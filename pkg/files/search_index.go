@@ -21,6 +21,7 @@ package files
 // 命中文件 name = 完整相对路径（如 sub/keep_me.txt）；在途临时文件不参与。
 
 import (
+	"container/list"
 	"io"
 	"log/slog"
 	"os"
@@ -28,11 +29,18 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"path"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
+
+// defaultMaxIndexOwners 是内存索引的 LRU 容量（owner 数上限）。每 owner 一份全量 map +
+// contentTokens，多租户大库必须设上限；被淘汰者下次访问按需重建（磁盘快照仍在）。
+const defaultMaxIndexOwners = 128
 
 // indexEntry 是索引中的单个条目。Key = 相对 user 桶的完整 rel（如 "sub/keep_me.txt"），
 // 不含 "user/" 前缀（与 checksum 台账的 "user/"+rel 键、以及旧搜索结果的 name 字段形态
@@ -81,9 +89,27 @@ type searchIndex struct {
 	tenant0 func(owner string) *storage.Tenant
 	// content 是内容索引开关（默认 false 零回归）：构建时抽样文本抽取词元。
 	content bool
+	// persist 是索引快照的 StateStore 适配（statestore.md §5.1 P1；nil = 本地 JSON 落盘
+	// 零回归）。装配层经 AttachIndexPersist 注入（state_index.go）。
+	persist *stateBackedIndexStore
 	// 集群同步（roadmap 11.11 方案 A-④）：sync nil = 单节点零回归。
-	sync       IndexSync
-	dirty      map[string]bool  // 写路径增量置脏（周期统一 Publish）
+	sync  IndexSync
+	dirty map[string]bool // 写路径增量置脏（集群 Publish 用；周期统一发布）
+	// pendingSave 是「写后待落盘」标记（与 dirty 分离：保存成功即清，集群发布失败需保留重试）。
+	// 由写路径增量置位、`SaveDirtyIndexSnapshots` 消费 ⇒ 崩溃窗口从「周期 interval（5m）」
+	// 缩到「debounce（1s）」（审计 2026-10-29）。
+	pendingSave map[string]bool
+	// gen 是 per-owner 失效代际（`InvalidateIndex` 递增）：快照载入必须代际匹配，否则重建
+	// ⇒ 删除快照失败（权限/占用/崩溃窗口）时失效仍然生效。全局失效（invalidateAll）
+	// 由「删除全部快照」实现（含内存未知的 owner），跨进程同样有效。
+	gen map[string]uint64
+	// maxOwners/ownerOrder/ownerElems 是 owner 维度 LRU（审计 2026-10-29 P2-2）：
+	// 只保留最近使用的 N 个 owner 的内存索引，超出淘汰最旧（快照保留 ⇒ 重建不打磁盘全扫）。
+	maxOwners  int
+	ownerOrder *list.List
+	ownerElems map[string]*list.Element
+	// rebuilds 是全量构建次数（可观测：`/metrics`；审计 2026-10-29 P2-5）。
+	rebuilds   atomic.Uint64
 	applied    appliedRev       // 副本已应用 rev（防乱序覆盖）
 	revCounter map[string]int64 // 主节点 per-owner rev（启动置 1）
 	nodeIDFn   func() string    // 发布者标识（装配层注入）
@@ -95,48 +121,172 @@ func newSearchIndex(logger func() *slog.Logger, volSet func() VolumeSet,
 	tenant func(volName, owner string) *storage.Tenant, tenant0 func(owner string) *storage.Tenant,
 	content bool) *searchIndex {
 	return &searchIndex{
-		owners:     map[string]*ownerIndex{},
-		built:      map[string]bool{},
-		logger:     logger,
-		volSet:     volSet,
-		tenant:     tenant,
-		tenant0:    tenant0,
-		content:    content,
-		applied:    appliedRev{rev: map[string]int64{}},
-		revCounter: map[string]int64{},
+		owners:      map[string]*ownerIndex{},
+		built:       map[string]bool{},
+		logger:      logger,
+		volSet:      volSet,
+		tenant:      tenant,
+		tenant0:     tenant0,
+		content:     content,
+		pendingSave: map[string]bool{},
+		gen:         map[string]uint64{},
+		maxOwners:   defaultMaxIndexOwners,
+		ownerOrder:  list.New(),
+		ownerElems:  map[string]*list.Element{},
+		applied:     appliedRev{rev: map[string]int64{}},
+		revCounter:  map[string]int64{},
 	}
 }
 
 // ensureOwner 返回 owner 的索引快照，首次访问时优先载入持久化快照（免全量
 // WalkDir——roadmap 2.3 P0 持久化增强）；无快照则全量构建并落盘。
 // owner 租户不可用（非法/根不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
+// persist 非 nil（StateStore 装配）时 load/save 走适配器（statestore.md §5.1 P1，见
+// state_index.go）；nil = 本地 JSON 落盘（单节点零回归）。
+// rebuildSubtree 按**真实磁盘**重建 userRel 子树（目录 rename 的目标侧投影，设计 2026-10-30 D2）。
+// 调用方应先 removePrefix 源前缀；本方法只负责把目标子树重新登记进索引（幂等覆盖）。
+//
+// 锁内做磁盘列举（rename 低频；与 removePrefix 的标签清理同类权衡，已在设计文档记档）。
+func (ix *searchIndex) rebuildSubtree(owner, userRel, volume string, root *storage.Root, tnt *storage.Tenant) {
+	if root == nil {
+		return
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	oi := ix.owners[owner]
+	if oi == nil {
+		return // 索引未构建 ⇒ 首次搜索会全量构建
+	}
+	newOI := cloneOwnerIndexLocked(oi)
+	newOI.entries[userRel] = &indexEntry{name: userRel, base: path.Base(userRel), isDir: true}
+	ix.ensureParentsLocked(newOI, userRel)
+	userRoot := "user"
+	if tnt != nil {
+		userRoot = tnt.UserRoot()
+	}
+	ix.walkUserRoot(root, userRoot, volume, userRel, tnt, newOI)
+	ix.owners[owner] = newOI
+	ix.markDirtyLocked(owner)
+}
+
+// stats 返回索引可观测规模：在内存中的 owner 数与条目总数。
+func (ix *searchIndex) stats() (owners, entries int) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	owners = len(ix.owners)
+	for _, oi := range ix.owners {
+		if oi != nil {
+			entries += len(oi.entries)
+		}
+	}
+	return owners, entries
+}
+
+// setMaxOwners 设置 LRU 容量并立即淘汰（测试/装配用；<=0 忽略）。
+func (ix *searchIndex) setMaxOwners(n int) {
+	if n <= 0 {
+		return
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.maxOwners = n
+	ix.evictOwnersLocked()
+}
+
+// touchOwnerLocked 提升 owner 热度并在超容时淘汰最旧（调用方持 ix.mu）。
+// 淘汰只丢内存索引（快照/gen 保留）⇒ 下次访问按需重建。
+func (ix *searchIndex) touchOwnerLocked(owner string) {
+	if ix.ownerOrder == nil {
+		return
+	}
+	if e, ok := ix.ownerElems[owner]; ok {
+		ix.ownerOrder.MoveToFront(e)
+		return
+	}
+	ix.ownerElems[owner] = ix.ownerOrder.PushFront(owner)
+	ix.evictOwnersLocked()
+}
+
+// evictOwnersLocked 淘汰超出容量的最旧 owner（调用方持 ix.mu）。
+func (ix *searchIndex) evictOwnersLocked() {
+	for ix.ownerOrder.Len() > ix.maxOwners {
+		back := ix.ownerOrder.Back()
+		if back == nil {
+			return
+		}
+		old, _ := back.Value.(string)
+		ix.ownerOrder.Remove(back)
+		delete(ix.ownerElems, old)
+		delete(ix.owners, old)
+		delete(ix.built, old)
+		delete(ix.pendingSave, old)
+	}
+}
+
 func (ix *searchIndex) ensureOwner(owner string) *ownerIndex {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	if ix.built[owner] {
+		ix.touchOwnerLocked(owner)
 		return ix.owners[owner]
 	}
-	// 持久化快照载入（owner 租户经 tenant0 解析；损坏/缺失回退全量构建）。
-	if tnt := ix.tenant0(owner); tnt != nil {
-		if entries, ok := loadIndexSnapshot(tnt, owner); ok {
-			oi := &ownerIndex{entries: entries}
-			ix.owners[owner] = oi
-			ix.built[owner] = true
-			ix.logger().Debug("索引载入持久化快照", "owner", owner, "entries", len(entries))
-			return oi
-		}
+	if oi, ok := ix.tryLoadSnapshotLocked(owner); ok {
+		ix.owners[owner] = oi
+		ix.built[owner] = true
+		ix.touchOwnerLocked(owner)
+		return oi
 	}
 	// 全量构建：owner 视图逐卷 WalkDir user 桶。
 	oi := ix.buildLocked(owner)
 	ix.owners[owner] = oi
 	ix.built[owner] = true
-	// 落盘快照（失败仅日志——快照是加速层）。
-	if tnt := ix.tenant0(owner); tnt != nil {
-		if err := saveIndexSnapshot(tnt, owner, oi.entries); err != nil {
-			ix.logger().Warn("索引快照落盘失败", "owner", owner, "error", err)
-		}
-	}
+	ix.touchOwnerLocked(owner)
+	ix.saveOwnerSnapshotLocked(owner, oi)
 	return oi
+}
+
+// tryLoadSnapshotLocked 尝试载入持久化快照（调用方持 ix.mu）：代际不匹配/缺失/损坏 ⇒ false。
+func (ix *searchIndex) tryLoadSnapshotLocked(owner string) (*ownerIndex, bool) {
+	tnt := ix.tenant0(owner)
+	if tnt == nil {
+		return nil, false
+	}
+	var entries map[string]*indexEntry
+	var snapGen uint64
+	var ok bool
+	if ix.persist != nil {
+		entries, snapGen, ok = ix.persist.load(owner)
+	} else {
+		entries, snapGen, ok = loadIndexSnapshot(tnt, owner)
+	}
+	if !ok {
+		return nil, false
+	}
+	// 代际校验：失效后（即使快照删除失败/被复活）不得载入旧快照。
+	if snapGen != ix.gen[owner] {
+		ix.logger().Debug("索引快照代际过期，忽略并重建",
+			"owner", owner, "snap_gen", snapGen, "gen", ix.gen[owner])
+		return nil, false
+	}
+	ix.logger().Debug("索引载入持久化快照", "owner", owner, "entries", len(entries))
+	return &ownerIndex{entries: entries}, true
+}
+
+// saveOwnerSnapshotLocked 落盘 owner 快照（失败仅日志——快照是加速层）。
+func (ix *searchIndex) saveOwnerSnapshotLocked(owner string, oi *ownerIndex) {
+	tnt := ix.tenant0(owner)
+	if tnt == nil {
+		return
+	}
+	var serr error
+	if ix.persist != nil {
+		serr = ix.persist.save(owner, oi.entries, ix.gen[owner])
+	} else {
+		serr = saveIndexSnapshot(tnt, owner, oi.entries, ix.gen[owner])
+	}
+	if serr != nil {
+		ix.logger().Warn("索引快照落盘失败", "owner", owner, "error", serr)
+	}
 }
 
 // invalidate 使 owner 索引失效（装配层旁路写后调用；下次访问全量重建）。
@@ -145,11 +295,124 @@ func (ix *searchIndex) invalidate(owner string) {
 	ix.mu.Lock()
 	delete(ix.built, owner)
 	delete(ix.owners, owner)
+	delete(ix.pendingSave, owner)
+	if e, ok := ix.ownerElems[owner]; ok {
+		ix.ownerOrder.Remove(e)
+		delete(ix.ownerElems, owner)
+	}
+	ix.gen[owner]++ // 代际失效：即使快照删除失败/被复活也不会被载入
 	ix.mu.Unlock()
-	if tnt := ix.tenant0(owner); tnt != nil {
-		p := indexSnapshotPath(tnt, owner)
-		if p != "" {
-			_ = os.Remove(p)
+	ix.deleteSnapshot(owner)
+}
+
+// invalidateAll 使**全部 owner** 的索引失效（对应 `POST /api/volumes/refresh` 无参：
+// 卷维度刷新无法精确映射到 owner，保守全清）。
+//
+// 语义：清空内存 + 删除**全部**磁盘快照（含本进程未知的 owner，见 deleteAllSnapshots）⇒
+// 重启后首次搜索也不会载入陈旧快照。
+func (ix *searchIndex) invalidateAll() {
+	ix.mu.Lock()
+	owners := make([]string, 0, len(ix.owners))
+	for o := range ix.owners {
+		owners = append(owners, o)
+	}
+	ix.owners = map[string]*ownerIndex{}
+	ix.built = map[string]bool{}
+	ix.ownerOrder = list.New()
+	ix.ownerElems = map[string]*list.Element{}
+	ix.pendingSave = map[string]bool{}
+	if ix.dirty != nil {
+		clear(ix.dirty)
+	}
+	ix.mu.Unlock()
+	for _, o := range owners {
+		ix.deleteSnapshot(o)
+	}
+	ix.deleteAllSnapshots()
+	ix.logger().Info("搜索索引已全部失效（显式刷新）", "owners", len(owners))
+}
+
+// defaultRootDir 返回默认卷根（多租户快照枚举的根）。volSet 未装配 ⇒ 空。
+func (ix *searchIndex) defaultRootDir() string {
+	if ix.volSet == nil {
+		return ""
+	}
+	vs := ix.volSet()
+	if vs == nil {
+		return ""
+	}
+	return vs.Default().RootDir
+}
+
+// deleteAllSnapshots 删除**所有** owner 的持久化快照（含本进程未知的 owner）。
+// 目的：显式刷新后不仅当前进程重建，重启后的首次搜索也不得载入陈旧快照。
+func (ix *searchIndex) deleteAllSnapshots() {
+	if ix.persist != nil {
+		ix.deleteStateSnapshots()
+		return
+	}
+	rootDir := ix.defaultRootDir()
+	if rootDir == "" || ix.tenant0 == nil {
+		return
+	}
+	ents, err := os.ReadDir(rootDir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			ix.deleteTenantSnapshots(e.Name())
+		}
+	}
+}
+
+// deleteStateSnapshots 枚举 StateStore 的 index/ 前缀并逐个删除。
+func (ix *searchIndex) deleteStateSnapshots() {
+	keys, err := ix.persist.list()
+	if err != nil {
+		ix.logger().Warn("枚举索引快照失败", "error", err)
+		return
+	}
+	for _, k := range keys {
+		if derr := ix.persist.deleteKey(k); derr != nil {
+			ix.logger().Warn("索引快照删除失败", "key", k, "error", derr)
+		}
+	}
+}
+
+// deleteTenantSnapshots 删除单个 tenant 的 meta/index/*.json（tenant 名非法/不可用 ⇒ no-op）。
+func (ix *searchIndex) deleteTenantSnapshots(tenant string) {
+	tnt := ix.tenant0(tenant)
+	if tnt == nil || tnt.Root() == nil {
+		return
+	}
+	names, err := tnt.Root().ReadDir("meta/index")
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		if n.IsDir() || !strings.HasSuffix(n.Name(), ".json") {
+			continue
+		}
+		_ = tnt.Root().Remove("meta/index/" + n.Name())
+	}
+}
+
+// deleteSnapshot 删除 owner 的持久化快照（best-effort；失败只记日志——正确性由代际保证）。
+func (ix *searchIndex) deleteSnapshot(owner string) {
+	if ix.persist != nil {
+		if err := ix.persist.delete(owner); err != nil {
+			ix.logger().Warn("索引快照删除失败（代际校验仍会拒绝它）", "owner", owner, "error", err)
+		}
+		return
+	}
+	tnt := ix.tenant0(owner)
+	if tnt == nil {
+		return
+	}
+	if rt := tnt.Root(); rt != nil {
+		if err := rt.Remove(indexSnapshotRel(owner)); err != nil && !os.IsNotExist(err) {
+			ix.logger().Warn("索引快照删除失败（代际校验仍会拒绝它）", "owner", owner, "error", err)
 		}
 	}
 }
@@ -259,9 +522,9 @@ func (ix *searchIndex) remove(owner, rel string) {
 // 并发模型同 upsert：copy-on-write 替换指针。顺带删除子树内全部标签。
 func (ix *searchIndex) removePrefix(owner, rel string) {
 	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	oi := ix.owners[owner]
 	if oi == nil {
+		ix.mu.Unlock()
 		return
 	}
 	newOI := cloneOwnerIndexLocked(oi)
@@ -275,6 +538,9 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	}
 	ix.owners[owner] = newOI
 	ix.markDirtyLocked(owner)
+	ix.mu.Unlock()
+	// 标签清理是磁盘 I/O（每条目一次 remove）：**必须锁外**执行（审计 2026-10-29 P2-3）——
+	// 持 ix.mu 做 N 次文件删除会阻塞全部搜索与写索引（rmdir 大目录时尤为严重）。
 	if tnt := ix.tenant0(owner); tnt != nil {
 		for _, k := range removed {
 			deleteTagsFromStore(tnt, k)
@@ -282,61 +548,16 @@ func (ix *searchIndex) removePrefix(owner, rel string) {
 	}
 }
 
-// rename 写路径增量：重命名/移动条目（from → to）。
-// 并发模型同 upsert：copy-on-write 替换指针（深拷贝保证 entry 字段不被在途 reader 读改）。
-func (ix *searchIndex) rename(owner, from, to string) {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	oi := ix.owners[owner]
-	if oi == nil {
-		return
-	}
-	newOI := cloneOwnerIndexLocked(oi)
-	fromName := filepath.ToSlash(from)
-	toName := filepath.ToSlash(to)
-	tnt := ix.tenant0(owner)
-	movedTags := func(oldKey, newKey string) {
-		if tnt == nil {
-			return
-		}
-		if tags := loadTagsFromStore(tnt, oldKey); len(tags) > 0 {
-			_ = saveTagsToStore(tnt, newKey, tags)
-			deleteTagsFromStore(tnt, oldKey)
-		}
-	}
-	if e, ok := newOI.entries[fromName]; ok {
-		delete(newOI.entries, fromName)
-		e.name = toName
-		e.base = filepath.Base(toName)
-		newOI.entries[toName] = e
-		ix.owners[owner] = newOI
-		ix.markDirtyLocked(owner)
-		movedTags(fromName, toName)
-		return
-	}
-	// 目录子树重命名：前缀搬移。
-	var moves []struct{ old, new string }
-	for k := range newOI.entries {
-		if strings.HasPrefix(k, fromName+"/") {
-			moves = append(moves, struct{ old, new string }{k, toName + strings.TrimPrefix(k, fromName)})
-		}
-	}
-	for _, m := range moves {
-		e := newOI.entries[m.old]
-		delete(newOI.entries, m.old)
-		e.name = m.new
-		e.base = filepath.Base(m.new)
-		newOI.entries[m.new] = e
-		movedTags(m.old, m.new)
-	}
-	ix.owners[owner] = newOI
-}
+// 注：旧的 `searchIndex.rename`（内存搬移/子树前缀搬移）已删除（设计 2026-10-30 Phase 2）：
+// 目录 rename 由 Root 事件投影覆盖——`applyDirRename` = 删源前缀 + `rebuildSubtree` 按真实
+// 磁盘重建目标子树；单文件 rename 由事件 upsert 目标。保留它只会成为「第二实现」（无调用方）。
 
 // buildLocked 全量构建 owner 索引（调用方持 ix.mu）。owner 视图逐卷 WalkDir user 桶，
 // 跳过在途临时文件（.inflight-*.part）；目录条目与文件条目分别登记（目录用独立 isDir
 // 标记，搜索时目录条目只列一次）。owner 租户不可用返回空索引（非 nil，保证 nil 安全）。
 // 构建后从 tagsStore 合并标签（meta/tags 由默认卷权威持有；见 walkUserRoot 的 tagTnt）。
 func (ix *searchIndex) buildLocked(owner string) *ownerIndex {
+	ix.rebuilds.Add(1)
 	oi := &ownerIndex{entries: map[string]*indexEntry{}}
 	if ix.tenant0 == nil {
 		return oi
@@ -381,6 +602,7 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 	if err != nil {
 		return // 目录不可读（正常空目录返回空）；静默跳过与旧 searchWalkDirCallback 同语义
 	}
+	w := &ownerWalk{root: root, userRoot: userRoot, tagTnt: tagTnt, oi: oi}
 	for _, e := range entries {
 		name := e.Name()
 		if IsInflightTempName(name) {
@@ -393,39 +615,64 @@ func (ix *searchIndex) walkUserRoot(root *storage.Root, userRoot, volume, dirRel
 		child += name
 		key := filepath.ToSlash(child)
 		if e.IsDir() {
-			// 目录条目：跨卷并存时只登记一次（isDir 条目不绑卷，搜索去重语义）。
-			if _, exists := oi.entries[key]; !exists {
-				oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
-			}
-			ix.walkUserRoot(root, userRoot, volume, child, tagTnt, oi)
+			ix.walkUserRootDirEntry(w, volume, child, key, name)
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		tokens := ix.sampleTokens(root, userRoot+"/"+child)
-		e := &indexEntry{
-			name: key, base: name,
-			size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
-			contentTokens: tokens,
-		}
-		// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
-		if tagTnt != nil {
-			e.tags = loadTagsFromStore(tagTnt, key)
-		}
-		oi.entries[key] = e
+		ix.walkUserRootFileEntry(w, key, name, volume, info)
 	}
 }
+
+// ownerWalk 是 owner 索引遍历的共享上下文（S107：收敛 walkUserRootDirEntry /
+// walkUserRootFileEntry 多参数；root/userRoot/tagTnt/oi 在遍历全程不变）。
+type ownerWalk struct {
+	root     *storage.Root
+	userRoot string
+	tagTnt   *storage.Tenant
+	oi       *ownerIndex
+}
+
+// walkUserRootDirEntry 登记目录条目（跨卷并存时只登记一次——isDir 条目不绑卷，搜索去重语义）
+// 并递归遍历子树。
+func (ix *searchIndex) walkUserRootDirEntry(w *ownerWalk, volume, child, key, name string) {
+	if _, exists := w.oi.entries[key]; !exists {
+		w.oi.entries[key] = &indexEntry{name: key, base: name, isDir: true}
+	}
+	ix.walkUserRoot(w.root, w.userRoot, volume, child, w.tagTnt, w.oi)
+}
+
+// walkUserRootFileEntry 构建单个文件条目（内容词元抽样 + 全量构建时从 tagsStore 合并标签）
+// 并登记进 oi。索引只是缓存，store 是标签权威；fullRel = userRoot+"/"+key（与全量构建同源）。
+func (ix *searchIndex) walkUserRootFileEntry(w *ownerWalk, key, name, volume string, info os.FileInfo) {
+	tokens := ix.sampleTokens(w.root, w.userRoot+"/"+key)
+	e := &indexEntry{
+		name: key, base: name,
+		size: info.Size(), modTime: info.ModTime().UnixNano(), volume: volume,
+		contentTokens: tokens,
+	}
+	// 全量构建时从 tagsStore 合并标签（索引只是缓存，store 是权威）。
+	if w.tagTnt != nil {
+		e.tags = loadTagsFromStore(w.tagTnt, key)
+	}
+	w.oi.entries[key] = e
+}
+
+// checksumLookup 按（卷, user 桶内相对路径）**惰性**取整文件 checksum：每次 O(1) 台账读，
+// 不做全量快照拷贝（此前 `Search` 每请求 `GetAll()` + 按卷拆分 = O(N) 拷贝，见设计审计）。
+// 卷名为空（单卷装配）或未命中 ⇒ ""。
+type checksumLookup func(vol, rel string) string
 
 // search 按 q（已小写）在 owner 索引中匹配，返回与旧 Search 逐字一致的 ListResult：
 // 文件条目 name = 完整相对路径（ToSlash），带 size/mtime/checksum/volume；目录条目
 // IsDir=true、name = 相对 user 桶路径、Volume 空。结果排序：先文件后目录？——**与旧语义
 // 一致**：旧实现按 WalkDir 序遍历（先父后子、按目录深度优先），本实现按 name 字典序
 // 稳定排序（可预测、与 List 的 name asc 排序观感一致；契约测试不锁序）。
-func (ix *searchIndex) search(owner, qLower, tag string, csMap map[string]string) []FileInfo {
+func (ix *searchIndex) search(owner, qLower, tag string, cs checksumLookup) []FileInfo {
 	// 先目录后文件、按 name 字典序：与 List 的 sortFileEntries(name asc) 对齐。
-	out := ix.searchLocked(owner, qLower, tag, csMap)
+	out := ix.searchLocked(owner, qLower, tag, cs)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
 			return out[i].IsDir // 目录在前
@@ -437,35 +684,46 @@ func (ix *searchIndex) search(owner, qLower, tag string, csMap map[string]string
 
 // searchLocked 是 search 的底层实现（不含排序，供 list 复用目录/文件条目构造逻辑）。
 // tag 非空时要求 entry.tags 精确含该标签（与 q 的 base/contentTokens 匹配 AND 组合）。
-func (ix *searchIndex) searchLocked(owner, qLower, tag string, csMap map[string]string) []FileInfo {
+func (ix *searchIndex) searchLocked(owner, qLower, tag string, cs checksumLookup) []FileInfo {
 	oi := ix.ensureOwner(owner)
 	if oi == nil {
 		return nil
 	}
 	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
 	for _, e := range oi.entries {
-		// 标签过滤（roadmap 11.10-④）：tag 非空且 entry 不含该标签 → 跳过。
-		// 精确匹配（设计文档：精确匹配 + q 仍走 base/contentTokens）。
-		if tag != "" && !tagsContain(e.tags, tag) {
+		if !ix.searchEntryMatch(e, qLower, tag) {
 			continue
 		}
-		// q 非空时仍走既有 base/contentTokens 匹配；q 为空（仅按 tag 过滤）放行。
-		if qLower != "" && !strings.Contains(strings.ToLower(e.base), qLower) {
-			if !ix.content || !tokensContain(e.contentTokens, qLower) {
-				continue
-			}
-		}
-		if e.isDir {
-			out = append(out, FileInfo{Name: e.name, IsDir: true})
-			continue
-		}
-		fi := FileInfo{Name: e.name, Size: e.size, ModTime: e.modTime, Volume: e.volume}
-		if cs, ok := csMap["user/"+e.name]; ok {
-			fi.Checksum = cs
-		}
-		out = append(out, fi)
+		// 按条目所属卷取 checksum（§15.1.1：同名文件跨卷不串）。
+		out = append(out, searchEntryToFileInfo(e, cs))
 	}
 	return out
+}
+
+// searchEntryMatch 判断单个索引条目是否命中标签与查询词（均不匹配返回 false）。
+// 标签精确匹配；q 为空（仅按 tag 过滤）放行，否则匹配 base 或内容词元。
+func (ix *searchIndex) searchEntryMatch(e *indexEntry, qLower, tag string) bool {
+	if tag != "" && !tagsContain(e.tags, tag) {
+		return false
+	}
+	if qLower != "" && !strings.Contains(strings.ToLower(e.base), qLower) {
+		if !ix.content || !tokensContain(e.contentTokens, qLower) {
+			return false
+		}
+	}
+	return true
+}
+
+// searchEntryToFileInfo 把索引条目转为搜索结果 FileInfo：目录不绑卷、文件带 checksum。
+func searchEntryToFileInfo(e *indexEntry, cs checksumLookup) FileInfo {
+	if e.isDir {
+		return FileInfo{Name: e.name, IsDir: true}
+	}
+	fi := FileInfo{Name: e.name, Size: e.size, ModTime: e.modTime, Volume: e.volume}
+	if cs != nil {
+		fi.Checksum = cs(e.volume, e.name)
+	}
+	return fi
 }
 
 // setTags 写路径增量：替换一个文件条目的标签（COW 替换指针，与 upsert 同并发模型）。
@@ -487,94 +745,78 @@ func (ix *searchIndex) setTags(owner, rel string, tags []string) {
 	ix.markDirtyLocked(owner)
 }
 
-// list 按 owner 索引列出目录的直接子项（roadmap P0 验收另一半：列表走索引）。
-//
-// dirRel 是相对 user 桶的目录路径（"" = 根）；volFilter 非空时只列该卷文件条目
-// （目录条目不绑卷，始终列出——与旧多卷聚合 List 的 seenDirs 语义一致）。
-//
-// 返回条目与旧 List 逐字一致的形状：目录条目 name = basename、IsDir=true、无 size/mtime/
-// checksum/volume；文件条目 name = basename、带 size/mtime/checksum/volume。
-//
-// 索引未构建（owner 租户不可用）时返回 nil（调用方按空结果处理，与旧语义一致）。
-//
-// 语义要点：
-//   - 直接子项 = key 前缀 dirRel/ 且不含更深的 '/'（一层）；
-//   - 目录条目来自索引的 isDir 条目（构建时跨卷去重、不绑卷）——列表天然只列一次；
-//   - 文件条目带 volume（构建时登记）；volFilter 非空时过滤；
-//   - 在途临时文件在构建时已跳过 → 天然排除；
-//   - 排序由调用方 sortFileEntries 处理（本方法不排序）。
-func (ix *searchIndex) list(owner, dirRel, volFilter string, csMap map[string]string) []FileInfo {
-	oi := ix.ensureOwner(owner)
-	if oi == nil {
-		return nil
-	}
-	prefix := dirRel
-	if prefix != "" {
-		prefix += "/"
-	}
-	out := make([]FileInfo, 0, 8) // 恒非 nil：空结果也是空切片（ListResult.Files 契约）
-	for key, e := range oi.entries {
-		if prefix != "" {
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			rest := key[len(prefix):]
-			if rest == "" || strings.Contains(rest, "/") {
-				continue // 目录自身或更深层子项 → 非直接子项
-			}
-		} else if strings.Contains(key, "/") {
-			continue // 根目录只列直接子项
-		}
-		if e.isDir {
-			out = append(out, FileInfo{Name: e.base, IsDir: true})
-			continue
-		}
-		if volFilter != "" && e.volume != volFilter {
-			continue
-		}
-		fi := FileInfo{Name: e.base, Size: e.size, ModTime: e.modTime, Volume: e.volume}
-		if cs, ok := csMap["user/"+key]; ok {
-			fi.Checksum = cs
-		}
-		out = append(out, fi)
-	}
-	return out
-}
-
-// saveAll 保存全部已构建 owner 的快照（幂等：未构建的跳过；供装配层周期调用）。
-// 返回保存的 owner 数（日志/测试断言用）。
+// saveAll 保存全部已构建 owner 的快照（幂等；供装配层周期调用/全量固化）。
 func (ix *searchIndex) saveAll() int {
 	ix.mu.Lock()
 	owners := make([]string, 0, len(ix.built))
 	for o := range ix.built {
 		owners = append(owners, o)
 	}
-	// 快照语义（审查 P1 同族）：每个 owner 的 entries 在锁内**深拷贝快照**后再解锁写盘。
-	// 此前解锁后直接遍历 oi.entries（map）——写路径 copy-on-write 替换指针后，旧指针
-	// 虽不再被写，但**替换瞬间在途的 saveAll 已持有旧指针**，若写路径旧实现原地改会崩；
-	// 现写路径已全改 copy-on-write，旧 map 永不变，但为防御未来回归仍取深拷贝快照。
-	snapshots := make(map[string]*ownerIndex, len(owners))
-	for _, o := range owners {
-		if oi := ix.owners[o]; oi != nil {
-			snapshots[o] = cloneOwnerIndexLocked(oi)
+	ix.mu.Unlock()
+	return ix.saveOwners(owners)
+}
+
+// saveDirty 只保存**写路径增量后置脏**的 owner（`SaveDirtyIndexSnapshots`，debounce 1s）。
+// 崩溃窗口从「周期 interval（默认 5m）」缩到 debounce；无变更时零 I/O。
+func (ix *searchIndex) saveDirty() int {
+	ix.mu.Lock()
+	owners := make([]string, 0, len(ix.pendingSave))
+	for o := range ix.pendingSave {
+		if ix.built[o] {
+			owners = append(owners, o)
 		}
 	}
 	ix.mu.Unlock()
+	if len(owners) == 0 {
+		return 0
+	}
+	return ix.saveOwners(owners)
+}
+
+// ownerSnapshot 是一次保存所需的一致快照（entries 深拷贝 + 代际）。
+type ownerSnapshot struct {
+	oi  *ownerIndex
+	gen uint64
+}
+
+// saveOwners 保存指定 owner 的快照。锁内取深拷贝 + 代际，锁外写盘（不阻塞搜索/写索引）；
+// 保存成功后仅当代际未变才清 pendingSave（防清掉「保存之后的新写入」标记）。
+func (ix *searchIndex) saveOwners(owners []string) int {
+	ix.mu.Lock()
+	snaps := make(map[string]ownerSnapshot, len(owners))
+	for _, o := range owners {
+		if oi := ix.owners[o]; oi != nil {
+			snaps[o] = ownerSnapshot{oi: cloneOwnerIndexLocked(oi), gen: ix.gen[o]}
+		}
+	}
+	ix.mu.Unlock()
+
 	saved := 0
 	for _, o := range owners {
-		oi := snapshots[o]
-		if oi == nil {
+		sn, ok := snaps[o]
+		if !ok {
 			continue
 		}
 		tnt := ix.tenant0(o)
 		if tnt == nil {
 			continue
 		}
-		if err := saveIndexSnapshot(tnt, o, oi.entries); err != nil {
-			ix.logger().Warn("索引快照周期保存失败", "owner", o, "error", err)
+		var serr error
+		if ix.persist != nil {
+			serr = ix.persist.save(o, sn.oi.entries, sn.gen)
+		} else {
+			serr = saveIndexSnapshot(tnt, o, sn.oi.entries, sn.gen)
+		}
+		if serr != nil {
+			ix.logger().Warn("索引快照保存失败", "owner", o, "error", serr)
 			continue
 		}
 		saved++
+		ix.mu.Lock()
+		if ix.gen[o] == sn.gen {
+			delete(ix.pendingSave, o)
+		}
+		ix.mu.Unlock()
 	}
 	return saved
 }
@@ -596,6 +838,31 @@ func (s *Service) InvalidateIndex(owner string) {
 	if s.index != nil {
 		s.index.invalidate(owner)
 	}
+}
+
+// InvalidateAllIndexes 使全部 owner 的搜索索引失效（`POST /api/volumes/refresh` 联动）。
+// 卷维度刷新无法精确映射到 owner ⇒ 保守全清；下次搜索按需重建（读一次磁盘）。
+func (s *Service) InvalidateAllIndexes() {
+	if s.index != nil {
+		s.index.invalidateAll()
+	}
+}
+
+// IndexStats 返回搜索索引的可观测规模（`/metrics`）：内存 owner 数、条目总数、全量重建次数。
+func (s *Service) IndexStats() (owners, entries int, rebuilds uint64) {
+	if s == nil || s.index == nil {
+		return 0, 0, 0
+	}
+	o, e := s.index.stats()
+	return o, e, s.index.rebuilds.Load()
+}
+
+// SaveDirtyIndexSnapshots 只落盘「写后置脏」的索引快照（debounce 循环调用）。
+func (s *Service) SaveDirtyIndexSnapshots() int {
+	if s.index == nil {
+		return 0
+	}
+	return s.index.saveDirty()
 }
 
 // sampleTokens 内容索引抽样（roadmap P2）：content 开关关闭或文件 >4MiB 时返回 nil

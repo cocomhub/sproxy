@@ -82,46 +82,62 @@ func (s *StorageManager) TryReserve(size int64, cat StorageCategory) error {
 	if size <= 0 {
 		return nil
 	}
-	// 使用 label break 避免内层循环 CAS 成功后回到外层再 CAS 一次导致双倍计数。
-outer:
-	for {
-		max := s.maxBytes.Load()
-		current := s.totalUsage.Load()
-		if max > 0 && current+size > max {
-			return ErrStorageFull
-		}
-		if s.totalUsage.CompareAndSwap(current, current+size) {
-			break
-		}
-		// CAS 失败，其他 goroutine 修改了 totalUsage，指数退避重试
-		backoff := 1
-		for {
-			time.Sleep(time.Duration(backoff) * time.Microsecond)
-			backoff *= 2
-			if backoff > 64 {
-				backoff = 64
-			}
-			// 重新加载 current 和 max
-			current = s.totalUsage.Load()
-			max = s.maxBytes.Load()
-			if max > 0 && current+size > max {
-				return ErrStorageFull
-			}
-			if s.totalUsage.CompareAndSwap(current, current+size) {
-				break outer
-			}
-		}
+	// 原子 CAS 累加 totalUsage（失败时指数退避自旋重试）；超限返回 ErrStorageFull。
+	if !s.casReserve(size) {
+		return ErrStorageFull
 	}
 	s.addCategory(cat, size)
 	return nil
 }
 
+// casReserve 以指数退避自旋 CAS 把 size 原子累加进 totalUsage，直到成功或超出上限。
+// 返回 true = 已成功累加；false = 超限（ErrStorageFull 语义；maxBytes=0 时不限制）。
+// 每次尝试前重读 current/limit，避免内层循环复用陈旧值（多 goroutine 并发下兜底）。
+func (s *StorageManager) casReserve(size int64) bool {
+	// CAS 失败，其他 goroutine 修改了 totalUsage，指数退避重试
+	backoff := 1
+	for {
+		limit := s.maxBytes.Load()
+		current := s.totalUsage.Load()
+		if limit > 0 && current+size > limit {
+			return false
+		}
+		if s.totalUsage.CompareAndSwap(current, current+size) {
+			return true
+		}
+		time.Sleep(time.Duration(backoff) * time.Microsecond)
+		backoff *= 2
+		if backoff > 64 {
+			backoff = 64
+		}
+	}
+}
+
 // Release 释放已占用的空间。
+//
+// **钳 0**（评审 P2）：与 quota.Pool 的「恒不为负」不变量对齐——扫描窗口内若先被扫描
+// 覆写（ScanAndRecalculate 无条件 Store）再 Release 在途预留，`totalUsage` 会被推负，
+// 导致上限校验短暂失效（负值使 max-bytes 比较恒通过）。原子 CAS 钳到 0。
+// Release 释放 size 字节（类别 cat），并**唤醒容量等待者**（释放侧唯一收口，设计 §3.1 I1）。
+// 释放与唤醒都在**等待锁**内 ⇒ 与等待侧的「查 + 入队」（waitq.AcquireUnder 持同一把锁）
+// 互斥 ⇒ 结构性无丢唤醒。
 func (s *StorageManager) Release(size int64, cat StorageCategory) {
+	s.withWaitLock(func() { s.releaseNoLock(size, cat) })
+}
+
+// releaseNoLock 是 Release 的**无锁内部版**（调用方须已持等待锁，或明确不需唤醒 ——
+// 如 waitq 的回滚路径：那里已在锁内，再取锁会自死锁）。
+func (s *StorageManager) releaseNoLock(size int64, cat StorageCategory) {
 	if size <= 0 {
 		return
 	}
-	s.totalUsage.Add(-size)
+	for {
+		cur := s.totalUsage.Load()
+		next := max(cur-size, 0)
+		if s.totalUsage.CompareAndSwap(cur, next) {
+			break
+		}
+	}
 	s.addCategory(cat, -size)
 }
 
@@ -197,6 +213,16 @@ func ScanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals,
 	var totals storageScanTotals
 	tenantBuckets := make(map[string]map[string]int64)
 
+	// 空路径防御（纵深，fail-safe）：filepath.EvalSymlinks("") 在 Unix 归一为 "."（symlink.go
+	// 末 `if dest == "" { dest = "." }`），WalkDir(".") 会扫描**进程当前工作目录**而非任何卷根
+	// ——实测 sproxy 默认 cwd=/root（5.4G）时令启动挂起 >90s。无本地根的卷（外部卷）RootDir
+	// 恒空，调用方应已跳过（见 reconcileVolumesFromDisk）；此处短路兜底，杜绝误扫 cwd。
+	// Windows 侧 EvalSymlinks("") 报错回落空串 → WalkDir("") 立即 ENOENT，两端行为不一致，
+	// 故显式短路以统一语义。
+	if dir == "" {
+		return tenantBuckets, totals, nil
+	}
+
 	// 解析符号链接，确保扫描的是真实路径
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -223,59 +249,70 @@ func ScanStorageDir(dir string) (map[string]map[string]int64, storageScanTotals,
 			}
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil {
-			return nil // 跳过无法读取的文件
-		}
-		if isChecksumSidecar(d.Name()) {
-			return nil
-		}
-		size := info.Size()
-
-		switch bucket := StorageBucketOf(rel); bucket {
-		case "user":
-			totals.user += size
-			totals.userFileCount++
-			tenant := firstSegment(rel)
-			addTenantBucket(tenantBuckets, tenant, "user", size)
-			// bucket_limits 子目录归集：把该文件同时计入其最长命中的路径键（如
-			// "user/videos/hd"），供 reconcile 先深后浅校准子 Scope committed。
-			// bucketDirKey 仅在有子目录链时返回非空键（桶内顶级文件返回 "" → 跳过，不额外
-			// 归集，避免与功能桶键重复双计）。scanner 纯机械归集，键集合由 reconcile 按
-			// 装配的段树过滤（未配置前缀不建立 scope/键）。
-			if dirKey := bucketDirKey(rel); dirKey != "" {
-				addTenantBucket(tenantBuckets, tenant, dirKey, size)
-			}
-		case "cloud", "archive":
-			totals.cloud += size
-			addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
-		case "chunk":
-			totals.chunked += size
-			addTenantBucket(tenantBuckets, firstSegment(rel), "chunk", size)
-		case "version":
-			totals.versions += size
-			addTenantBucket(tenantBuckets, firstSegment(rel), "version", size)
-		case "meta":
-			// 服务端内部账本（sync/cloud 任务状态、chunked session、share token 等）：
-			// 计入 totalUsage 与租户 meta 配额 Scope，但不入 stats 分类枚举（4 键不变）。
-			totals.meta += size
-			addTenantBucket(tenantBuckets, firstSegment(rel), "meta", size)
-		default:
-			// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
-			// LAYOUT_VERSION 标记文件不计入）。.__ 魔法目录已在目录层 SkipDir 跳过。
-			if d.Name() == "LAYOUT_VERSION" {
-				return nil
-			}
-			totals.user += size
-			totals.userFileCount++
-		}
-		return nil
+		return classifyScannedFile(rel, d, &totals, tenantBuckets)
 	})
 	if err != nil {
 		return nil, totals, err
 	}
 	totals.total = totals.user + totals.chunked + totals.versions + totals.cloud + totals.meta
 	return tenantBuckets, totals, nil
+}
+
+// classifyScannedFile 归集一个扫描到的文件：跳过无法读取的文件与 checksum 侧边文件，
+// 其余按新布局桶语义累加 totals 分类与 tenantBuckets。调用方保证 d 为文件（非目录）。
+func classifyScannedFile(rel string, d fs.DirEntry, totals *storageScanTotals, tenantBuckets map[string]map[string]int64) error {
+	info, err := d.Info()
+	if err != nil {
+		return nil // 跳过无法读取的文件
+	}
+	if isChecksumSidecar(d.Name()) {
+		return nil
+	}
+	size := info.Size()
+
+	switch bucket := StorageBucketOf(rel); bucket {
+	case "user":
+		totals.user += size
+		totals.userFileCount++
+		tenant := firstSegment(rel)
+		addTenantBucket(tenantBuckets, tenant, "user", size)
+		// bucket_limits 子目录归集：把该文件同时计入其最长命中的路径键（如
+		// "user/videos/hd"），供 reconcile 先深后浅校准子 Scope committed。
+		// bucketDirKey 仅在有子目录链时返回非空键（桶内顶级文件返回 "" → 跳过，不额外
+		// 归集，避免与功能桶键重复双计）。scanner 纯机械归集，键集合由 reconcile 按
+		// 装配的段树过滤（未配置前缀不建立 scope/键）。
+		if dirKey := bucketDirKey(rel); dirKey != "" {
+			addTenantBucket(tenantBuckets, tenant, dirKey, size)
+		}
+	case "cloud", "archive":
+		totals.cloud += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), bucket, size)
+	case "chunk":
+		totals.chunked += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), "chunk", size)
+	case "version":
+		totals.versions += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), "version", size)
+	case "meta":
+		// 服务端内部账本（sync/cloud 任务状态、chunked session、share token 等）：
+		// 计入 totalUsage 与租户 meta 配额 Scope，但不入 stats 分类枚举（4 键不变）。
+		totals.meta += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), "meta", size)
+	case "backup":
+		// 备份 manifest 功能桶（2026-10-11 新增）：同 meta 口径——服务端内部账本，
+		// 计入 totalUsage 与租户 backup 配额 Scope，不入 stats 分类枚举。
+		totals.meta += size
+		addTenantBucket(tenantBuckets, firstSegment(rel), "backup", size)
+	default:
+		// 无桶结构的旧布局平铺文件按用户文件计入（新布局路径均落入上方 bucket 分支；
+		// LAYOUT_VERSION 标记文件不计入）。.__ 魔法目录已在目录层 SkipDir 跳过。
+		if d.Name() == "LAYOUT_VERSION" {
+			return nil
+		}
+		totals.user += size
+		totals.userFileCount++
+	}
+	return nil
 }
 
 // ScanAndRecalculate 全量扫描存储根，重新统计各分类文件大小和用户文件数量。
@@ -380,15 +417,35 @@ func bucketDirKey(rel string) string {
 }
 
 func (s *StorageManager) addCategory(cat StorageCategory, delta int64) {
+	// 与 totalUsage 同口径钳 0（防扫描覆写后在途 Release 把分类计数推负 → /stats 出现
+	// 负值且分类合计与总量不一致）。
 	switch cat {
 	case CategoryUserFiles:
-		s.userFilesSize.Add(delta)
+		clampAdd(&s.userFilesSize, delta)
 	case CategoryChunked:
-		s.chunkedSize.Add(delta)
+		clampAdd(&s.chunkedSize, delta)
 	case CategoryVersions:
-		s.versionsSize.Add(delta)
+		clampAdd(&s.versionsSize, delta)
 	case CategoryCloud:
-		s.cloudSize.Add(delta)
+		clampAdd(&s.cloudSize, delta)
+	}
+}
+
+// clampAdd 原子加 delta 并把结果钳到 >= 0（CAS 循环；delta>0 直接 Add 免循环）。
+func clampAdd(v *atomic.Int64, delta int64) {
+	if delta == 0 {
+		return
+	}
+	if delta > 0 {
+		v.Add(delta)
+		return
+	}
+	for {
+		cur := v.Load()
+		next := max(cur+delta, 0)
+		if v.CompareAndSwap(cur, next) {
+			return
+		}
 	}
 }
 

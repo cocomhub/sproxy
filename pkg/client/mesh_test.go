@@ -80,71 +80,14 @@ func TestMeshConnect_Echo(t *testing.T) {
 	// 单个原始 TCP mock 同时服务两个端点：
 	//   GET  /api/hub/services  → JSON 服务发现
 	//   POST /api/relay/stream  → CONNECT 风格：读请求体 → 写 200 → echo 后续字节
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	hub := &mockMeshHub{
+		CheckAuth:    true,
+		ServicesBody: `[{"name":"echo","node":"leaf","addr":"127.0.0.1:7777"}]`,
+		RelayKind:    RelayEcho,
 	}
-	defer ln.Close()
+	addr := startMockMeshHub(t, hub)
 
-	go func() {
-		for {
-			conn, aerr := ln.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				statusLine, lerr := br.ReadString('\n')
-				if lerr != nil {
-					return
-				}
-				// 读请求头，直到空行
-				contentLength := int64(0)
-				headers := map[string]string{}
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\r\n" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok {
-						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-					}
-				}
-				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
-				// I66：所有 mesh 信令请求都必须携带复用后的 auth_token Bearer
-				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
-					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\r\n\r\n")
-					return
-				}
-
-				switch {
-				case strings.Contains(statusLine, "GET /api/hub/services "):
-					body := `[{"name":"echo","node":"leaf","addr":"127.0.0.1:7777"}]`
-					fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
-					return
-				case strings.Contains(statusLine, "POST /api/relay/stream "):
-					// 读掉请求 body
-					if contentLength > 0 {
-						_, _ = io.CopyN(io.Discard, br, contentLength)
-					}
-					// 建立：写 200，然后 echo 后续字节
-					_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
-					_, _ = io.Copy(c, br)
-					return
-				default:
-					_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\r\n\r\n")
-					return
-				}
-			}(conn)
-		}
-	}()
-
-	c := NewFileClient("http://"+ln.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
+	c := NewFileClient("http://"+addr, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -156,18 +99,7 @@ func TestMeshConnect_Echo(t *testing.T) {
 	if node != "leaf" {
 		t.Fatalf("unexpected node: %q", node)
 	}
-
-	payload := []byte("mesh-echo-test")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo mismatch: got %q want %q", got, payload)
-	}
+	assertMeshEchoData(t, conn, []byte("mesh-echo-test"))
 }
 
 // TestMeshConnect_MultiCandidateFallback 验证 MeshConnect 遍历同名服务候选：
@@ -177,110 +109,21 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 	t.Parallel()
 	// 只服务 /api/hub/services：返回两个候选，node-A 用不可达地址，node-B 可达
 	// 可达的 echo 后端（纯数据 echo，不做协议解析——hub 已处理 CONNECT）
-	reachable, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reachable.Close()
-	go func() {
-		for {
-			conn, aerr := reachable.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				_, _ = io.Copy(c, c) // 纯 echo
-			}(conn)
-		}
-	}()
+	reachableAddr := startEchoBackend(t)
 
 	// hub 服务器：services 返回两个候选，relay/stream 走 reachable
-	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	hub := &mockMeshHub{
+		CheckAuth:     true,
+		ServicesBody:  fmt.Sprintf(`[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"%s"}]`, reachableAddr),
+		RelayKind:     RelayProxy,
+		ReachableAddr: reachableAddr,
+		FailAddr:      "127.0.0.1:1",
+		RelayStatus:   "HTTP/1.1 502 Bad Gateway\r\n\r\n",
+		Allow:         true,
 	}
-	defer hubLn.Close()
-	reachableAddr := reachable.Addr().String()
-	go func() {
-		for {
-			conn, aerr := hubLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				statusLine, lerr := br.ReadString('\n')
-				if lerr != nil {
-					return
-				}
-				contentLength := int64(0)
-				headers := map[string]string{}
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\r\n" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok {
-						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-					}
-				}
-				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
-				// I66：mesh 信令请求必须携带复用后的 auth_token Bearer
-				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
-					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\r\n\r\n")
-					return
-				}
-				switch {
-				case strings.Contains(statusLine, "GET /api/hub/services "):
-					body := fmt.Sprintf(`[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"%s"}]`, reachableAddr)
-					fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
-					return
-				case strings.Contains(statusLine, "POST /api/relay/stream "):
-					body := make([]byte, contentLength)
-					_, _ = io.ReadFull(br, body)
-					var req struct {
-						Target string `json:"target"`
-						Type   string `json:"type"`
-						Addr   string `json:"addr"`
-					}
-					_ = json.Unmarshal(body, &req)
-					// S97：校验 relay 请求体 target/type 字段与宣告的服务一致
-					if req.Type != "tcp" || (req.Target != "node-A" && req.Target != "node-B") {
-						_, _ = io.WriteString(c, "HTTP/1.1 400 Bad Request\x0d\x0a\x0d\x0a")
-						return
-					}
-					// 按请求体里的 addr 决定是否可达：127.0.0.1:1（node-A）不可达 → 返回不发 200
-					if req.Addr == "127.0.0.1:1" {
-						_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
-						return
-					}
-					// 转发到 reachable（模拟 hub 代理）
-					up, uerr := net.Dial("tcp", reachableAddr)
-					if uerr != nil {
-						return
-					}
-					defer up.Close()
-					_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
-					done := make(chan struct{}, 2)
-					go func() { _, _ = io.Copy(up, br); done <- struct{}{} }()
-					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-					<-done
-					return
-				default:
-					_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\r\n\r\n")
-					return
-				}
-			}(conn)
-		}
-	}()
+	hubAddr := startMockMeshHub(t, hub)
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
+	c := NewFileClient("http://"+hubAddr, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -294,65 +137,17 @@ func TestMeshConnect_MultiCandidateFallback(t *testing.T) {
 		t.Fatalf("expected fallback to node-B, got %q", node)
 	}
 	// 验证数据面通
-	payload := []byte("multi-candidate")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo mismatch: got %q want %q", got, payload)
-	}
+	assertMeshEchoData(t, conn, []byte("multi-candidate"))
 }
 
 // TestRelayStream_Success_Echo 直接单测 RelayStream：200 建立后数据面 echo 可用（S50）。
 func TestRelayStream_Success_Echo(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
+	hub := &mockMeshHub{RelayKind: RelayEcho}
+	addr := startMockMeshHub(t, hub)
 
-	go func() {
-		for {
-			conn, aerr := ln.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				if _, lerr := br.ReadString('\n'); lerr != nil {
-					return
-				}
-				contentLength := int64(0)
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\x0d\x0a" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
-						contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-					}
-				}
-				if contentLength > 0 {
-					_, _ = io.CopyN(io.Discard, br, contentLength)
-				}
-				_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\x0d\x0a\x0d\x0a")
-				_, _ = io.Copy(c, br) // echo
-			}(conn)
-		}
-	}()
-
-	c := NewFileClient("http://" + ln.Addr().String())
+	c := NewFileClient("http://" + addr)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -361,18 +156,7 @@ func TestRelayStream_Success_Echo(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-
-	payload := []byte("relay-echo")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo mismatch: got %q want %q", got, payload)
-	}
+	assertMeshEchoData(t, conn, []byte("relay-echo"))
 }
 
 // TestRelayStream_ErrorStatus 验证非 200 状态（502/401/404）返回 error（S50）。
@@ -389,46 +173,10 @@ func TestRelayStream_ErrorStatus(t *testing.T) {
 		{"not_found", "HTTP/1.1 404 Not Found\x0d\x0a\x0d\x0a", "404"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer ln.Close()
-			go func() {
-				for {
-					conn, aerr := ln.Accept()
-					if aerr != nil {
-						return
-					}
-					go func(c net.Conn) {
-						defer c.Close()
-						br := bufio.NewReader(c)
-						if _, lerr := br.ReadString('\n'); lerr != nil {
-							return
-						}
-						contentLength := int64(0)
-						for {
-							line, rerr := br.ReadString('\n')
-							if rerr != nil {
-								return
-							}
-							if line == "\x0d\x0a" || line == "\n" {
-								break
-							}
-							k, v, ok := strings.Cut(line, ":")
-							if ok && strings.ToLower(strings.TrimSpace(k)) == "content-length" {
-								contentLength, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-							}
-						}
-						if contentLength > 0 {
-							_, _ = io.CopyN(io.Discard, br, contentLength)
-						}
-						_, _ = io.WriteString(c, tc.statusLine)
-					}(conn)
-				}
-			}()
+			hub := &mockMeshHub{RelayKind: RelayStatusFail, RelayStatus: tc.statusLine}
+			addr := startMockMeshHub(t, hub)
 
-			c := NewFileClient("http://" + ln.Addr().String())
+			c := NewFileClient("http://" + addr)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			conn, err := c.RelayStream(ctx, "leaf", "127.0.0.1:7777")
@@ -487,101 +235,19 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	// 可达 echo 后端
-	reachable, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reachable.Close()
-	go func() {
-		for {
-			conn, aerr := reachable.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				_, _ = io.Copy(c, c)
-			}(conn)
-		}
-	}()
+	reachableAddr := startEchoBackend(t)
 
-	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	hub := &mockMeshHub{
+		CheckAuth:     true,
+		ServicesBody:  fmt.Sprintf(`[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"%s"}]`, reachableAddr),
+		RelayKind:     RelayProxy,
+		ReachableAddr: reachableAddr,
+		FailAddr:      "127.0.0.1:1",
+		RelayStatus:   "HTTP/1.1 504 Gateway Timeout\x0d\x0a\x0d\x0a",
 	}
-	defer hubLn.Close()
-	reachableAddr := reachable.Addr().String()
-	go func() {
-		for {
-			conn, aerr := hubLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				statusLine, lerr := br.ReadString('\n')
-				if lerr != nil {
-					return
-				}
-				contentLength := int64(0)
-				headers := map[string]string{}
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\x0d\x0a" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok {
-						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-					}
-				}
-				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
-				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
-				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
-					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
-					return
-				}
-				switch {
-				case strings.Contains(statusLine, "GET /api/hub/services "):
-					body := fmt.Sprintf(`[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"%s"}]`, reachableAddr)
-					fmt.Fprintf(c, "HTTP/1.1 200 OK\x0d\x0aContent-Type: application/json\x0d\x0aContent-Length: %d\x0d\x0a\x0d\x0a%s", len(body), body)
-					return
-				case strings.Contains(statusLine, "POST /api/relay/stream "):
-					body := make([]byte, contentLength)
-					_, _ = io.ReadFull(br, body)
-					var req struct {
-						Addr string `json:"addr"`
-					}
-					_ = json.Unmarshal(body, &req)
-					if req.Addr == "127.0.0.1:1" {
-						// 模拟 hub 12s 决策超时后回 504
-						_, _ = io.WriteString(c, "HTTP/1.1 504 Gateway Timeout\x0d\x0a\x0d\x0a")
-						return
-					}
-					up, uerr := net.Dial("tcp", reachableAddr)
-					if uerr != nil {
-						return
-					}
-					defer up.Close()
-					_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\x0d\x0a\x0d\x0a")
-					done := make(chan struct{}, 2)
-					go func() { _, _ = io.Copy(up, br); done <- struct{}{} }()
-					go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
-					<-done
-					return
-				default:
-					_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\x0d\x0a\x0d\x0a")
-					return
-				}
-			}(conn)
-		}
-	}()
+	hubAddr := startMockMeshHub(t, hub)
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
+	c := NewFileClient("http://"+hubAddr, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
@@ -594,90 +260,26 @@ func TestMeshConnect_504Fallback(t *testing.T) {
 		t.Fatalf("expected fallback to node-B after 504, got %q", node)
 	}
 	// 数据面验证
-	payload := []byte("after-504")
-	if _, err := conn.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo mismatch: got %q want %q", got, payload)
-	}
+	assertMeshEchoData(t, conn, []byte("after-504"))
 }
 
 // TestMeshConnect_AllCandidatesFail 验证所有候选均失败时返回聚合错误（I35）。
 func TestMeshConnect_AllCandidatesFail(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	hubLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	hub := &mockMeshHub{
+		CheckAuth:    true,
+		ServicesBody: `[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"127.0.0.1:2"}]`,
+		RelayKind:    RelayStatusFail,
+		RelayStatus:  "HTTP/1.1 502 Bad Gateway\x0d\x0a\x0d\x0a",
 	}
-	defer hubLn.Close()
-	go func() {
-		for {
-			conn, aerr := hubLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				statusLine, lerr := br.ReadString('\n')
-				if lerr != nil {
-					return
-				}
-				contentLength := int64(0)
-				headers := map[string]string{}
-				for {
-					line, rerr := br.ReadString('\n')
-					if rerr != nil {
-						return
-					}
-					if line == "\x0d\x0a" || line == "\n" {
-						break
-					}
-					k, v, ok := strings.Cut(line, ":")
-					if ok {
-						headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-					}
-				}
-				contentLength, _ = strconv.ParseInt(headers["content-length"], 10, 64)
-				// I66：信令/中继请求必须携带复用后的 auth_token Bearer
-				if !strings.HasPrefix(headers["authorization"], "SproxySig ") {
-					_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
-					return
-				}
-				switch {
-				case strings.Contains(statusLine, "GET /api/hub/services "):
-					body := `[{"name":"svc","node":"node-A","addr":"127.0.0.1:1"},{"name":"svc","node":"node-B","addr":"127.0.0.1:2"}]`
-					fmt.Fprintf(c, "HTTP/1.1 200 OK\x0d\x0aContent-Type: application/json\x0d\x0aContent-Length: %d\x0d\x0a\x0d\x0a%s", len(body), body)
-					return
-				case strings.Contains(statusLine, "POST /api/relay/stream "):
-					body := make([]byte, contentLength)
-					_, _ = io.ReadFull(br, body)
-					var req struct {
-						Addr string `json:"addr"`
-					}
-					_ = json.Unmarshal(body, &req)
-					_ = req // 两个候选都失败 → 502
-					_, _ = io.WriteString(c, "HTTP/1.1 502 Bad Gateway\x0d\x0a\x0d\x0a")
-					return
-				default:
-					_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\x0d\x0a\x0d\x0a")
-					return
-				}
-			}(conn)
-		}
-	}()
+	hubAddr := startMockMeshHub(t, hub)
 
-	c := NewFileClient("http://"+hubLn.Addr().String(), WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
+	c := NewFileClient("http://"+hubAddr, WithAccessKey("test-ak", "test-sk"), WithAccessKeyID("skey-aaaaaaaaaaaa"))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	_, _, err = c.MeshConnect(ctx, "svc")
+	_, _, err := c.MeshConnect(ctx, "svc")
 	if err == nil {
 		t.Fatal("expected error when all candidates fail")
 	}
@@ -732,5 +334,209 @@ func TestBufferedNetConn_CloseWrite(t *testing.T) {
 	<-serverCh
 	if err := <-serverErr; err != io.EOF {
 		t.Fatalf("expected EOF on server after CloseWrite, got %v", err)
+	}
+}
+
+// mockMeshHub 是模拟 mesh hub（服务发现 + CONNECT 中继）的可复用数据驱动构建物。
+// 各字段决定服务端行为，测试只需填写结构化配置，不写路由闭包。
+type mockMeshHub struct {
+	// CheckAuth 为 true 时校验请求 Authorization 是否为 SproxySig（I66）。
+	CheckAuth bool
+	// ServicesBody 是 GET /api/hub/services 的 JSON 响应体；空则回 404。
+	ServicesBody string
+	// RelayKind 决定 POST /api/relay/stream 的处理方式。
+	RelayKind mockRelayKind
+	// RelayStatus 是 RelayStatusFail/RelayProxy 时固定的错误状态行。
+	RelayStatus string
+	// ReachableAddr 是 RelayProxy 时代理到的可达后端地址。
+	ReachableAddr string
+	// FailAddr 是 RelayProxy 时命中即返回 RelayStatus 的目标地址。
+	FailAddr string
+	// Allow 为 RelayProxy 时启用 S97 target/type 校验。
+	Allow bool
+}
+
+// mockRelayKind 标识 mock hub 对中继请求的处理方式。
+type mockRelayKind int
+
+const (
+	// RelayEcho 丢弃请求体后回 200 并后续字节原样 echo。
+	RelayEcho mockRelayKind = iota
+	// RelayStatusFail 恒写 RelayStatus 错误状态行。
+	RelayStatusFail
+	// RelayProxy 读取请求体并按 addr 决策：要么回 RelayStatus，要么代理到 ReachableAddr。
+	RelayProxy
+)
+
+// startMockMeshHub 启动一个模拟 hub TCP 服务端，按 cfg 配置分派请求。返回监听地址。
+func startMockMeshHub(t *testing.T, cfg *mockMeshHub) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go startMockHubAcceptor(ln, cfg)
+	return ln.Addr().String()
+}
+
+// startEchoBackend 启动一个可达的纯 echo 后端，返回其监听地址。
+func startEchoBackend(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go startEchoAcceptor(ln)
+	return ln.Addr().String()
+}
+
+// startMockHubAcceptor 接受连接并为每个连接启动一个处理 goroutine。
+func startMockHubAcceptor(ln net.Listener, cfg *mockMeshHub) {
+	for {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		go serveMockHubConn(conn, cfg)
+	}
+}
+
+// startEchoAcceptor 接受 echo 后端连接并把每个连接原样回显。
+func startEchoAcceptor(ln net.Listener) {
+	for {
+		conn, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			_, _ = io.Copy(c, c)
+		}(conn)
+	}
+}
+
+// serveMockHubConn 读取请求头、校验鉴权，并按状态行分派到 services 或 relay。
+func serveMockHubConn(c net.Conn, cfg *mockMeshHub) {
+	defer c.Close()
+	br := bufio.NewReader(c)
+	statusLine, _ := br.ReadString('\n')
+	if statusLine == "" {
+		return
+	}
+	headers, contentLength := readMockHubHeaders(br)
+	if cfg.CheckAuth && !strings.HasPrefix(headers["authorization"], "SproxySig ") {
+		_, _ = io.WriteString(c, "HTTP/1.1 401 Unauthorized\x0d\x0a\x0d\x0a")
+		return
+	}
+	switch {
+	case strings.Contains(statusLine, "GET /api/hub/services "):
+		if cfg.ServicesBody != "" {
+			writeServicesResponse(c, cfg.ServicesBody)
+			return
+		}
+	case strings.Contains(statusLine, "POST /api/relay/stream "):
+		serveMockRelay(c, cfg, contentLength, br)
+		return
+	}
+	_, _ = io.WriteString(c, "HTTP/1.1 404 Not Found\x0d\x0a\x0d\x0a")
+}
+
+// readMockHubHeaders 读取 CONNECT 风格请求头直到空行，返回 headers（小写 key）与 Content-Length。
+func readMockHubHeaders(br *bufio.Reader) (map[string]string, int64) {
+	headers := map[string]string{}
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil {
+			break
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if ok {
+			headers[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+		}
+	}
+	contentLength, _ := strconv.ParseInt(headers["content-length"], 10, 64)
+	return headers, contentLength
+}
+
+// serveMockRelay 按 cfg.RelayKind 处理一个中继请求。
+func serveMockRelay(c net.Conn, cfg *mockMeshHub, contentLength int64, br *bufio.Reader) {
+	switch cfg.RelayKind {
+	case RelayEcho:
+		if contentLength > 0 {
+			_, _ = io.CopyN(io.Discard, br, contentLength)
+		}
+		_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\x0d\x0a\x0d\x0a")
+		_, _ = io.Copy(c, br)
+		return
+	case RelayProxy:
+		serveMockRelayProxy(c, cfg, br, contentLength)
+		return
+	default:
+		// 先读尽请求体再回状态行：Windows 下若直接 Close 且残留未读数据，
+		// TCP RST 会把已缓冲的响应一并丢弃，导致客户端「读响应状态失败」。
+		if contentLength > 0 {
+			_, _ = io.CopyN(io.Discard, br, contentLength)
+		}
+		_, _ = io.WriteString(c, cfg.RelayStatus)
+	}
+}
+
+// serveMockRelayProxy 解析中继请求体按目标地址决策：命中失败地址回错、否则代理到后端。
+func serveMockRelayProxy(c net.Conn, cfg *mockMeshHub, br *bufio.Reader, contentLength int64) {
+	body := make([]byte, contentLength)
+	_, _ = io.ReadFull(br, body)
+	var req struct {
+		Target string `json:"target"`
+		Type   string `json:"type"`
+		Addr   string `json:"addr"`
+	}
+	_ = json.Unmarshal(body, &req)
+	if cfg.Allow && (req.Type != "tcp" || req.Target == "") {
+		_, _ = io.WriteString(c, "HTTP/1.1 400 Bad Request\x0d\x0a\x0d\x0a")
+		return
+	}
+	if req.Addr == cfg.FailAddr {
+		_, _ = io.WriteString(c, cfg.RelayStatus)
+		return
+	}
+	up, uerr := net.Dial("tcp", cfg.ReachableAddr)
+	if uerr != nil {
+		return
+	}
+	defer up.Close()
+	_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\x0d\x0a\x0d\x0a")
+	writeRelayProxy(c, br, up)
+}
+
+// writeRelayProxy 把 br→conn、conn→up 双向代理直到一端关闭。
+func writeRelayProxy(conn net.Conn, br *bufio.Reader, up net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(up, br); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(conn, up); done <- struct{}{} }()
+	<-done
+}
+
+// writeServicesResponse 写一个 services 发现响应（JSON 服务列表）。
+func writeServicesResponse(conn net.Conn, body string) {
+	fmt.Fprintf(conn, "HTTP/1.1 200 OK\x0d\x0aContent-Type: application/json\x0d\x0aContent-Length: %d\x0d\x0a\x0d\x0a%s", len(body), body)
+}
+
+// assertMeshEchoData 验证 mesh 数据面回显往返一致。
+func assertMeshEchoData(t *testing.T, conn net.Conn, payload []byte) {
+	t.Helper()
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo mismatch: got %q want %q", got, payload)
 	}
 }

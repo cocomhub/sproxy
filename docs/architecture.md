@@ -155,7 +155,8 @@ func init() {
 - **流中继转发：** `POST /api/relay/stream` 升级为到目标叶子的双向字节流（RelayStreamHandler）
 - **跨 hub 联邦（多跳链式中继）：** 本 hub 路由表未命中目标节点时，把 relay 拨号请求
   转发到「上报该节点的联邦对端 hub」，实现 `A→hub1→hub2→B` 链式中继（见
-  `pkg/server/federation_forward.go`）。
+  `pkg/server/federation/forward.go`；HTTP 装配面与故障转移在
+  `pkg/server/relay_stream.go`）。
 
 #### 多路径自动选路（SmartDial，2026-09-19，`pkg/tunnel/mesh`）
 
@@ -347,3 +348,614 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   `X-Volume` 头、可选 `volume` 参数（upload 表单 / 其余 query）。FileClient 卷上下文
   （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /
   `--volume` / `mv --to-volume`；WebUI 卷 badge + 仪表 + 上传下拉。
+
+### 统一存储卷模型（StorageVolume 唯一身份 + VolumeView 唯一取卷入口）
+
+设计：`docs/designs/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
+
+本地卷与外部卷统一为 **`registry.StorageVolume`** 契约（`Name/Kind/FS/Close` + 可选能力
+`Footprinter`/`PhysBound`/`StatsProvider`），`registry.Set` 持有 `storageVolumes` 表，
+`Set.StorageVolume(name)` 是唯一取卷入口；`assembleLocalVolume` 改走 `NewLocalBackend`
+（`*storage.Root` 成为本地卷内部细节，仅默认卷 tenant/globalRoot 存量路径保留）。
+
+**按用途统一访问器 `Set.VolumeView(name, use)`**：同一卷按用途返回不同装饰链视图——
+`user`（用户文件：Guard → trusted.Wrap → capacity → staging 消费方套）、`meta`（控制面：
+Guard，不经容量）。装饰链在**装配期**经 `SetVolumeViewDecorator` 注入（registry 内置默认
+trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS（R27 直连点收缩）。
+
+**转存支持本地卷**：`checkTransferVolumePreflight` 只要求目标卷可解析（FS 非 nil），不再
+要求协议非空；本地卷 target 产物落 `<owner>/user/<rel>`（`ResolveUserLocation` 统一键空间，
+可经 `/download` 命中）。**本地卷转存的容量记账（R16 P1）**：`rootfs` 适配器自述
+`syncpkg.LocalVolume`（本地根恒本地）⇒ 转存判定非远程 ⇒ owner 配额探测生效；卷级容量池经
+装配注入 `VolumePoolChargeFor` 做**写前探测 + 写后差分结算**（`pool.ProbeReserve`/`Adjust`），
+删除侧 `ReleaseCommitted` 对称（外部卷容量权威仍在 FS 层 `CapacityFS`，不双记）。转存 URL 形态 `local://<卷>/<rel>`（U4：`RegisterLocalBackend`
+声明 `local` 协议，`Set.ResolveURL` 经 `VolumeView` 读本地卷）。`volume://`（`Location.String()`
+卷内定位序列化）与 `local://`（协议寻址）并存分工。
+
+### 卷状态维护（list / checksum / 索引的统一缓存层）
+
+设计：[docs/designs/2026-10-28-volume-state-maintenance.md](./designs/2026-10-28-volume-state-maintenance.md)。
+
+**问题**：list 的目录视图与 checksum 派生值此前有**三套实现**（本地卷 `searchIndex` +
+`checksums.json`、外部卷每次远端 `ListDir`、secretdata 自管索引）⇒ 三个真相源、三条失效路径
+（#874：旁路写漏一处即「list 缺条目 + checksum 空」）。
+
+**现状（2026-10-29）**：list 的数据源已收敛为**卷状态视图**（`VolumeView.ListDir` + 缓存），
+视图不可用时**实时扫描**；`searchIndex` 只服务搜索（`index.list` 已删除并硬禁，R41）。
+**唯一列举入口**是装配层的 `VolumeViewLister.ListDirView`——本地卷与外部卷共用（键空间由
+`ResolveUserLocation` 统一），`ExternalList`/`ExternalVolumeSource` 已删除并硬禁。
+
+**内存上界（2026-10-30）**：卷状态缓存有**双上限**——目录快照数（`DefaultMaxEntries` 4096）
+与**总条目预算**（`DefaultMaxTotalEntries` 200_000，即所有目录 `entries` 之和）。超预算按 LRU
+淘汰；**单目录快照超过总预算 ⇒ 不缓存**（回源），避免一个十万文件目录挤占全部内存。
+
+**校验巡检的台账读取（2026-10-30）**：`/api/verify` 用可选扩展 `checksum.Iterator` **分批遍历**
+（锁外回调，峰值内存 O(键列表 + 单批)），不再 `GetAll()` 全量拷贝；判空用 `LenCounter`（O(1)）。
+store 未实现这些能力时回落 `GetAll`（零回归）。
+
+**读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
+（`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce
+合并**（`ChecksumStore.Set` 只更新内存 + 累计代际，1s 定时器合并为一次全量落盘，`Flush`/`Close`
+可强制落盘）——此前每条 `Set` 都全量重写 `checksums.json`，批量 N 文件退化为 O(N²) I/O。
+崩溃窗口 ≤ debounce，台账可由对象 meta 侧车重建（`RebuildChecksums`），故窗口内丢失可自愈。
+两个后端都实现**卷维度键**（`VolumeKeyedStore`，§15.1.1：卷键优先 + 旧键兜底）——
+集群后端缺失该能力时 `checksumSet/Get` 会静默退化为无卷键，导致多卷同名文件 checksum 串值。
+领域侧一律经 `checksum.ChecksumStoreIface` 使用台账（**不得**断言具体类型 `*ChecksumStore`：
+那会让集群后端被判为「未装配」，导致 list/search 的 checksum 恒空、`RebuildChecksums` 失败）；
+批量回填用可选扩展 `BatchWriter`/`VolumeBatchWriter`，判空用 `LenCounter`。
+合并逻辑由**唯一实现** `internal/savemerger` 承担（通用「全量落盘合并器」）：checksum 的两个后端
+（`ChecksumStore` 卷内文件 / `StateBackedChecksumStore` 集群 StateStore）与 dedup 台账
+（`files.DedupStore`，本地 JSON / 集群 StateStore）共用同一语义。集群后端的台账实例**按 owner
+缓存**（`Handlers.checksumStores` / `Handlers.dedupStores`，两者同构）——未缓存时每次首读都会从
+StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者都清空（旧实例先落盘/丢弃）。
+
+**机制（四条不变量）**：
+
+1. **卷维度**：缓存键恒为 `(卷名, 卷内相对路径)`；跨卷聚合是「对卷集合的派生遍历」，
+   不是独立全局索引。
+2. **横切关注点 = 装配期装饰器**：唯一入口 `volumestate.Wrap`（与 `capacity.WrapStorageVolume`
+   同形），业务代码零感知；门禁 **R44** 保证没有第二个包装点。
+3. **失效由变更事件驱动**：装饰器在 `WriteFile/Delete/Rename/MakeDir/WriteIfAbsent/Move/Copy/Link`
+   成功后**自动失效**（含祖先目录），调用方不需要登记 —— 这是 #874 缺陷族的结构解。
+4. **卷自管只报告事实**：卷经 `sync.Entry.Checksum*` 与可选 `volume.StateGeneration`
+   （廉价代际：目录 mtime / 容器 meta 版本 / LastModified）如实上报，**不得自建 list 缓存**。
+
+**权威口径**：卷是真相源、缓存只加速 —— `Stat` 恒回源；需要 checksum 的安全操作走
+「调用方给 → 现取 → fail-closed」三段式，缓存值不作删除门禁唯一依据。
+**写面纪律（E2E 锁定）**：外部卷的读/写入口必须经 `VolumeView`（不得直取 `External().FS()`），
+否则写后不失效缓存（`test/e2e_volume_state_test.go` 有对照组断言）。
+**派生状态唯一提供方（R40）**：list/index 级缓存类型必须登记（`internal/archcheck/list_cache_types.tsv`）——
+新增复用 `pkg/volumestate`，只有「卷自身是唯一能算出真值的地方」（secretdata 的密文分块索引）才允许自管。
+**配置默认值安全（R43）**：`Default()` 里的特化默认值（bool `true` / 非空 string）必须登记
+（`config_defaults.tsv`）——新增字段须用安全默认，需要「默认开启」时把语义反转成 `disable_xxx`。
+
+**本地卷写面纪律（R45）**：`storage.Root` 的结构性变异方法（mkdir/remove/rename/link/chtimes）在
+成功后发 `Mutation` 事件（租户子根自动归一 `<owner>/<rel>` 前缀）；装配层把它接到
+`files.Service.ApplyRootMutation`，搜索索引因此**自动**跟随旁路写（转存/归档/跨卷搬移），
+不需要写路径逐点登记。新增 Root 变异方法必须调用 `notifyMutation`（R45 门禁拦截）。
+**内容写**（`OpenFile` 裸句柄无法观察）由卷的 FS 写面在成功后调用 `Root.MarkWritten(rel)` 声明
+（本地卷唯一调用点 = `pkg/rootfs.WriteFile`）⇒ 转存/归档/镜像/备份落盘同样自动进索引。
+**R42**：带 `ListDir` 的 FS 实现必须实现 `StateGen` 或登记理由（`fs_derived_state.tsv`），
+保证「有派生状态的实现能被缓存层探测到变化」。
+**范围**：本期仅非本地卷（外部/封装）；本地卷沿用既有实现（门禁 R46 登记为只减不增）。
+
+## 可信卷（Trusted Volume：完整性 sidecar + 元信息隔离 + 卷级容量）
+
+「可信卷」把「读回内容 == 写入内容」从**约定**升级为**结构性不变量**：服务端为每个文件维护一份
+用户不可访问的整文件完整性证据（`FileMeta` sidecar），读路径逐分块校验，损坏**fail-closed**。
+设计细节与已记档边界见 [docs/designs/2026-10-10-trusted-volume.md](./designs/2026-10-10-trusted-volume.md)。
+
+### 数据模型与布局
+
+- `FileMeta`（`pkg/files/meta`）：`Size`/`TotalSHA256`/`ChunkSize` + 逐分块 `{index,offset,size,sha256,md5}`，
+  外加 `CTime`/`MTime`/`MediaType`/`Extra`。分块数上限与 sidecar 读取上限（64MiB）**自洽**——
+  `ResolveChunkSize` 会为保证「写出即可读」上抬档位（1MiB…32MiB）。
+- **sidecar 独立桶**：`<owner>/meta/<rel>.meta`（不是用户目录内的 `.meta`）——
+  与用户真实 `*.meta` 文件不再冲突，且业务层经 `MetaBucketGuard` **结构性不可达** meta 桶。
+- **键空间单一来源**：`volume.Location.FSPath()` 恒为 `<归一 owner>/<bucket>/<path>`；
+  备份目标等「相对键空间」经 `prefixFS` 前缀化后才进可信链（防跨 owner 互覆与 Guard 误判）。
+
+### 装饰器链与能力透传
+
+按「最内层原始卷 → 容量 → 可信 → 守卫 → 业务」装配：
+
+```
+业务层 → MetaBucketGuard(TrustedVolumeFS(CapacityFS(原始 FS)))
+                     ↑ staging 门卫按卷另行叠加（StagingQuotaGateFS）
+```
+
+- 每个装饰器**透明转发全部可选能力**（`meta.Provider`/`MetaExtraUpdater`/`RangeReader`/
+  `DirectURLProvider`/`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`/`Mover`/`Copier`/`Linker`/
+  `StagingQuota*`），并由编译期断言 + 门禁 R21（`internal/archcheck/capability_parity_gate_test.go`）
+  机械保证：新增能力接口若漏转发即报红（`BlockAccessor` 为一致豁免，理由见设计 §8）。
+- **能力探测必须下探 `syncpkg.Innermost`**：装饰器无条件回显能力（透传契约）⇒ 直接对装饰层做
+  类型断言恒真。这条纪律已修过三类失效：staging 门卫恒跳过、`RangeReader` 回落成死代码、
+  `Provider` 探测失败。
+- **卷内容一律经 `storage.Root`（或经 Root 的 FS 适配器 `server.NewRootFS`）**：`sync.NewLocalFS`
+  是「任意目录 → 纯 os I/O」的适配器，用在**卷根**上会绕过 at-rest 加解密、封印、用户可见长度与
+  容量接线——历史三个 P0 全出自这一类（DAV 面、备份源、同步本地侧）。该纪律由门禁 R26
+  （`internal/archcheck/volume_root_bypass_gate_test.go`）机械保证：非测试源码中
+  `NewLocalFS(...)` 的调用点必须登记并写明「为什么可以不经 Root」（与 R25
+  `user_io_gate_test.go` 互补：R25 管「经 Root 但绕过用户可见入口」，R26 管「根本不经 Root」）。
+
+### 读写路径保证
+
+- **写**：上传（simple/multipart）、S3 网关 PUT/multipart、DAV PUT、块写、跨卷 copy/move、
+  云转存、备份/恢复、回收站、sync push/pull 均在**同一写窗口**生成 sidecar；覆盖写场景
+  必然**失效旧 sidecar**（否则旧 meta 描述旧内容 → 新内容永久校验失败、文件不可读）。
+  写失败/序列化失败同样删旧 sidecar 退化为「无 meta」（可自愈）。
+- **读**：`/download`、`/download/chunk`、S3 兼容网关 GET、DAV GET、外部卷服务端转发统一经
+  `meta.VerifyReadSeeker` 逐分块比对；失败**主动中断连接**（`panic(http.ErrAbortHandler)`）+
+  指标 `success=false`，绝不「200 + 截断内容」。
+- **加密卷（at-rest）**：默认下发**明文**（加密只在存储层，与 DAV/S3/分享/预览语义一致），
+  `?ciphertext=1` 显式导出存储原样密文；尺寸/`Content-Range`/Range 一律按**明文坐标**
+  （`storage.Root.LogicalSize`），密文坐标仅在 `ciphertext=1` 分支。
+- **降级可观测**：sidecar 缺失（升级后存量文件）记 Debug、读失败/畸形记 Warn；`skip_verify`
+  只关读侧校验、不关 meta 生成与桶隔离。
+
+### 卷级容量
+
+- 配置卷/用户卷容量在 **FS 层**（`capacity.CapacityFS`）统一强制：写入累计、删除/覆盖/改名/
+  服务端 Copy 释放、未知长度按实测结算；计数快照持久化（`rename` + fsync 父目录）+
+  损坏/版本不识标记（Warn，避免静默归零后可超额）。
+- 外部卷覆盖写按**净增**探测（`externalReserveNeed`），避免「写满即永久 507」。
+- S3 网关单对象 PUT 与 multipart complete / 版本恢复一致走 **owner Scope + 卷池双账本**。
+
+### 本地 staging 配额
+
+外部卷上传/同步先落本地暂存 → 必须防本地盘打满：`ApplyStagingQuota` 按**最内层原始卷**三分支——
+显式豁免（`StagingQuotaExempt`，如 s3 流式直传）、自管（`StagingQuotaCapable`，如 baidupcs，
+per-request/per-owner 门卫包装）、否则强制 `StagingQuotaGateFS`（fail-safe 宁多勿漏）。
+staging 独立 Scope 但**挂在全局池之下**（受 `max_storage_bytes` 约束）。
+
+## 真实存储审查（逻辑 ↔ 物理落点，2026-11-04）
+
+secretdata 卷的物理布局刻意不可读（随机容器名、`q`/`z` 标记、meta pad、嵌套容器），
+运维/审计无法直接回答「这块盘上的文件是干什么的」。新增**可选能力**统一表达该问题：
+
+```go
+// pkg/volume/inspect.go
+type StorageInspector interface {
+    Trace(ctx, rel string, mode InspectMode) (*PathTrace, error)      // 逻辑 → 容器/meta/分块/parity
+    Explain(ctx, realRel string, mode InspectMode) (*RealExplanation, error) // 真实路径 → 用途 + 归属
+}
+```
+
+- **落位**：`pkg/volume` 定义契约，`pkg/volume/secretdata` 是唯一布局实现；
+  `pkg/server`（两条只读路由）+ `pkg/client` + `cmd/sclient volume trace|explain` 只做薄编排。
+  布局知识**不得**在装配层/CLI 复制（否则必然与写路径漂移）。
+- **模式**：默认 `InspectIndex`（只读索引）；`InspectDisk` 对比磁盘并输出差异码
+  （`blob_missing` / `blob_orphan` / `size_mismatch` / `meta_unreadable` / …）。
+- **安全**：只解 meta 不读内容；真实路径越界显式拒绝（`ErrOutsideVolume` → 403）；
+  只读（无删除/修复）；差异码不是删除建议（回收走 GC）。
+- **未实现能力的卷** ⇒ `501 not_inspectable`，绝不返回空结果（空结果会被误读为「没有落点」）。
+- 设计：`docs/designs/2026-11-04-secretdata-storage-inspection.md`。
+
+## 统一转存（归档 = 转存 + 预处理）
+
+**单一管道**：`源(source) → [可选预处理] → 目标卷(destination)`。无预处理 = 纯转存（individual）；
+有预处理 = 打包后转存（旧「归档」概念升级）。预处理经 `pkg/transfer` registry 选型——内置
+`tar`（压缩 gzip/zstd/brotli + 可选加密 aes-256-gcm）。
+
+三个云端归档端点共用同一执行核心 `Handlers.cloudArchiveToVolume`：
+`POST /api/cloud/tasks/{id}/archive`、`POST /api/cloud/archive`、`POST /api/cloud/groups/{id}/archive`；
+请求体 `target_volume` + `target_path` 指定转存目标（空 = 落租户 archive 桶，既有行为零回归）。
+
+**目标卷写视图**——单一出口 `Handlers.externalVolumeTransferFS`（与 cloud 下载转存共用，防解析漂移）：
+- `trusted.Guard(trusted.Wrap(be.FS()))`：meta 恒生成 + meta 桶隔离；外部源卷封印经装配处
+  `enclosure.SealBackend` 注入 ⇒ `be.FS()` 自动继承封印。
+- 目标键经 `volume.ResolveUserLocation`（恒 `<owner>/user/<rel>` 前缀 + 路径安全），与读路径
+  `resolveExternalDownload` 同键空间 ⇒ 产物可经 `/download` 命中（外部卷不进本地文件索引，
+  故不出现在 `/api/files` 列表）；`target_path` 可含子目录，空 = `archive/<归档名>`。
+- 本地 staging 配额（`ApplyStagingQuota`；长度未知的打包流由 gate 的 `reservingReader` 按实测
+  增量预留 + 背压）+ `transferWriteLock`（per-(owner,rel)，与 HTTP/DAV/S3 同键空间）+ 目标卷
+  `ReserveSpace` 预检（装饰器链未实现 → `ErrUnsupported` 跳过）。
+- 拒绝静默覆盖：`WriteIfAbsent` 优先（同名 → 409）；`secrets` 密钥卷、未声明协议、空 scheme
+  fail-closed。转存不占租户 archive 桶（仅 `cloud_archive_max_bytes` 上限校验）。
+- 加密密钥来自 `archive.key_file`（与 `/api/archive` 同约定）；`encrypt`/`cipher`/`compression`/
+  `target_path` 仅与 `target_volume` 同用（否则 400，防静默忽略），且 `cipher` 须与 `encrypt`
+  同用（单独指定不加密 → 400）；加密产物命名追加 `.aes`（`<名>.tar.gz.aes`，不再伪装成可直接
+  gunzip 的 `.tar.gz`）。CLI 用**卷 URI 路径**（`--target <卷名>:/<路径>`，
+  cd/mv 同规约）指定，客户端归一为 `target_volume`/`target_path`（协议层不解析 URI）。
+
+**未落地**：图片组「每文件一分块」封装（设计方向 A/B 待 #34 详设）；Web UI 未暴露转存目标。
+
+## 远端派生状态缓存与删除失效纪律（2026-10-27）
+
+仓库持有若干「从远端/对象内容派生出来的本地状态」。按**陈旧后果**分四类，决定各自的失效强度：
+
+| 类别 | 定义 | 陈旧后果 | 允许的过期强度 |
+|---|---|---|---|
+| **A 内容派生值** | checksum / size / mtime / 明文块 | **安全**：错误「一致」放过被篡改文件；错误「不一致」误拒合法操作 | **强一致或 fail-closed**，禁止乐观复用 |
+| **B 句柄/凭据** | dlink URL、access token | 可用性失败，失败可观测可自愈 | TTL + 失败自愈 |
+| **C 结构视图** | 目录树 / 文件索引 / 聚合列表 | 幽灵条目、看不到新文件 | 中（必须有收敛路径） |
+| **D 聚合账本** | 配额用量、容量计数 | 假 507 / 过度准入 | 强，但有界漂移 + 对账 |
+
+判定口诀：*能导致「把坏数据当好数据」的是 A 类，必须强一致；只影响「这次失败下次再试」的是
+B 类，TTL 就够。*
+
+### 产出契约（谁能零成本给就必须给）
+
+- `sync.Entry.Checksum` **允许为空**（= 未知，调用方按需 stat）；但底层能在**列举时零额外
+  I/O** 给出整文件 SHA-256（内存态）的卷**必须填**（secretdata 的 `Original.SHA256`）。
+- `ChecksumType` 必须自述算法：`baidupcs` 的 `etag` **不得**填入 `FileInfo.Checksum`
+  （非整文件 SHA-256，会造成错误校验语义）；无法零成本取 SHA-256 的卷保持 unknown，
+  由消费方 stat 兜底（三段式：给了用 / 没给现取 / 仍拿不到明确拒绝）。
+
+### 消费侧三段式（任何需要 checksum 才安全的写操作）
+
+```
+① 调用方给了 → 用；
+② 没给 → Stat / FileMeta 现取（A 类禁止用缓存猜）；
+③ 仍拿不到 → 明确拒绝（fail-closed，不静默跳过校验）。
+```
+
+前端 `resolveOpChecksum` / CLI `FileClient.resolveDeleteChecksum` 即此形状。
+
+### 删除三段式（顺序不可颠倒）
+
+```
+① 前：校验（删除前现取的 checksum；crossCheckExternalChecksum 用 sidecar 记录值比对 =
+      「防误删」而非「防篡改」——API 文档须显式声明）
+② 中：删远端。失败 ⇒ 本地一律不动（不释放配额、不清缓存），保持可重试
+③ 后：失效本地派生状态（确认成功后才执行；单项失败只 Warn + 记指标，绝不回滚 ②）
+     a 内容缓存（块/窗口/明文）→ 即时清
+     b 结构视图（索引/列表缓存）→ 即时清
+     c 句柄（dlink/token）→ 即时 clear key
+     d 账本（配额/容量）→ 用删除前实测字节释放（与写侧同源口径）
+     e 审计/事件 → 发布
+```
+
+**最重要结论**：*凡是**本进程之外**可能被删除的东西（外部卷、多实例共享卷、用户直接用网盘
+App 改的卷），其派生值要么不缓存、要么有 TTL/重扫——不能靠「我删的时候记得清」。* A 类不缓存
+（每次现取）；B 类 TTL+自愈；C 类需重扫（secretdata 索引 `loadIndex` 只在挂载时跑一次；
+多进程/外部改动收敛由设计文档 §6 的裁定覆盖）；D 类靠对账。
+
+## 作用域分层（Global / Server / Assembly）
+
+> 2026-10-30 起生效（server 治理 S1）。解决的是「**命名声称的作用域**与**实际消费者**不一致」：
+> `pkg/` 下曾有约 40% 的代码只有 `cmd/sproxy` 可达，却与真正的通用能力混在同一命名空间。
+
+### 三层定义
+
+| 作用域 | 判据 | 命名空间 | 允许导入 |
+|---|---|---|---|
+| **Global** | 与进程无关的能力；`sproxy` / `sclient` / `sproxy-mcp` / tools 任一可消费 | `pkg/<capability>` | 只能导 Global |
+| **Server** | 只在 sproxy 服务端进程内有意义 | `pkg/server/<capability>` | Global + Server（**不得**导装配根） |
+| **Assembly** | 只做装配、路由注册与生命周期 | `pkg/server`（根包，精确匹配） | 全部 |
+| **Private** | 单个二进制私有 | `cmd/<bin>/internal/...` | 该二进制子树 |
+
+### 命名规则（新增包必须遵守）
+
+1. 被 `cmd/sclient` 或 `cmd/sproxy-mcp` 可达 ⇒ 才可放 `pkg/<capability>`（Global）；
+2. 只被 `cmd/sproxy` 可达 ⇒ 放 `pkg/server/<capability>`；
+3. 两个二进制都可达 ⇒ Global，且**不得**反向依赖任何 Server 包；
+4. 只服务单个二进制的 ⇒ `cmd/<bin>/internal/<capability>`。
+
+反例（曾出现/差点出现）：`pkg/config`（实际是 server 配置 schema）、`pkg/httpapi`
+（HTTP 面只有服务端有）、`pkg/service/*`（`service` 是层名不是能力名）。
+
+### 可执行边界（门禁）
+
+| 门禁 | 断言 |
+|---|---|
+| **R1**（`arch_test.go`） | 已登记包不得导入层级更高的已登记包 |
+| **R2** | 子包只允许父域子树与装配层导入（`pkg/server/config` 登记为 `pkg/server` 子包） |
+| **R4** | `pkg/**` 中不在 `pkg/server/**` 的包不得导入 `pkg/server/**`（Global 不依赖 Server） |
+| **R6**（`server_scope_gate_test.go`） | `pkg/server/**` 子包不得导入装配根 `pkg/server`；且每个子包必须在 `Levels` 登记 |
+
+依赖方向固定为单向：
+
+```
+pkg/server（装配根） ──▶ pkg/server/<cap> ──▶ pkg/<Global>
+```
+
+### 横切能力：`internal/httpjson`（JSON 响应写出唯一实现）
+
+JSON 响应写出曾有 **5 份**等价实现：装配根 `sendJSONResponse`（328 处调用）、
+`pkg/files.Service.sendJSON`（146 处）、`pkg/server/ratelimit` 的 429 回包（因无法反向
+import 装配根而字节级复制，见 #988）、`pkg/server/cloudtasks.writeJSON`、
+`pkg/server/remotefs` 的两个本地 helper；另有 41 处「先设 Content-Type 再
+`json.NewEncoder(w).Encode`」的裸写（无 500 兜底、各自复制日志/状态码逻辑）。
+
+现全部收敛到 `internal/httpjson`（L0，零 `pkg/*` 依赖）：
+
+| API | 用途 |
+|---|---|
+| `Send(w, status, v)` | 写 JSON 响应，告警日志用包级实例（装配根经 `SetLogger` 注入） |
+| `SendOpt(w, status, v, Opt)` | 同上，可指定 `Logger` / `Handler`（失败日志属性）/ `Msg`（日志文案）/ `Attrs` |
+| `SendErr(w, status, v, Opt) error` | 同上，但返回序列化/写出错误（「写失败必须被调用方感知」场景，如信令不得消费未送达消息） |
+| `SendError(w, status, msg)` | 写 `{"error": msg}`（429/错误回包） |
+| `WriteBody(w, status, body)` | 写出**已序列化**字节（缓存命中的预序列化体，避免二次序列化） |
+
+契约（按字节断言，不得改）：成功路径无尾随换行；序列化失败 → 500 + 固定错误体
+（**带**尾随换行，沿用 `json.Encoder` 形态）+ Warn 日志（文案/handler 属性可经 `Opt` 保留）。
+
+门禁 **R54**（`json_response_gate_test.go`）从棘轮升级为**硬禁止**：非测试源码出现裸
+JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实现本体）、`pkg/testutil/`
+（外部服务替身）、`cmd/`（CLI stdout，`w` 是 `io.Writer`）。
+
+### 当前落地状态（S1 配置 / S2 通知 / S3 调度器 / S4 Handlers 分域 / S5 S3 / S6 WebDAV / S7 AI / S8 分享 / S9 指标 / S10 巡检 / S11 用量统计 / S12 告警引擎 / S13 归档助手 / S14 跨 hub 转发 / S15 前置 文件锁原语 / S15 限流 / T1 跨节点读写面 / T3-a 凭据存储与主密钥解析 / T3-b 封装卷翻译与装配）
+
+- `pkg/server/config`：配置**数据模型**（55+ 类型）、`Default`/`SetDefaults`、`Validate`
+  及其校验/派生辅助（`ParseVolumeACL`、`ReadListenerPins`、`ParseMaintenanceWindow`、
+  `IsLoopbackHost`、`ValidateIPList`）、`Load*`/`SaveConfig`。
+- `pkg/server/config_alias.go`：**迁移期兼容层**（类型/常量别名 + 4 个转发函数），
+  让 `pkg/server` 存量 100+ 文件与 `cmd/sproxy` 零改动。
+  **移除条件**：后续切片逐个搬入 `pkg/server/<cap>` 后删除本文件，新代码直接 import
+  `pkg/server/config`。
+- 共享 IP 工具下沉 `pkg/netutil`（`ParseIPNets` / `AllowIPsCoverLoopback`）；
+  配额桶名单下沉 `pkg/storage`（`QuotaBucketNames`）——两者都是 Global 能力，
+  不应留在 server 作用域。
+
+**S2：通知域（`pkg/server/notify`）**
+
+- 迁入：`NotifyCenter`（注册表/规则路由/去抖/重试/有界历史）、全部渠道实现
+  （wecom/serverchan/email/webhook/alertmanager/grafana）、webhook 签名、RSS/Atom feed 渲染。
+- **依赖倒置**：通知域只接受自己的 `notify.Event`（Action/Object/Result/Detail/TS），
+  装配层在 `RecordAudit` 里做一次字段映射——通知域不反向依赖 `AuditEvent`/装配层（R6）。
+- 装配层保留 HTTP 面：`notify_handlers.go`（history/test/feed 三个端点 + feed token 门禁）。
+- 装配层直接 import `pkg/server/notify`（`NotifyCenter`/`Notifier`/`NotifyMessage`/`Event`）；
+  迁移期别名 `notify_alias.go` 已删除。
+- HMAC-SHA256 下沉 `pkg/cryptox.HMACSHA256`（S3 SigV4 与 webhook 签名共用单一实现）。
+
+**S3：统一周期任务调度器（`pkg/server/scheduler`）**
+
+- 迁入：`Scheduler`/`Task`/`TaskFunc`（周期任务注册、单飞防重入、panic 恢复、维护窗口、
+  优雅停止 + `FinalRunOnStop`），零 `pkg/*` 依赖（L0）。
+- 装配层保留周期任务的**注册内容**（uploading 清理 / version-gc / trash-gc / share-cleanup /
+  usage-flush），任务描述直接使用 `scheduler.Task`；迁移期别名 `scheduler_alias.go` 已删除。
+
+**S4：`Handlers` 分域依赖（`pkg/server/deps.go`）**
+
+- 100+ 扁平字段收敛为 **12 个值嵌入分组**：`coreDeps` / `httpDeps` / `authDeps` /
+  `filesDeps` / `volumeDeps` / `cloudDeps` / `shareDeps` / `hubDeps` / `clusterDeps` /
+  `auditDeps` / `aiDeps` / `opsDeps`。
+- **值嵌入 + Go 字段提升**：`h.volSet` 等 580 个方法调用点与全部 `Handlers{...}`
+  字面量零改动（Go 1.27 支持在复合字面量中初始化提升字段）。
+- 每个分组就是**未来切片的 Deps**：搬 `volume` 切片时把 `volumeDeps` 变成
+  `volume.Deps`，字段名即注入点，无需再拆结构体。
+- 门禁 **R7**（`handlers_deps_gate_test.go`）：Handlers 直接字段数 ≤ 12、每个字段必须是
+  嵌入的 `*Deps` 类型——新依赖必须加到 `deps.go` 的分组，禁止 god object 回归。
+
+**S5：S3 兼容网关（`pkg/server/s3`）**
+
+- 迁入：SigV4 验签、对象/桶读写、multipart（在途 part 双账本 + complete 结算）、列表与 Abort。
+- **依赖倒置**：`s3.Deps` 注入 `Volumes/Credentials/TenantFor/VolumePoolForTenant/QuotaScopeFor/
+  FileService/Meta/WithAuditVolume`；`MetaPolicy` 是 sidecar 策略的窄接口（装配层用
+  `filesMetaPolicy` 适配），网关不反向依赖 `pkg/server`（R6）。
+- 共享词汇上移：`ChunkPrefix`/`PartSuffix` → `pkg/storage`；用户可见读写直接调 `pkg/rootfs`
+  （原 `pkg/server` 薄包装不再需要）；HMAC 走 `pkg/cryptox`。
+- 装配：`pkg/server/s3_wiring.go` 的 `h.s3Service()` 构造 Deps；路由注册 `s3Service().Handler`。
+- 白盒单测（part 账本）随迁 `pkg/server/s3`；HTTP 集成测试保留在装配层（经公开入口）。
+
+**S6：服务端 WebDAV 挂载面（`pkg/server/dav`）**
+
+- 迁入：`/dav/` 挂载（多卷 `?volume=` + 默认卷 ACL 同口径）、`davMetaFS` 装饰器
+  （写/删/改名后 sidecar 联动、目录 MOVE 整棵 meta 子树迁移）。
+- **依赖倒置**：`dav.Deps` 注入 `Volumes/TenantFor/DefaultVolumeAllows/FileService/
+  Meta/QuotaScopeFor/WithAuditVolume/OwnerFromRequest`；`MetaPolicy`（`WriteMeta` +
+  `SweepMetaTmp`）由装配层 `filesMetaPolicy` 适配，装饰器不反向依赖装配层（R6）。
+- 装配：`pkg/server/dav_wiring.go` 的 `h.davService()`；路由 `authMiddleware(davService().Handler)`。
+- 白盒装饰器测试随迁 `pkg/server/dav`（`MetaPolicy` 用测试替身）；HTTP e2e 保留装配层。
+
+**S7：AI 域（`pkg/server/ai`）**
+
+- 迁入：文件洞察（`AIInsight` + 缓存）、告警建议器（`AIAdvisor`）、AI 配额（`AIQuota`）、
+  AI 派生数据隐私（`AIPrivacy`）、事件消费端（`AIEventConsumer`）。
+- **依赖倒置**：事件源用 `ai.EventSource`（装配层把 `EventBus` 快照转成 `ai.FileEvent`），
+  AI 域不反向依赖装配层（R6）。
+- HTTP 面（summarize/tag/privacy/quota）保留装配层，经 `ai_alias.go` 别名与
+  `AIInsight` 的 `Enabled/Cache/Quota/Advise` 访问器调用。
+- 白盒缓存测试随迁 `pkg/server/ai`；handler/事件测试保留装配层（迁移期别名）。
+
+**S8：分享存储（`pkg/server/share`）**
+
+- 迁入：\`Store\`（进程内 + 落盘）、\`StateBackedStore\`（集群 StateStore 后端）、\`Link\`/\`Spec\`/
+  \`StoreIface\`、持久化格式与过期/容量淘汰。
+- 装配层保留 **HTTP 面**（create/access/list/revoke），直接使用 `share.Store`/`share.StoreIface`/
+  `share.StateBackedStore`（含 `NewStateBackedStore`）；分享域常量
+  （`share.MaxShareTTL`/`share.MaxShareEntries`/`share.MaxShareBodySize`）与存储同源。
+  迁移期别名 `share_alias.go` 已删除。
+- 白盒持久化测试随迁 \`pkg/server/share\`；HTTP/e2e 测试保留装配层。
+
+**S9：运行时指标注册表（`pkg/server/metrics`）**
+
+- 迁入：`Metrics` 注册表（计数器/直方图/标签组）、`XferMetrics`/`XferConnMetrics`、
+  `RebalanceProgress`、渲染辅助（`WriteMetric`/`WriteLabeledCounter`/`WriteHistogram`/
+  `WriteGaugeSamples`/`WriteReadLoopBlock`/`WriteHybridMetrics`/`WriteGCIDMetrics`）、`RenderSLOMetrics`。
+- `/metrics` HTTP 面、中间件与需要装配态的渲染段（卷水位/索引缓存/hub 节点）留在装配层，
+  直接使用 `metrics.Metrics` 与导出的渲染辅助（`metrics.WriteMetric` 等）；迁移期别名
+  `metrics_alias.go` 已删除。
+
+**S10：checksum 巡检（`pkg/server/verify`）**
+
+- 迁入：`VerifyOnce`/`VerifyPass`（全租户/单卷、单飞防重入）、台账分批遍历、坏文件隔离、`Report`/`Mismatch`。
+- **依赖倒置**：`verify.Deps` 注入 `TenantFor`/`ListTenantIDs`/`LocateOwnerFile`/`ChecksumStoreFor`/
+  `Alert`/`Audit`/`Busy`/`Hook`；装配层保留 `POST /api/verify` HTTP 面与调度注册。
+- **单一事实源**：新增 `checksum.File(root, rel)`（用户可见摘要），`pkg/files` 与 `pkg/server` 的
+  `*ChecksumRoot` 包装均委托它；漂移门禁改为「委托契约」断言。
+
+**S11：用量统计（`pkg/server/ops`）**
+
+- 迁入：`du` 递归统计（`WalkRoot`/`WalkFS`）、存储分类遍历（`WalkUploadStats`/
+  `WalkUploadStatsByCategory`）、`CategoriesFromBuckets`/`BucketOf`/`IsStorageBucket`/`QuotaStatusOf`、
+  stats 响应类型。
+- **纯遍历**：logger 经参数注入，不持有装配状态；`GET /api/du`、`GET /api/stats` 的 HTTP 面与
+  `statsRootFor`（租户/卷根解析）留在装配层。
+
+**S12：阈值告警引擎（`pkg/server/alerts`）**
+
+- 迁入：`Engine`（规则匹配 + FIRING/OK 状态机去抖 + 磁盘/配额水位轮询 + 事件驱动
+  `OnVolumeDegraded`/`OnSyncFailed`/`OnLoginLocked`/`OnNATFailure`/`OnChecksumMismatch`）、
+  `NewFromConfig`、`AdoptNotifyChannels`、AI 建议器挂点。
+- **依赖已收敛**：只依赖已下沉的 `pkg/server/config`、`pkg/server/notify`、`pkg/server/ai`，无反向依赖。
+- 装配层与 `cmd/sproxy` 直接使用 `alerts.Engine`/`alerts.NewEngine`/`alerts.SourceNATFailure`；
+  迁移期别名 `alerts_alias.go` 已删除。
+
+**S13：归档打包助手（`pkg/server/archive`）**
+
+- 迁入：`AddFileToTar`（递归打包、符号链接拒绝、Lstat↔open TOCTOU 交叉验证）、`DefaultMaxArchiveSize`。
+- **删除 `pkg/server/user_visible_io.go`**：它只是 `pkg/rootfs` 的 6 个纯委托（收敛原则 #11 禁止薄封装），
+  39 处调用点直接改为 `rootfs.*`。
+
+**S14：跨 hub 中继转发（`pkg/server/federation`）**
+
+- 迁入：`FederationForwarder`（`Forward`/`PeersForNode`/`MaxHops`/`Close`）、`NewFederationForwarder`、
+  与对端 hub 的 CONNECT 拨号实现（`relayForwardDialer`，含握手 deadline/ctx watchdog/TLS 配置）、
+  防环元数据（`RelayForwardHopHeader`/`RelayForwardPathHeader`/`DefaultRelayMaxHops`）、
+  错误映射类型 `StatusError`（`Status`/`Message`）。
+- **装配面留在 `pkg/server`**：`RelayStreamHandler`（HTTP 解析、mesh 隔离、故障转移、
+  `forwardWithFailover`、把头写回客户端）与 `federation_services.go` 的服务发现端点。
+- 切片自包依赖：只 import `pkg/tunnel/hub` 与 `pkg/sproxysig`（L2），`h.*` 引用 0 个；
+  转发请求体在本包内以三字段结构体序列化（不反向依赖装配根，R6）。
+
+**S15 前置：跨进程文件锁原语（`pkg/server/filelock`）**
+
+- 迁入：`Lock`/`Unlock`（Unix `flock` 独占锁，阻塞直到获得；Windows 无 flock 等价实现，
+  退化为空操作）。两个文件按 `//go:build` 拆分（`lock_unix.go` / `lock_windows.go`）。
+- **不是选主语义**：多节点写面唯一化仍走 `pkg/leader` 的 `LeaderElector`（含租约/续租/
+  `ErrLeaseLost`/`WriteGuard`）；本包只服务「多进程对同一共享文件 read-modify-write」的两处
+  协调后端（限流计数 `pkg/server/ratelimit` 的 file 后端、带宽字节预算 `bandwidth_coord.go`），
+  为 S15 限流切片解除耦合（已随 S15 落地）。
+- **进程内互斥不在此包**：Unix flock 对同进程内同一文件可重入（不互斥），由调用方的
+  `sync.Mutex` 串行化。零 `pkg/*` 依赖 ⇒ L0。
+- 门禁 R23 的存量豁免路径同步为 `pkg/server/filelock/lock_unix.go`。
+
+**S15：限流能力（`pkg/server/ratelimit`）**
+
+- 迁入：`RateLimiter`（滑动窗口 + per-IP 令牌桶 + per-endpoint 规则 + 全局并发信号量 +
+  `Middleware` 放行链 + `UpdateConfig`/`UpdateDimensions` 热更新）、`Coordinator` 抽象与
+  `NewCoordinator` 装配入口、`localCoordinator`（内存）、`fileCoordinator`（文件锁共享计数）、
+  `NormalizeRemoteIP`（per-IP 桶键归一）。
+- **装配面留在 `pkg/server`**：`clientIP.go`（`resolveClientIP` 信任代理语义 + `ipGate` +
+  `clientIPFromRequest`，依赖 `Handlers` 配置快照/logger）、HTTP 面 429 响应契约由装配层用例
+  （`ratelimit_config_test.go`）锁定；切片经 `SetMetrics`/`SetClientIPFn`/`SetCoordinator`
+  接收装配注入，`h.*` 引用 0 个（R6）。
+- 共享辅助上移 `internal/coordkey`：`Sanitize`（协调计数文件 key → 安全文件名）由限流计数
+  与带宽字节预算两个 file 后端共用，避免两份归一规则分叉。
+- 切片自包依赖：`pkg/server/config`(L2)、`pkg/server/metrics`(L2)、`pkg/netutil`(G0)、
+  `pkg/server/filelock`(G0) ⇒ L2；白盒测试随迁，装配/配置接线用例保留装配层。
+
+**T1：跨节点读写面（`pkg/server/remotefs`，2026-11-01）**
+
+- 迁入：只读面（`/remote/list|stat|download|meta|stats` 的 GET/HEAD 白名单 + 授权 + 委派）、
+  写面（`/remote/write|rename|delete|mkdir` + 块级 `block/open|write|close`）、两个 loopback
+  listener（身份/双向 pin/凭证池/accept 退避）、以及仅被 listener 消费的 accept 退避原语。
+- **两面同址**：读写面刻意**反向同构**（同一套授权三重约束、同一套错误映射 401/403/404/409/500、
+  同一套审计落点），放在一起才能守住这个不变量——分开即允许各自漂移。
+- **依赖倒置**：`remotefs.Deps` 恒 8 字段（`Files`/`Volumes`/`Quota`/`Audit`/`Meta`/`Config`/
+  `Logger`/`Runtime`）。`Meta`（持有侧 sidecar 键空间）、`Runtime`（身份/静态密钥/mux 选项/
+  凭证池）都是装配层知识，以窄接口注入，切片不反向依赖 `pkg/server`（R6）。
+- **域语义不复制**：写面只做授权 + 调 `pkg/files` 域方法；checksum 门禁、原子改名、版本、
+  配额、文件锁、卷路由全部留在领域层（远程写与本地写共享同一锁池）。
+- 装配：`pkg/server/remotefs_wiring.go`（`remoteDeps` + 四个适配器）构造 Deps；
+  `StartRemoteReadListener`/`StartRemoteWriteListener` 保留在装配层（`cmd/sproxy` 是独立
+  module），listener 类型以别名暴露（`RemoteReadListener`/`RemoteWriteListener`）。
+- 测试：协议面白盒用例随迁 `pkg/server/remotefs`（真实 `files.Service` + `registry.Set` 夹具）；
+  **凭证池验签、写面拒绝指标渲染、与本地写共享锁池** 三类用例依赖装配态，保留在装配层
+  （`remote_read_credential_test.go`/`remote_write_metrics_test.go`/`remote_write_lock_test.go`）。
+- 度量：`pkg/server` 非测试行 29,960 → **28,889**；子包 16 → 17。
+
+**T3-b：封装卷翻译与运行期装配（`pkg/server/enclosure`，2026-11-02）**
+
+- 迁入：用户面 `target` 语法翻译（`TranslateNestedVolume`/`TranslateNestedDecl`/`ParseNestedTarget`）、
+  运行期装配/拆除（`AttachEnclosureVolume`/`DetachEnclosureVolume`）、声明校验、封印注入、
+  容量池继承、占用区间擦除、封印区间判定（`SealedAt`）。
+- **翻译语义是兼容面，切片不改**：`type: <wrapper>` + `extra.target: "<卷>/<子路径>"` →
+  `extra.source`（装配词汇）；持久化/回显仍是用户面原形态（store 字节零变化，翻译只在内存）。
+- **依赖倒置**：切片只接收显式参数（`*registry.Set` / `*slog.Logger` / storage root），不持有
+  `*Handlers`；唯一装配态依赖（卷集）经 `pkg/server/enclosure_wiring.go` 的
+  `h.enclosureSealedAt` 薄适配传入，不反向 import `pkg/server`（R6）。
+- 测试：纯翻译用例随迁 `pkg/server/enclosure/nested_test.go`；装配级用例（config/API/重启/
+  封印联动）依赖装配态，保留在 `pkg/server`（`nested_enclosure_type_test.go` 等）。
+
+**T3-a：凭据存储与主密钥解析（`pkg/server/credentials`，2026-11-02）**
+
+- 迁入：StateStore 后端凭据 store（StateStore 优先 + 旧 `<meta>/credentials.json` 回退的
+  双读单写、可选静态加密内嵌）、生产装配入口 `BootstrapServerCredentials`（store 选型 /
+  加密包装 / 载入 Ring）、主密钥与 Vault token 来源解析
+  （`ResolveCredentialMasterKey` / `resolveVaultToken`）、Ring 首个存活凭据选取
+  （`BestCredential` / `BestFirstCredential`）。
+- **边界**：本包只做「存储 + 主密钥解析」。启动编排（`(h *Handlers) bootstrapCredentials`
+  的 fail-closed panic 与零凭据启动日志语义）、自用凭据自省（`SelfCredential`）、凭据轮换
+  循环（renew/prune/持久化接线）依赖装配态或装配 opts，保留在装配层
+  （`credentials.go` / `credential_rotation.go`）。
+- **零行为变化**：master key 来源顺序（`master_key_file` → 环境变量
+  `SPROXY_CREDENTIAL_MASTER_KEY`）、Vault token 来源顺序（`token_file` → `TokenEnv`）、
+  AAD 推导（owner 唯一相对 `storage_root` 路径的 `ToSlash` 形态）、加密开关语义与错误文案
+  逐字不变。原有 `resolveCredentialMasterKey` + 导出薄封装收敛为单一导出实现
+  `ResolveCredentialMasterKey`（AGENTS 硬规则 11）。
+- **依赖方向**：依赖 `pkg/accesskey`/`pkg/state`/`pkg/storage`（L0）与 `pkg/server/config`（L2）
+  ⇒ L2；不反向依赖 `pkg/server`（R6）。`cmd/sproxy` 是独立 module，直接 import 本包，
+  装配层不留同名薄封装。
+- **F1 默认卷根**：本包内 `defaultVolumeRoot` 复刻装配层 `resolveDefaultVolumeRoot` 的裁决
+  （首卷 root 占位 ⇒ `storage_root`）；两处取值一致由行为测试锁定——
+  `pkg/server/feature_bucket_volume_test.go` 的分叉配置用例断言凭据落默认卷根而非
+  `cfg.StorageRoot`。
+- 测试：纯存储/主密钥/装配入口用例随迁 `pkg/server/credentials`（断言零改动）；
+  装配级用例（`bootstrapCredentials` / `SelfCredential`）与 `state_store` 配置面用例保留在
+  `pkg/server`（`self_credential_test.go` / `state_store_config_test.go`）。
+- 度量：`pkg/server` 非测试行 28,489 → **28,125**；子包 18 → 19。
+
+**P2 总体度量（2026-11-01，设计见 `docs/designs/2026-11-01-residual-assembly-optimization.md`）**
+
+- `pkg/server` 非测试行 **42,568 → 28,125（−33.9%）**；服务端子包 **1 → 19**；
+- 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 `internal/httpjson`（#995 一期 + 二期，收敛 5 份实现 + 41 处裸写，R54 升级为硬禁止）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
+- 剩余 28,125 行按切片判据（去重 `h.` 字段 ≤8 且密度 ≤80/千行）已到自然边界；未做的 T2 二期（41 处裸 JSON 写迁移）由 R54 棘轮锁住只减不增。
+
+**P1：装配层策略对象（2026-10-31）**
+
+- `volume.Router`（#960 内核 + #962 接线）：卷路由与 ACL 单一实现，删除 `locateOwnerFileLegacy`/
+  `locateDefaultVolumeFile`/`locateOwnerFileScan` 三份重复；不变量 4/4 变异命中。
+- `quota.Settlement`（#961 内核 + #964 `ReserveWait` + #965 云归档迁移）：`Reserve→Reconcile→Commit/Release`
+  状态机，幂等、未提交自动回滚、排队等待复用既有 `waitq`；云归档硬编码 30s 超时缺陷一并修正。
+- `cloudtasks.Orchestrator`（#968/#970/#971/#972/#973/#974/#975）：云下载/归档迁入
+  `pkg/server/cloudtasks`，`Deps` 恒 8 字段（7 窄接口 + Logger）、接口方法 40 个；
+  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/designs/2026-10-31-cloudtasks-deps-mapping.md`。
+
+**路由表数据化与下放（`pkg/server/router`，2026-11-02）**
+
+- `router.Route[H]` + `router.Register`：子包用 `RoutePrefix` 常量 + `Routes()` 字面量表声明自己的
+  URL 子路径与**两端分类**，装配层一次注册到 srvMux/localMux（双 mux 不再各写一遍）；
+  「分类 → 包装器」映射留在 `h.routeWrapper`（装配层唯一决定处，未登记分类 panic）。
+- 已下放：`cloudtasks`（16 条）、`share`（3 条）、`notify`（3 条）、`ai`（5 条）、`verify`（1 条）；
+  装配层自持表：文件域（45）、同步（9）、回收站（3）、运维管理面（15）、凭据（10）。
+- `Guard` 维度（2026-11-03）：分类表达基础鉴权，Guard 表达同一分类内的额外入口控制
+  （公开凭据入口各自的限流器 + 主 mux IP 门）；未知 Guard / 未初始化限流器在注册期 panic。`GET /s/{token}` 是独立前缀的公网分发面，不属分享管理组，留在装配层注册。
+- 门禁 **R38** 扩展解析 `pkg/server/*/routes.go` 与装配层 `pkg/server/routes_{files,sync,trash,ops}.go`
+  的 `RoutePrefix` + 字面量表（`routeTableFiles`），迁移后仍与 `route_classes.tsv` 双向比对，
+  deny-by-default 不变；**表声明分类与 TSV 分类逐条相等**（改分类必须同时改两处）。
+- **分类查表（2026-11-03，本轮）**：文件域分类不再在请求时用字符串白名单推导，改为
+  `route_class_index.go` 的 `模式串 → Class` 索引；键来自 `mux.Handler(r)`（中间件层
+  `r.Pattern` 尚为空）。`isFileGroupedRoute` / `isReadOnlyFileRoute` 已删除——这两个白名单
+  曾把「模式串 vs 具体路径」的歧义变成 **每次 500**（semantic search、backend presign）与
+  **隧道内层静默越权**。写面（`isWriteFaceRoute`）同样声明化：`Route.Mutating` +
+  文件域/分享由 `ClassUser` 派生，S3 子树挂载特判；新增路由漏声明由
+  `TestWriteFace_EveryRegisteredRouteIsDeclared` 拦住。
+- 设计见 `docs/designs/2026-11-02-route-group-registration.md` 与
+  `docs/designs/2026-11-03-route-class-single-source.md`。
+
+### 剩余三块为何不再按切片下沉（2026-10-30 实测）
+
+`cloud`（2.2k）、`volume`（6.5k）、`files`（3.9k）与已下沉的 15 片**形态不同**，实测判据：
+
+| 维度 | 已下沉叶子包 | cloud / volume / files |
+|---|---|---|
+| 装配依赖（`h.*`） | 0–8 个 | cloud ≈ 30 个；volume/files 更高 |
+| 依赖性质 | 纯数据/纯遍历/单一策略 | 配额预留与结算、卷路由、写策略、审计编排 |
+| 抽出后 | 依赖经窄接口注入，耦合下降 | 需在 `Deps` 里复刻 `Handlers` 能力面 ⇒ **耦合不降反升** |
+
+结论：这三块**就是装配核心本身**（HTTP 编排 + 跨域结算）。真正要降低其维护成本，前置是先把
+「用户可见写策略（`pkg/files`）」「卷容量/配额记账（`pkg/volume/capacity`）」的边界定清，再谈搬运；
+在那之前按切片外移只会新增一层 `Deps` 翻译层，与收敛原则相悖。**已完成的 15 片（装配包
+42,568 → 29,960 行，−29.6%）到此为自然边界。**
+
+### 新增 Server 切片的步骤
+
+1. 建 `pkg/server/<cap>`，包内只依赖 Global 与同层 Server 包；
+2. 在 `internal/archcheck/layers.go` 登记 `Levels`（层级按**实测依赖**取 max+1）与
+   `ParentDomain`（父域 `pkg/server`）；依赖了此前未登记的 Global 包时一并登记；
+3. 装配根通过构造参数注入依赖，**不**让切片反向 import `pkg/server`；
+4. 搬移对应测试；跨域测试改为经 `Register`/构造入口做黑盒；
+5. 更新按路径扫描的门禁清单（R38 路由文件、R25/R26 白名单、R43 目录等）。

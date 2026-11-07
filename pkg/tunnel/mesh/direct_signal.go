@@ -210,7 +210,7 @@ type directSignalerServer struct {
 	conn net.Conn // 待 SendAnswer 回写的连接
 }
 
-func (s *directSignalerServer) SendOffer(_ string, _ string) error {
+func (s *directSignalerServer) SendOffer(_, _ string) error {
 	return errors.New("direct signal: 监听侧不应发送 offer")
 }
 
@@ -289,7 +289,7 @@ func (s *directSignalerServer) WaitOffer(ctx context.Context) (string, string, e
 	return rr.msg.Node, rr.msg.SDP, nil
 }
 
-func (s *directSignalerServer) SendAnswer(_ string, sdp string) error {
+func (s *directSignalerServer) SendAnswer(_, sdp string) error {
 	s.mu.Lock()
 	c := s.conn
 	s.conn = nil
@@ -365,7 +365,7 @@ func (c *directSignalerClient) getFingerprint() string {
 	return c.fp
 }
 
-func (c *directSignalerClient) SendOffer(_ string, sdp string) error {
+func (c *directSignalerClient) SendOffer(_, sdp string) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(directSignalTimeout)); err != nil {
 		return err
 	}
@@ -415,7 +415,7 @@ func (c *directSignalerClient) WaitAnswer(ctx context.Context) (string, string, 
 	return "", rr.msg.SDP, nil
 }
 
-func (c *directSignalerClient) SendAnswer(_ string, _ string) error {
+func (c *directSignalerClient) SendAnswer(_, _ string) error {
 	return errors.New("direct signal: 拨号侧不应发送 answer")
 }
 

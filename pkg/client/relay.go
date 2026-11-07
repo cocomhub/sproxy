@@ -124,27 +124,13 @@ func (c *FileClient) relayStreamBody(ctx context.Context, target, addr string, b
 	if err != nil {
 		return nil, fmt.Errorf("RelayStream: 解析 serverURL 失败: %w", err)
 	}
-	scheme := u.Scheme
 	host := u.Host
 	if host == "" {
 		return nil, fmt.Errorf("RelayStream: 无效的 serverURL %q", c.serverURL)
 	}
-
-	dialer := &net.Dialer{Timeout: 15 * time.Second}
-	var raw net.Conn
-	switch scheme {
-	case "https", "wss":
-		// 用 tls.Dialer.DialContext（支持 ctx 取消，Ctrl+C 可中断 TLS 拨号）。
-		// 注：wss/ws 在此仅表示「是否 TLS」，不引入 WebSocket 升级语义（S47 容错）。
-		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: c.relayTLSConfig()}
-		raw, err = tlsDialer.DialContext(ctx, "tcp", host)
-	case "http", "ws":
-		raw, err = dialer.DialContext(ctx, "tcp", host)
-	default:
-		return nil, fmt.Errorf("RelayStream: 不支持的 scheme %q", scheme)
-	}
+	raw, err := c.relayDialHub(ctx, u.Scheme, host)
 	if err != nil {
-		return nil, fmt.Errorf("RelayStream: 连接 hub 失败: %w", err)
+		return nil, err
 	}
 
 	// I33：握手阶段有界——deadline 取 min(ctx deadline, 30s)；ctx-watchdog 在
@@ -179,7 +165,60 @@ func (c *FileClient) relayStreamBody(ctx context.Context, target, addr string, b
 	}
 	defer cleanup()
 
-	// 发送原始 HTTP CONNECT 风格请求
+	reqText, err := c.relayBuildRequest(host, body, headers)
+	if err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if _, werr := io.WriteString(raw, reqText); werr != nil {
+		raw.Close()
+		return nil, fmt.Errorf("RelayStream: 写请求头失败: %w", werr)
+	}
+	if _, werr := raw.Write(body); werr != nil {
+		raw.Close()
+		return nil, fmt.Errorf("RelayStream: 写请求体失败: %w", werr)
+	}
+
+	// 读取响应头，校验是否成功建立（S45：解析状态码而非 Contains(" 200 ")；
+	// 不用 http.ReadResponse——CONNECT 200 后紧跟数据面字节，会被当 body 消费）。
+	br := bufio.NewReader(raw)
+	if err := relayReadHandshake(br, raw); err != nil {
+		return nil, err
+	}
+
+	// 清除握手 deadline：长连接数据面（SSH 等）不受残留 deadline 影响
+	_ = raw.SetDeadline(time.Time{})
+
+	// 返回原始连接（bufio.Reader 中可能已缓冲后续数据，包装回 raw）
+	return &bufferedNetConn{Conn: raw, reader: br}, nil
+}
+
+// relayDialHub 按 scheme（https/wss 走 TLS，http/ws 走明文）建立到 hub 的连接。
+// wss/ws 在此仅表示「是否 TLS」，不引入 WebSocket 升级语义（S47 容错）。
+func (c *FileClient) relayDialHub(ctx context.Context, scheme, host string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	var raw net.Conn
+	var err error
+	switch scheme {
+	case "https", "wss":
+		// 用 tls.Dialer.DialContext（支持 ctx 取消，Ctrl+C 可中断 TLS 拨号）。
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: c.relayTLSConfig()}
+		raw, err = tlsDialer.DialContext(ctx, "tcp", host)
+	case "http", "ws":
+		raw, err = dialer.DialContext(ctx, "tcp", host)
+	default:
+		return nil, fmt.Errorf("RelayStream: 不支持的 scheme %q", scheme)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("RelayStream: 连接 hub 失败: %w", err)
+	}
+	return raw, nil
+}
+
+// relayBuildRequest 组装原始 HTTP CONNECT 风格请求文本（认证头 + 自定义头）。
+// SproxySig 只签名 method/path/query/body，头不参与签名（hop-by-hop 语义）；
+// 防 CRLF 注入：拒绝含 \r\n 的头名/值。
+func (c *FileClient) relayBuildRequest(host string, body []byte, headers map[string]string) (string, error) {
 	path := "/api/relay/stream"
 	var b strings.Builder
 	fmt.Fprintf(&b, "POST %s HTTP/1.1\r\n", path)
@@ -197,36 +236,26 @@ func (c *FileClient) relayStreamBody(ctx context.Context, target, addr string, b
 	} else if c.authToken != "" {
 		fmt.Fprintf(&b, "Authorization: Bearer %s\r\n", c.authToken)
 	}
-	// 自定义头（跨 hub 转发防环元数据等）：SproxySig 只签名 method/path/query/body，
-	// 头不参与签名（hop-by-hop 语义），此处直接写入。
 	for k, v := range headers {
 		// 防 CRLF 注入：拒绝含 \r\n 的头名/值（对端 hub 解析 header 时不受影响，但
 		// 防转发链上中间环节把注入带到下一跳）。
 		if strings.ContainsAny(k, "\r\n") || strings.ContainsAny(v, "\r\n") {
-			raw.Close()
-			return nil, fmt.Errorf("RelayStream: 非法自定义头 %q（含 CR/LF）", k)
+			return "", fmt.Errorf("RelayStream: 非法自定义头 %q（含 CR/LF）", k)
 		}
 		fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 	}
 	b.WriteString("Connection: close\r\n\r\n")
-	if _, werr := io.WriteString(raw, b.String()); werr != nil {
-		raw.Close()
-		return nil, fmt.Errorf("RelayStream: 写请求头失败: %w", werr)
-	}
-	if _, werr := raw.Write(body); werr != nil {
-		raw.Close()
-		return nil, fmt.Errorf("RelayStream: 写请求体失败: %w", werr)
-	}
+	return b.String(), nil
+}
 
-	// 读取响应头，校验是否成功建立
-	br := bufio.NewReader(raw)
+// relayReadHandshake 读取 CONNECT 响应状态行并校验 200；随后消费剩余响应头
+// 直到空行。非 200 时返回 RelayStatusError（401 附诊断提示）。
+func relayReadHandshake(br *bufio.Reader, raw net.Conn) error {
 	statusLine, err := br.ReadString('\n')
 	if err != nil {
 		raw.Close()
-		return nil, fmt.Errorf("RelayStream: 读响应状态失败: %w", err)
+		return fmt.Errorf("RelayStream: 读响应状态失败: %w", err)
 	}
-	// S45：解析状态码而非脆弱的 Contains(" 200 ")。不要用 http.ReadResponse——
-	// CONNECT 200 后紧跟数据面字节，ReadResponse 会把数据当 body 消费，破坏流。
 	parts := strings.SplitN(strings.TrimSpace(statusLine), " ", 3)
 	statusCode := 0
 	if len(parts) >= 2 {
@@ -244,25 +273,19 @@ func (c *FileClient) relayStreamBody(ctx context.Context, target, addr string, b
 			// 成功，但本方法直拨 /api/relay/stream 仅 srvMux + Bearer。
 			reason = "未授权（可能原因：隧道/xfer 模式 + 服务端强制认证 + 客户端未配置凭据，请用 WithAccessKey/WithAccessKeyID（SproxySig）或 WithBearerToken（api_keys）配置与服务端一致的凭据）"
 		}
-		return nil, &RelayStatusError{Status: statusCode, Message: reason}
+		return &RelayStatusError{Status: statusCode, Message: reason}
 	}
 	// 读取剩余响应头直到空行
 	for {
 		line, rerr := br.ReadString('\n')
 		if rerr != nil {
 			raw.Close()
-			return nil, fmt.Errorf("RelayStream: 读响应头失败: %w", rerr)
+			return fmt.Errorf("RelayStream: 读响应头失败: %w", rerr)
 		}
 		if line == "\r\n" || line == "\n" {
-			break
+			return nil
 		}
 	}
-
-	// 清除握手 deadline：长连接数据面（SSH 等）不受残留 deadline 影响
-	_ = raw.SetDeadline(time.Time{})
-
-	// 返回原始连接（bufio.Reader 中可能已缓冲后续数据，包装回 raw）
-	return &bufferedNetConn{Conn: raw, reader: br}, nil
 }
 
 // relayTLSConfig 返回用于连接 hub 的 TLS 配置，兼容自签证书。

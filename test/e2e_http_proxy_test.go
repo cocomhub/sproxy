@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -51,11 +50,11 @@ func startHTTPProxyLongRunning(t *testing.T, extraArgs ...string) (string, func(
 	tmpDir := t.TempDir()
 	binPath := e2eBinPath(t, "cmd/sclient")
 
-	// 配置隔离：--config 指向不存在路径（sclientcfg.New 静默忽略），
-	// 隔离本机 ~/.config/sproxy/sclient.yaml（--server 挡不住用户配置里的凭据）。
-	configPath := filepath.Join(tmpDir, "sclient.yaml")
-	if err := os.WriteFile(configPath, []byte(""), 0644); err != nil {
-		t.Fatalf("write sclient config: %v", err)
+	// 配置隔离（统一 context）：--config 指向含 env 段的 config.yaml（http-proxy
+	// 常驻不依赖凭据，但统一后无 config.yaml 会 fail-closed——给最小合法配置）。
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if werr := writeMinimalConfigYAML(t, configPath); werr != nil {
+		t.Fatalf("write config.yaml: %v", werr)
 	}
 
 	args := []string{

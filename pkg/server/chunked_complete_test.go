@@ -40,7 +40,17 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 	if msg == "" {
 		t.Fatal("mismatch 响应应有 message 说明")
 	}
-	mismatchOK := false
+	assertChunkMismatchList(t, resp, wantMismatch)
+
+	// 失败保留：session 仍存在、临时名（session.TempPath 指向文件）仍存在、预留未释放
+	// （供重传继续写）。临时名在 user 桶目标同目录，用 session.TempPath 精确断言（而非
+	// 只扫 user 桶根——子目录临时名不在根下）。
+	assertChunkedSessionPreserved(t, env, uploadID, alive)
+}
+
+// assertChunkMismatchList 断言 mismatch_chunks 与 wantMismatch 精确一致。
+func assertChunkMismatchList(t *testing.T, resp map[string]any, wantMismatch []int) {
+	t.Helper()
 	switch v := resp["mismatch_chunks"].(type) {
 	case nil:
 		t.Fatal("mismatch 响应应有 mismatch_chunks 字段")
@@ -53,7 +63,6 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 				t.Fatalf("mismatch_chunks[%d]=%v want %d", i, iv, wantMismatch[i])
 			}
 		}
-		mismatchOK = true
 	case []float64:
 		if len(v) != len(wantMismatch) {
 			t.Fatalf("mismatch_chunks=%v want %v", v, wantMismatch)
@@ -63,15 +72,15 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 				t.Fatalf("mismatch_chunks[%d]=%v want %d", i, v[i], wantMismatch[i])
 			}
 		}
-		mismatchOK = true
-	}
-	if !mismatchOK {
+	default:
 		t.Fatalf("mismatch_chunks 类型异常: %T", resp["mismatch_chunks"])
 	}
+}
 
-	// 失败保留：session 仍存在、临时名（session.TempPath 指向文件）仍存在、预留未释放
-	// （供重传继续写）。临时名在 user 桶目标同目录，用 session.TempPath 精确断言（而非
-	// 只扫 user 桶根——子目录临时名不在根下）。
+// assertChunkedSessionPreserved 断言失败后 session/临时名/配额预留仍保留（供重传）。
+// alive=false（临时文件缺失分支）时跳过临时名存在性断言。
+func assertChunkedSessionPreserved(t *testing.T, env *ownerChunkedEnv, uploadID string, alive bool) {
+	t.Helper()
 	sess := env.h.uploadStoreFor("alice").GetSession(uploadID)
 	if sess == nil || sess.Completed {
 		t.Fatalf("mismatch 后 session 应保留且未完成, got %+v", sess)
@@ -92,7 +101,7 @@ func assertChunkedMismatchResponse(t *testing.T, env *ownerChunkedEnv, uploadID 
 	} else if alive {
 		t.Fatal("mismatch 后 session 应仍有 TempPath")
 	}
-	if got := env.h.quotaBucketFor("alice", "user").Reserved(); got == 0 {
+	if env.h.quotaBucketFor("alice", "user").Reserved() == 0 {
 		t.Fatal("mismatch 后配额预留应保留（供重传继续写）, Reserved=0")
 	}
 }
@@ -111,7 +120,7 @@ func TestCompleteFullVerifyAndMismatchChunks(t *testing.T) {
 	totalChunks := 3
 	uploadID := "complete-mismatch-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "dir/bad.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "dir/bad.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -183,7 +192,7 @@ func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
 	chunkSize := int64(4096)
 	uploadID := "complete-mismatch-2"
 
-	code, resp := env.initAs(t, "alice", uploadID, "o.bin", int64(len(content)), chunkSize, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "o.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -244,7 +253,7 @@ func TestCompleteOverwriteReleaseUsage(t *testing.T) {
 	newContent := []byte(strings.Repeat("b", 40))
 	fileChecksum := sha256Hex(newContent)
 	uploadID := "complete-ov-1"
-	code, resp := env.initAs(t, "alice", uploadID, "ov.bin", int64(len(newContent)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "ov.bin", totalSize: int64(len(newContent)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -329,7 +338,7 @@ func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "complete-bad-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "badfile.bin", int64(len(content)), 4096, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "badfile.bin", totalSize: int64(len(content)), chunkSize: 4096, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -377,23 +386,50 @@ func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
 func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	dir := t.TempDir()
 
-	// 第一代 handlers：建 alice 会话与临时名（user 桶），分片 0 正确、分片 1 写坏
-	// （bitmap 都置 true 模拟 crash 前已标记）。
-	h1 := newChunkedTestHandlers(t, dir, 4096)
 	filename := "recover-complete.bin"
 	chunkSize := int64(4096)
 	content0 := bytes.Repeat([]byte("G"), 4096)
 	content1 := bytes.Repeat([]byte("H"), 100)
 	total := append(append([]byte{}, content0...), content1...)
-
 	uploadID := "recover-complete-1"
+
+	helperMismatchConsistentFirstGen(t, mismatchConsistentScenario{
+		dir: dir, uploadID: uploadID, filename: filename, chunkSize: chunkSize,
+		content0: content0, content1: content1, total: total,
+	})
+
+	// 第二代 handlers：恢复（分片 0 匹配保留、分片 1 需重传）。
+	h2 := newChunkedTestHandlers(t, dir, chunkSize)
+	t.Cleanup(func() { _ = h2.Close() })
+	helperMismatchConsistentRecover(t, h2, dir, uploadID, filename)
+	helperMismatchConsistentRetransmit(t, h2, dir, uploadID, filename, content1, total)
+}
+
+// mismatchConsistentScenario 是「恢复后 complete 对 mismatch 一致」测试的分代场景数据
+// （第一代 handler 构造与恢复断言共享）。
+type mismatchConsistentScenario struct {
+	dir       string
+	uploadID  string
+	filename  string
+	chunkSize int64
+	content0  []byte
+	content1  []byte
+	total     []byte
+}
+
+// helperMismatchConsistentFirstGen 构造第一代 handlers：
+// 建 alice 会话与临时名（user 桶），分片 0 正确、分片 1 写坏（bitmap 都置 true
+// 模拟 crash 前已标记），随后持久化并 Close 模拟重启。
+func helperMismatchConsistentFirstGen(t *testing.T, sc mismatchConsistentScenario) {
+	t.Helper()
+	h1 := newChunkedTestHandlers(t, sc.dir, sc.chunkSize)
 	us1 := h1.uploadStoreFor("alice")
-	session, err := us1.CreateSession(uploadID, filename, int64(len(total)), chunkSize, 2, sha256Hex(total), 0)
+	session, err := us1.CreateSession(sc.uploadID, sc.filename, int64(len(sc.total)), sc.chunkSize, 2, sha256Hex(sc.total), 0)
 	if err != nil {
 		t.Fatalf("创建会话失败: %v", err)
 	}
 	tnt := h1.tenantFor("alice")
-	rel, ok := tnt.UserRel(filename)
+	rel, ok := tnt.UserRel(sc.filename)
 	if !ok {
 		t.Fatal("UserRel 失败")
 	}
@@ -406,32 +442,35 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	if tmpErr != nil {
 		t.Fatalf("创建临时名: %v", tmpErr)
 	}
-	if truncErr := tmpF.Truncate(int64(len(total))); truncErr != nil {
+	if truncErr := tmpF.Truncate(int64(len(sc.total))); truncErr != nil {
 		tmpF.Close()
 		t.Fatalf("truncate: %v", truncErr)
 	}
 	tmpF.Close()
-	if werr := writeInflightTempEntry(t, h1, "alice", uploadID, filename, 0, content0); werr != nil {
+	if werr := writeInflightTempEntry(t, h1, "alice", sc.uploadID, sc.filename, 0, sc.content0); werr != nil {
 		t.Fatalf("写分片 0: %v", werr)
 	}
 	// 分片 1 写坏内容，但 bitmap/checksum 表按正确内容标记。
-	if werr := writeInflightTempEntry(t, h1, "alice", uploadID, filename, 1, bytes.Repeat([]byte("N"), 100)); werr != nil {
+	if werr := writeInflightTempEntry(t, h1, "alice", sc.uploadID, sc.filename, 1, bytes.Repeat([]byte("N"), 100)); werr != nil {
 		t.Fatalf("写分片 1: %v", werr)
 	}
-	if merr := us1.MarkChunkReceived(uploadID, 0, sha256Hex(content0)); merr != nil {
+	if merr := us1.MarkChunkReceived(sc.uploadID, 0, sha256Hex(sc.content0)); merr != nil {
 		t.Fatalf("标记 0: %v", merr)
 	}
-	if merr := us1.MarkChunkReceived(uploadID, 1, sha256Hex(content1)); merr != nil {
+	if merr := us1.MarkChunkReceived(sc.uploadID, 1, sha256Hex(sc.content1)); merr != nil {
 		t.Fatalf("标记 1: %v", merr)
 	}
-	if perr := us1.PersistNow(uploadID); perr != nil {
+	if perr := us1.PersistNow(sc.uploadID); perr != nil {
 		t.Fatalf("持久化: %v", perr)
 	}
 	h1.Close() // 模拟重启
+}
 
-	// 第二代 handlers：恢复（分片 0 匹配保留、分片 1 需重传）。
-	h2 := newChunkedTestHandlers(t, dir, 4096)
-	t.Cleanup(func() { _ = h2.Close() })
+// helperMismatchConsistentRecover 断言恢复后的 bitmap
+// （0=keep/1=clear），并验证恢复后直接 complete 返回 400（分片 1 缺失）且不落盘
+// 错误正式名。
+func helperMismatchConsistentRecover(t *testing.T, h2 *Handlers, dir, uploadID, filename string) {
+	t.Helper()
 	rec := h2.uploadStoreFor("alice").GetSession(uploadID)
 	if rec == nil {
 		t.Fatal("重启后 session 未恢复")
@@ -453,18 +492,24 @@ func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, "alice", "user", filename)); !os.IsNotExist(statErr) {
 		t.Fatalf("恢复后 complete 失败不应落盘正式名, stat err=%v", statErr)
 	}
+}
 
-	// 客户端模型：重传分片 1（先 seek 直写正确内容到临时名，再标记——等价 uploadChunk）
-	// + complete → 成功（数据可重传前提下恢复后 complete 收敛）。
+// helperMismatchConsistentRetransmit 重传分片 1（先 seek
+// 直写正确内容到临时名，再标记——等价 uploadChunk）+ complete → 200 且最终文件内容
+// 正确（数据可重传前提下恢复后 complete 收敛）。
+func helperMismatchConsistentRetransmit(t *testing.T, h2 *Handlers, dir, uploadID, filename string, content1, total []byte) {
+	t.Helper()
 	if werr := writeInflightTempEntry(t, h2, "alice", uploadID, filename, 1, content1); werr != nil {
 		t.Fatalf("重传写分片 1: %v", werr)
 	}
 	if merr := h2.uploadStoreFor("alice").MarkChunkReceived(uploadID, 1, sha256Hex(content1)); merr != nil {
 		t.Fatalf("标记重传分片 1: %v", merr)
 	}
+	raw, _ := json.Marshal(map[string]string{"upload_id": uploadID})
 	rr2 := httptest.NewRecorder()
-	h2.uploadComplete(rr2, httptest.NewRequest("POST", "/upload/complete", bytes.NewReader(raw)).
-		WithContext(withActor(req.Context(), "alice")))
+	actReq := httptest.NewRequest("POST", "/upload/complete", bytes.NewReader(raw))
+	actReq = actReq.WithContext(withActor(actReq.Context(), "alice"))
+	h2.uploadComplete(rr2, actReq)
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("重传后 complete 应 200, got %d body=%s", rr2.Code, rr2.Body.String())
 	}
@@ -490,7 +535,7 @@ func TestCompleteMismatch_TempFileMissing_AllChunksMismatch(t *testing.T) {
 	uploadID := "complete-missing-temp"
 	chunkSize := int64(4096)
 
-	code, resp := env.initAs(t, "alice", uploadID, "missing.bin", int64(len(content)), chunkSize, 3, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "missing.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: 3, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}

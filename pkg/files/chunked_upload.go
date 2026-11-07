@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,9 +24,11 @@ import (
 	"github.com/cocomhub/sproxy/internal/shortid"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // validateChunkChecksum 校验 chunk_checksum 是否为有效的 64 位 hex 字符串。
@@ -190,53 +193,16 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		"file_checksum", shortid.ShortHash(req.FileChecksum), "upload_id", req.UploadID)
 
 	// 校验字段
-	if req.UploadID == "" {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
+	if !s.validateInitRequest(w, &req) {
 		return
 	}
-	// upload_id 用裸 id，过 pkg/storage.ValidSegmentName（段名校验单一权威）防路径穿越：
-	// 拒绝 / \、".."、".__" 前缀、Windows 非法字符与保留设备名、尾点/尾空格、超长。
-	// 租户隔离由 per-tenant chunk 桶物理保证（会话只在本租户 chunk/ 下创建），无需 owner 前缀。
-	if !storage.ValidSegmentName(req.UploadID) {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "无效的 upload_id"}, http.StatusBadRequest)
-		return
-	}
-	if _, err := pathguard.ValidateFilePath(req.Filename); err != nil {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
-		return
-	}
-	// 分块计划校验（上下界 + 乘法溢出 + 覆盖性）：ChunkedUploadSession 按 total_chunks
-	// **等长分配**两块元数据（ReceivedChunks/ChunkChecksums）⇒ 无上界即单请求内存放大，
-	// 且 chunk_size*total_chunks 可回绕绕过覆盖性检查。判据见 maxTotalChunks/validateChunkPlan。
-	if err := validateChunkPlan(req.TotalSize, req.ChunkSize, req.TotalChunks); err != nil {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
-		return
-	}
-	if !validateChunkChecksum(req.FileChecksum) {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "file_checksum 不是有效的 hex"}, http.StatusBadRequest)
+	// 首次初始化即携带的元数据：白名单/类型/长度校验（fail-closed 400，不静默丢弃）。
+	if !s.validateInitMetaExtra(w, &req) {
 		return
 	}
 
-	// 取 owner 的租户与 per-tenant UploadStore（会话目录 <默认卷根>/<owner>/chunk/<id>/；
-	// 会话元数据统一默认卷 chunk 桶，temp 整文件在目标卷 user 桶，见 routeUpload 注释）。
-	owner := s.rt.actorOf(r)
-	store := s.rt.uploadStore(owner)
-	if store == nil {
-		s.rt.logger().Error("获取 per-tenant UploadStore 失败", "owner", owner)
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-		return
-	}
-	defTnt := s.rt.tenantOf(owner)
-	if defTnt == nil || defTnt.Root() == nil {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-		return
-	}
-	rel, ok := defTnt.UserRel(req.Filename)
-	// tnt 是目标卷租户（temp 文件写盘根）。新会话由 routeUpload 定卷后赋值；续传会话首个
-	// init 已定卷（session.Volume），仅按需派生（见 !reused 块）。
-	var tnt *storage.Tenant
+	owner, store, defTnt, rel, ok := s.initUploadContext(w, r, &req)
 	if !ok {
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return
 	}
 
@@ -266,21 +232,156 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		// checksum 冲突 409）；locate miss（视图内无此 rel）视为新文件跳过——防对无权卷遗留
 		// 文件做版本化覆盖写/假冲突（AD-6 写侧闭合，F-1 同族）。volSet nil（旧装配唯一根）
 		// 恒在默认租户 dup-check（单卷零回归）。
-		var homeTnt *storage.Tenant
-		if s.rt.volSet() == nil {
-			homeTnt = defTnt
-		} else if loc, found := s.rt.locateOwnerFile(owner, rel); found && loc.Tenant != nil {
-			forceHomeVol = loc.VolumeName
-			homeTnt = loc.Tenant
-		}
-		if homeTnt != nil {
-			if s.checkExistingFileForInit(w, homeTnt, rel, req.Filename, req.FileChecksum) {
-				return // 幂等 200 / checksum 冲突 409（versioning 关）已回包
-			}
+		if handled, homeVol := s.checkInitHomeDup(w, owner, rel, &req, defTnt); handled {
+			return
+		} else {
+			forceHomeVol = homeVol
 		}
 	}
 
 	// 分块大小协商
+	chunkSize, ok := s.negotiateInitChunkSize(w, &req)
+	if !ok {
+		return
+	}
+
+	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
+	// 预检 + 会话创建/续传 + 新会话路由预留与在途临时文件。详细语义见 createChunkedSession。
+	session, reused, ok := s.createChunkedSession(r.Context(), &chunkedInit{w: w, r: r, store: store, owner: owner, rel: rel, explicitVol: explicitVol, forceHomeVol: forceHomeVol}, &req, chunkSize)
+	if !ok {
+		return
+	}
+
+	// 首次初始化携带的元数据存入会话（续传复用时以既有会话为准，不覆盖）：
+	// complete 时随 .meta sidecar 落盘（避免「先传完再补录」窗口）。
+	if !reused && len(req.MetaExtra) > 0 {
+		session.MetaExtra = req.MetaExtra
+		_ = store.PersistNowIfCurrent(session) // best-effort 持久化（失败下次 init/续传重建）
+	}
+
+	msg := s.initSuccessMessage(session, reused)
+
+	s.sendJSON(w, ChunkedInitResponse{
+		Success:   true,
+		UploadID:  session.UploadID,
+		ChunkSize: session.ChunkSize,
+		Message:   msg,
+	}, http.StatusOK)
+}
+
+// initSuccessMessage 组装 init 成功文案（续传恢复 vs 新会话），并输出对应日志。
+func (s *Service) initSuccessMessage(session *ChunkedUploadSession, reused bool) string {
+	msg := "上传会话已创建"
+	if reused {
+		missing := MissingChunks(session)
+		msg = fmt.Sprintf("续传会话已恢复，缺失 %d 个分块", len(missing))
+		s.rt.logger().Info("续传会话", "upload_id", session.UploadID, "file_name", session.Filename,
+			"missing", len(missing), "total", session.TotalChunks)
+	} else {
+		s.rt.logger().Info("新上传会话", "upload_id", session.UploadID, "file_name", session.Filename,
+			"total_size", session.TotalSize, "total_chunks", session.TotalChunks)
+	}
+	return msg
+}
+
+// chunkedInit 是分块上传 init 流程的共享 HTTP 上下文（S107：收敛 createChunkedSession /
+// initNewSession / abortInitOrphanRollback 多参数；w/r/store/owner/rel/explicitVol/forceHomeVol
+// 在 init 全程不变）。
+type chunkedInit struct {
+	w            http.ResponseWriter
+	r            *http.Request
+	store        *UploadStore
+	owner        string
+	rel          string
+	explicitVol  string
+	forceHomeVol string
+}
+
+// createChunkedSession 同名会话冲突预检 + 会话创建/续传（GetOrCreateSession）+ 新会话
+// 路由预留与在途临时文件装配（initNewSession）。返回 (session, reused, ok)。
+func (s *Service) createChunkedSession(ctx context.Context, i *chunkedInit, req *ChunkedInitRequest, chunkSize int64) (*ChunkedUploadSession, bool, bool) {
+	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
+	// 预检：存在未完成同名会话但 checksum/大小不一致 → 拒绝（避免同目标两个在途会话）。
+	if !s.rejectConflictingSession(i.w, i.store, req) {
+		return nil, false, false
+	}
+	// 会话直接以裸 id 创建于本租户 i.store（无 i.owner 前缀；隔离靠 per-tenant chunk 桶）
+	session, reused, err := i.store.GetOrCreateSession(req.UploadID, req.Filename,
+		req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum, req.FileModTime)
+	if err != nil {
+		s.rt.logger().Error("创建/续传上传会话失败", "upload_id", req.UploadID, "error", err)
+		s.sendJSON(i.w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return nil, false, false
+	}
+	if !reused {
+		// 任务 4：在途整文件（user 桶目标同目录）与配额预留。
+		// 多卷（AD-5/AD-7）：routeUpload 先定卷 + i.owner 全局 Scope + 卷容量池双 TryReserve
+		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
+		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
+		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
+		if !s.initNewSession(ctx, i, session, req) {
+			return nil, false, false
+		}
+	}
+	return session, reused, true
+}
+
+// validateInitRequest 校验 init 请求字段：upload_id 非空 + 段名合法（防路径穿越）、
+// filename 路径合法、分块计划（上下界 + 乘法溢出 + 覆盖性）、file_checksum hex 格式。
+// 任一失败回 400 并返回 false。
+func (s *Service) validateInitRequest(w http.ResponseWriter, req *ChunkedInitRequest) bool {
+	if req.UploadID == "" {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "缺少 upload_id"}, http.StatusBadRequest)
+		return false
+	}
+	// upload_id 用裸 id，过 pkg/storage.ValidSegmentName（段名校验单一权威）防路径穿越：
+	// 拒绝 / \、".."、".__" 前缀、Windows 非法字符与保留设备名、尾点/尾空格、超长。
+	// 租户隔离由 per-tenant chunk 桶物理保证（会话只在本租户 chunk/ 下创建），无需 owner 前缀。
+	if !storage.ValidSegmentName(req.UploadID) {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "无效的 upload_id"}, http.StatusBadRequest)
+		return false
+	}
+	if _, err := pathguard.ValidateFilePath(req.Filename); err != nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return false
+	}
+	// 分块计划校验（上下界 + 乘法溢出 + 覆盖性）：ChunkedUploadSession 按 total_chunks
+	// **等长分配**两块元数据（ReceivedChunks/ChunkChecksums）⇒ 无上界即单请求内存放大，
+	// 且 chunk_size*total_chunks 可回绕绕过覆盖性检查。判据见 maxTotalChunks/validateChunkPlan。
+	if err := validateChunkPlan(req.TotalSize, req.ChunkSize, req.TotalChunks); err != nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
+		return false
+	}
+	if !validateChunkChecksum(req.FileChecksum) {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "file_checksum 不是有效的 hex"}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// checkInitHomeDup 对 auto 定卷路径执行 home dup-check：locateOwnerFile 命中（文件确实
+// 存在于 owner 视图）→ 在该 home 卷根做幂等/冲突/版本检查（checkExistingFileForInit，
+// 已回包时 handled=true）；locate miss / 单卷旧装配 → 恒默认租户 dup-check。返回
+// (handled, forceHomeVol)——handled=true 表示已回包，调用方直接返回。
+func (s *Service) checkInitHomeDup(w http.ResponseWriter, owner, rel string, req *ChunkedInitRequest, defTnt *storage.Tenant) (handled bool, forceHomeVol string) {
+	var homeTnt *storage.Tenant
+	if s.rt.volSet() == nil {
+		homeTnt = defTnt
+	} else if loc, found := s.rt.locateOwnerFile(owner, rel); found && loc.Tenant != nil {
+		forceHomeVol = loc.VolumeName
+		homeTnt = loc.Tenant
+	}
+	if homeTnt != nil {
+		if s.checkExistingFileForInit(w, homeTnt, rel, req.Filename, req.FileChecksum) {
+			return true, "" // 幂等 200 / checksum 冲突 409（versioning 关）已回包
+		}
+	}
+	return false, forceHomeVol
+}
+
+// negotiateInitChunkSize 协商分块大小（超出服务端上限自动裁剪并重算分块数、复验分块
+// 计划）；裁剪路径不合法 → 回 400 返回 false。
+func (s *Service) negotiateInitChunkSize(w http.ResponseWriter, req *ChunkedInitRequest) (int64, bool) {
 	chunkSize, adjusted := negotiateChunkSize(req.ChunkSize, s.rt.chunkSize())
 	if adjusted {
 		s.rt.logger().Info("chunk_size 超出服务端上限，自动裁剪",
@@ -298,163 +399,209 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		req.TotalChunks = int(totalChunks)
 		if err := validateChunkPlan(req.TotalSize, chunkSize, req.TotalChunks); err != nil {
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: err.Error()}, http.StatusBadRequest)
-			return
+			return 0, false
 		}
 	}
+	return chunkSize, true
+}
 
-	// 任务 4 设计决策②：同名存活 session 同 checksum 复用续传、不同 checksum 直拒（Conflict）。
-	// 预检：存在未完成同名会话但 checksum/大小不一致 → 拒绝（避免同目标两个在途会话）。
+// rejectConflictingSession 预检同名存活会话：checksum/大小不一致 → 拒绝创建新会话
+// （避免同目标两个在途会话）；一致（可续传）或无名会话 → 放行。
+func (s *Service) rejectConflictingSession(w http.ResponseWriter, store *UploadStore, req *ChunkedInitRequest) bool {
 	if existing := store.GetSessionByFilename(req.Filename); existing != nil {
 		if existing.FileChecksum != req.FileChecksum || existing.TotalSize != req.TotalSize {
 			s.rt.logger().Warn("同名会话已存在但 checksum 不匹配，拒绝创建新会话",
 				"file_name", req.Filename, "upload_id", req.UploadID)
 			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "同名文件正在上传中且 checksum 不一致"}, http.StatusConflict)
-			return
+			return false
 		}
 	}
+	return true
+}
 
-	// 会话直接以裸 id 创建于本租户 store（无 owner 前缀；隔离靠 per-tenant chunk 桶）
-	session, reused, err := store.GetOrCreateSession(req.UploadID, req.Filename,
-		req.TotalSize, chunkSize, req.TotalChunks, req.FileChecksum, req.FileModTime)
+// defaultVolumeNameOf 返回卷集合的默认卷名（nil 集合 → ""，调用方按无卷语义处理）。
+func defaultVolumeNameOf(vs VolumeSet) string {
+	if vs == nil {
+		return ""
+	}
+	return vs.Default().Name
+}
+
+// sessionStagingTenant 返回会话在途临时文件（分块内容）的写盘租户。
+//
+// 外部卷目标（2026-10-22 缺陷修复）：分块链路（init 建在途文件 / chunk seek 直写 / complete
+// 全文件校验）依赖本地租户根，而外部卷（baidupcs/secretdata）`route.Tenant == nil`
+// （`registry.Set.Tenant` 对无本地根的卷恒返回 nil）⇒ 此前直接 400「无效的文件路径」，
+// 外部卷 + 大文件（>100MiB 自动分块 / >1GiB 普通上传上限）完全不可用。
+// 修复：分块内容落**默认卷**（本地 staging 区，逐块 SHA-256 校验 + complete 全文件校验），
+// complete 通过后经 route.Sink 转存到目标外部卷。本地卷目标 → 目标卷租户（零回归）。
+func (s *Service) sessionStagingTenant(owner string, route UploadRoute) *storage.Tenant {
+	if route.Tenant != nil && route.Tenant.Root() != nil {
+		return route.Tenant
+	}
+	if route.Sink != nil {
+		return s.rt.tenantOf(owner)
+	}
+	return nil
+}
+
+// publishExternalStaging 外部卷目标（route.Sink 非 nil 且无本地租户）时，把分块内容落点
+// 钉在**默认卷**（本地 staging，session.StagingVolume）并标记 ExternalTarget（complete 走
+// staging 转存路径而非本地 rename）。本地卷目标 → no-op（true）。身份门控发布，任一失败即 false。
+func (s *Service) publishExternalStaging(i *chunkedInit, session *ChunkedUploadSession, route UploadRoute) bool {
+	if route.Sink == nil || route.Tenant != nil {
+		return true
+	}
+	ok := true
+	if stagingVol := defaultVolumeNameOf(s.rt.volSet()); stagingVol != "" {
+		ok = i.store.setSessionStagingVolumeIfCurrent(session, stagingVol)
+	}
+	return i.store.setSessionExternalTargetIfCurrent(session) && ok
+}
+
+// initNewSession 对新会话执行路由预留（routeUpload 定卷 + 双 TryReserve / P5 回退预留）
+// 与在途整临时文件创建（O_EXCL + Truncate 预占位）。任一失败清理会话并回 4xx/5xx，
+// 返回 false；发布结果校验失败（会话已被并发删除/接管）→ 整体回滚（abortInitOrphanRollback）。
+func (s *Service) initNewSession(ctx context.Context, i *chunkedInit, session *ChunkedUploadSession, req *ChunkedInitRequest) bool {
+	route, routeErr := s.rt.routeUpload(ctx, i.owner, i.rel, i.explicitVol, req.TotalSize, i.forceHomeVol)
+	if routeErr != nil {
+		i.store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendUploadRouteError(i.w, i.r, req.Filename, routeErr)
+		return false
+	}
+	// 外部卷目标（2026-10-22 缺陷修复）——route.Sink 非 nil 但 Tenant nil（外部卷无本地根）：
+	// 分块内容落**默认卷** staging（sessionStagingTenant），complete 校验通过后经 Sink 转存。
+	tnt := s.sessionStagingTenant(i.owner, route)
+	if tnt == nil || tnt.Root() == nil {
+		route.Release()
+		i.store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(i.w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return false
+	}
+	// 定卷/预留写回 i.store 持有的会话对象：必须经锁内 setter（该对象会被并发请求经
+	// GetSession/PersistNow 整结构深拷贝，直接改字段即数据竞争，审计 C-8）。
+	// 三处发布均走**身份门控** setter（按注册世代判定「表内该 id 仍是本次注册的会话」）：
+	// 同 id 已被新会话接管时返回 false，避免把本次状态发布到接管会话上
+	// （RV9-CHUNK-FINAL Q7）。
+	routePublished := i.store.setSessionRouteIfCurrent(session, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
+	// 外部卷目标（route.Sink 非 nil 且无本地租户）：分块内容落点钉在**默认卷**（本地 staging），
+	// 使 temp 解析（tenantRootForStaging）定位到 staging 租户根。本地卷目标 StagingVolume 空
+	// （= 目标卷，零回归）。默认卷名经装配层注入的卷集合取（与其它卷名解析同源）。
+	stagingPublished := s.publishExternalStaging(i, session, route)
+	// p5Reserved/p5Published 记录 P5 回退预留的字节数与登记结果（供发布失败时回滚；
+	// 未走 P5 分支时 p5Published 恒为 true、p5Reserved 为 0）。
+	var p5Reserved int64
+	p5Published := true
+	if route.ScopeRes == nil && s.rt.storageManager() != nil {
+		// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
+		// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
+		// （已完成会话不释放，见 DeleteSession）。
+		reserved, published, ok := s.p5FallbackReserve(ctx, i.w, i.store, session, req)
+		if !ok {
+			return false
+		}
+		p5Reserved = reserved
+		p5Published = published
+	}
+
+	// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
+	// Truncate(TotalSize) 预先占位；失败按 500，临时名未创建无需清理配额。
+	// tempRel = user/<dir>/.inflight-<hash16>-<upload_id>.part（散列取 i.rel 全路径）。
+	tempRel, tempPublished := s.createInitTempFile(i.w, i.store, session, tnt, i.rel)
+	if tempRel == "" {
+		return false
+	}
+	// 发布结果校验（审计 P2-2 + RV9-CHUNK-FINAL Q7）：三处**身份门控** setter 返回 false
+	// ⇔ 本次 init 的会话已不在表中——已被并发删除（cancel / 过期清理）**或**同 id 已被新会话
+	// 接管。两者都意味着 routeUpload 预留、P5 回退预留与刚创建的在途临时文件没有（属于本次的）
+	// 会话登记 ⇒ 既不会被删除也不会被释放（永久孤儿）。fail-closed：回滚本次全部产物并回 409。
+	// 注意「部分发布已生效」也必须整体回滚（route 已发布 → P5/temp 失败同样走本支）。
+	if !routePublished || !p5Published || !tempPublished || !stagingPublished {
+		releaseP5 := int64(0)
+		if !p5Published {
+			releaseP5 = p5Reserved
+		}
+		s.abortInitOrphanRollback(i, route, tnt, tempRel, releaseP5, req.Filename, session.UploadID)
+		return false
+	}
+	return true
+}
+
+// p5FallbackReserve P5 回退预留：quota 未装配（route.ScopeRes nil）时回退旧 storageMgr
+// 全局预留。返回 (reservedBytes, published)；失败已清理会话并回 507（ok=false）。
+func (s *Service) p5FallbackReserve(ctx context.Context, w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, req *ChunkedInitRequest) (int64, bool, bool) {
+	if err := s.rt.storageManager().WaitReserveChunked(ctx, session.TotalSize); err != nil {
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.rt.logger().Warn("storage full, chunked upload rejected",
+			"file_name", req.Filename,
+			"total_size", session.TotalSize,
+			"current_usage", s.rt.storageManager().Usage(),
+			"max_bytes", s.rt.storageManager().MaxBytes(),
+		)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
+		return 0, false, false
+	}
+	// P5 回退预留登记：**未完成**会话删除/过期时按此释放（DeleteSession/cleanupExpired）；
+	// 已完成会话不释放——temp 已 rename 为正式文件，字节仍在磁盘（见 DeleteSession）。
+	return session.TotalSize, store.setSessionStorageMgrReservedIfCurrent(session, session.TotalSize), true
+}
+
+// createInitTempFile 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突，
+// Truncate(TotalSize) 预先占位）并发布临时名（身份门控 setter）。返回 (tempRel,
+// tempPublished)；失败已清理会话并回 500（tempRel 为空）。
+func (s *Service) createInitTempFile(w http.ResponseWriter, store *UploadStore, session *ChunkedUploadSession, tnt *storage.Tenant, rel string) (string, bool) {
+	// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
+	// Truncate(TotalSize) 预先占位；失败按 500，临时名未创建无需清理配额。
+	// tempRel = user/<dir>/.inflight-<hash16>-<upload_id>.part（散列取 rel 全路径）。
+	tempRel := TempRelForUser(session, rel)
+	if tempRel == "" {
+		s.rt.logger().Error("派生在途临时文件路径失败", "upload_id", session.UploadID, "file_name", session.Filename)
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", false
+	}
+	// 确保临时名父目录存在（user/<dir> 桶目标同目录）。
+	if err := tnt.Root().MkdirAll(filepath.Dir(tempRel), 0o755); err != nil {
+		s.rt.logger().Error("创建在途临时文件父目录失败", "upload_id", session.UploadID, "error", err)
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", false
+	}
+	tmpFile, err := tnt.Root().OpenFile(tempRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		s.rt.logger().Error("创建/续传上传会话失败", "upload_id", req.UploadID, "error", err)
-		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-		return
+		s.rt.logger().Error("创建在途临时文件失败", "upload_id", session.UploadID, "error", err)
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", false
 	}
-
-	if !reused {
-		// 任务 4：在途整文件（user 桶目标同目录）与配额预留。
-		// 多卷（AD-5/AD-7）：routeUpload 先定卷 + owner 全局 Scope + 卷容量池双 TryReserve
-		// （507 时清理 session 返回 507，不创建临时名）；tnt 为 route 目标卷租户（temp/complete
-		// 同卷 rename 原子）。单卷旧装配（volSet nil）：routeUpload 回落既有 scope TryReserve
-		// 语义；scope 未装配（quota nil）时回退旧 storageMgr 预留（与改造前一致，零回归）。
-		route, routeErr := s.rt.routeUpload(owner, rel, explicitVol, req.TotalSize, forceHomeVol)
-		if routeErr != nil {
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendUploadRouteError(w, r, req.Filename, routeErr)
-			return
-		}
-		if route.Tenant == nil || route.Tenant.Root() == nil {
-			route.Release()
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
-			return
-		}
-		tnt = route.Tenant
-		// 定卷/预留写回 store 持有的会话对象：必须经锁内 setter（该对象会被并发请求经
-		// GetSession/PersistNow 整结构深拷贝，直接改字段即数据竞争，审计 C-8）。
-		// 三处发布均走**身份门控** setter（按注册世代判定「表内该 id 仍是本次注册的会话」）：
-		// 同 id 已被新会话接管时返回 false，避免把本次状态发布到接管会话上
-		// （RV9-CHUNK-FINAL Q7）。
-		routePublished := store.setSessionRouteIfCurrent(session, route.VolumeName, route.ScopeRes, route.Pool, route.PoolRes)
-		// p5Reserved/p5Published 记录 P5 回退预留的字节数与登记结果（供发布失败时回滚；
-		// 未走 P5 分支时 p5Published 恒为 true、p5Reserved 为 0）。
-		var p5Reserved int64
-		p5Published := true
-		if route.ScopeRes == nil && s.rt.storageManager() != nil {
-			// P5 回退：quota 未装配（route.ScopeRes nil，volSet nil 旧装配 / globalPool nil）
-			// 时回退旧 storageMgr 全局预留；未完成会话删除/过期时按 StorageMgrReserved 释放
-			// （已完成会话不释放，见 DeleteSession）。
-			if err := s.rt.storageManager().TryReserveChunked(session.TotalSize); err != nil {
-				store.cleanupSessionIfCurrent(session.UploadID, session)
-				s.rt.logger().Warn("storage full, chunked upload rejected",
-					"file_name", req.Filename,
-					"total_size", session.TotalSize,
-					"current_usage", s.rt.storageManager().Usage(),
-					"max_bytes", s.rt.storageManager().MaxBytes(),
-				)
-				s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "存储空间不足"}, http.StatusInsufficientStorage)
-				return
-			}
-			// P5 回退预留登记：**未完成**会话删除/过期时按此释放（DeleteSession/cleanupExpired）；
-			// 已完成会话不释放——temp 已 rename 为正式文件，字节仍在磁盘（见 DeleteSession）。
-			p5Reserved = session.TotalSize
-			p5Published = store.setSessionStorageMgrReservedIfCurrent(session, session.TotalSize)
-		}
-
-		// 创建在途整临时文件（user 桶 target 同目录，O_EXCL 防跨 worker 冲突），
-		// Truncate(TotalSize) 预先占位；失败按 500，临时名未创建无需清理配额。
-		// tempRel = user/<dir>/.inflight-<hash16>-<upload_id>.part（散列取 rel 全路径）。
-		tempRel := TempRelForUser(session, rel)
-		if tempRel == "" {
-			s.rt.logger().Error("派生在途临时文件路径失败", "upload_id", session.UploadID, "file_name", session.Filename)
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-			return
-		}
-		// 确保临时名父目录存在（user/<dir> 桶目标同目录）。
-		if err := tnt.Root().MkdirAll(filepath.Dir(tempRel), 0o755); err != nil {
-			s.rt.logger().Error("创建在途临时文件父目录失败", "upload_id", session.UploadID, "error", err)
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-			return
-		}
-		tmpFile, err := tnt.Root().OpenFile(tempRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err != nil {
-			s.rt.logger().Error("创建在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-			return
-		}
-		if err := tmpFile.Truncate(session.TotalSize); err != nil {
-			tmpFile.Close()
-			_ = tnt.Root().Remove(tempRel)
-			s.rt.logger().Error("预占在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-			return
-		}
-		if err := tmpFile.Close(); err != nil {
-			_ = tnt.Root().Remove(tempRel)
-			s.rt.logger().Error("关闭在途临时文件失败", "upload_id", session.UploadID, "error", err)
-			store.cleanupSessionIfCurrent(session.UploadID, session)
-			s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "创建上传会话失败"}, http.StatusInternalServerError)
-			return
-		}
-		// 临时名发布同样走身份门控 setter（同上：并发读者会深拷贝会话）。
-		tempPublished := store.setSessionTempPathIfCurrent(session, tempRel)
-		// 回写 session.json 持久化 tempPath（重启后据此恢复续传）。
-		// 同样走**身份门控**：会话已被接管时本请求已注定回滚 ⇒ 不去动**接管会话**的持久化文件；
-		// 该情形随后会被下面的发布结果校验判定并回 409（回滚路径自带告警），故此处只记 Debug。
-		if err := store.PersistNowIfCurrent(session); err != nil {
-			if errors.Is(err, errSessionNotCurrent) {
-				s.rt.logger().Debug("会话已被接管，跳过持久化在途临时文件路径", "upload_id", session.UploadID)
-			} else {
-				s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
-			}
-		}
-		// 发布结果校验（审计 P2-2 + RV9-CHUNK-FINAL Q7）：三处**身份门控** setter 返回 false
-		// ⇔ 本次 init 的会话已不在表中——已被并发删除（cancel / 过期清理）**或**同 id 已被新会话
-		// 接管。两者都意味着 routeUpload 预留、P5 回退预留与刚创建的在途临时文件没有（属于本次的）
-		// 会话登记 ⇒ 既不会被删除也不会被释放（永久孤儿）。fail-closed：回滚本次全部产物并回 409。
-		// 注意「部分发布已生效」也必须整体回滚（route 已发布 → P5/temp 失败同样走本支）。
-		if !routePublished || !p5Published || !tempPublished {
-			releaseP5 := int64(0)
-			if !p5Published {
-				releaseP5 = p5Reserved
-			}
-			s.abortInitOrphanRollback(w, store, route, tnt, tempRel, releaseP5, req.Filename, session.UploadID)
-			return
+	if err := tmpFile.Truncate(session.TotalSize); err != nil {
+		tmpFile.Close()
+		_ = tnt.Root().Remove(tempRel)
+		s.rt.logger().Error("预占在途临时文件失败", "upload_id", session.UploadID, "error", err)
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", false
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = tnt.Root().Remove(tempRel)
+		s.rt.logger().Error("关闭在途临时文件失败", "upload_id", session.UploadID, "error", err)
+		store.cleanupSessionIfCurrent(session.UploadID, session)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", false
+	}
+	// 临时名发布同样走身份门控 setter（同上：并发读者会深拷贝会话）。
+	tempPublished := store.setSessionTempPathIfCurrent(session, tempRel)
+	// 回写 session.json 持久化 tempPath（重启后据此恢复续传）。
+	// 同样走**身份门控**：会话已被接管时本请求已注定回滚 ⇒ 不去动**接管会话**的持久化文件；
+	// 该情形随后会被下面的发布结果校验判定并回 409（回滚路径自带告警），故此处只记 Debug。
+	if err := store.PersistNowIfCurrent(session); err != nil {
+		if errors.Is(err, errSessionNotCurrent) {
+			s.rt.logger().Debug("会话已被接管，跳过持久化在途临时文件路径", "upload_id", session.UploadID)
+		} else {
+			s.rt.logger().Warn("持久化在途临时文件路径失败", "upload_id", session.UploadID, "error", err)
 		}
 	}
-
-	msg := "上传会话已创建"
-	if reused {
-		missing := MissingChunks(session)
-		msg = fmt.Sprintf("续传会话已恢复，缺失 %d 个分块", len(missing))
-		s.rt.logger().Info("续传会话", "upload_id", session.UploadID, "file_name", req.Filename,
-			"missing", len(missing), "total", session.TotalChunks)
-	} else {
-		s.rt.logger().Info("新上传会话", "upload_id", session.UploadID, "file_name", req.Filename,
-			"total_size", req.TotalSize, "total_chunks", session.TotalChunks)
-	}
-
-	s.sendJSON(w, ChunkedInitResponse{
-		Success:   true,
-		UploadID:  session.UploadID,
-		ChunkSize: session.ChunkSize,
-		Message:   msg,
-	}, http.StatusOK)
+	return tempRel, tempPublished
 }
 
 // abortInitOrphanRollback 回滚「已无会话登记」的 init 遗留产物：删除刚创建的在途临时文件、
@@ -472,16 +619,14 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 // 的「temp 丢失不可修复」会拖到 TTL）。
 // releaseP5 只在「P5 回退预留从未登记进会话」时非 0：ReleaseChunked 是直接累减（非幂等），
 // 已登记的预留由会话删除负责归还，重复归还会让容量账少算。
-func (s *Service) abortInitOrphanRollback(w http.ResponseWriter, store *UploadStore, route UploadRoute,
-	tnt *storage.Tenant, tempRel string, releaseP5 int64, filename, uploadID string,
-) {
+func (s *Service) abortInitOrphanRollback(i *chunkedInit, route UploadRoute, tnt *storage.Tenant, tempRel string, releaseP5 int64, filename, uploadID string) {
 	if tempRel != "" && tnt != nil && tnt.Root() != nil {
 		// 身份闸门：当前会话记录的临时名与 tempRel 相同时，该文件归新会话所有 ⇒ 跳过删除。
 		// 判据用「记录值与路径」而非按 id 删：新会话可能尚未发布 TempPath（此时文件仍是本次
 		// 遗留的孤儿，删除它是安全的，且能避免残留件阻断新会话的 O_EXCL 创建）。
 		// 判定与删除在**同一次 us.mu.RLock 内**完成（RemoveUnclaimedTemp）：若先取副本、放锁后再删，
 		// 两拍之间新会话可能恰好发布同一 TempPath，就会删掉它的在途文件（RV9-CHUNK-FINAL 建议①）。
-		claimed, rmErr := store.RemoveUnclaimedTemp(uploadID, tempRel, func() error {
+		claimed, rmErr := i.store.RemoveUnclaimedTemp(uploadID, tempRel, func() error {
 			return tnt.Root().Remove(tempRel)
 		})
 		switch {
@@ -501,7 +646,7 @@ func (s *Service) abortInitOrphanRollback(w http.ResponseWriter, store *UploadSt
 	s.rt.logger().Warn("init 期间会话已被并发删除，已回滚定卷/容量预留与在途临时文件",
 		"file_name", filename, "upload_id", shortid.ShortHash(uploadID),
 		"temp_created", tempRel != "", "p5_released_bytes", releaseP5)
-	s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "上传会话已被并发取消，请重新初始化"}, http.StatusConflict)
+	s.sendJSON(i.w, ChunkedInitResponse{Success: false, Message: "上传会话已被并发取消，请重新初始化"}, http.StatusConflict)
 }
 
 // TempRelForUser 生成租户 user 桶内分块在途整文件的存储根相对路径：
@@ -557,68 +702,15 @@ func (s *Service) openSessionTempWrite(tnt *storage.Tenant, session *ChunkedUplo
 func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// 限制请求体大小（含 multipart 开销）
-	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
-
-	// 解析 multipart
-	//nolint:gosec // G120 误报：请求体已由上一行 http.MaxBytesReader 限定为 DefaultChunkBodyLimit
-	// （64 MiB），并非无界解析。实测：同一代码留在 pkg/server 时不报、迁入本包即报（gosec 该规则是
-	// Sanitizers 为空的 taint 规则，无法识别 MaxBytesReader 的限定）。**触发条件已定因**：污点分析
-	// 的入口是「**处理器在包内没有调用者**」——路由注册留在装配层，故本包的处理器无包内调用者；
-	// 对照探针：只把基线的处理器改名（仍被路由注册调用）不复现，而加一个包内无调用者的方法
-	// 无论导出与否都复现。
-	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
-		s.rt.logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get("Content-Type"), "content_length", r.ContentLength)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
-		return
-	}
-	// I-3：multipart 解析不读到 EOF，读完全部 body 触发 bodyValidator 哈希校验。
-	if err := drainAndVerifyBody(r); err != nil {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
-		return
-	}
-	s.rt.logger().Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get("Content-Type"))
-
-	uploadID, chunkIndex, chunkChecksum, ok := parseChunkFormParams(r)
+	uploadID, chunkIndex, chunkChecksum, owner, store, session, ok := s.parseChunkRequest(w, r)
 	if !ok {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "缺少 upload_id、chunk_index 或 chunk_checksum 无效"}, http.StatusBadRequest)
 		return
 	}
 
-	s.rt.logger().Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get("Content-Type"))
+	s.rt.logger().Debug("uploadChunk 请求", "upload_id", uploadID, "chunk_index", chunkIndex, "content_type", r.Header.Get(headerContentType))
 
-	// 租户隔离靠 per-tenant store：会话只在本租户 chunk/ 桶下创建，跨租户同裸 id 互不可见
-	owner := s.rt.actorOf(r)
-	store := s.rt.uploadStore(owner)
-	if store == nil {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
-		return
-	}
-
-	// 获取 session
-	session := store.GetSession(uploadID)
-	if session == nil {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
-		return
-	}
-
-	if session.Completed {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
-		return
-	}
-	// 合并中屏障（C-3）：complete 的「全文件校验 → rename」期间不得再接受分块，
-	// 否则该分块可能在 rename 之后改写临时文件（落盘内容 != 刚校验通过的内容）。
-	// 此处必须**立即**拒绝（而非在 merge 锁上排队）。
-	// ShouldRetry：合并是**瞬态**窗口（通常毫秒级），必须置 true 让 SDK 退避重试——否则 SDK
-	// （pkg/client/chunked.go 仅在 should_retry=true 时重试）会把它当永久失败直接判死整个上传。
-	// 该窗口在多进程共用同一会话时可达：SDK 的 uploadID 是 filename|size|mtime|checksum 的确定性散列。
-	if session.Completing {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ShouldRetry: true, Message: "上传正在合并中，暂不接受新分块"}, http.StatusConflict)
-		return
-	}
-
-	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: fmt.Sprintf("chunk_index %d 超出范围 [0, %d)", chunkIndex, session.TotalChunks)}, http.StatusBadRequest)
+	// 合并中屏障 + 幂等预检（锁外先查一次；已回包时直接返回）。
+	if !s.checkChunkAcceptable(w, session, uploadID, chunkIndex, chunkChecksum) {
 		return
 	}
 
@@ -628,13 +720,6 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-
-	// 幂等：如果该块已接收且 checksum 匹配，直接返回成功
-	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
-		s.rt.logger().Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(chunkChecksum))
-		s.sendJSON(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
-		return
-	}
 
 	// 获取 chunk IO 读锁（任务 4：并发分段写各自 seek 固定 offset + BoundWriter 防越界，
 	// 锁域仍按 uploadID 划分避免同会话 bitmap 更新与完成读的竞态；complete 用写锁读全文件）。
@@ -647,34 +732,14 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
 		return
 	}
-	if session.Completed {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
-		return
-	}
 	// 持锁后的权威复查（C-3 屏障）：早期检查之后、取锁之前 complete 可能已进入合并阶段。
-	// ShouldRetry 语义同上（瞬态窗口，让 SDK 退避重试而非判死整个上传）。
-	if session.Completing {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ShouldRetry: true, Message: "上传正在合并中，暂不接受新分块"}, http.StatusConflict)
-		return
-	}
-	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
-		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: fmt.Sprintf("chunk_index %d 超出范围 [0, %d)", chunkIndex, session.TotalChunks)}, http.StatusBadRequest)
-		return
-	}
-	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
-		s.rt.logger().Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(chunkChecksum))
-		s.sendJSON(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
+	if !s.checkChunkAcceptable(w, session, uploadID, chunkIndex, chunkChecksum) {
 		return
 	}
 
-	// 任务 4：seek+BoundWriter 直写整临时文件。不写独立 .chunk 文件。
-	// 流程：读块到内存 → 块 checksum 校验 → 清空读取句柄（读指针已 EOF）→
-	// Seek(i*chunkSize) → BoundWriter(limit=该分片实际长度) 写入（防越界写坏相邻分片）→
-	// MarkChunkReceived(i, checksum)。请求体已受 MaxBytesReader(DefaultChunkBodyLimit)
-	// 限制，单块 ≤ ~60 MiB（测试 4KiB），内存缓冲可控。
-	// 乱序安全：seek 固定 offset + BoundWriter 逐段写，互不覆盖；并发分段写沿用锁。
-	// 多卷（AD-5）：temp 整文件在会话定卷的 user 桶（init 定卷），chunk 直写须经该卷租户。
-	tnt := s.rt.volumeTenant(session.Volume, owner)
+	// 多卷（AD-5）：temp 整文件在**staging 卷**（本地卷目标 = 目标卷；外部卷目标 = 默认卷
+	// staging）的 user 桶，chunk 直写须经该卷租户。
+	tnt := s.stagingTenantForSession(session, owner)
 	if tnt == nil || tnt.Root() == nil {
 		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传会话缺少在途临时文件"}, http.StatusInternalServerError)
 		return
@@ -691,45 +756,21 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 	// （同一 goroutine 顺序执行，归还后无引用 —— 见 readChunkBodyOwned 的说明）。
 	data, release, err := readChunkBodyOwned(file)
 	if err != nil {
-		s.rt.logger().Error("读取分块失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
+		s.rt.logger().Error(errMsgReadChunk, "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: errMsgReadChunk}, http.StatusInternalServerError)
 		return
 	}
 	defer release() // 所有返回路径（含 checksum 不匹配 / 写入失败）都归还池条目，不泄漏
 
 	if closeErr := file.Close(); closeErr != nil {
 		s.rt.logger().Error("关闭分块读取句柄失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", closeErr)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "读取分块失败"}, http.StatusInternalServerError)
-		return
-	}
-	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(data))
-	if !checksum.Equal(serverChecksum, chunkChecksum) {
-		s.rt.logger().Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
-			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum),
-			"session_chunk_size", session.ChunkSize)
-		s.sendJSON(w, ChunkUploadResponse{
-			Success:     false,
-			ChunkIndex:  chunkIndex,
-			ShouldRetry: true,
-			Message:     "SHA-256 校验不匹配",
-		}, http.StatusOK)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: errMsgReadChunk}, http.StatusInternalServerError)
 		return
 	}
 
-	// 限长分片直写：limit=该分片实际长度（末片短于 chunk_size）。
-	offset := int64(chunkIndex) * session.ChunkSize
-	limit := chunkLenAt(session, chunkIndex)
-	written, err := s.writeChunkDirect(session, tnt, offset, limit, data)
-	if err != nil {
-		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
-		return
-	}
-
-	// 更新 session
-	if err := store.MarkChunkReceived(uploadID, chunkIndex, serverChecksum); err != nil {
-		s.rt.logger().Error("标记分块已接收失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
-		s.sendJSON(w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "更新状态失败"}, http.StatusInternalServerError)
+	// 分片 SHA-256 校验 + seek 直写 + 位图更新（失败语义见 verifyAndWriteChunk）。
+	written, ok := s.verifyAndWriteChunk(&chunkWriteCtx{w: w, store: store, session: session, tnt: tnt}, uploadID, chunkIndex, chunkChecksum, data)
+	if !ok {
 		return
 	}
 
@@ -740,6 +781,127 @@ func (s *Service) UploadChunk(w http.ResponseWriter, r *http.Request) {
 		ChunkIndex: chunkIndex,
 		Message:    fmt.Sprintf("分块 %d 已接收并校验通过", chunkIndex),
 	}, http.StatusOK)
+}
+
+// parseChunkRequest 解析分块上传请求的前置段：限制请求体 + multipart 解析 + body 校验 +
+// 表单参数（upload_id/chunk_index/chunk_checksum）+ 会话获取。任一失败已回包 4xx/5xx 并
+// 返回 ok=false。返回 (uploadID, chunkIndex, chunkChecksum, owner, store, session, ok)。
+func (s *Service) parseChunkRequest(w http.ResponseWriter, r *http.Request) (uploadID string, chunkIndex int, chunkChecksum, owner string, store *UploadStore, session *ChunkedUploadSession, ok bool) {
+	// 限制请求体大小（含 multipart 开销）
+	r.Body = http.MaxBytesReader(w, r.Body, size.DefaultChunkBodyLimit)
+
+	// 解析 multipart
+	//nolint:gosec // G120 误报：请求体已由 http.MaxBytesReader 限定为 DefaultChunkBodyLimit，并非无界解析。
+	if err := r.ParseMultipartForm(size.DefaultChunkBodyLimit); err != nil {
+		s.rt.logger().Warn("uploadChunk parse multipart 失败", "error", err.Error(), "content_type", r.Header.Get(headerContentType), "content_length", r.ContentLength)
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "解析 multipart 失败"}, http.StatusRequestEntityTooLarge)
+		return "", 0, "", "", nil, nil, false
+	}
+	// I-3：multipart 解析不读到 EOF，读完全部 body 触发 bodyValidator 哈希校验。
+	if err := drainAndVerifyBody(r); err != nil {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		return "", 0, "", "", nil, nil, false
+	}
+	s.rt.logger().Debug("uploadChunk multipart 解析完成", "content_type", r.Header.Get(headerContentType))
+
+	uploadID, chunkIndex, chunkChecksum, ok = parseChunkFormParams(r)
+	if !ok {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "缺少 upload_id、chunk_index 或 chunk_checksum 无效"}, http.StatusBadRequest)
+		return "", 0, "", "", nil, nil, false
+	}
+
+	// 租户隔离靠 per-tenant store：会话只在本租户 chunk/ 桶下创建，跨租户同裸 id 互不可见
+	owner = s.rt.actorOf(r)
+	store = s.rt.uploadStore(owner)
+	if store == nil {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return "", 0, "", "", nil, nil, false
+	}
+
+	// 获取 session
+	session = store.GetSession(uploadID)
+	if session == nil {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return "", 0, "", "", nil, nil, false
+	}
+	return uploadID, chunkIndex, chunkChecksum, owner, store, session, true
+}
+
+// chunkWriteCtx 承载单次分块直写的目标上下文（w + store + session + tnt）。
+type chunkWriteCtx struct {
+	w       http.ResponseWriter
+	store   *UploadStore
+	session *ChunkedUploadSession
+	tnt     *storage.Tenant
+}
+
+// verifyAndWriteChunk 分片 SHA-256 校验（比对失败回 200 让客户端重传）+ 限长 seek 直写 +
+// session 位图更新。任一失败已回包并返回 ok=false；成功返回 (实际写入字节数, true)。
+func (s *Service) verifyAndWriteChunk(c *chunkWriteCtx, uploadID string, chunkIndex int, chunkChecksum string, data []byte) (int64, bool) {
+	serverChecksum := fmt.Sprintf("%x", sha256.Sum256(data))
+	if !checksum.Equal(serverChecksum, chunkChecksum) {
+		s.rt.logger().Warn("chunk SHA-256 不匹配", "upload_id", uploadID, "chunk_index", chunkIndex,
+			"server", shortid.ShortHash(serverChecksum), "client", shortid.ShortHash(chunkChecksum),
+			"session_chunk_size", c.session.ChunkSize)
+		s.sendJSON(c.w, ChunkUploadResponse{
+			Success:     false,
+			ChunkIndex:  chunkIndex,
+			ShouldRetry: true,
+			Message:     "SHA-256 校验不匹配",
+		}, http.StatusOK)
+		return 0, false
+	}
+
+	// 限长分片直写：limit=该分片实际长度（末片短于 chunk_size）。
+	offset := int64(chunkIndex) * c.session.ChunkSize
+	limit := chunkLenAt(c.session, chunkIndex)
+	written, err := s.writeChunkDirect(c.session, c.tnt, offset, limit, data)
+	if err != nil {
+		s.rt.logger().Error("写入在途临时文件失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		s.sendJSON(c.w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "写入分块失败"}, http.StatusInternalServerError)
+		return 0, false
+	}
+
+	// 更新 c.session
+	if err := c.store.MarkChunkReceived(uploadID, chunkIndex, serverChecksum); err != nil {
+		s.rt.logger().Error("标记分块已接收失败", "upload_id", uploadID, "chunk_index", chunkIndex, "error", err)
+		s.sendJSON(c.w, ChunkUploadResponse{Success: false, ChunkIndex: chunkIndex, ShouldRetry: true, Message: "更新状态失败"}, http.StatusInternalServerError)
+		return 0, false
+	}
+	return written, true
+}
+
+// checkChunkAcceptable 检查会话是否可接受该分块：已完成 410 / 合并中 409（ShouldRetry，
+// 瞬态窗口让 SDK 退避重试而非判死）/ 索引越界 400 / 幂等命中（同 checksum 已接收）→
+// 200 跳过。任一情形已回包，返回 false；可接受返回 true。
+func (s *Service) checkChunkAcceptable(w http.ResponseWriter, session *ChunkedUploadSession, uploadID string, chunkIndex int, chunkChecksum string) bool {
+	if session.Completed {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: "上传已完成，不接受新分块"}, http.StatusGone)
+		return false
+	}
+	// 合并中屏障（C-3）：complete 的「全文件校验 → rename」期间不得再接受分块，
+	// 否则该分块可能在 rename 之后改写临时文件（落盘内容 != 刚校验通过的内容）。
+	// 此处必须**立即**拒绝（而非在 merge 锁上排队）。
+	// ShouldRetry：合并是**瞬态**窗口（通常毫秒级），必须置 true 让 SDK 退避重试——否则 SDK
+	// （pkg/client/chunked.go 仅在 should_retry=true 时重试）会把它当永久失败直接判死整个上传。
+	// 该窗口在多进程共用同一会话时可达：SDK 的 uploadID 是 filename|size|mtime|checksum 的确定性散列。
+	if session.Completing {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, ShouldRetry: true, Message: "上传正在合并中，暂不接受新分块"}, http.StatusConflict)
+		return false
+	}
+
+	if chunkIndex < 0 || chunkIndex >= session.TotalChunks {
+		s.sendJSON(w, ChunkUploadResponse{Success: false, Message: fmt.Sprintf("chunk_index %d 超出范围 [0, %d)", chunkIndex, session.TotalChunks)}, http.StatusBadRequest)
+		return false
+	}
+
+	// 幂等：如果该块已接收且 checksum 匹配，直接返回成功
+	if session.ReceivedChunks[chunkIndex] && session.ChunkChecksums[chunkIndex] == chunkChecksum {
+		s.rt.logger().Debug("chunk 已存在，跳过", "upload_id", uploadID, "chunk_index", chunkIndex, "checksum", shortid.ShortHash(chunkChecksum))
+		s.sendJSON(w, ChunkUploadResponse{Success: true, ChunkIndex: chunkIndex, Message: "分块已存在，跳过"}, http.StatusOK)
+		return false
+	}
+	return true
 }
 
 // readChunkBodyOwned 读取 multipart 分块文件到内存（供 SHA-256 校验与直写数据源），
@@ -965,12 +1127,14 @@ func (s *Service) checkFileExistsStatus(w http.ResponseWriter, owner, filename s
 		return true
 	}
 	var root *storage.Root
+	vol := "" // 卷文件名（卷维度 checksum 读取；空 = 单卷/未知 → 旧无卷键）
 	if s.rt.volSet() != nil {
 		loc, found := s.rt.locateOwnerFile(owner, rel)
 		if !found || loc.Tenant == nil || loc.Tenant.Root() == nil {
 			return false
 		}
 		root = loc.Tenant.Root()
+		vol = loc.VolumeName
 	} else {
 		root = tnt.Root()
 	}
@@ -979,7 +1143,7 @@ func (s *Service) checkFileExistsStatus(w http.ResponseWriter, owner, filename s
 		return false
 	}
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		if checksum, ok := cs.Get(rel); ok {
+		if checksum, ok := checksumGet(cs, vol, rel); ok {
 			s.sendJSON(w, ChunkStatusResponse{
 				Success:      true,
 				Completed:    true,
@@ -1054,9 +1218,28 @@ func (s *Service) validateCompleteSession(w http.ResponseWriter, store *UploadSt
 // `internal/archcheck/upload_side_effect_test.go`（设置 mtime 的调用全仓只允许一处）。
 //
 // 文件在会话定卷（session.Volume；空 = 默认卷）的 user 桶——mtime 须经该卷租户；checksum
-// store 是 owner 逻辑命名空间（默认卷 meta 单一权威），与物理卷无关。
+// 台账按**卷维度**记录（§15.1.1：同名文件跨卷不互相覆盖）。
 func (s *Service) recordCompleteMetadata(owner, uploadID string, session *ChunkedUploadSession, finalChecksum string) {
-	tnt := s.rt.volumeTenant(session.Volume, owner)
+	// 在途临时文件在 **staging 卷**（本地卷目标 = 目标卷；外部卷目标 = 默认卷）。
+	// checksum 台账按**目标卷**（session.Volume）维度记录 ⇒ 跨卷同名互不覆盖。
+	if cs := s.rt.checksumStore(owner); cs != nil {
+		checksumSet(cs, session.Volume, "user/"+strings.TrimPrefix(session.Filename, "/"), finalChecksum)
+	} else {
+		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过记录", "file_name", session.Filename)
+	}
+
+	// **外部卷目标不写本地副作用**：mtime/sidecar/索引都作用于「本地 root 上的 rel 实体」，
+	// 而外部卷目标的内容不在本地（已由 `completeExternalTransfer` 转存到目标卷）——
+	// 目标卷的 mtime/meta 由**写面装饰链**（trusted.Guard(Wrap)）在 Sink 写时自行生成，
+	// 列举走卷视图（`VolumeViewLister.ListDirView`，不依赖本地索引）。此处若照本地卷路径做，
+	// 会得到两条噪音告警
+	// （`chtimesat user/...: no such file` / sidecar 写入失败）且无任何真实作用。
+	if session.ExternalTarget {
+		s.finishSessionAfterComplete(owner, uploadID)
+		return
+	}
+
+	tnt := s.stagingTenantForSession(session, owner)
 	if tnt == nil || tnt.Root() == nil {
 		s.rt.logger().Warn("记录完成元数据失败：租户不可用", "owner", owner)
 		return
@@ -1068,8 +1251,19 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	}
 
 	// 上传成功的共同副作用内核（mtime + checksum 台账），与单次上传同源。
-	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, finalChecksum, session.FileModTime, s.rt.logger())
+	s.recordUploadSuccess(tnt.Root(), owner, session.Filename, rel, session.Volume, finalChecksum, session.FileModTime, s.rt.logger())
+	// 可信卷：分块上传 complete 后同样到达即建 meta（C-CRITICAL-2 修复——与单次上传
+	// writeFileSettle 一致，分块传完也有 .meta sidecar）。
+	if s.rt.fileMetaEnabled() {
+		if mErr := s.rt.writeMetaSidecar(context.Background(), owner, tnt.Root(), rel, session.MetaExtra); mErr != nil {
+			s.rt.logger().Warn("可信卷 meta 落盘失败（分块上传，读侧将不校验）", "file_name", session.Filename, "error", mErr)
+		}
+	}
+	s.finishSessionAfterComplete(owner, uploadID)
+}
 
+// finishSessionAfterComplete 标记会话完成并延迟清理（本地卷与外部卷目标共用）。
+func (s *Service) finishSessionAfterComplete(owner, uploadID string) {
 	// 标记完成（延迟清理 session 目录）
 	store := s.rt.uploadStore(owner)
 	if store == nil {
@@ -1083,27 +1277,32 @@ func (s *Service) recordCompleteMetadata(owner, uploadID string, session *Chunke
 	store.CleanupSessionAfter(uploadID, 5*time.Second)
 }
 
+// acquireCompleteTargets 取 complete 的 staging 租户、user 桶相对路径，并取 rel 文件级
+// 互斥锁（T6c move 锁架构延伸：complete 原子 rename 与并发 move 共用同 rel 锁，无锁时
+// move 删源后 complete 仍可把文件落回源卷 ⇒ 与目标卷副本并存）。返回 ok=false 表示已回包
+// （rel 被占用 409）。
+func (s *Service) acquireCompleteTargets(w http.ResponseWriter, owner string, session *ChunkedUploadSession) (*storage.Tenant, string, func(), bool) {
+	tnt := s.stagingTenantForSession(session, owner)
+	rel := ""
+	if tnt != nil && tnt.Root() != nil {
+		if r, ok := tnt.UserRel(session.Filename); ok {
+			rel = r
+		}
+	}
+	if rel == "" {
+		return tnt, rel, func() {}, true
+	}
+	release, locked := s.rt.fileLocks().Acquire(owner, rel)
+	if !locked {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
+		return nil, "", nil, false
+	}
+	return tnt, rel, release, true
+}
+
 // UploadComplete 合并所有分块完成上传。
 func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit)
-	var req ChunkedCompleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "请求体必须是合法 JSON（无法解析）"}, http.StatusBadRequest)
-		return
-	}
-	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
-	if err := drainAndVerifyBody(r); err != nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "请求体校验失败（签名哈希不匹配或 JSON 语法错误）"}, http.StatusBadRequest)
-		return
-	}
-
-	owner := s.rt.actorOf(r)
-	store := s.rt.uploadStore(owner)
-	if store == nil {
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
-		return
-	}
-	session, ok := s.validateCompleteSession(w, store, owner, req.UploadID)
+	owner, uploadID, store, session, ok := s.parseCompleteRequest(w, r)
 	if !ok {
 		return
 	}
@@ -1111,7 +1310,7 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 合并中屏障（C-3）：置位后拒绝新分块，使「全文件校验 → rename」期间临时文件不再被改写。
 	// 并发的第二个 complete 也在此被拦住（防两个 complete 同时合并/rename 同一会话）。
 	// 失败/中断路径（含 mismatch 重传）由 defer 清除，客户端可重试 complete。
-	if !store.BeginComplete(req.UploadID) {
+	if !store.BeginComplete(uploadID) {
 		s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "该上传正在合并中，请稍后重试"}, http.StatusConflict)
 		return
 	}
@@ -1120,91 +1319,75 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// rename 已成功但后续落元数据早退（recordCompleteMetadata 的「租户不可用」/「文件名映射失败」
 	// 两处 return 不调 CompleteSession）时，会话会停在 Completed=false ∧ Completing=true：
 	// 此后该会话 chunk 恒 409、complete 恒 409，只能等 24h TTL / 进程重启 / cancel。
-	defer store.EndComplete(req.UploadID)
+	defer store.EndComplete(uploadID)
 
-	// 合并不随客户端断开而取消：Using WithoutCancel 派生独立 context。
+	// 合并不随客户端断开而取消：WithoutCancel 派生独立 context。
 	// （complete 内部仍保守检查 ctx.Done；recovery 兜底走进程级。）
 	mergeCtx := context.WithoutCancel(r.Context())
 
-	// 取会话目标卷租户与 user 桶相对路径（覆盖写 ReleaseUsage / complete / SaveVersion 用）。
-	// 多卷（AD-5）：init 定卷，temp + rename + version 全在目标卷（session.Volume 空 = 默认卷）。
-	tnt := s.rt.volumeTenant(session.Volume, owner)
-	rel := ""
-	if tnt != nil && tnt.Root() != nil {
-		if r, ok := tnt.UserRel(session.Filename); ok {
-			rel = r
-		}
+	// 取会话 **staging 卷**租户（在途临时文件所在：本地卷目标 = 目标卷；外部卷目标 = 默认卷
+	// staging）与 user 桶相对路径：prepareMergedTemp 全文件校验、本地 rename、外部转存读源
+	// 均用它。并取 rel 文件级互斥锁（防与并发 move 竞态，见 helper 注释）。
+	//
+	// 为何不是目标卷租户：外部卷目标没有本地租户（volumeTenant → nil），而**分块内容恒在
+	// 本地 staging**（这正是本修复的核心）——目标卷只影响「写到哪里」，不影响「分块内容在哪」
+	// （见 session.StagingVolume）。
+	tnt, rel, relUnlock, ok := s.acquireCompleteTargets(w, owner, session)
+	if !ok {
+		return
 	}
-
-	// 文件级互斥（T6c move 锁架构延伸）：complete 会把 temp 原子 rename 为最终文件，与并发
-	// move（复制→删源）共用同 rel 锁——无锁时 move 删源后 complete 仍可把文件落回源卷，与
-	// 目标卷副本并存（AD-4 破坏）；持锁后 move 期间 complete 409（客户端可稍后重试，
-	// session/temp/预留均保留）。
-	if rel != "" {
-		release, locked := s.rt.fileLocks().Acquire(owner, rel)
-		if !locked {
-			s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "文件正在移动/上传中，请稍后重试"}, http.StatusConflict)
-			return
-		}
-		defer release()
-	}
+	defer relUnlock()
 
 	// 全文件校验临时名内容 == session.FileChecksum：
-	//  校验通过 → rename 为正式名 → 写 checksum store → 覆盖写 ReleaseUsage(old)；
+	//  校验通过 → rename 为正式名（本地卷）/ 转存到外部卷（外部卷目标，见下方分支）→
+	//  写 checksum store → 覆盖写 ReleaseUsage(old)；
 	//  校验失败 → 逐分片 seek 重算 → mismatch_chunks（失败保留 session+临时名+预留供重传，
 	//   不释放——重传还要写临时名；只有取消/过期/放弃才释放，见 DeleteSession/cleanupExpired）。
 	mismatch, err := s.prepareMergedTemp(mergeCtx, store, tnt, session)
-	if err != nil {
-		// 全文件校验失败且已定位坏分片 → 400 + mismatch_chunks；IO/内部错误 → 500。
-		if mismatch != nil {
-			s.rt.logger().Warn("complete 校验失败，客户端按 mismatch_chunks 重传坏分片",
-				"upload_id", req.UploadID, "file_name", session.Filename, "mismatch", mismatch)
+	if s.sendCompleteMergeError(w, uploadID, session, mismatch, err) {
+		return
+	}
+
+	// 外部卷目标（2026-10-22 缺陷修复）：complete 不 rename 落位（外部卷无本地 inode），
+	// 而是经 route.Sink 转存到目标卷（staging 内容已全文件校验通过；转存内部有界重试自愈）。
+	if session.ExternalTarget {
+		sink := s.externalSinkForSession(session, owner)
+		if sink != nil {
+			finalChecksum, ok := s.completeExternalTransfer(mergeCtx, w, session, owner, rel, tnt, sink)
+			if !ok {
+				return
+			}
+			s.recordCompleteMetadata(owner, uploadID, session, finalChecksum)
 			s.sendJSON(w, ChunkCompleteResponse{
-				Success:        false,
-				Filename:       session.Filename,
-				Message:        fmt.Sprintf("%d 个分片校验失败，请重传这些分片后再次完成", len(mismatch)),
-				MismatchChunks: mismatch,
-			}, http.StatusBadRequest)
+				Success:      true,
+				Filename:     session.Filename,
+				FileChecksum: finalChecksum,
+				Message:      "文件合并并校验通过",
+			}, http.StatusOK)
 			return
 		}
-		s.rt.logger().Error("合并分块失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
-		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "合并文件失败"}, http.StatusInternalServerError)
+		// sink 不可得（装配异常/重启后卷集合未恢复）：fail-closed 500，不把 staging 当正式文件。
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Filename: session.Filename, Message: "外部卷写面不可用"}, http.StatusInternalServerError)
 		return
 	}
 
 	// 覆盖写（versioning enabled + 目标存同名旧文件）先备份版本。SaveVersion 把旧文件
 	// 复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；失败 best-effort。
 	// 任务 8 O-1：覆盖动作记审计（沿用 upload_handler 覆盖写审计写法，Action=overwrite）。
-	overwrote := false
-	if rel != "" && tnt != nil && tnt.Root() != nil {
-		if s.rt.versioningEnabled() {
-			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
-				if _, vErr := s.SaveVersion(strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
-					s.rt.logger().Warn("保存文件版本失败", "file_name", session.Filename, "error", vErr)
-				} else {
-					overwrote = true
-				}
-			}
-		}
-	}
-
-	// 与单次上传的三处**有意保留的差异**（P2-d 逐条记录，勿「顺手统一」）：
-	//  ① 版本保存时机：此处「目标存在即备份」（客户端主动整文件重传 = 有意覆盖）；
-	//     单次上传在 `handleDuplicateFile` 里**仅在 checksum 不同**时备份（同 checksum 走幂等 200）。
-	//  ② 配额结算形式：此处「Commit(total) + ReleaseUsage(prev)」显式对账（I1 修复），
-	//     单次上传用 `UploadRoute.Commit(prev, written)` 的 Adjust 差分；两者终态 committed 相同。
-	//  ③ 卷池结算：两处同为 Adjust(prev,total)/Commit(total)（此处与单次上传一致，无差异）。
-	//
-	// rename 前 stat 旧文件大小（覆盖写）；新文件场景 old=0。
-	prev := int64(0)
-	if rel != "" && tnt != nil && tnt.Root() != nil {
-		if st, statErr := tnt.Root().Stat(rel); statErr == nil {
-			prev = st.Size()
-		}
-	}
+	// 与单次上传的差异见 backupCompleteVersion。rename 前 stat 旧文件大小（覆盖写）；新文件
+	// 场景 old=0。
+	overwrote, prev := s.backupCompleteVersion(r.Context(), tnt, rel, owner, session.Filename)
 	finalChecksum := session.FileChecksum
-	if err := atomicRenameRoot(tnt.Root(), session.TempPath, rel); err != nil {
-		s.rt.logger().Error("重命名最终文件失败", "upload_id", req.UploadID, "file_name", session.Filename, "error", err)
+	// at-rest 加密卷：在途明文（可续传）在 finalize 单遍加密落位——raw rename 会把明文
+	// 直接落盘（at-rest 加密被绕过、/download 解密失败 = 文件不可读，评审 P0 的分块上传面）。
+	var ferr error
+	if tnt.Root().IsEncrypted() {
+		ferr = encryptFinalizeRoot(tnt.Root(), session.TempPath, rel)
+	} else {
+		ferr = atomicRenameRoot(tnt.Root(), session.TempPath, rel)
+	}
+	if ferr != nil {
+		s.rt.logger().Error("最终文件落位失败", "upload_id", uploadID, "file_name", session.Filename, "error", ferr)
 		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "重命名文件失败"}, http.StatusInternalServerError)
 		return
 	}
@@ -1212,14 +1395,288 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// P4/P5 配额对账（I1）：user 桶 Scope——init 已 TryReserve(TotalSize) 预留新文件全部
 	// 字节（容量已在 init 校验），此处把预留 Commit 成 user 桶 committed（新文件大小），
 	// 覆盖写再 ReleaseUsage(old) 释放已无磁盘实体的旧文件字节。净效果：committed 恰好等于
-	// 新文件真实大小（显式对账，替代 Adjust 差分）。Release 原子生效一次——CompleteSession
-	// 后 CleanupSessionAfter 删除会话时的额外 Release/Commit 为空操作。
-	// scope 按文件实际 rel 解析（与 init 同一键，EnsureScope 缓存复用→同对象），子目录配额
-	// 与 user 桶/租户逐级检查一致性由父链聚合保证。
+	// 新文件真实大小（显式对账，替代 Adjust 差分）。语义见 settleCompleteQuota。
+	s.settleCompleteQuota(session, owner, rel, prev, tnt)
+
+	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
+	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功
+	// 也不记 audit，保持一致）。Detail 文案是外部可观察的审计产物（`/api/audit` 直出给 Web
+	// UI）：由 pkg/server 的 TestCompleteOverwriteReleaseUsage 钉住（断言恰好一条 overwrite
+	// 审计及其全部字段）。
+	if overwrote {
+		s.rt.recordFileAudit(r.Context(), "overwrite", session.Filename, auditResultSuccess, "分块上传覆盖现有文件（版本已保存）")
+	}
+
+	s.recordCompleteMetadata(owner, uploadID, session, finalChecksum)
+
+	s.rt.logger().Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
+	s.sendJSON(w, ChunkCompleteResponse{
+		Success:      true,
+		Filename:     session.Filename,
+		FileChecksum: finalChecksum,
+		Message:      "文件合并并校验通过",
+	}, http.StatusOK)
+}
+
+// parseCompleteRequest 解析 complete 请求的前置段：限制请求体 + JSON 解码 + body 校验 +
+// 会话获取与幂等预检（validateCompleteSession）。任一失败已回包并返回 ok=false。
+// 返回 (owner, uploadID, store, session, ok)。
+func (s *Service) parseCompleteRequest(w http.ResponseWriter, r *http.Request) (owner, uploadID string, store *UploadStore, session *ChunkedUploadSession, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, size.CompleteBodyLimit)
+	var req ChunkedCompleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "请求体必须是合法 JSON（无法解析）"}, http.StatusBadRequest)
+		return "", "", nil, nil, false
+	}
+	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
+	if err := drainAndVerifyBody(r); err != nil {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "请求体校验失败（签名哈希不匹配或 JSON 语法错误）"}, http.StatusBadRequest)
+		return "", "", nil, nil, false
+	}
+
+	owner = s.rt.actorOf(r)
+	store = s.rt.uploadStore(owner)
+	if store == nil {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgUploadIDNotFound}, http.StatusNotFound)
+		return "", "", nil, nil, false
+	}
+	session, ok = s.validateCompleteSession(w, store, owner, req.UploadID)
+	if !ok {
+		return "", "", nil, nil, false
+	}
+	return owner, req.UploadID, store, session, true
+}
+
+// stagingTenantForSession 返回会话在途临时文件（分块内容）的写盘租户——
+// 与 `tenantRootForStaging` 同一语义（session.StagingVolume 优先，否则 session.Volume）。
+func (s *Service) stagingTenantForSession(session *ChunkedUploadSession, owner string) *storage.Tenant {
+	if session == nil {
+		return nil
+	}
+	vol := session.StagingVolume
+	if vol == "" {
+		vol = session.Volume
+	}
+	return s.rt.volumeTenant(vol, owner)
+}
+
+// resolveExternalTransferSrc 解析外部卷转存源：返回 staging 临时文件绝对路径。
+// 入参校验与路径解析收敛在此（降 completeExternalTransfer 认知复杂度）。
+// 返回 ok=false 时已回包。
+func (s *Service) resolveExternalTransferSrc(w http.ResponseWriter, session *ChunkedUploadSession, tnt *storage.Tenant) (string, bool) {
+	if session.TempPath == "" {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "上传会话缺少在途临时文件"}, http.StatusInternalServerError)
+		return "", false
+	}
+	abs, aok := tnt.Root().Abs(session.TempPath)
+	if !aok {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "在途临时文件路径越界"}, http.StatusInternalServerError)
+		return "", false
+	}
+	return abs, true
+}
+
+// completeExternalTransfer 是外部卷目标的分块 complete：staging 整文件校验通过后，
+// 经 route.Sink（外部卷写面）转存到目标卷。staging 临时文件由会话清理（cleanupSessionIfCurrent）
+// 删除——不落正式名。
+//
+// 语义对齐普通上传外部卷（writeExternalSettle）：MakeDir + WriteFile 整流写 + 写后大小复核
+// （不符 → 删除产物 + 500）+ 双账本结算。内容正确性由转存前的 staging 全文件校验保证。
+func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseWriter, session *ChunkedUploadSession, owner string, rel string, tnt *storage.Tenant, sink UploadSink) (finalChecksum string, ok bool) {
+	if sink == nil || tnt == nil || tnt.Root() == nil {
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", false
+	}
+	// 读取 staging 整临时文件（已在 complete 前全文件校验通过，此处单遍流式转存）。
+	abs, aok := s.resolveExternalTransferSrc(w, session, tnt)
+	if !aok {
+		return "", false
+	}
+
+	// MakeDir（外部卷无隐式目录）+ 整流写 + 写后**大小复核**（对齐 writeExternalSettle 的
+	// 写入形态，并补一道可命中的落地验证）。
+	//
+	// **内容正确性**由 `prepareMergedTemp` 在转存前已全文件校验保证（staging 内容 == 客户端
+	// 声明的 FileChecksum）——此处不再重算一遍源流哈希（那是同一判据的重复实现，且重算的
+	// 是「送出去的字」而非「存下来的字节」，对静默损坏无鉴别力）。外部卷的**静默损坏**
+	// （写入成功但字节被改）由**可信卷 sidecar 在读侧**逐块校验 fail-closed（本写面与普通
+	// 上传外部卷同一 trusted.Guard(Wrap) 链，写侧恒生成 meta；见 docs/config.md「可信卷」）。
+	// rel 带 user/ 前缀（与 writeExternalSettle 同一传入口径：Sink 实现负责 owner 前缀/
+	// 键空间映射，域侧不自行剥离）。
+	if !s.ensureExternalDir(ctx, w, sink, rel) {
+		return "", false
+	}
+
+	// **有界重试（生产可用性，2026-10-22）**：外部卷转存（网盘慢速/瞬时抖动/账本瞬时降级）
+	// 是**瞬时故障**——数据（staging）完好，重试即可自愈，不应一次失败直接 500 让客户端
+	// 干等/重传。每次重试前**先清理已写入的残骸**（避免目标已存在语义下重试被永久阻断）。
+	// **最大 10 次**（用户 2026-10-22 指定），退避 1s→2s→…→2^9s 封顶。
+	for attempt := range externalTransferMaxAttempts {
+		if attempt > 0 && !s.waitBeforeRetry(ctx, w, sink, rel, attempt) {
+			return "", false
+		}
+		if err := s.attemptExternalTransfer(ctx, session, rel, abs, sink); err != nil {
+			s.rt.logger().Warn("外部卷转存未成功（将重试）", "file_name", session.Filename,
+				"attempt", attempt+1, "error", err)
+			continue
+		}
+		// 结算（与普通外部上传同口径：卷自报物理足迹优先）。
+		s.settleCompleteQuota(session, owner, rel, 0, nil)
+		s.rt.logger().Info("外部卷分块上传完成（staging 转存）", "file_name", session.Filename,
+			"checksum", shortid.ShortHash(session.FileChecksum), "size", session.TotalSize, "volume", session.Volume,
+			"attempts", attempt+1)
+		return session.FileChecksum, true
+	}
+	// 重试耗尽：会话与 staging 保留（可再 complete 重试），回 5xx。
+	s.rt.logger().Error("外部卷保存文件失败（重试耗尽）", "file_name", session.Filename)
+	s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
+	return "", false
+}
+
+// ensureExternalDir 确保外部卷目标目录存在（外部卷无隐式目录语义）。失败已回包，返回 false。
+func (s *Service) ensureExternalDir(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string) bool {
+	dir := path.Dir(rel)
+	if derr := sink.MakeDir(ctx, dir); derr != nil {
+		// **必须区分「已存在且完整」与「已存在但残缺」**：不能只看 ErrExist 就放行
+		// （半途残留的目录/缺目录 meta 会让后续写入落在不完整结构上）。只有 Stat 确认该
+		// 路径**确实可读存在**才视为目标达成；否则带详情失败，由上层清理后重试。
+		if _, exists, serr := sink.Stat(ctx, dir); serr == nil && exists {
+			s.rt.logger().Info("外部卷目标目录已存在（Stat 确认可读，视为达成）", "dir", dir)
+			return true
+		}
+		// **必须带出详情**：此前只回「创建目录失败」⇒ 生产故障无法定位（实测多条上传因此
+		// 只看到无信息量的 500）。
+		s.rt.logger().Warn("外部卷创建目标目录失败", "dir", dir, "error", derr)
+		s.sendJSON(w, ChunkCompleteResponse{Success: false,
+			Message: errMsgCreateDirFailed + ": " + derr.Error()}, http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// externalTransferMaxAttempts / externalTransferBaseDelay 是外部卷转存的有界重试预算。
+// 10 次（用户 2026-10-22 指定）；退避 1s→2s→…→2^9s 封顶。
+const (
+	externalTransferMaxAttempts = 10
+	externalTransferBaseDelay   = time.Second
+)
+
+// waitBeforeRetry 重试前清理残骸并退避等待（ctx 取消即放弃）。返回 false = 已回包（放弃）。
+func (s *Service) waitBeforeRetry(ctx context.Context, w http.ResponseWriter, sink UploadSink, rel string, attempt int) bool {
+	_ = sink.Remove(ctx, rel)
+	select {
+	case <-ctx.Done():
+		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
+		return false
+	default:
+	}
+	// 退避经注入的 sleep（生产 = time.Sleep；测试 = 0 等待 ⇒ 用例瞬时完成）。
+	s.rt.retrySleepFn()(externalTransferBaseDelay << attempt)
+	return true
+}
+
+// attemptExternalTransfer 执行一次转存尝试：整流写 + 写后大小复核（不符即删产物）。
+// 返回 error = 本次未成功（调用方按重试预算继续）。
+func (s *Service) attemptExternalTransfer(ctx context.Context, session *ChunkedUploadSession, rel, abs string, sink UploadSink) error {
+	f, ferr := os.Open(abs)
+	if ferr != nil {
+		return ferr
+	}
+	defer func() { _ = f.Close() }()
+	// 片 3（2026-10-26）：外部卷转存把 init 携带的 meta_extra 经 ctx 透传给写面
+	// （trusted/secretdata 写 meta 时合并），修「外部卷分块上传丢 extra」。未携带 = 零回归。
+	ctx = syncpkg.WithUploadMetaExtra(ctx, session.MetaExtra)
+	if werr := sink.WriteFile(ctx, rel, f, session.TotalSize, session.FileModTime); werr != nil {
+		return werr
+	}
+	sz, exists, serr := sink.Stat(ctx, rel)
+	if serr != nil || !exists || sz != session.TotalSize {
+		_ = sink.Remove(ctx, rel)
+		return fmt.Errorf("写后大小复核失败：want=%d got=%d exists=%v err=%v", session.TotalSize, sz, exists, serr)
+	}
+	return nil
+}
+
+// externalSinkForSession 按会话目标卷解析外部卷写面（UploadSink）。
+// 装配层经 routeUpload（RouteTarget）在 init 定卷时已注入 Sink；但 complete 可能在进程
+// 重启之后（断点续传）——会话里不能存接口 ⇒ 按 session.Volume 经装配层可选能力
+// `ExternalSinkSource` 重新解析（门禁 R2：域侧不直接 import registry/sync）。
+// 未装配该能力 / 卷非外部 / 未知卷 → nil（调用方 fail-closed）。
+func (s *Service) externalSinkForSession(session *ChunkedUploadSession, owner string) UploadSink {
+	if session == nil || session.Volume == "" {
+		return nil
+	}
+	return s.rt.externalSinkFor(owner, session.Volume)
+}
+
+// sendCompleteMergeError 处理 prepareMergedTemp 的错误：err 为 nil 时返回 false（调用方
+// 继续）；已回包时返回 true。全文件校验失败且已定位坏分片 → 400 + mismatch_chunks；
+// IO/内部错误 → 500。
+func (s *Service) sendCompleteMergeError(w http.ResponseWriter, uploadID string, session *ChunkedUploadSession, mismatch []int, err error) bool {
+	if err == nil {
+		return false
+	}
+	// 全文件校验失败且已定位坏分片 → 400 + mismatch_chunks；IO/内部错误 → 500。
+	if mismatch != nil {
+		s.rt.logger().Warn("complete 校验失败，客户端按 mismatch_chunks 重传坏分片",
+			"upload_id", uploadID, "file_name", session.Filename, "mismatch", mismatch)
+		s.sendJSON(w, ChunkCompleteResponse{
+			Success:        false,
+			Filename:       session.Filename,
+			Message:        fmt.Sprintf("%d 个分片校验失败，请重传这些分片后再次完成", len(mismatch)),
+			MismatchChunks: mismatch,
+		}, http.StatusBadRequest)
+		return true
+	}
+	s.rt.logger().Error("合并分块失败", "upload_id", uploadID, "file_name", session.Filename, "error", err)
+	s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: "合并文件失败"}, http.StatusInternalServerError)
+	return true
+}
+
+// backupCompleteVersion 覆盖写（versioning enabled + 目标存同名旧文件）先备份版本：
+// SaveVersion 把旧文件复制进 version 桶（version 桶 Scope 记账），不改 user 桶 committed；
+// 失败 best-effort。同时捕获目标旧大小 prev（rename 前 stat；新文件场景 old=0）。
+// 返回 overwrote（是否实际保存了版本）与 prev（覆盖写 Adjust 差分用）。
+func (s *Service) backupCompleteVersion(ctx context.Context, tnt *storage.Tenant, rel, owner, filename string) (overwrote bool, prev int64) {
+	if rel != "" && tnt != nil && tnt.Root() != nil {
+		if s.rt.versioningEnabled() {
+			if _, sErr := tnt.Root().Stat(rel); sErr == nil {
+				if _, vErr := s.SaveVersion(ctx, strings.TrimPrefix(rel, "user/"), tnt, owner); vErr != nil {
+					s.rt.logger().Warn("保存文件版本失败", "file_name", filename, "error", vErr)
+				} else {
+					overwrote = true
+				}
+			}
+		}
+		// rename 前 stat 旧文件大小（覆盖写）；新文件场景 old=0。
+		if st, statErr := tnt.Root().Stat(rel); statErr == nil {
+			prev = st.Size()
+			// **与结算同源**（独立复审「释放≠结算」类根治，2026-10-18）：`prev` 会进
+			// `Adjust(prev,total)`/`ReleaseUsage(prev)`，而写入侧结算按**卷自报实测足迹** ⇒ 用
+			// `Stat` 尺寸对 secretdata 会每次覆盖写泄漏 (足迹 − 逻辑) 的幽灵占用。改名之前取足迹。
+			prev = s.releaseChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, rel, prev)
+		}
+	}
+	return overwrote, prev
+}
+
+// settleCompleteQuota 合并成功后的配额对账（I1）：user 桶 Scope 把 init 预留 Commit 成
+// committed（新文件大小），覆盖写再 ReleaseUsage(old) 释放已无磁盘实体的旧文件字节；
+// 卷容量池双账本结算（新文件 Commit(total) / 覆盖写 Adjust(prev,total) 差分收敛 +
+// 释放预留）。Release 原子生效一次——CompleteSession 后 CleanupSessionAfter 删除会话时
+// 的额外 Release/Commit 为空操作。
+func (s *Service) settleCompleteQuota(session *ChunkedUploadSession, owner, rel string, prev int64, tnt *storage.Tenant) {
+	// 口径与写入侧一致（加密卷按物理占用；用目标卷租户根判定——加密是按卷属性）。
+	var root *storage.Root
+	if tnt != nil {
+		root = tnt.Root()
+	}
+	// TotalSize 是客户端声明的**逻辑**总长 ⇒ 折算为物理；prev 来自 Stat（已是物理）⇒ 不折算。
+	total := physicalCharge(root, session.TotalSize)
 	if scope := s.rt.quotaScope(owner, rel); scope != nil {
 		if session.Reservation != nil {
 			// 先提交新文件字节（reserved → committed），再释放旧文件字节。
-			session.Reservation.Commit(session.TotalSize)
+			session.Reservation.Commit(total)
 			session.Reservation = nil
 		}
 		if prev > 0 {
@@ -1233,39 +1690,14 @@ func (s *Service) UploadComplete(w http.ResponseWriter, r *http.Request) {
 	// 防卷池 Usage 虚高/路由误判）。
 	if session.Pool != nil && session.PoolRes != nil {
 		if prev > 0 {
-			session.Pool.Adjust(prev, session.TotalSize)
+			session.Pool.Adjust(prev, total)
 			session.PoolRes.Release()
 		} else {
-			session.PoolRes.Commit(session.TotalSize)
+			session.PoolRes.Commit(total)
 		}
 		session.Pool = nil
 		session.PoolRes = nil
 	}
-
-	// checksum 台账与 mtime 由 recordCompleteMetadata 经共享内核 recordUploadSuccess 一次写入
-	// （此处原有一份重复写入，P2-d 删除：同一 (rel, checksum) 写两遍无收益，且是「两处实现
-	// 各自演化」的温床）。
-
-	// 任务 8 O-1：分块上传覆盖写（rename 已原子替换旧文件）记审计，与 write.go 单次上传的
-	// 覆盖写审计同形（同 action/object_type/result）；无覆盖（新文件）不审计（普通上传成功
-	// 也不记 audit，保持一致）。
-	//
-	// **Detail 文案是外部可观察的审计产物**（`/api/audit` 直出给 Web UI）：与合并前经
-	// RecordOverwriteAudit 落盘的那条逐字相同，由 pkg/server 的
-	// TestCompleteOverwriteReleaseUsage 钉住（断言恰好一条 overwrite 审计及其全部字段）。
-	if overwrote {
-		s.rt.recordFileAudit(r.Context(), "overwrite", session.Filename, auditResultSuccess, "分块上传覆盖现有文件（版本已保存）")
-	}
-
-	s.recordCompleteMetadata(owner, req.UploadID, session, finalChecksum)
-
-	s.rt.logger().Info("文件合并完成", "file_name", session.Filename, "checksum", shortid.ShortHash(finalChecksum), "size", session.TotalSize)
-	s.sendJSON(w, ChunkCompleteResponse{
-		Success:      true,
-		Filename:     session.Filename,
-		FileChecksum: finalChecksum,
-		Message:      "文件合并并校验通过",
-	}, http.StatusOK)
 }
 
 // prepareMergedTemp 在 complete 期对临时名做全文件校验（== file_checksum）并逐分片准确
@@ -1334,4 +1766,68 @@ func (s *Service) sendUploadRouteError(w http.ResponseWriter, r *http.Request, r
 	}
 	s.rt.logger().ErrorContext(r.Context(), "上传卷路由失败", "file_name", remotePath, "error", err.Error())
 	s.sendJSON(w, UploadResponse{Success: false, Message: errMsgSaveFailed}, http.StatusInternalServerError)
+}
+
+// encryptFinalizeRoot 把**在途明文**临时文件（可续传的分片暂存）以 at-rest 加密语义写入
+// rel，并删除临时文件。用于加密卷的分块上传 finalize：GCM 是流式格式，分片随机定位写
+// 不可行，故分片阶段保持明文暂存、落位时单遍加密（峰值 ≈ 明文+密文，与整文件原子写同量级）。
+// 写失败时不留半截目标（删除 rel），临时文件保留（调用方可重试）。
+func encryptFinalizeRoot(root *storage.Root, tmpRel, rel string) error {
+	src, err := root.Open(tmpRel)
+	if err != nil {
+		return fmt.Errorf("打开在途文件: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	w, werr := root.OpenFileEncrypted(rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if werr != nil {
+		return fmt.Errorf("创建加密封装目标: %w", werr)
+	}
+	if _, cerr := io.Copy(w, src); cerr != nil {
+		_ = w.Close()
+		_ = root.Remove(rel)
+		return fmt.Errorf("加密落位: %w", cerr)
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = root.Remove(rel)
+		return fmt.Errorf("加密落位收尾: %w", cerr)
+	}
+	return root.Remove(tmpRel)
+}
+
+// validateInitMetaExtra 校验 init 请求携带的 meta_extra（A/B/C 档）。
+// 返回 false 表示已回 400（fail-closed：不合法不落盘）。
+// 客户端收到 400 应「重试时不带 meta_extra」再走 PUT /api/files/meta 二次补录。
+func (s *Service) validateInitMetaExtra(w http.ResponseWriter, req *ChunkedInitRequest) bool {
+	if len(req.MetaExtra) == 0 {
+		return true
+	}
+	req.MetaExtra = meta.TrimExtra(req.MetaExtra)
+	if verr := meta.ValidateExtra(req.MetaExtra); verr != nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "meta_extra 无效: " + verr.Error()}, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// initUploadContext 取 init 的 owner/per-tenant UploadStore/目标 rel（fail-closed 500/400）。
+// 返回 ok=false 表示已回包。
+func (s *Service) initUploadContext(w http.ResponseWriter, r *http.Request, req *ChunkedInitRequest) (string, *UploadStore, *storage.Tenant, string, bool) {
+	owner := s.rt.actorOf(r)
+	store := s.rt.uploadStore(owner)
+	if store == nil {
+		s.rt.logger().Error("获取 per-tenant UploadStore 失败", "owner", owner)
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgCreateSession}, http.StatusInternalServerError)
+		return "", nil, nil, "", false
+	}
+	defTnt := s.rt.tenantOf(owner)
+	if defTnt == nil || defTnt.Root() == nil {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
+		return "", nil, nil, "", false
+	}
+	rel, ok := defTnt.UserRel(req.Filename)
+	if !ok {
+		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
+		return "", nil, nil, "", false
+	}
+	return owner, store, defTnt, rel, true
 }

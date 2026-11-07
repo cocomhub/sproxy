@@ -5,20 +5,28 @@ package server
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/compressx"
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // newTestCfgPtr 返回指向默认配置（uploadsDir=dir）的 atomic.Pointer[Config]，供 handler 测试写入 cfgPtr。
@@ -42,7 +50,7 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: testLogger(), Config: cfg})
 	h.cloudMgr = mgr
 
 	serverCfg := h.cfgPtr.Load()
@@ -51,8 +59,8 @@ func setupCloudArchiveTestWithCfg(t *testing.T, modify func(*Config)) (*httptest
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
-	mux.HandleFunc("POST /api/cloud/archive", h.cloudArchiveBatch)
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.archiveTaskHandler())
+	mux.HandleFunc("POST /api/cloud/archive", h.archiveBatchHandler())
 	return httptest.NewServer(mux), mgr, dir
 }
 
@@ -65,7 +73,7 @@ func setupCloudArchiveTest(t *testing.T) (*httptest.Server, *cloud.CloudDownload
 // createCompletedTask 创建一个已完成的任务，并在 <tenant>/cloud/<id>/ 下创建测试文件。
 func createCompletedTask(t *testing.T, mgr *cloud.CloudDownloadManager, filename string) string {
 	t.Helper()
-	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "")
+	task, err := mgr.CreateTask("url", "https://example.com/"+filename, filename, 100, "", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +94,7 @@ func TestCloudArchive_SingleTask(t *testing.T) {
 
 	id := createCompletedTask(t, mgr, "test.zip")
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{"archive_name":"single-task.tar.gz"}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON, strings.NewReader(`{"archive_name":"single-task.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +129,7 @@ func TestCloudArchive_TaskNotFound(t *testing.T) {
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +156,12 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 	defer ts.Close()
 
 	// 创建一个未完成的任务（默认 status = "pending"）
-	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "")
+	task, err := mgr.CreateTask("url", "https://example.com/test.zip", "test.zip", 100, "", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +191,7 @@ func TestCloudArchive_BatchTasks(t *testing.T) {
 	id2 := createCompletedTask(t, mgr, "file2.zip")
 
 	body := `{"task_ids":["` + id1 + `","` + id2 + `"],"archive_name":"batch-test.tar.gz"}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +226,7 @@ func TestCloudArchive_BatchEmptyTaskIDs(t *testing.T) {
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(`{"task_ids":[]}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(`{"task_ids":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +255,7 @@ func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
 	id := createCompletedTask(t, mgr, "valid.zip")
 
 	body := `{"task_ids":["` + id + `","nonexistent-id"]}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +289,7 @@ func TestCloudArchive_BatchAllTasksSkipped(t *testing.T) {
 	defer ts.Close()
 
 	body := `{"task_ids":["nonexistent-1","nonexistent-2"]}`
-	resp, err := http.Post(ts.URL+"/api/cloud/archive", "application/json", strings.NewReader(body))
+	resp, err := http.Post(ts.URL+"/api/cloud/archive", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +321,7 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	id := createCompletedTask(t, mgr, "test.zip")
 
 	// 不指定 archive_name，使用默认名称
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +338,7 @@ func TestCloudArchive_DefaultArchiveName(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success=true, got message: %s", result.Message)
 	}
-	if !strings.HasSuffix(result.File, ".tar.gz") {
+	if !strings.HasSuffix(result.File, tarGZExt) {
 		t.Fatalf("expected default archive name ending with '.tar.gz', got %q", result.File)
 	}
 	if result.Size <= 0 {
@@ -361,7 +369,7 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 	originalMTime := info.ModTime()
 
 	// 创建普通归档验证 mtime
-	resp, err := http.Post(url+"/api/archive", "application/json",
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON,
 		strings.NewReader(`{"files":["mtime-test.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +399,7 @@ func TestCloudArchive_SameNameConflict(t *testing.T) {
 	id := createCompletedTask(t, mgr, "test.zip")
 
 	// 第一次归档成功
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +410,7 @@ func TestCloudArchive_SameNameConflict(t *testing.T) {
 	}
 
 	// 同名再次归档 → 409
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{"archive_name":"conflict.tar.gz"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +430,7 @@ func TestCloudArchive_SizeLimit(t *testing.T) {
 
 	id := createCompletedTask(t, mgr, "test.zip")
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", "application/json",
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+id+"/archive", contentTypeJSON,
 		strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -450,18 +458,18 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	env.setOwnerQuota("alice", 1100)
 	sm := capacity.NewStorageManager(env.root, 1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/quota.zip", "quota.zip", 100, "alice")
+	task, err := mgr.CreateTask("url", "https://example.com/quota.zip", "quota.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -477,10 +485,10 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"quota.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusInsufficientStorage {
@@ -507,18 +515,18 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件
-	task, err := mgr.CreateTask("url", "https://example.com/gone.zip", "gone.zip", 100, "alice")
+	task, err := mgr.CreateTask("url", "https://example.com/gone.zip", "gone.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -535,10 +543,10 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"gone.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -570,12 +578,9 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 	if got := archiveScope.Usage(); got != 0 {
 		t.Fatalf("文件已不在后删除归档，archive 桶 Usage()=%d want 0（按登记释放，不虚高）", got)
 	}
-	// 登记已清除。
-	env.h.tenantMu.Lock()
-	_, stillReg := env.h.archiveUsage["alice"]["gone.tar.gz"]
-	env.h.tenantMu.Unlock()
-	if stillReg {
-		t.Fatal("删除后登记应已清除")
+	// 登记已清除（登记事实源随 S3c 迁入 cloudtasks.Service）。
+	if got := env.h.cloudTaskService().ArchiveUsage("alice", "gone.tar.gz"); got != 0 {
+		t.Fatalf("删除后登记应已清除，got %d", got)
 	}
 	// 幂等：再次删除（登记也不存在）仍成功且桶不虚高。
 	if err := env.h.deleteCloudArchive("alice", "gone.tar.gz"); err != nil {
@@ -597,16 +602,16 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	})
+	}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/newlayout.zip", "newlayout.zip", 100, "alice")
+	task, err := mgr.CreateTask("url", "https://example.com/newlayout.zip", "newlayout.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -624,12 +629,12 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest("POST", "/api/cloud/tasks/"+taskID+"/archive", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		rr := httptest.NewRecorder()
 		aliceMux.ServeHTTP(rr, req)
 		return rr
@@ -659,5 +664,264 @@ func TestCloudArchive_NewLayout(t *testing.T) {
 	// kind=cloud_archive 下载 filename=xxx.tar.gz → 200
 	if code := env.doGet(t, "alice", "/download?filename=xxx.tar.gz&kind=cloud_archive"); code != http.StatusOK {
 		t.Fatalf("kind=cloud_archive 下载应 200, got %d", code)
+	}
+}
+
+// setupCloudArchiveVolumeHandlers 构造带 fake 外部卷 + completed 任务的 handler，
+// 供单任务/批量归档 target_volume 的统一转存测试直接调用 handler（不经 HTTP mux）。
+func setupCloudArchiveVolumeHandlers(t *testing.T) (*Handlers, *serverMemFS, *cloud.CloudDownloadManager) {
+	t.Helper()
+	dir := testutil.MkdirTemp(t, "archive-volume-")
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	sm := capacity.NewStorageManager(dir, 1<<30, nil, testLogger())
+	h.storageMgr = sm
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor,
+		ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs,
+		Logger: testLogger(), Config: defaultCloudDownloadConfig(),
+	})
+	h.cloudMgr = mgr
+	return h, fs, mgr
+}
+
+// TestCloudArchive_SingleTask_ToVolume 单任务归档 target_volume：打包转存外部卷
+// （owner 前缀键 + tar.gz 内容），不再静默按桶归档。
+func TestCloudArchive_SingleTask_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(fs.files[key])); err != nil {
+		t.Fatalf("目标应为 tar.gz（gzip 头）: %v", err)
+	}
+}
+
+// TestCloudArchive_Batch_ToVolume 批量归档 target_volume：多文件打包转存外部卷。
+func TestCloudArchive_Batch_ToVolume(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id1 := createCompletedTask(t, mgr, "a.bin")
+	id2 := createCompletedTask(t, mgr, "b.bin")
+	body := fmt.Sprintf(`{"task_ids":[%q,%q],"archive_name":"batch.tar.gz","target_volume":"vault"}`, id1, id2)
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/archive", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.archiveBatchHandler()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/archive/batch.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite 同名归档二次转存 → 409：锁定
+// 目标卷装饰链的 WriteIfAbsent + transfer 存在性检查（防静默覆盖）。
+func TestCloudArchive_SingleTask_ToVolume_RejectsOverwrite(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+			strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault"}`))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.archiveTaskHandler()(rec, req)
+		return rec.Code
+	}
+	if code := post(); code != http.StatusOK {
+		t.Fatalf("首次转存应 200，got %d", code)
+	}
+	if code := post(); code != http.StatusConflict {
+		t.Fatalf("同名二次转存应 409（拒绝静默覆盖），got %d", code)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_LockKey 转存写锁与文件域同键空间（user/<rel>）：
+// 预占 user/archive/lock.tar.gz 锁后转存应 409（证明锁键未用带 owner 前缀的 FSPath）。
+func TestCloudArchive_SingleTask_ToVolume_LockKey(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	release, ok := h.acquireFileLock("", "user/archive/lock.tar.gz")
+	if !ok {
+		t.Fatal("预占锁失败")
+	}
+	defer release()
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"lock.tar.gz","target_volume":"vault"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("锁被占时应 409，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_SecretsRejected secrets 密钥卷非通用转存目标 →
+// 400 fail-closed（与 cloud 下载转存 checkTransferVolumePreflight 同语义）。
+func TestCloudArchive_SingleTask_ToVolume_SecretsRejected(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	h.volSet = newFakeVolSetForTypedTransfer("secrets", "secrets", &serverMemFS{files: map[string][]byte{}})
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"secrets"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("secrets 卷应 400，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_TargetPath 显式目标路径（客户端由卷 URI 归一）：
+// user 桶内子目录 + 文件名直接生效，不再固定 archive/ 前缀。
+func TestCloudArchive_SingleTask_ToVolume_TargetPath(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	body := `{"archive_name":"s.tar.gz","target_volume":"vault","target_path":"backups/2026/s.tar.gz"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	key := "anonymous/user/backups/2026/s.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键 %q 缺失（实际 %v）", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	var resp CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if want := "vault://vault/" + key; resp.File != want {
+		t.Fatalf("File=%q want %q", resp.File, want)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Encrypt 归档转存 + 流式加密（encrypt=true）：
+// 产物为 tar.gz.aes 密文（不可直接 gzip 解），密钥来自 archive.key_file，解密后 tar 内含源文件。
+func TestCloudArchive_SingleTask_ToVolume_Encrypt(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	key := bytes.Repeat([]byte{0x11}, 32)
+	keyPath := filepath.Join(h.cfgPtr.Load().StorageRoot, "archive.key")
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.cfgPtr.Load().Archive.KeyFile = keyPath
+
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","encrypt":true}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz.aes"]
+	if len(raw) == 0 {
+		t.Fatal("加密转存未落盘")
+	}
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("加密产物不应直接 gzip 可解")
+	}
+	cr, err := files.NewCipherReader("aes-256-gcm", key, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewCipherReader: %v", err)
+	}
+	gr, err := gzip.NewReader(cr)
+	if err != nil {
+		t.Fatalf("解密后应可 gzip 解: %v", err)
+	}
+	defer gr.Close()
+	names, err := tarNames(gr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "single.bin" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+}
+
+// TestCloudArchive_SingleTask_ToVolume_Compression 归档转存 + 压缩选型（zstd）。
+func TestCloudArchive_SingleTask_ToVolume_Compression(t *testing.T) {
+	t.Parallel()
+	h, fs, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive",
+		strings.NewReader(`{"archive_name":"s.tar.gz","target_volume":"vault","compression":"zstd"}`))
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	h.archiveTaskHandler()(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	raw := fs.files["anonymous/user/archive/s.tar.gz"]
+	if _, err := gzip.NewReader(bytes.NewReader(raw)); err == nil {
+		t.Fatal("zstd 产物不应被 gzip 解")
+	}
+	zr, err := compressx.NewReader(compressx.Zstd, bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("NewReader(zstd): %v", err)
+	}
+	defer zr.Close()
+	if _, err := tarNames(zr); err != nil {
+		t.Fatalf("zstd 解包: %v", err)
+	}
+}
+
+// TestCloudArchive_ExtrasRequireTarget 预处理/目标路径选项缺前置条件 → 400（防静默忽略）：
+// encrypt/compression 无 target_volume；cipher 无 encrypt；target_path 无 target_volume。
+func TestCloudArchive_ExtrasRequireTarget(t *testing.T) {
+	t.Parallel()
+	h, _, mgr := setupCloudArchiveVolumeHandlers(t)
+	id := createCompletedTask(t, mgr, "single.bin")
+	for _, body := range []string{
+		`{"archive_name":"s.tar.gz","encrypt":true}`,
+		`{"archive_name":"s.tar.gz","compression":"zstd"}`,
+		`{"archive_name":"s.tar.gz","target_volume":"vault","cipher":"aes-256-gcm"}`,
+		`{"archive_name":"s.tar.gz","target_path":"backups/s.tar.gz"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/cloud/tasks/"+id+"/archive", strings.NewReader(body))
+		req.SetPathValue("id", id)
+		rec := httptest.NewRecorder()
+		h.archiveTaskHandler()(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("选项缺前置条件应 400，body=%s got %d", body, rec.Code)
+		}
+	}
+}
+
+// tarNames 读取 tar 流的条目名列表。
+func tarNames(r io.Reader) ([]string, error) {
+	tr := tar.NewReader(r)
+	var names []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return names, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, hdr.Name)
 	}
 }

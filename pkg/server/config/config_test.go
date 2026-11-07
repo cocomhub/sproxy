@@ -1,0 +1,1262 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/provider"
+	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
+	"gopkg.in/yaml.v3"
+)
+
+// compile-time interface check
+var _ provider.Provider = mapProvider{}
+
+func TestConfig_WebTunnelDefault(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	if !c.Web.Tunnel {
+		t.Fatal("web.tunnel 默认应为 true")
+	}
+}
+
+func TestConfig_DefaultsFilled(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Addr == "" {
+		t.Fatal("Addr default empty")
+	}
+	if cfg.StorageRoot == "" {
+		t.Fatal("StorageRoot default empty")
+	}
+	if cfg.ChunkSize <= 0 {
+		t.Fatal("ChunkSize default <= 0")
+	}
+	if cfg.UploadSessionTTL <= 0 {
+		t.Fatal("UploadSessionTTL default <= 0")
+	}
+	if cfg.ServerTimeouts.Shutdown <= 0 {
+		t.Fatalf("ServerTimeouts.Shutdown default <= 0: %v", cfg.ServerTimeouts.Shutdown)
+	}
+	if cfg.ServerTimeouts.Shutdown != 30*time.Second {
+		t.Fatalf("ServerTimeouts.Shutdown default want 30s, got %v", cfg.ServerTimeouts.Shutdown)
+	}
+	if !cfg.TLS.Enabled {
+		t.Fatal("TLS.Enabled default should be true")
+	}
+	if !cfg.TLS.AutoTLS {
+		t.Fatal("TLS.AutoTLS default should be true")
+	}
+	if cfg.CloudDownloadTimeout != 30*time.Minute {
+		t.Fatalf("CloudDownloadTimeout default want 30m, got %v", cfg.CloudDownloadTimeout)
+	}
+	if cfg.CloudDownloadIdleTimeout != 1*time.Minute {
+		t.Fatalf("CloudDownloadIdleTimeout default want 1m, got %v", cfg.CloudDownloadIdleTimeout)
+	}
+	if cfg.CloudMaxRetries != 10 {
+		t.Fatalf("CloudMaxRetries default want 10, got %d", cfg.CloudMaxRetries)
+	}
+	if cfg.CloudRetryDelay != 10*time.Second {
+		t.Fatalf("CloudRetryDelay default want 10s, got %v", cfg.CloudRetryDelay)
+	}
+	if cfg.CloudMaxBatchURLs != 100 {
+		t.Fatalf("CloudMaxBatchURLs default want 100, got %d", cfg.CloudMaxBatchURLs)
+	}
+}
+
+func TestConfig_Validate_FillsZeroes(t *testing.T) {
+	t.Parallel()
+	c := &Config{TLS: TLSConfig{Enabled: true}}
+	c.SetDefaults()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if c.Addr == "" || c.StorageRoot == "" || c.ChunkSize <= 0 ||
+		c.UploadSessionTTL <= 0 || c.ServerTimeouts.Shutdown <= 0 {
+		t.Fatalf("SetDefaults did not fill zero values: %+v", c)
+	}
+}
+
+func TestConfig_Defaults_HubMaxConnections(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.SetDefaults()
+	if cfg.Hub.MaxConnections != 256 {
+		t.Fatalf("Hub.MaxConnections default want 256, got %d", cfg.Hub.MaxConnections)
+	}
+	// 显式配置非零值应保留
+	cfg2 := Default()
+	cfg2.Hub.MaxConnections = 64
+	cfg2.SetDefaults()
+	if cfg2.Hub.MaxConnections != 64 {
+		t.Fatalf("Hub.MaxConnections want preserved 64, got %d", cfg2.Hub.MaxConnections)
+	}
+}
+
+func TestConfig_Validate_HubEnabledNoTokenRequired(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 不再要求任何 hub 级 token（准入改由顶层 access_keys 提供，
+	// SproxySig AccessKey + HMAC proof）；仅需 ws transport 即可通过校验（S42）。
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.WS.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("hub.enabled=true 且 ws 传输开启应通过校验（无需 token）: %v", err)
+	}
+	// hub 未启用时不受 ws 开关影响。
+	cfg2 := Default()
+	cfg2.Hub.Enabled = false
+	cfg2.Hub.Transports.WS.Enabled = false
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
+	}
+}
+
+func TestConfig_Validate_HubEnabledRequiresTransport(t *testing.T) {
+	t.Parallel()
+	// hub.enabled=true 但 transports.ws.enabled=false → 校验失败（S42，
+	// WS 是当前唯一节点接入传输，hub 启用而无 transport 时节点无法连接）。
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub.enabled=true but transports.ws.enabled=false")
+	}
+	// 启用 ws 后应通过
+	cfg.Hub.Transports.WS.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected error with ws enabled: %v", err)
+	}
+	// hub 未启用时不受 ws 开关影响
+	cfg2 := Default()
+	cfg2.Hub.Transports.WS.Enabled = false
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("hub disabled should not require ws transport: %v", err)
+	}
+}
+
+// TestConfig_Default_TCPTransportDisabled 验证 hub.transports.tcp 默认关闭
+// （显式开启才生效），且默认监听地址为空（由装配点回落 127.0.0.1:18084）。
+func TestConfig_Default_TCPTransportDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.Transports.TCP.Enabled {
+		t.Fatal("hub.transports.tcp.enabled 默认应为 false")
+	}
+	if cfg.Hub.Transports.TCP.Listen != "" {
+		t.Fatalf("hub.transports.tcp.listen 默认应为空，got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+}
+
+// TestConfig_SetDefaults_TCPListen 验证 tcp 传输启用且 listen 为空时回落默认
+// 127.0.0.1:18084（loopback，与 sclient relay --transport tcp 无 --hub 的默认回落一致）。
+// 安全边界：默认绑定 loopback，远程可达需显式配置 listen。
+func TestConfig_SetDefaults_TCPListen(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Transports.TCP.Enabled = true
+	cfg.SetDefaults()
+	if cfg.Hub.Transports.TCP.Listen != "127.0.0.1:18084" {
+		t.Fatalf("tcp listen 默认应为 127.0.0.1:18084，got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+	// 显式配置的 listen 应保留
+	cfg2 := Default()
+	cfg2.Hub.Transports.TCP.Enabled = true
+	cfg2.Hub.Transports.TCP.Listen = "127.0.0.1:19000"
+	cfg2.SetDefaults()
+	if cfg2.Hub.Transports.TCP.Listen != "127.0.0.1:19000" {
+		t.Fatalf("显式 tcp listen 应保留，got %q", cfg2.Hub.Transports.TCP.Listen)
+	}
+}
+
+// TestConfig_Validate_TCPPortConflict 验证 hub TCP 中继与主 HTTP server 同端口时
+// 校验失败（提前给清晰错误，而非 OS 绑定失败）。
+func TestConfig_Validate_TCPPortConflict(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.TCP.Enabled = true
+	cfg.Hub.Transports.TCP.Listen = ":18083" // 与默认 addr :18083 同端口
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when TCP relay port conflicts with HTTP addr")
+	}
+	// 不同端口应通过
+	cfg2 := Default()
+	cfg2.Hub.Enabled = true
+	cfg2.Hub.Transports.TCP.Enabled = true
+	cfg2.Hub.Transports.TCP.Listen = "127.0.0.1:18084"
+	cfg2.SetDefaults()
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("different port should pass: %v", err)
+	}
+}
+
+// TestConfig_Validate_HubEnabledRequiresAtLeastOneTransport 验证 hub 启用时
+// ws/tcp 至少启用一种；两者皆关校验失败（旧规则只认 ws，P1 TCP 中继后放宽）。
+func TestConfig_Validate_HubEnabledRequiresAtLeastOneTransport(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when hub enabled but no transport enabled")
+	}
+	// 仅 tcp 启用应通过（无 WS 场景）
+	cfgOnlyTCP := Default()
+	cfgOnlyTCP.Hub.Enabled = true
+	cfgOnlyTCP.Hub.Transports.TCP.Enabled = true
+	if err := cfgOnlyTCP.Validate(); err != nil {
+		t.Fatalf("hub enabled with only tcp transport should pass: %v", err)
+	}
+	// 仅 ws 启用应通过（向后兼容）
+	cfgOnlyWS := Default()
+	cfgOnlyWS.Hub.Enabled = true
+	cfgOnlyWS.Hub.Transports.WS.Enabled = true
+	if err := cfgOnlyWS.Validate(); err != nil {
+		t.Fatalf("hub enabled with only ws transport should pass: %v", err)
+	}
+	// 两者都启用应通过
+	cfgBoth := Default()
+	cfgBoth.Hub.Enabled = true
+	cfgBoth.Hub.Transports.WS.Enabled = true
+	cfgBoth.Hub.Transports.TCP.Enabled = true
+	if err := cfgBoth.Validate(); err != nil {
+		t.Fatalf("hub enabled with ws+tcp transports should pass: %v", err)
+	}
+	// hub 未启用时不受影响
+	cfgDisabled := Default()
+	cfgDisabled.Hub.Enabled = false
+	if err := cfgDisabled.Validate(); err != nil {
+		t.Fatalf("hub disabled should pass regardless of transports: %v", err)
+	}
+}
+
+// TestConfig_Default_QUICTransportDisabled 验证 hub.transports.quic 默认关闭
+// （显式开启才生效），且默认监听地址为空（由装配点回落 127.0.0.1:18088）。
+func TestConfig_Default_QUICTransportDisabled(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.Transports.QUIC.Enabled {
+		t.Fatal("hub.transports.quic.enabled 默认应为 false")
+	}
+	if cfg.Hub.Transports.QUIC.Listen != "" {
+		t.Fatalf("hub.transports.quic.listen 默认应为空，got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+}
+
+// TestConfig_SetDefaults_QUICListen 验证 quic 传输启用且 listen 为空时回落默认
+// 127.0.0.1:18088（loopback，与 sclient relay --transport quic 无 --hub 的默认回落一致）。
+// 安全边界：默认绑定 loopback，远程可达需显式配置 listen（与 tcp 中继同语义）。
+func TestConfig_SetDefaults_QUICListen(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Transports.QUIC.Enabled = true
+	cfg.SetDefaults()
+	if cfg.Hub.Transports.QUIC.Listen != "127.0.0.1:18088" {
+		t.Fatalf("quic listen 默认应为 127.0.0.1:18088，got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+	// 显式配置的 listen 应保留
+	cfg2 := Default()
+	cfg2.Hub.Transports.QUIC.Enabled = true
+	cfg2.Hub.Transports.QUIC.Listen = "127.0.0.1:19088"
+	cfg2.SetDefaults()
+	if cfg2.Hub.Transports.QUIC.Listen != "127.0.0.1:19088" {
+		t.Fatalf("显式 quic listen 应保留，got %q", cfg2.Hub.Transports.QUIC.Listen)
+	}
+}
+
+// TestConfig_Validate_QUICPortConflict 验证 hub QUIC 中继与主 HTTP server 同端口时
+// 校验失败（提前给清晰错误，而非 OS 绑定失败；与 TCP 中继同语义）。
+func TestConfig_Validate_QUICPortConflict(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.QUIC.Enabled = true
+	cfg.Hub.Transports.QUIC.Listen = ":18083" // 与默认 addr :18083 同端口
+	cfg.SetDefaults()
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when QUIC relay port conflicts with HTTP addr")
+	}
+	// 不同端口应通过
+	cfg2 := Default()
+	cfg2.Hub.Enabled = true
+	cfg2.Hub.Transports.QUIC.Enabled = true
+	cfg2.Hub.Transports.QUIC.Listen = "127.0.0.1:18088"
+	cfg2.SetDefaults()
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("different port should pass: %v", err)
+	}
+}
+
+// TestLoadFromProvider_QUICTransport 验证 YAML 解析 hub.transports.quic 配置。
+func TestLoadFromProvider_QUICTransport(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": false},
+				"quic": map[string]any{
+					"enabled": true,
+					"listen":  "127.0.0.1:19088",
+				},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if !cfg.Hub.Transports.QUIC.Enabled {
+		t.Fatal("expected hub.transports.quic.enabled=true")
+	}
+	if cfg.Hub.Transports.QUIC.Listen != "127.0.0.1:19088" {
+		t.Fatalf("expected quic listen 127.0.0.1:19088, got %q", cfg.Hub.Transports.QUIC.Listen)
+	}
+	if cfg.Hub.Transports.WS.Enabled {
+		t.Fatal("expected ws transport disabled")
+	}
+}
+
+// TestConfig_Validate_HubEnabledQUICOnly 验证 hub 启用时仅 quic 传输即可通过校验
+// （quic 是独立 UDP listener，与 ws/tcp 同级）。
+func TestConfig_Validate_HubEnabledQUICOnly(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Hub.Enabled = true
+	cfg.Hub.Transports.QUIC.Enabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("hub enabled with only quic transport should pass: %v", err)
+	}
+}
+
+// TestLoadFromProvider_TCPTransport 验证 YAML 解析 hub.transports.tcp 配置。
+func TestLoadFromProvider_TCPTransport(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": false},
+				"tcp": map[string]any{
+					"enabled": true,
+					"listen":  "127.0.0.1:19000",
+				},
+			},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if !cfg.Hub.Transports.TCP.Enabled {
+		t.Fatal("expected hub.transports.tcp.enabled=true")
+	}
+	if cfg.Hub.Transports.TCP.Listen != "127.0.0.1:19000" {
+		t.Fatalf("expected tcp listen 127.0.0.1:19000, got %q", cfg.Hub.Transports.TCP.Listen)
+	}
+	if cfg.Hub.Transports.WS.Enabled {
+		t.Fatal("expected ws transport disabled")
+	}
+}
+
+func TestLoadFromProvider_DefaultsOnly(t *testing.T) {
+	t.Parallel()
+	p := mapProvider{m: map[string]any{}}
+	cfg, err := LoadFromProvider(p)
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.Addr != ":18083" {
+		t.Fatalf("expected default Addr :18083, got %q", cfg.Addr)
+	}
+}
+
+func TestLoadFromProvider_OverridesViaSet(t *testing.T) {
+	t.Parallel()
+	p := mapProvider{m: map[string]any{"addr": ":19999"}}
+	cfg, err := LoadFromProvider(p)
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.Addr != ":19999" {
+		t.Fatalf("want :19999, got %q", cfg.Addr)
+	}
+}
+
+func TestLoadConfig_FileNotExist_ReturnsDefault(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig(\"\"): %v", err)
+	}
+	if cfg.Addr != ":18083" {
+		t.Fatalf("expected default, got %+v", cfg)
+	}
+}
+
+func TestSaveConfig_ToFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "sproxy.yaml")
+
+	cfg := Default()
+	cfg.Addr = ":19999"
+	if err := SaveConfig(cfg, path); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.Addr != ":19999" {
+		t.Fatalf("Addr mismatch: want :19999, got %q", loaded.Addr)
+	}
+}
+
+func TestSaveConfig_ReadOnlyDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("read-only dir test not supported on Windows")
+	}
+	t.Parallel()
+
+	roDir, cleanup := testutil.MakeReadOnlyDir(t)
+	defer cleanup()
+
+	cfg := Default()
+	err := SaveConfig(cfg, filepath.Join(roDir, "sproxy.yaml"))
+	if err == nil {
+		t.Fatal("expected error when saving to read-only directory")
+	}
+}
+
+func TestSaveConfig_InvalidPath(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	err := SaveConfig(cfg, "/nonexistent/dir/config.yaml")
+	if err == nil {
+		t.Error("expected error saving to nonexistent directory")
+	}
+}
+
+func TestLoadConfig_FileNotFound(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadConfig("/nonexistent/config.yaml")
+	if err != nil {
+		t.Logf("LoadConfig for nonexistent file returned error: %v (acceptable)", err)
+	}
+	if cfg == nil {
+		t.Log("LoadConfig returned nil config (acceptable)")
+	}
+}
+
+// TestConfig_YAMLTagsMatchMapstructure 验证配置树中所有字段的 yaml 与 mapstructure 标签一致。
+//
+// 回归防护（I31）：viper 通过 mapstructure 标签解码，yaml.Unmarshal 通过 yaml 标签解码。
+// 两者键名不一致时（如 ACME 字段曾写 mapstructure:"http_01" 而 yaml 键为 http01），
+// viper 路径静默丢失配置值恒为默认值，而基于 yaml 的测试路径不受影响。
+// 该测试直接断言两条解码路径的键名一致，任何字段再出现标签漂移都会立即失败。
+func TestConfig_YAMLTagsMatchMapstructure(t *testing.T) {
+	t.Parallel()
+
+	seen := map[reflect.Type]bool{}
+	var check func(typ reflect.Type)
+	check = func(typ reflect.Type) {
+		switch typ.Kind() {
+		case reflect.Pointer:
+			check(typ.Elem())
+			return
+		case reflect.Slice, reflect.Array:
+			check(typ.Elem())
+			return
+		case reflect.Struct:
+			// 继续检查字段
+		default:
+			return
+		}
+		if seen[typ] {
+			return
+		}
+		seen[typ] = true
+		for f := range typ.Fields() {
+			compareFieldYAMLMaps(t, typ, f, check)
+		}
+	}
+	check(reflect.TypeFor[Config]())
+}
+
+// compareFieldYAMLMaps 校验单个字段的 yaml 与 mapstructure 标签键名一致，并对复合类型递归。
+func compareFieldYAMLMaps(t *testing.T, typ reflect.Type, f reflect.StructField, check func(reflect.Type)) {
+	t.Helper()
+	if !f.IsExported() {
+		return
+	}
+	yamlTag := f.Tag.Get("yaml")
+	mapTag := f.Tag.Get("mapstructure")
+	if yamlTag != "" && yamlTag != "-" && mapTag != "" && mapTag != "-" {
+		yKey, _, _ := strings.Cut(yamlTag, ",")
+		mKey, _, _ := strings.Cut(mapTag, ",")
+		if yKey != mKey {
+			t.Errorf("%s.%s: yaml 标签 %q 与 mapstructure 标签 %q 不一致", typ.Name(), f.Name, yKey, mKey)
+		}
+	}
+	check(f.Type)
+}
+
+// TestConfig_Registration_Defaults 覆盖凭据 store 化的新配置字段默认值/校验：
+// registration.disable 默认 false（=允许注册）、allow_insecure_loopback 默认 false、
+// credential_ttl 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
+func TestConfig_Registration_Defaults(t *testing.T) {
+	c := Default()
+	helperConfigRegistrationDefaults_defaults(t, c)
+
+	// 负值 = 显式禁用首启（合法，RegisterRoutes 据此跳过 anonymous 生成）。
+	neg := Default()
+	neg.CredentialTTL = -1
+	if err := neg.Validate(); err != nil {
+		t.Errorf("credential_ttl 负值（显式禁首启）应通过 Validate: %v", err)
+	}
+	// 零值经 SetDefaults 复活为 30d。
+	zero := &Config{}
+	zero.SetDefaults()
+	helperConfigRegistrationDefaults_afterSetDefaults(t, zero)
+
+	// Validate 负向：非法值必须拒绝。
+	invalid := func(mut func(*RegistrationConfig)) error {
+		c := Default()
+		mut(&c.Registration)
+		return c.Validate()
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.LoginFailLimit = 0 }); err == nil {
+		t.Error("login_fail_limit=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.SessionTTL = 0 }); err == nil {
+		t.Error("session_ttl=0 应被 Validate 拒绝")
+	}
+	if err := invalid(func(r *RegistrationConfig) { r.CliTTL = -time.Hour }); err == nil {
+		t.Error("cli_ttl<=0 应被 Validate 拒绝")
+	}
+}
+
+// helperConfigRegistrationDefaults_defaults 钉住 Default() 的注册/TOTP 字段默认值。
+func helperConfigRegistrationDefaults_defaults(t *testing.T, c *Config) {
+	t.Helper()
+	if c.Registration.Disable {
+		t.Error("registration.disable 默认应为 false（允许注册）")
+	}
+	if c.AllowInsecureLoopback {
+		t.Error("allow_insecure_loopback 默认应为 false（生产无认证 401）")
+	}
+	if c.CredentialTTL != 30*24*time.Hour {
+		t.Errorf("credential_ttl 默认应为 30d，实际 %v", c.CredentialTTL)
+	}
+	// TOTP 注册/登录新字段（task ⑧-⑩）默认值。
+	if c.Registration.ForceTOTP {
+		t.Error("registration.force_totp 默认应为 false（简单 AK/SK 注册）")
+	}
+	if c.Registration.SessionTTL != 7*24*time.Hour {
+		t.Errorf("registration.session_ttl 默认应为 7 天，实际 %v", c.Registration.SessionTTL)
+	}
+	if c.Registration.CliTTL != 7*24*time.Hour {
+		t.Errorf("registration.cli_ttl 默认应为 7d(168h)，实际 %v", c.Registration.CliTTL)
+	}
+	if c.Registration.LoginFailLimit != 5 {
+		t.Errorf("registration.login_fail_limit 默认应为 5，实际 %d", c.Registration.LoginFailLimit)
+	}
+	if c.Registration.LoginFailWindow != 15*time.Minute {
+		t.Errorf("registration.login_fail_window 默认应为 15m，实际 %v", c.Registration.LoginFailWindow)
+	}
+}
+
+// helperConfigRegistrationDefaults_afterSetDefaults 钉住零值 Config 经 SetDefaults 后
+// TOTP 注册字段复活为默认值。
+func helperConfigRegistrationDefaults_afterSetDefaults(t *testing.T, zero *Config) {
+	t.Helper()
+	if zero.CredentialTTL != 30*24*time.Hour {
+		t.Errorf("SetDefaults 后 credential_ttl 应为 30d，实际 %v", zero.CredentialTTL)
+	}
+	if zero.Registration.SessionTTL != 7*24*time.Hour {
+		t.Errorf("SetDefaults 后 session_ttl 应为 7d，实际 %v", zero.Registration.SessionTTL)
+	}
+	if zero.Registration.CliTTL != 7*24*time.Hour {
+		t.Errorf("SetDefaults 后 cli_ttl 应为 7d(168h)，实际 %v", zero.Registration.CliTTL)
+	}
+	if zero.Registration.LoginFailLimit != 5 {
+		t.Errorf("SetDefaults 后 login_fail_limit 应为 5，实际 %d", zero.Registration.LoginFailLimit)
+	}
+	if zero.Registration.LoginFailWindow != 15*time.Minute {
+		t.Errorf("SetDefaults 后 login_fail_window 应为 15m，实际 %v", zero.Registration.LoginFailWindow)
+	}
+}
+
+// TestConfig_VirtualSubnet_Default 校验 hub.virtual_subnet 默认值为 CGNAT 100.64.0.0/10，
+// 空值经 SetDefaults 填充，非空值不被覆盖。
+func TestConfig_VirtualSubnet_Default(t *testing.T) {
+	c := Default()
+	if c.Hub.VirtualSubnet != hub.DefaultVirtualSubnet {
+		t.Fatalf("Default().Hub.VirtualSubnet = %q, want %q", c.Hub.VirtualSubnet, hub.DefaultVirtualSubnet)
+	}
+	c2 := &Config{}
+	c2.SetDefaults()
+	if c2.Hub.VirtualSubnet != hub.DefaultVirtualSubnet {
+		t.Fatalf("SetDefaults 后 Hub.VirtualSubnet = %q, want %q", c2.Hub.VirtualSubnet, hub.DefaultVirtualSubnet)
+	}
+	c3 := Default()
+	c3.Hub.VirtualSubnet = "10.0.0.0/8"
+	c3.SetDefaults()
+	if c3.Hub.VirtualSubnet != "10.0.0.0/8" {
+		t.Fatalf("SetDefaults 不应覆盖非空 VirtualSubnet, got %q", c3.Hub.VirtualSubnet)
+	}
+}
+
+// TestConfig_Defaults_HubDHTPersistFile 验证 hub.dht_persist_file 默认空
+// （持久化缺省关闭，零行为变更）。
+func TestConfig_Defaults_HubDHTPersistFile(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if cfg.Hub.DHTPersistFile != "" {
+		t.Fatalf("Hub.DHTPersistFile 默认应为空，got %q", cfg.Hub.DHTPersistFile)
+	}
+}
+
+// TestLoadFromProvider_HubDHTPersistFile 验证 YAML 解析 hub.dht_persist_file 配置。
+func TestLoadFromProvider_HubDHTPersistFile(t *testing.T) {
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"hub": map[string]any{
+			"enabled": true,
+			"transports": map[string]any{
+				"ws": map[string]any{"enabled": true},
+			},
+			"dht":              "kad",
+			"dht_persist_file": "/tmp/kad-dht.json",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider failed: %v", err)
+	}
+	if cfg.Hub.DHT != "kad" {
+		t.Fatalf("Hub.DHT want kad, got %q", cfg.Hub.DHT)
+	}
+	if cfg.Hub.DHTPersistFile != "/tmp/kad-dht.json" {
+		t.Fatalf("Hub.DHTPersistFile want /tmp/kad-dht.json, got %q", cfg.Hub.DHTPersistFile)
+	}
+}
+
+// TestConfig_StorageRoot 验证 storage_root 回退与 owner_quotas 默认值逻辑（任务 4）。
+// StorageRoot() 字段非空优先，否则回退 StorageRoot（兼容旧配置）；OwnerQuotaFor 显式 owner > "*" > 0。
+func TestConfig_StorageRoot(t *testing.T) {
+	c := Default()
+	c.StorageRoot = "./storage"
+	if c.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot=%q", c.StorageRoot)
+	}
+	// OwnerQuotaFor：未配置返回默认值
+	if got := c.OwnerQuotaFor("alice"); got != 0 {
+		t.Fatalf("OwnerQuotaFor(默认)=%d want 0", got)
+	}
+	c.OwnerQuotas = map[string]ByteSize{"*": 5 << 30, "alice": 10 << 30}
+	if got := c.OwnerQuotaFor("alice"); got != 10<<30 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d", got)
+	}
+	if got := c.OwnerQuotaFor("bob"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(bob 默认*)=%d", got)
+	}
+}
+
+// TestLoadFromProvider_StorageRootOwnerQuotas 验证 YAML 解析 storage_root/owner_quotas 配置
+// （owner_quotas 值支持纯数字字节与人类可读大小；"*" 为默认值）。
+func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"storage_root": "./storage",
+		"owner_quotas": map[string]any{"*": int64(5 << 30), "alice": int64(10 << 30)},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot()=%q want ./storage", cfg.StorageRoot)
+	}
+	if got := cfg.OwnerQuotaFor("alice"); got != 10<<30 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d want %d", got, 10<<30)
+	}
+	if got := cfg.OwnerQuotaFor("bob"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(bob)=%d want %d（回退 * 默认）", got, 5<<30)
+	}
+}
+
+// TestLoadFromProvider_OwnerQuotas_HumanReadable 验证 owner_quotas 值支持人类可读大小
+// （"5GiB"/"2GB"/"1.5MiB" 等，大小写不敏感），与纯数字字节等价。
+func TestLoadFromProvider_OwnerQuotas_HumanReadable(t *testing.T) {
+	// 并行化：纯 mapProvider 解码，无共享全局状态。
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"owner_quotas": map[string]any{
+			"*":         "5GiB",
+			"alice":     "2GB",
+			"bob":       "1.5MiB",
+			"anonymous": 1073741824,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.OwnerQuotaFor("*"); got != 5<<30 {
+		t.Fatalf("OwnerQuotaFor(*)=%d want %d (5GiB)", got, 5<<30)
+	}
+	if got := cfg.OwnerQuotaFor("alice"); got != 2*1000*1000*1000 {
+		t.Fatalf("OwnerQuotaFor(alice)=%d want %d (2GB)", got, 2*1000*1000*1000)
+	}
+	if got := cfg.OwnerQuotaFor("bob"); got != int64(1.5*1024*1024) {
+		t.Fatalf("OwnerQuotaFor(bob)=%d want %d (1.5MiB)", got, int64(1.5*1024*1024))
+	}
+	if got := cfg.OwnerQuotaFor("anonymous"); got != 1073741824 {
+		t.Fatalf("OwnerQuotaFor(anonymous)=%d want 1073741824（纯数字）", got)
+	}
+	// 非法人类可读值 → 校验/解码失败（fail-closed）。
+	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"owner_quotas": map[string]any{"alice": "5XB"},
+	}}); err == nil {
+		t.Fatal("非法人类可读大小应解码失败")
+	}
+}
+
+// TestLoadFromProvider_StorageRootFallback 验证仅配置 storage_root 时正确解析，且旧键
+// uploads_dir 被忽略（回退默认 ./storage）——uploads_dir 字段已完全移除，不兼容旧配置键。
+func TestLoadFromProvider_StorageRootFallback(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"storage_root": "/old/uploads"}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if cfg.StorageRoot != "/old/uploads" {
+		t.Fatalf("StorageRoot()=%q want /old/uploads", cfg.StorageRoot)
+	}
+	// 旧键 uploads_dir 已被移除：仅配 uploads_dir 时解析不到 storage_root → 回退默认。
+	cfgOld, err := LoadFromProvider(mapProvider{m: map[string]any{"uploads_dir": "/old/uploads"}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider(旧键): %v", err)
+	}
+	if cfgOld.StorageRoot != "./storage" {
+		t.Fatalf("StorageRoot(仅配 uploads_dir)=%q want 默认 ./storage（旧键已废弃）", cfgOld.StorageRoot)
+	}
+}
+
+// TestConfig_VirtualSubnet_Validate 校验 hub.virtual_subnet 校验：非法 CIDR 拒绝、
+// IPv6 拒绝、合法 IPv4 通过。
+func TestConfig_VirtualSubnet_Validate(t *testing.T) {
+	valid := Default()
+	valid.Hub.VirtualSubnet = "10.0.0.0/8"
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("合法 IPv4 子网应通过: %v", err)
+	}
+	invalid := Default()
+	invalid.Hub.VirtualSubnet = "not-a-cidr"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("非法 CIDR 应被 Validate 拒绝")
+	}
+	ipv6 := Default()
+	ipv6.Hub.VirtualSubnet = "fd00::/8"
+	if err := ipv6.Validate(); err == nil {
+		t.Fatal("IPv6 子网应被 Validate 拒绝（虚拟 IP 分配仅支持 IPv4）")
+	}
+}
+
+// TestConfig_BucketLimits_Default 验证 BucketLimits 默认值为非 nil 空 map
+// （满足 len(c.BucketLimits)==0 的判断，round-trip 后不 panic）。
+func TestConfig_BucketLimits_Default(t *testing.T) {
+	c := Default()
+	if c.BucketLimits == nil {
+		t.Fatal("BucketLimits 默认应为非 nil 空 map（非 nil 可被 map 判断/访问复用）")
+	}
+	if len(c.BucketLimits) != 0 {
+		t.Fatalf("BucketLimits 默认应空 map, got %d entries", len(c.BucketLimits))
+	}
+}
+
+// TestLoadFromProvider_BucketLimits 验证 YAML 解析 bucket_limits 配置（页面在 briefs 中已明确字段名）。
+// 任务 8 起：功能桶根键（如 "cloud"）与 quotaBucketNames 重叠被 Validate 显式拒绝（防
+// 覆盖功能桶上限），此处用合法子目录键验证解析 + 拒绝重叠的回归。
+func TestLoadFromProvider_BucketLimits(t *testing.T) {
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr": ":18083",
+		"bucket_limits": map[string]any{
+			"user/videos/hd": int64(10485760),
+			"user/archive":   int64(1 << 30),
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10485760 {
+		t.Fatalf("BucketLimits[user/videos/hd]=%d want 10485760", got)
+	}
+	if got := cfg.BucketLimits["user/archive"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[user/archive]=%d want %d", got, 1<<30)
+	}
+	// 功能桶根键与 quotaBucketNames 重叠 → 校验失败（C 任务 2 放行条件 3）。
+	if _, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"addr":          ":18083",
+		"bucket_limits": map[string]any{"cloud": int64(1 << 30)},
+	}}); err == nil || !strings.Contains(err.Error(), "与功能桶根重叠") {
+		t.Fatalf("bucket_limits 键 cloud 与功能桶根重叠应被拒绝, got %v", err)
+	}
+}
+
+// TestLoadFromProvider_BucketLimits_HumanReadable 验证 bucket_limits 值支持人类可读大小。
+func TestLoadFromProvider_BucketLimits_HumanReadable(t *testing.T) {
+	// 并行化：纯 mapProvider 解码，无共享全局状态。
+	t.Parallel()
+	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
+		"bucket_limits": map[string]any{
+			"user/videos/hd": "10MiB",
+			"user/archive":   "1GiB",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("LoadFromProvider: %v", err)
+	}
+	if got := cfg.BucketLimits["user/videos/hd"]; got != 10<<20 {
+		t.Fatalf("BucketLimits[user/videos/hd]=%d want %d (10MiB)", got, 10<<20)
+	}
+	if got := cfg.BucketLimits["user/archive"]; got != 1<<30 {
+		t.Fatalf("BucketLimits[user/archive]=%d want %d (1GiB)", got, 1<<30)
+	}
+}
+
+// TestLoadConfig_VolCapacity_HumanReadable 验证 volumes[].vol_capacity 支持人类可读大小。
+func TestLoadConfig_VolCapacity_HumanReadable(t *testing.T) {
+	// 并行化：LoadConfig 使用独立临时文件，无共享全局状态。
+	t.Parallel()
+	yaml := "volumes:\n" +
+		"  - name: disk1\n" +
+		"    root: /mnt/d1\n" +
+		"    vol_capacity: 500GB\n" +
+		"  - name: disk2\n" +
+		"    root: /mnt/d2\n" +
+		"    vol_capacity: 2TiB\n"
+	path := filepath.Join(t.TempDir(), "sproxy.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Volumes) != 2 {
+		t.Fatalf("Volumes 数量=%d want 2", len(cfg.Volumes))
+	}
+	if got := int64(cfg.Volumes[0].VolCapacity); got != 500*1000*1000*1000 {
+		t.Fatalf("Volumes[0].VolCapacity=%d want %d (500GB)", got, 500*1000*1000*1000)
+	}
+	if got := int64(cfg.Volumes[1].VolCapacity); got != 2<<40 {
+		t.Fatalf("Volumes[1].VolCapacity=%d want %d (2TiB)", got, 2<<40)
+	}
+}
+
+// TestConfig_Validate_BucketLimits_KeyValidation 验证 bucket_limits 路径键合法性校验
+// （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串 /
+// 非 user 首段（分层配额仅支持 user 桶子目录）；合法 user 子目录键通过；负上限拒绝。
+func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
+	badKeys := []string{
+		"", "..", "../escape", "user/../x", "user//x", "/user/x", "user/x/",
+		"user/.", "C:/abs", `user\videos`, "videos/hd", "cloud/x",
+	}
+	for _, k := range badKeys {
+		c := Default()
+		c.BucketLimits = map[string]ByteSize{k: 100}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("bucket_limits 键 %q 应被拒绝, got nil", k)
+		}
+	}
+	// 合法子目录键通过（首段必须为 user；段名全部合法）。
+	c := Default()
+	c.BucketLimits = map[string]ByteSize{"user/ok/deep": 50, "user/videos:en/hd": 30}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 bucket_limits 键不应被拒绝: %v", err)
+	}
+	// 负上限拒绝。
+	c = Default()
+	c.BucketLimits = map[string]ByteSize{"user/x": -5}
+	if err := c.Validate(); err == nil {
+		t.Fatal("bucket_limits 负上限应被拒绝")
+	}
+}
+
+// TestConfig_Telemetry_Default 验证 telemetry 默认值：
+// 默认关闭（enabled=false）、采样率 1.0、OTLP 端点为空的"仅进程内/环境变量驱动"模式。
+func TestConfig_Telemetry_Default(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	if c.Telemetry.Enabled {
+		t.Fatal("telemetry.enabled 默认应为 false（关闭时保持纯 slog）")
+	}
+	if c.Telemetry.SampleRatio != 1.0 {
+		t.Fatalf("telemetry.sample_ratio 默认应为 1.0，got %v", c.Telemetry.SampleRatio)
+	}
+	if c.Telemetry.OTLPEndpoint != "" {
+		t.Fatalf("telemetry.otlp_endpoint 默认应为空（仅走标准环境变量），got %q", c.Telemetry.OTLPEndpoint)
+	}
+	// 默认配置不启用 telemetry，Validate 仍应通过。
+	c = Default()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("默认配置 Validate 不应报错: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_Disabled_SkipsValidation 验证 telemetry.enabled=false 时
+// 不校验 sample_ratio/otlp_endpoint（历史/闲置配置遗留不阻断启动，与 hub 校验门控一致）。
+func TestConfig_Telemetry_Disabled_SkipsValidation(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry.Enabled = false
+	c.Telemetry.SampleRatio = 0 // 非法值，但未被启用 → 忽略
+	c.Telemetry.OTLPEndpoint = "not-a-url"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("telemetry.enabled=false 时不应校验 sample_ratio/otlp_endpoint: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_Validate_InvalidSampleRatio 验证启用 telemetry 时
+// 非法采样率（≤0 或 >1）被拒绝。
+func TestConfig_Telemetry_Validate_InvalidSampleRatio(t *testing.T) {
+	t.Parallel()
+	for _, r := range []float64{0, -0.5, 1.5, 2} {
+		c := Default()
+		c.Telemetry.Enabled = true
+		c.Telemetry.SampleRatio = r
+		if err := c.Validate(); err == nil {
+			t.Fatalf("telemetry.sample_ratio=%v 应被拒绝", r)
+		}
+	}
+}
+
+// TestConfig_Telemetry_Validate_InvalidEndpoint 验证启用 telemetry 时
+// 非法 OTLP 端点（非 URL / 非 http(s) scheme / 缺 host）被拒绝。
+func TestConfig_Telemetry_Validate_InvalidEndpoint(t *testing.T) {
+	t.Parallel()
+	bad := []string{"not-a-url", "ftp://collector:4318", "http://", ":4318", "collector:4318"}
+	for _, ep := range bad {
+		c := Default()
+		c.Telemetry.Enabled = true
+		c.Telemetry.SampleRatio = 1.0
+		c.Telemetry.OTLPEndpoint = ep
+		if err := c.Validate(); err == nil {
+			t.Fatalf("telemetry.otlp_endpoint=%q 应被拒绝", ep)
+		}
+	}
+	// 合法端点通过。
+	c := Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 0.5
+	c.Telemetry.OTLPEndpoint = "http://127.0.0.1:4318"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 telemetry 配置不应被拒绝: %v", err)
+	}
+	c = Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 1.0
+	c.Telemetry.OTLPEndpoint = "https://collector.example.com:4318"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("合法 https 端点不应被拒绝: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_EmptyEndpoint_Passes 验证启用 telemetry 但 otlp_endpoint
+// 为空（仅走标准环境变量）是合法配置。
+func TestConfig_Telemetry_EmptyEndpoint_Passes(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry.Enabled = true
+	c.Telemetry.SampleRatio = 1.0
+	c.Telemetry.OTLPEndpoint = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("telemetry.enabled=true 且 otlp_endpoint 为空（仅环境变量）应通过: %v", err)
+	}
+}
+
+// TestConfig_Telemetry_YAMLTags 验证 telemetry 段的 yaml 键名与映射键一致。
+func TestConfig_Telemetry_YAMLTags(t *testing.T) {
+	t.Parallel()
+	c := Default()
+	c.Telemetry = OTELConfig{Enabled: true, SampleRatio: 0.25, OTLPEndpoint: "http://127.0.0.1:4318"}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	for _, key := range []string{"telemetry:", "enabled: true", "sample_ratio: 0.25", "otlp_endpoint: http://127.0.0.1:4318"} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("序列化输出缺少 %q：\n%s", key, data)
+		}
+	}
+}
+
+// TestConfig_CredentialStore_Backend 覆盖 credential_store.backend 配置（task 3）：
+// backend 缺省/枚举 + Vault 子段默认值 + backend=vault 的 Validate 门禁 + aesgcm 回归。
+func TestConfig_CredentialStore_Backend(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 用 env 的子测试无法并行（R18 对含 t.Setenv 的测试自动豁免串行要求）
+	t.Run("缺省默认值", credentialStoreBackendDefaults)
+	t.Run("backend 合法枚举 encrypt=false 通过", credentialStoreBackendValidEnums)
+	t.Run("backend 非法拒绝", credentialStoreBackendInvalidRejected)
+	t.Run("backend=vault+encrypt 门禁", credentialStoreBackendVaultGate)
+	t.Run("backend=vault addr scheme/loopback 校验", credentialStoreBackendVaultAddr)
+	t.Run("backend=aesgcm+encrypt master key 门禁回归", credentialStoreBackendAesgcmMasterKey)
+}
+
+func credentialStoreBackendDefaults(t *testing.T) {
+	c := Default()
+	if c.CredentialStore.Backend != "aesgcm" {
+		t.Errorf("backend 缺省应为 aesgcm，实际 %q", c.CredentialStore.Backend)
+	}
+	if c.CredentialStore.Vault.Mount != "transit" {
+		t.Errorf("vault.mount 缺省应为 transit，实际 %q", c.CredentialStore.Vault.Mount)
+	}
+	if c.CredentialStore.Vault.TokenEnv != "VAULT_TOKEN" {
+		t.Errorf("vault.token_env 缺省应为 VAULT_TOKEN，实际 %q", c.CredentialStore.Vault.TokenEnv)
+	}
+	if c.CredentialStore.Vault.Timeout != 10*time.Second {
+		t.Errorf("vault.timeout 缺省应为 10s，实际 %v", c.CredentialStore.Vault.Timeout)
+	}
+	if c.CredentialStore.Vault.CacheTTL != 30*time.Second {
+		t.Errorf("vault.cache_ttl 缺省应为 30s，实际 %v", c.CredentialStore.Vault.CacheTTL)
+	}
+}
+
+func credentialStoreBackendValidEnums(t *testing.T) {
+	for _, b := range []string{"aesgcm", "vault", ""} {
+		c := Default()
+		c.CredentialStore.Backend = b
+		c.CredentialStore.Encrypt = false
+		if err := c.Validate(); err != nil {
+			t.Errorf("backend=%q encrypt=false 应通过 Validate: %v", b, err)
+		}
+	}
+}
+
+func credentialStoreBackendInvalidRejected(t *testing.T) {
+	c := Default()
+	c.CredentialStore.Backend = "aws"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "backend") {
+		t.Errorf("backend=aws 应拒绝且错误含 backend，got %v", err)
+	}
+}
+
+func credentialStoreBackendVaultGate(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "") // 清 token 环境变量（防宿主泄漏干扰）
+	vaultBase := func(mut func(*VaultConfig)) *Config {
+		c := Default()
+		c.CredentialStore.Backend = "vault"
+		c.CredentialStore.Encrypt = true
+		mut(&c.CredentialStore.Vault)
+		return c
+	}
+	const addr = "https://vault:8200" // 非 loopback 需 https（S-1 收紧）
+	if err := vaultBase(func(*VaultConfig) {}).Validate(); err == nil || !strings.Contains(err.Error(), "vault.addr") {
+		t.Errorf("vault.addr 空应拒绝且错误含 vault.addr, got %v", err)
+	}
+	if err := vaultBase(func(v *VaultConfig) { v.Addr = addr }).Validate(); err == nil || !strings.Contains(err.Error(), "vault.key_name") {
+		t.Errorf("vault.key_name 空应拒绝且错误含 vault.key_name, got %v", err)
+	}
+	err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+	}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "token") {
+		t.Errorf("token 源全空应拒绝且错误含 token, got %v", err)
+	}
+	err = vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenFile = "/etc/sproxy/vault-token"
+	}).Validate()
+	if err != nil {
+		t.Errorf("addr+key_name+token_file 齐应通过 Validate, got %v", err)
+	}
+	// M-2 正向：自定义 TokenEnv 名 + 环境变量非空 → 通过（防 tokEnv 回落逻辑回归）。
+	t.Setenv("SPROXY_TEST_VAULT_TOKEN", "tok")
+	if err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenEnv = "SPROXY_TEST_VAULT_TOKEN"
+	}).Validate(); err != nil {
+		t.Errorf("自定义 token_env + 环境变量应通过 Validate, got %v", err)
+	}
+	// M-2 正向：TokenEnv=="" 回落 VAULT_TOKEN + 环境变量非空 → 通过。
+	t.Setenv("VAULT_TOKEN", "tok")
+	if err := vaultBase(func(v *VaultConfig) {
+		v.Addr = addr
+		v.KeyName = "sproxy"
+		v.TokenEnv = ""
+	}).Validate(); err != nil {
+		t.Errorf("TokenEnv 空回落 VAULT_TOKEN + 环境变量应通过 Validate, got %v", err)
+	}
+}
+
+func credentialStoreBackendVaultAddr(t *testing.T) {
+	t.Setenv("VAULT_TOKEN", "tok")
+	cases := []struct {
+		name    string
+		addr    string
+		wantErr string // 空 = 应通过
+	}{
+		{name: "loopback http 通过", addr: "http://127.0.0.1:8200"},
+		{name: "localhost http 通过", addr: "http://localhost:8200"},
+		{name: "IPv6 loopback http 通过", addr: "http://[::1]:8200"},
+		{name: "非 loopback https 通过", addr: "https://vault.example.com:8200"},
+		{name: "非 loopback http 拒绝", addr: "http://vault.example.com:8200", wantErr: "https"},
+		{name: "无 scheme 拒绝", addr: "vault:8200", wantErr: "scheme"},
+		{name: "缺 host 拒绝", addr: "https://", wantErr: "host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.CredentialStore.Backend = "vault"
+			c.CredentialStore.Encrypt = true
+			c.CredentialStore.Vault.Addr = tc.addr
+			c.CredentialStore.Vault.KeyName = "sproxy"
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("addr %q 应通过 Validate, got %v", tc.addr, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("addr %q 应拒绝且错误含 %q, got %v", tc.addr, tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func credentialStoreBackendAesgcmMasterKey(t *testing.T) {
+	t.Setenv(CredentialMasterKeyEnv, "")
+	c := Default() // backend 缺省 aesgcm
+	c.CredentialStore.Encrypt = true
+	c.CredentialStore.MasterKeyFile = ""
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "master_key_file") {
+		t.Errorf("aesgcm+encrypt 无 master key 应拒绝且错误含 master_key_file, got %v", err)
+	}
+	c2 := Default()
+	c2.CredentialStore.Encrypt = true
+	c2.CredentialStore.MasterKeyFile = "/etc/sproxy/master.key"
+	if err := c2.Validate(); err != nil {
+		t.Errorf("aesgcm+encrypt + master_key_file 应通过 Validate, got %v", err)
+	}
+}
+
+// TestConfig_Vault_NestedDecode 验证 credential_store.vault 子段嵌套 YAML/mapstructure 解码
+// （S-2）：含 vault.addr/key_name/timeout/cache_ttl（字符串 duration）的 YAML 走 LoadConfig →
+// 断言 Timeout/CacheTTL 正确解码；Mount/TokenEnv 显式空 → SetDefaults 回落默认。
+func TestConfig_Vault_NestedDecode(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
+	doc := `
+addr: ":18083"
+storage_root: "./storage"
+credential_store:
+  encrypt: false
+  backend: vault
+  vault:
+    addr: "https://vault:8200"
+    key_name: "sproxy"
+    mount: ""
+    token_env: ""
+    timeout: "10s"
+    cache_ttl: "30s"
+`
+	if err := os.WriteFile(cfgPath, []byte(doc), 0o600); err != nil {
+		t.Fatalf("写临时配置: %v", err)
+	}
+	c, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if c.CredentialStore.Backend != "vault" {
+		t.Errorf("backend 应解码为 vault, got %q", c.CredentialStore.Backend)
+	}
+	if c.CredentialStore.Vault.Addr != "https://vault:8200" {
+		t.Errorf("vault.addr 应解码为 https://vault:8200, got %q", c.CredentialStore.Vault.Addr)
+	}
+	if c.CredentialStore.Vault.KeyName != "sproxy" {
+		t.Errorf("vault.key_name 应解码为 sproxy, got %q", c.CredentialStore.Vault.KeyName)
+	}
+	if c.CredentialStore.Vault.Timeout != 10*time.Second {
+		t.Errorf("vault.timeout 应解码为 10s, got %v", c.CredentialStore.Vault.Timeout)
+	}
+	if c.CredentialStore.Vault.CacheTTL != 30*time.Second {
+		t.Errorf("vault.cache_ttl 应解码为 30s, got %v", c.CredentialStore.Vault.CacheTTL)
+	}
+	if c.CredentialStore.Vault.Mount != "transit" {
+		t.Errorf("vault.mount 空应回落 transit, got %q", c.CredentialStore.Vault.Mount)
+	}
+	if c.CredentialStore.Vault.TokenEnv != "VAULT_TOKEN" {
+		t.Errorf("vault.token_env 空应回落 VAULT_TOKEN, got %q", c.CredentialStore.Vault.TokenEnv)
+	}
+}
+
+// TestConfig_ProtocolSaltKey_Parse 验证 protocol_salt_key 配置解析。
+func TestConfig_ProtocolSaltKey_Parse(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{}
+	data := []byte("protocol_salt_key: " + strings.Repeat("ab", 32) + "\n")
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal: %v", err)
+	}
+	if cfg.ProtocolSaltKey != strings.Repeat("ab", 32) {
+		t.Fatalf("protocol_salt_key 解析失败: %q", cfg.ProtocolSaltKey)
+	}
+}
+
+// mapProvider 将 map[string]any 转换为 provider.Provider 用于测试。
+type mapProvider struct {
+	m map[string]any
+}
+
+func (p mapProvider) Unmarshal(obj any) error {
+	// 使用 yaml 作为中介：map → yaml bytes → struct
+	// Config 结构体使用 yaml tag，所以 yaml.Unmarshal 能正确匹配字段
+	data, err := yaml.Marshal(p.m)
+	if err != nil {
+		return err
+	}
+	return yaml.Unmarshal(data, obj)
+}
+
+// TestConfigValidate_MaintenanceWindow 配置校验：启用时 HH:MM 格式 fail-closed；
+// 未启用时非法值被忽略（零回归）。
+
+func TestConfigValidate_MaintenanceWindow(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Scheduler.MaintenanceWindow.Enabled = true
+	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
+	cfg.Scheduler.MaintenanceWindow.End = "06:00"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("合法维护窗口应通过校验: %v", err)
+	}
+	cfg.Scheduler.MaintenanceWindow.Start = "25:00"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("start=25:00 非法小时应拒绝")
+	}
+	cfg.Scheduler.MaintenanceWindow.Start = "22:00"
+	cfg.Scheduler.MaintenanceWindow.End = "6:0"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("end=6:0 非 HH:MM 应拒绝")
+	}
+	cfg2 := Default()
+	cfg2.StorageRoot = t.TempDir()
+	cfg2.Scheduler.MaintenanceWindow.Start = "not-a-time"
+	if err := cfg2.Validate(); err != nil {
+		t.Fatalf("未启用维护窗口时非法值应被忽略（零回归）: %v", err)
+	}
+}

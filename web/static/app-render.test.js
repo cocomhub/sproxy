@@ -85,6 +85,32 @@ test('previewKind 归类', () => {
   assert.strictEqual(r.previewKind(null), 'download');
 });
 
+// ---- 视频播放入口判定（VIDEO_EXT 口径：主流浏览器可播/可尝试子集） ----
+test('isVideoName 主流浏览器可播/可尝试集合（大小写不敏感）', () => {
+  for (const name of ['a.mp4', 'a.MKV', 'a.webm', 'a.AVI', 'a.mov', 'a.ts', 'a.M4V', 'a.ogv', 'a.3gp', 'a.mpg', 'a.mpeg', 'a.vob', 'a.mod', 'a.dat', 'a.3g2']) {
+    assert.strictEqual(r.isVideoName(name), true, name + ' 应给 ▶（主流可播或可尝试）');
+  }
+  // 全浏览器不原生播放（无解码器）→ 不给 ▶ 入口（黑屏无意义，只给下载）
+  for (const name of ['a.rmvb', 'a.wmv', 'a.flv', 'a.asf', 'a.f4v']) {
+    assert.strictEqual(r.isVideoName(name), false, name + ' 全浏览器不可播 → 不给 ▶');
+  }
+  // 非视频 / 无扩展名
+  for (const name of ['a.txt', 'a.png', 'noext', '', null]) {
+    assert.strictEqual(r.isVideoName(name), false, String(name));
+  }
+});
+
+test('buildFileRowHtml 视频行有 ▶ 播放按钮、全不可播容器无（rmvb/wmv/flv 只给下载）', () => {
+  assert.ok(r.buildFileRowHtml({ name: 'a.mp4', size: 10 }, 'a.mp4').includes('file-video-play-btn'));
+  assert.ok(r.buildFileRowHtml({ name: 'MOVIE.MKV', size: 10 }, 'MOVIE.MKV').includes('file-video-play-btn'));
+  assert.ok(r.buildFileRowHtml({ name: 'a.ogv', size: 10 }, 'a.ogv').includes('file-video-play-btn'),
+    'ogv Chrome/Firefox 可播 → 给 ▶');
+  assert.ok(!r.buildFileRowHtml({ name: 'a.rmvb', size: 10 }, 'a.rmvb').includes('file-video-play-btn'),
+    'rmvb 全浏览器不可播 → 无 ▶ 入口');
+  assert.ok(!r.buildFileRowHtml({ name: 'd.mp4', is_dir: true }, 'd.mp4').includes('file-video-play-btn'),
+    '目录不给 ▶ 入口');
+});
+
 // ---- 文件列表排版（HTML 片段断言 + XSS 转义） ----
 test('buildFileRowHtml 文件行含转义 + checksum 前缀', () => {
   const html = r.buildFileRowHtml({ name: 'a<b.txt', size: 2048, checksum: 'c'.repeat(20), is_dir: false }, 'a<b.txt');
@@ -111,6 +137,22 @@ test('buildFileRowHtml 文件行卷 badge：有 volume 显示、无 volume 不�
   const xssVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: '<img>' }, 'a.txt');
   assert.ok(!xssVol.includes('<img>'));
   assert.ok(xssVol.includes('&lt;img&gt;'));
+});
+
+test('volBadge wrapper 按 category 渲染：volume 缺失/空仍输出 vol-badge-wrapper（过滤视图真实场景）', () => {
+  // 常规：volume 非空 + wrapper → vol-badge-wrapper 类 + 🔒 卷名。
+  const html = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: 'vault', volume_category: 'wrapper' });
+  assert.match(html, /vol-badge-wrapper/);
+  assert.ok(html.includes('>🔒 vault<'), 'wrapper 徽标应显示 🔒 + 卷名');
+  // 过滤视图真实场景：外部卷目录视图条目 volume 空但 volume_category 在 → 徽标按
+  // category 渲染而非 volume，仍输出 vol-badge-wrapper（≤ 早期数据 / 防御路径）。
+  const noVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume_category: 'wrapper' });
+  assert.match(noVol, /vol-badge-wrapper/);
+  const emptyVol = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10, volume: '', volume_category: 'wrapper' });
+  assert.match(emptyVol, /vol-badge-wrapper/);
+  // 非 wrapper 且无 volume → 仍无 badge（零回归）。
+  const plain = r.buildFileRowHtml({ name: 'a.mp4', is_dir: false, size: 10 });
+  assert.ok(!plain.includes('vol-badge'), '无 volume 且非 wrapper 不显示 badge');
 });
 
 test('buildFileTableHtml 空 / 多行', () => {
@@ -217,6 +259,43 @@ test('volumesTableHtml 空列表 + 多卷仪表', () => {
   assert.ok(xss.includes('&lt;svg onload=1&gt;'));
 });
 
+// ---- 云端下载三行为表单 ----
+test('cloudDownloadFormHtml includes transfer volume selector + three behaviors', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: ['local', 'vault'], current: 'vault' });
+  assert.match(html, /name="transfer-volume"/);
+  assert.match(html, /name="save"/);
+  assert.match(html, /name="download-local"/);
+  // integrity_must_pass 复选框默认不勾（无 checked 属性），样式走 var(--…)（暗色兼容）。
+  assert.match(html, /name="integrity-must-pass"/);
+  assert.ok(!/name="integrity-must-pass"\s+checked/.test(html), 'integrity-must-pass 默认不勾选');
+  assert.match(html, /var\(--text-primary\)/);
+  assert.match(html, /var\(--bg-container\)/);
+  assert.match(html, /vault/);
+});
+
+test('cloudDownloadFormHtml 过滤服务端必然拒绝的转存候选（U3：仅 secrets）', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: [
+    { name: 'main', type: 'local' },
+    { name: '', type: '' },
+    { name: 'mykeys', type: 'secrets' },
+    { name: 'bd', type: 'baidupcs' },
+    { name: 'vault', type: 'secretdata' }
+  ], current: '' });
+  assert.ok(html.includes('bd'), '外部卷应保留');
+  assert.ok(html.includes('vault'), '封装卷（secretdata）可选作转存目标');
+  assert.ok(html.includes('>main<'), '本地卷现可选作转存目标（U3 统一卷模型）');
+  assert.ok(!html.includes('mykeys'), 'secrets 密钥卷应被过滤（服务端 400）');
+});
+
+test('isTransferTargetVolume 判定口径', () => {
+  assert.ok(r.isTransferTargetVolume({ name: 'bd', type: 'baidupcs' }));
+  assert.ok(r.isTransferTargetVolume({ name: 'v', type: 'secretdata' }));
+  assert.ok(r.isTransferTargetVolume({ name: 'm', type: 'local' }));
+  assert.ok(r.isTransferTargetVolume({ name: 'x', type: '' }));
+  assert.ok(!r.isTransferTargetVolume({ name: 'k', type: 'secrets' }));
+  assert.ok(!r.isTransferTargetVolume(null));
+});
+
 // ---- 审计面板 ----
 test('auditTableHtml 空事件 → 空占位', () => {
   const html = r.auditTableHtml([]);
@@ -229,6 +308,8 @@ test('auditTableHtml 事件行 + 时间格式化', () => {
   assert.ok(html.includes('delete'));
   assert.ok(html.includes('ak-1'));
   assert.ok(html.includes('mesh-a'));
+  assert.ok(html.includes('>卷<'), '表头应含「卷」列');
+  assert.ok(html.includes('vault-a') === false, '未给 volume 时不应凭空出现卷名');
   assert.ok(html.includes('dir/a.txt'));
   assert.ok(html.includes('to=b.txt'));
   // 时间列按 locale 格式化（toLocaleString），非原始 ISO 串。
@@ -237,7 +318,7 @@ test('auditTableHtml 事件行 + 时间格式化', () => {
 
 test('auditTableHtml 所有字段过 escHtml 防 XSS（actor/mesh/detail 重点）', () => {
   const html = r.auditTableHtml([{
-    action: '<img>', actor: '<script>actor</script>', mesh: '<b>mesh</b>',
+    action: '<img>', actor: '<script>actor</script>', mesh: '<b>mesh</b>', volume: '<em>vol</em>',
     object_type: '<i>obj</i>', object: '"onmouseover=&', result: '<u>r</u>', detail: '<svg onload=1>', ts: 'x',
   }]);
   assert.ok(!html.includes('<img>'));
@@ -245,6 +326,7 @@ test('auditTableHtml 所有字段过 escHtml 防 XSS（actor/mesh/detail 重点�
   assert.ok(!html.includes('<svg'));
   assert.ok(html.includes('&lt;script&gt;actor&lt;/script&gt;'), 'actor 应转义');
   assert.ok(html.includes('&lt;b&gt;mesh&lt;/b&gt;'), 'mesh 应转义');
+  assert.ok(html.includes('&lt;em&gt;vol&lt;/em&gt;'), 'volume 应转义');
   assert.ok(html.includes('&lt;svg onload=1&gt;'), 'detail 应转义');
   assert.ok(html.includes('&quot;onmouseover=&amp;'));
   assert.ok(!html.includes('<b>mesh</b>'), 'mesh 原始标签不应出现');
@@ -279,6 +361,18 @@ test('cloudTaskActions 各状态', () => {
   assert.ok(r.cloudTaskActions('t1', 'f', 'failed', '').includes('cloud-resume-btn'));
   assert.ok(r.cloudTaskActions('t1', 'f', 'pending', '').includes('cloud-cancel-btn'));
   assert.ok(!r.cloudTaskActions('t1', 'f', 'completed', '').includes('cloud-cancel-btn'));
+});
+
+// review 4（W2 遗留）：legacy cloudTaskActions 曾硬编码 meta.raw={} → cleaned 分支永不生效、
+// 转存 URL 永不展示（回到「已清理显示下载」误导）。raw 透传后必须真值断言。
+test('cloudTaskActions cleaned + transfer_url（raw 透传）→ 隐藏下载 + 展示转存', () => {
+  const raw = { checksum: 'c1', cleanup_status: 'cleaned', transfer_url: 'secretdata://vault/pikpak/c.bin' };
+  const html = r.cloudTaskActions('t1', 'f', 'completed', 'c1', raw);
+  assert.ok(!html.includes('cloud-download-btn'), 'cleaned 不应有下载按钮（404 误导）');
+  assert.ok(html.includes('已清理'), '应展示已清理标记');
+  assert.ok(html.includes('secretdata://vault/pikpak/c.bin'), '应展示转存产物 URL');
+  assert.ok(!html.includes('navigator.clipboard.writeText(this.title)'), '不应再内联 onclick 复制（改走委托 data-url + await/catch）');
+  assert.ok(html.includes('data-url'), '复制应走 data-url 委托（P1 修复）');
 });
 
 test('buildCloudTaskTableHtml / buildCloudGroupTableHtml / buildVersionTableHtml', () => {
@@ -450,4 +544,143 @@ test('buildTransferRowHtml：同步行显示载体信息（无载体信息的行
 
   const uploadRow = r.buildTransferRowHtml({ id: 'u1', kind: 'upload', filename: 'a.txt', status: 'uploading', total: 10, loaded: 5 });
   assert.ok(!uploadRow.includes('直连×'), '非同步行不受影响');
+});
+
+test('buildIntegrityBadge：damaged 黄色 / unverified 灰色 / verified 与缺省 空', () => {
+  const mk = (st) => ({ kind: 'cloud_task', meta: { raw: { integrity_status: st } } });
+  assert.match(r.buildIntegrityBadge('cloud_task', mk('damaged')), /完整性异常/);
+  assert.match(r.buildIntegrityBadge('cloud_task', mk('unverified')), /未校验/);
+  assert.equal(r.buildIntegrityBadge('cloud_task', mk('verified')), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', mk('')), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', null), '');
+  assert.equal(r.buildIntegrityBadge('cloud_task', {}), '');
+  // 非云任务类型无标记
+  assert.equal(r.buildIntegrityBadge('sync_task', mk('damaged')), '');
+});
+
+// 分享按钮必须带**文件行自身所在卷**（data-volume）：外部卷/加密卷分享依赖它定位源文件
+// （服务端 resolveShareSource 的 volume 参数）；缺了会退化成「服务端自动定位」。
+test('buildFileRowHtml 分享按钮带 data-volume（行卷优先）', () => {
+  const withVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: 'vault' }, 'a.txt');
+  assert.ok(withVol.includes('file-share-btn'), '分享按钮存在');
+  assert.ok(withVol.includes('data-volume="vault"'), 'data-volume 应取行卷');
+  const withoutVol = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(withoutVol.includes('data-volume=""'), '无行卷时为空串（服务端自动定位）');
+});
+
+// 下载/预览/删除/重命名按钮同样必须带**文件行自身所在卷**（data-volume）：外部/加密卷上
+// 这些操作依赖行卷做 ?volume= 定位（用户裁定 2026-10-27：行卷优先，回落当前过滤卷）。
+test('buildFileRowHtml 下载/预览/删除/重命名按钮带 data-volume（行卷优先）', () => {
+  const withVol = r.buildFileRowHtml({ name: 'a.txt', size: 10, volume: 'disk2' }, 'a.txt');
+  assert.ok(withVol.includes('file-download-btn'), '下载按钮存在');
+  assert.ok(withVol.includes('file-preview-btn'), '预览按钮存在');
+  assert.ok(withVol.includes('file-delete-btn'), '删除按钮存在');
+  assert.ok(withVol.includes('file-rename-btn'), '重命名按钮存在');
+  assert.ok(withVol.includes('data-volume="disk2"'), '行操作 data-volume 应取行卷');
+  // 行卷 + 过滤卷同名时以行卷为准（多卷聚合列表下最准确）。
+  const noVol = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(noVol.includes('data-volume=""'), '无行卷时为空串（回落过滤卷/auto）');
+});
+
+test('shareVolumeFor：行卷优先 → 过滤卷 → 空（自动定位）', () => {
+  assert.equal(r.shareVolumeFor('vault', 'default'), 'vault', '行卷优先（多卷同名不漏定位）');
+  assert.equal(r.shareVolumeFor('', 'vault'), 'vault', '无行卷时用过滤卷');
+  assert.equal(r.shareVolumeFor('', ''), '', '皆空 ⇒ 不发送 volume');
+  assert.equal(r.shareVolumeFor(undefined, undefined), '', 'undefined 也归一为空串');
+});
+
+// ---- meta extra（2026-10-26 读闭环）：徽标 + 弹窗渲染 ----
+
+// 文件行的 meta 徽标：有 extra 时显示键数，无/空时不显示。
+// 变异：把 metaBadge 条件改成恒显示 → 无 extra 用例红。
+test('buildFileRowHtml meta 徽标：有 extra 显示键数，无则不显示', () => {
+  const withExtra = r.buildFileRowHtml({ name: 'a.txt', size: 10, extra: { code: 'X', maker: 'Y' } }, 'a.txt');
+  assert.ok(withExtra.includes('meta-badge'), '有 extra 应渲染 meta-badge');
+  assert.ok(withExtra.includes('📄 2'), '徽标应显示键数 2');
+  const noExtra = r.buildFileRowHtml({ name: 'b.txt', size: 10 }, 'b.txt');
+  assert.ok(!noExtra.includes('meta-badge'), '无 extra 不应渲染徽标');
+  const emptyExtra = r.buildFileRowHtml({ name: 'c.txt', size: 10, extra: {} }, 'c.txt');
+  assert.ok(!emptyExtra.includes('meta-badge'), '空 extra 不应渲染徽标');
+});
+
+// 每行必须有「元数据」按钮（UI 入口）。
+test('buildFileRowHtml 含元数据按钮', () => {
+  const html = r.buildFileRowHtml({ name: 'a.txt', size: 10 }, 'a.txt');
+  assert.ok(html.includes('file-meta-btn'), '元数据按钮存在');
+  assert.ok(html.includes('data-filename="a.txt"'), '按钮带文件名');
+});
+
+// 空 extra → 「暂无元数据」占位；非空 → 逐键渲染 key 与 value。
+test('buildMetaReadHtml：空占位 + 逐键渲染', () => {
+  assert.match(r.buildMetaReadHtml({}), /暂无元数据/);
+  assert.match(r.buildMetaReadHtml(null), /暂无元数据/);
+  const html = r.buildMetaReadHtml({ code: 'ABC-001', maker: 'STUDIO X' });
+  assert.ok(html.includes('code') && html.includes('ABC-001'));
+  assert.ok(html.includes('maker') && html.includes('STUDIO X'));
+});
+
+// 弹窗 HTML：包含读区、编辑 textarea（预填当前 extra JSON）、三个模式按钮。
+test('buildMetaModalHtml：读区 + 编辑区 + 三模式按钮', () => {
+  const html = r.buildMetaModalHtml('dir/a.mp4', { code: 'X' });
+  assert.ok(html.includes('meta-read-area'), '读区');
+  assert.ok(html.includes('id="meta-edit-json"'), '编辑 textarea');
+  // textarea 预填当前 extra（JSON 经 escHtml 转义为 HTML 实体形态）。
+  assert.ok(html.includes('code'), 'textarea 应含键 code');
+  assert.ok(html.includes('meta-save-btn'), '合并保存按钮');
+  assert.ok(html.includes('meta-replace-btn'), '整表替换按钮');
+  assert.ok(html.includes('meta-delete-key-btn'), '删除键按钮');
+  assert.ok(html.includes('dir/a.mp4'), '显示目标文件名');
+});
+
+// HTML 转义：extra 值含 <script> 必须被转义（防 XSS）。
+test('buildMetaReadHtml 转义恶意值', () => {
+  const html = r.buildMetaReadHtml({ x_tag: '<script>alert(1)</script>' });
+  assert.ok(!html.includes('<script>'), '不得输出未转义的 script 标签');
+  assert.ok(html.includes('&lt;script&gt;'), '应转义为实体');
+});
+
+// 「重建索引」按钮（S5）：卷面板每行应有 vol-refresh-btn（data-vol 转义）。
+test('volumesTableHtml 每卷行含「重建索引」按钮（S5）', () => {
+  const html = r.volumesTableHtml([{ name: 'vault', mode: 'allow', capacity: 0, usage: 10, allowed: true }]);
+  assert.ok(html.includes('vol-refresh-btn'), '应有 vol-refresh-btn');
+  assert.ok(html.includes('data-vol="vault"'), 'data-vol 应取卷名');
+  assert.ok(html.includes('重建索引'), '按钮文案');
+});
+
+test('volumesTableHtml 重建索引按钮 HTML 转义卷名', () => {
+  const html = r.volumesTableHtml([{ name: 'a"b', mode: 'deny', capacity: 0, usage: 0, allowed: false }]);
+  assert.ok(html.includes('data-vol="a&quot;b"'), '卷名应转义（防注入）');
+});
+
+// cloudDownloadFormHtml 含 meta-extra 输入（转存产物自定义元数据），且无内联亮色 hex。
+test('cloudDownloadFormHtml 含 meta-extra 输入框', () => {
+  const html = r.cloudDownloadFormHtml({ volumes: [{ name: 'v1', type: 'secretdata' }] });
+  assert.ok(html.includes('name="meta-extra"'), '应含 name="meta-extra" 输入');
+  assert.ok(html.includes('cloud-behavior-form'), '应含行为表单容器');
+  assert.ok(!/#[0-9a-fA-F]{6}/.test(html), '不应内联亮色 hex（暗色兼容）');
+});
+
+// humanizeMetaValue：读区人类可视化（时间键转本地时区、URL 解码可见字符）——
+// 编辑区 textarea 仍是原始 JSON（可修复），此函数只作用读区展示。
+test('humanizeMetaValue 时间转本地 + URL 解码可见', () => {
+  // 时间键（UTC RFC3339）→ 本地时区可读
+  const t = r.humanizeMetaValue('transferred_at', '2026-10-28T03:00:55Z');
+  assert.ok(t.includes('2026'), '应含年份');
+  assert.ok(t.includes(':'), '应含时分秒');
+  assert.ok(!t.includes('Z'), '不应再显示 UTC Z');
+  // URL 键百分号编码 → 可见字符
+  const u = r.humanizeMetaValue('source_url', 'https://example.com/s/abc?spx_target=%E4%B8%AD%E6%96%87.mp4');
+  assert.ok(u.includes('中文.mp4'), '应解码为可见中文');
+  assert.ok(!u.includes('%E4'), '不应残留编码');
+  // 普通键原样
+  assert.strictEqual(r.humanizeMetaValue('checksum', 'abc123'), 'abc123');
+  // 非法时间原样（不崩）
+  assert.strictEqual(r.humanizeMetaValue('transferred_at', 'not-a-time'), 'not-a-time');
+});
+
+// buildMetaReadHtml 读区渲染用 humanize（source_url 显示解码后内容）。
+test('buildMetaReadHtml 读区展示解码 URL', () => {
+  const html = r.buildMetaReadHtml({ source_url: 'https://example.com/s/a?spx_target=%E4%B8%AD%E6%96%87.mp4' });
+  assert.ok(html.includes('中文.mp4'), '读区应显示解码可见字符');
+  assert.ok(!html.includes('%E4%B8%AD'), '读区不应残留编码');
 });

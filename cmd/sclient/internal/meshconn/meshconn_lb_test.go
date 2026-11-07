@@ -157,20 +157,29 @@ func TestParseExitWeights(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseExitWeights(c.entries, group)
-			if c.ok {
-				if err != nil {
-					t.Fatalf("parseExitWeights(%v): %v", c.entries, err)
-				}
-				for i := range c.want {
-					if got[i] != c.want[i] {
-						t.Fatalf("weights = %v, want %v", got, c.want)
-					}
-				}
-			} else if err == nil {
-				t.Fatalf("parseExitWeights(%v) 应报错", c.entries)
-			}
+			checkParseExitWeights(t, c.entries, group, c.want, c.ok)
 		})
+	}
+}
+
+// checkParseExitWeights 断言 parseExitWeights 对单个用例的结果：ok 时校验权重数组，
+// 否则校验 fail-closed 报错。
+func checkParseExitWeights(t *testing.T, entries []string, group []string, want []int, ok bool) {
+	t.Helper()
+	got, err := parseExitWeights(entries, group)
+	if ok {
+		if err != nil {
+			t.Fatalf("parseExitWeights(%v): %v", entries, err)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("weights = %v, want %v", got, want)
+			}
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("parseExitWeights(%v) 应报错", entries)
 	}
 }
 

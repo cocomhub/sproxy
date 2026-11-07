@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +26,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -128,7 +128,7 @@ func uploadFile(t *testing.T, baseURL, filename string, body []byte, headers map
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -503,12 +503,27 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	}
 	// 创建真实在途临时文件（init 分块上传：TryReserve + 落盘 .inflight-*.part）。
 	content := bytes.Repeat([]byte("I"), 100)
+	createInflightTempViaInit(t, url, content)
+
+	// 磁盘上确有一个 .inflight 临时名。
+	assertInflightTempCountOnDisk(t, cfgPtr, 1)
+
+	// 列表不含临时名。
+	assertListOmitsInflightTemp(t, url)
+
+	// 搜索不含临时名（用临时名特征段 ".inflight" 匹配）。
+	assertSearchOmitsInflightTemp(t, url)
+}
+
+// createInflightTempViaInit 通过 /upload/init 创建真实在途临时文件（.inflight-*.part）。
+func createInflightTempViaInit(t *testing.T, url string, content []byte) {
+	t.Helper()
 	reqBody, _ := json.Marshal(map[string]any{
 		"upload_id": "list-filter-tmp", "filename": "infl.bin", "total_size": int64(len(content)),
 		"chunk_size": 4096, "total_chunks": 1, "file_checksum": sha256hex(content),
 	})
 	initReq, _ := http.NewRequest("POST", url+"/upload/init", bytes.NewReader(reqBody))
-	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set(headerContentType, contentTypeJSON)
 	initResp, initErr := testHTTPClient(t).Do(initReq)
 	if initErr != nil {
 		t.Fatalf("init: %v", initErr)
@@ -517,7 +532,11 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 	if initResp.StatusCode != 200 {
 		t.Fatalf("init: %d", initResp.StatusCode)
 	}
-	// 磁盘上确有一个 .inflight 临时名。
+}
+
+// assertInflightTempCountOnDisk 断言匿名用户 user 桶下在途临时文件数量。
+func assertInflightTempCountOnDisk(t *testing.T, cfgPtr *atomic.Pointer[Config], want int) {
+	t.Helper()
 	tmpCount := 0
 	userRoot := filepath.Join(cfgPtr.Load().StorageRoot, "anonymous", "user")
 	entries, _ := os.ReadDir(userRoot)
@@ -526,11 +545,14 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 			tmpCount++
 		}
 	}
-	if tmpCount != 1 {
-		t.Fatalf("磁盘应有 1 个 .inflight 临时名, got %d", tmpCount)
+	if tmpCount != want {
+		t.Fatalf("磁盘应有 %d 个 .inflight 临时名, got %d", want, tmpCount)
 	}
+}
 
-	// 列表不含临时名。
+// assertListOmitsInflightTemp 断言 /api/files 列表不含在途临时名且含 normal.txt。
+func assertListOmitsInflightTemp(t *testing.T, url string) {
+	t.Helper()
 	listResp, listErr := http.Get(url + "/api/files")
 	if listErr != nil {
 		t.Fatalf("list: %v", listErr)
@@ -552,8 +574,11 @@ func TestListFiles_FiltersInflightTemp(t *testing.T) {
 			t.Fatalf("list 应含 normal.txt, got %+v", list.Files)
 		}
 	}
+}
 
-	// 搜索不含临时名（用临时名特征段 ".inflight" 匹配）。
+// assertSearchOmitsInflightTemp 断言 /api/files/search?q=inflight 结果不含在途临时名。
+func assertSearchOmitsInflightTemp(t *testing.T, url string) {
+	t.Helper()
 	searchResp, sErr := http.Get(url + "/api/files/search?q=inflight")
 	if sErr != nil {
 		t.Fatalf("search: %v", sErr)
@@ -820,7 +845,7 @@ func TestBatchDelete_Success(t *testing.T) {
 
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"a.txt","checksum":"%s"},{"filename":"b.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
@@ -862,7 +887,7 @@ func TestBatchDelete_ContinueOnError(t *testing.T) {
 
 	reqBody := fmt.Sprintf(`{"files":[{"filename":"nonexistent.txt","checksum":"%s"},{"filename":"exists.txt","checksum":"%s"}]}`, cs, cs)
 	req, _ := http.NewRequest("POST", url+"/api/batch/delete", strings.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("batch delete: %v", err)
@@ -946,13 +971,9 @@ func TestAuthMiddleware(t *testing.T) {
 // ---- ChecksumStore 并发安全 ----
 
 func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "csstore-test-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "csstore-test-")
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 
 	var wg sync.WaitGroup
 	const goroutines = 50
@@ -975,7 +996,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	wg.Wait()
 
 	// 重新打开 store，确认磁盘内容能正确解析
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	// 至少不能 panic、不能丢出错误。具体保留数量取决于调度。
 	t.Logf("after concurrent ops, store has %d entries", len(all))
@@ -984,13 +1005,9 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 // ---- ChecksumStore 原子写：确保 .tmp 不残留 ----
 
 func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "csstore-atomic-*")
-	if err != nil {
-		t.Fatalf("mktmp: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := testutil.MkdirTemp(t, "csstore-atomic-")
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
 	cs.Set("k", "v")
 	cs.Set("k2", "v2")
 	cs.Delete("k")
@@ -1092,25 +1109,6 @@ func newTestServerWithAllRoutesCredsMany(t *testing.T, modifyCfg func(*Config), 
 		_ = h.Close()
 	})
 	return ts.URL, &cfgPtr
-}
-
-// makeReadOnlyDir 创建一个只读目录（无写权限），用于测试文件写入失败路径。
-func makeReadOnlyDir(t *testing.T) (string, func()) {
-	t.Helper()
-	d := t.TempDir()
-
-	roDir := filepath.Join(d, "readonly")
-	if err := os.Mkdir(roDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(roDir, 0444); err != nil {
-			t.Fatalf("chmod: %v", err)
-		}
-		cleanup := func() { os.Chmod(roDir, 0755) }
-		return roDir, cleanup
-	}
-	return d, func() {}
 }
 
 // ---- healthz / version ----
@@ -1673,7 +1671,7 @@ func TestUpload_ParseMultipartFormError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new req: %v", err)
 	}
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
+	req.Header.Set(headerContentType, "multipart/form-data; boundary=xxx")
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatalf("do upload: %v", err)

@@ -12,9 +12,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCipher_StreamRoundtrip 流式加密 → 解密往返 = 原文。
@@ -60,19 +62,17 @@ func TestCipher_StreamRoundtrip(t *testing.T) {
 // TestCipher_RegisterAndLookup 注册表按名查算法。
 func TestCipher_RegisterAndLookup(t *testing.T) {
 	t.Parallel()
-	// 清理注册表（包级全局，测试隔离；-count=2 残留复现见 #601）。
-	old := cipherRegistrySnapshot()
-	cipherRegistryClear()
-	t.Cleanup(func() { cipherRegistryRestore(old) })
-
-	// aes-256-gcm 由 init 预注册——测自定义算法（非冲突）。
-	if RegisterCipher("test-cipher", 32<<10) == false {
+	// 用唯一算法名（时间戳）测首次/重复注册语义，避免 -count=2 残留冲突。
+	// 不清理共享全局注册表（aes-256-gcm 由 init 预注册）——否则并行的
+	// TestCipher_StreamRoundtrip 在清空窗口内查不到该算法而竞态失败（#601 同型）。
+	algo := fmt.Sprintf("test-cipher-%d", time.Now().UnixNano())
+	if RegisterCipher(algo, 32<<10) == false {
 		t.Fatal("首次注册应 true")
 	}
-	if RegisterCipher("test-cipher", 32<<10) == true {
+	if RegisterCipher(algo, 32<<10) == true {
 		t.Fatal("重复注册应 false")
 	}
-	cfg, ok := LookupCipher("test-cipher")
+	cfg, ok := LookupCipher(algo)
 	if !ok {
 		t.Fatal("已注册算法应可查")
 	}

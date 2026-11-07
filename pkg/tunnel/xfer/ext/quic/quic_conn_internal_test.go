@@ -333,7 +333,7 @@ func TestQuicConnReceiveWithDeadline(t *testing.T) {
 // TestQuicConnReceiveWithCancel 验证 Receive 用 ctx 取消解除阻塞读（无 deadline 的 ctx）。
 func TestQuicConnReceiveWithCancel(t *testing.T) {
 	c := &quicConn{stream: &blockingStream{}}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8188 — cancel 由下方 goroutine（30ms 后）显式触发，加 defer 冗余
 	go func() {
 		time.Sleep(30 * time.Millisecond)
 		cancel()
@@ -377,7 +377,7 @@ func TestQuicConnReceiveNoGoroutineLeak(t *testing.T) {
 	const rounds = 50
 
 	for range rounds {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(context.Background()) // NOSONAR: S8188 — 每轮由下方 goroutine（2ms 后）显式 cancel
 		go func() {
 			time.Sleep(2 * time.Millisecond)
 			cancel()

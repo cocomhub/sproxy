@@ -5,15 +5,18 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // usage_store.go 是计量报告（roadmap 11.10-⑩）P1 的 usageStore 纯逻辑层：
@@ -44,9 +47,15 @@ type usageMonthFile struct {
 
 // usageStore 是 per-owner 周期用量聚合存储（内存环 + 周期落盘，thread-safe）。
 type usageStore struct {
-	mu         sync.RWMutex
-	persistDir string // 为空 = 纯内存（测试/未装配形态，不落盘）
-	logger     *slog.Logger
+	mu sync.RWMutex
+	// root 是**默认卷的卷句柄**（nil = 纯内存形态：测试/未装配，不落盘）。
+	// 落盘位置 = rootfs.RelJoin(rel, owner)/<YYYY-MM>.json，由卷自己决定是否加密——使用方
+	// 不理解「是否加密卷」（非加密卷 = 普通读写；加密卷 = 卷内透明加解密），
+	// 同时经 Root 天然继承封印判定（封装卷占用区间写入恒拒）。
+	root *storage.Root
+	// rel 是台账在 default 卷内的相对目录（生产 = "meta/usage"；测试可为 ""）。
+	rel    string
+	logger *slog.Logger
 	// days: owner → 按日期升序的日桶序列（环，最近 usageRingRetention 个）。
 	// 跨日记录自动追加新日桶；超窗弹最旧。月边界不特殊处理——日桶天然按月分组，
 	// Flush/载入以月为文件粒度。
@@ -65,19 +74,24 @@ type usageDayEntry struct {
 // 超过窗口的最旧日桶被弹出（内存有界；历史完整数据以月快照落盘为准）。
 const usageRingRetention = 92
 
-// newUsageStore 创建 usageStore。persistDir 为空 = 纯内存形态（不落盘不载入）；
-// 非空时扫描 <persistDir>/*/<YYYY-MM>.json 恢复各 owner 各月日桶（文件缺失 = 空历史）。
-func newUsageStore(persistDir string, logger *slog.Logger) *usageStore {
+// maxUsageSnapshotBytes 是月快照读取上界（防注入超大 JSON 的 OOM；月快照是
+// 「天 × kind」小体量，4MiB 已远超正常形态）。超限 = 视为损坏 → 跳过该文件。
+const maxUsageSnapshotBytes = 4 << 20
+
+// newUsageStore 创建 usageStore。root 为 nil = 纯内存形态（不落盘不载入）；
+// 非 nil 时扫描 rootfs.RelJoin(rel, *) 下的 <YYYY-MM>.json 恢复各 owner 各月日桶（缺失 = 空历史）。
+func newUsageStore(root *storage.Root, rel string, logger *slog.Logger) *usageStore {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &usageStore{
-		persistDir: persistDir,
-		logger:     logger,
-		days:       make(map[string][]usageDayEntry),
-		dayIndex:   make(map[string][]string),
+		root:     root,
+		rel:      rootfs.RelDir(rel),
+		logger:   logger,
+		days:     make(map[string][]usageDayEntry),
+		dayIndex: make(map[string][]string),
 	}
-	if persistDir != "" {
+	if root != nil {
 		s.load()
 	}
 	return s
@@ -86,10 +100,10 @@ func newUsageStore(persistDir string, logger *slog.Logger) *usageStore {
 // load 扫描持久化目录恢复历史日桶（启动恢复；目录不存在视为空历史）。
 // 只载入最近 usageRingRetention 个日桶（防历史目录巨大导致内存暴涨）。
 func (s *usageStore) load() {
-	ownerDirs, err := os.ReadDir(s.persistDir)
+	ownerDirs, err := s.root.ReadDir(s.rel)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			s.logger.Warn("用量持久化目录读取失败，跳过恢复", "dir", s.persistDir, "error", err.Error())
+			s.logger.Warn("用量持久化目录读取失败，跳过恢复", "dir", s.rel, "error", err.Error())
 		}
 		return
 	}
@@ -97,34 +111,49 @@ func (s *usageStore) load() {
 		if !od.IsDir() {
 			continue
 		}
-		owner := od.Name()
-		monthFiles, ferr := os.ReadDir(filepath.Join(s.persistDir, owner))
-		if ferr != nil {
+		s.loadOwner(od.Name())
+	}
+}
+
+// loadOwner 恢复单个 owner 目录下的月快照文件（目录读取失败视为空历史）。
+func (s *usageStore) loadOwner(owner string) {
+	monthFiles, ferr := s.root.ReadDir(rootfs.RelJoin(s.rel, owner))
+	if ferr != nil {
+		return
+	}
+	for _, mf := range monthFiles {
+		if mf.IsDir() || !strings.HasSuffix(mf.Name(), ".json") {
 			continue
 		}
-		for _, mf := range monthFiles {
-			if mf.IsDir() || !strings.HasSuffix(mf.Name(), ".json") {
-				continue
-			}
-			var file usageMonthFile
-			data, rerr := os.ReadFile(filepath.Join(s.persistDir, owner, mf.Name()))
-			if rerr != nil {
-				s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", mf.Name(), "error", rerr.Error())
-				continue
-			}
-			if uerr := json.Unmarshal(data, &file); uerr != nil {
-				s.logger.Warn("用量月快照解析失败，跳过", "owner", owner, "file", mf.Name(), "error", uerr.Error())
-				continue
-			}
-			dates := make([]string, 0, len(file.Days))
-			for d := range file.Days {
-				dates = append(dates, d)
-			}
-			sort.Strings(dates)
-			for _, d := range dates {
-				s.appendDayLocked(owner, usageDayEntry{Date: d, Kinds: file.Days[d]})
-			}
-		}
+		s.loadMonthFile(owner, mf.Name())
+	}
+}
+
+// loadMonthFile 载入单个 owner 月快照（读取/解析失败跳过并告警；成功把该月各日桶入环）。
+func (s *usageStore) loadMonthFile(owner, fileName string) {
+	var file usageMonthFile
+	rc, rerr := rootfs.OpenUserVisibleRead(s.root, rootfs.RelJoin(s.rel, owner)+"/"+fileName)
+	if rerr != nil {
+		s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", fileName, "error", rerr.Error())
+		return
+	}
+	data, rdErr := io.ReadAll(io.LimitReader(rc, maxUsageSnapshotBytes+1))
+	_ = rc.Close()
+	if rdErr != nil || len(data) > maxUsageSnapshotBytes {
+		s.logger.Warn("用量月快照读取失败，跳过", "owner", owner, "file", fileName, "error", rdErr)
+		return
+	}
+	if uerr := json.Unmarshal(data, &file); uerr != nil {
+		s.logger.Warn("用量月快照解析失败，跳过", "owner", owner, "file", fileName, "error", uerr.Error())
+		return
+	}
+	dates := make([]string, 0, len(file.Days))
+	for d := range file.Days {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+	for _, d := range dates {
+		s.appendDayLocked(owner, usageDayEntry{Date: d, Kinds: file.Days[d]})
 	}
 }
 
@@ -162,7 +191,7 @@ func (s *usageStore) RecordUsage(owner, kind string, n int64) {
 func (s *usageStore) RecordUsageAt(owner, kind string, n int64, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	date := at.Format("2006-01-02")
+	date := at.Format(timeLayoutDate)
 	if i := s.findDayLocked(owner, date); i >= 0 {
 		s.days[owner][i].Kinds[kind] += n
 		return
@@ -198,15 +227,15 @@ type usageSummary struct {
 // from > to 或日期非法返回空结果（报告语义，非 400——校验归 handler 层）。
 func (s *usageStore) Summary(owner, from, to string) usageSummary {
 	sum := usageSummary{Owner: owner, From: from, To: to, Kinds: usageDay{}}
-	fromT, ferr := time.Parse("2006-01-02", from)
-	toT, terr := time.Parse("2006-01-02", to)
+	fromT, ferr := time.Parse(timeLayoutDate, from)
+	toT, terr := time.Parse(timeLayoutDate, to)
 	if ferr != nil || terr != nil || fromT.After(toT) {
 		return sum
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for i := 0; i < len(s.days[owner]); i++ {
-		d, perr := time.Parse("2006-01-02", s.days[owner][i].Date)
+		d, perr := time.Parse(timeLayoutDate, s.days[owner][i].Date)
 		if perr != nil {
 			continue
 		}
@@ -226,11 +255,26 @@ func (s *usageStore) Summary(owner, from, to string) usageSummary {
 // 未装配持久化目录（persistDir 空）= no-op。落盘失败返回错误（调用方记 Warn，
 // 内存仍可读，绝不阻断业务）。
 func (s *usageStore) Flush() error {
-	if s.persistDir == "" {
+	if s.root == nil {
 		return nil
 	}
 	s.mu.RLock()
 	// 按 owner 分组：owner → month → {date: kinds}（快照副本，锁外落盘）。
+	grouped := s.groupDaysLocked()
+	s.mu.RUnlock()
+
+	for owner, months := range grouped {
+		for month, days := range months {
+			if err := s.writeMonthSnapshot(owner, month, days); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// groupDaysLocked 把内存环按 owner/月分组为落盘快照副本（调用方须已持 s.mu RLock）。
+func (s *usageStore) groupDaysLocked() map[string]map[string]map[string]usageDay {
 	grouped := make(map[string]map[string]map[string]usageDay)
 	for owner, entries := range s.days {
 		for _, e := range entries {
@@ -244,16 +288,7 @@ func (s *usageStore) Flush() error {
 			grouped[owner][month][e.Date] = cloneUsageDay(e.Kinds)
 		}
 	}
-	s.mu.RUnlock()
-
-	for owner, months := range grouped {
-		for month, days := range months {
-			if err := s.writeMonthSnapshot(owner, month, days); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return grouped
 }
 
 // writeMonthSnapshot 原子写单个月快照（tmp + Rename；Windows 语义：Rename 覆盖
@@ -263,17 +298,31 @@ func (s *usageStore) writeMonthSnapshot(owner, month string, days map[string]usa
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(s.persistDir, owner)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	dirRel := rootfs.RelJoin(s.rel, owner)
+	if err := rootfs.EnsureDir(s.root, dirRel, 0o755); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, month+".json")
-	tmp := path + ".tmp"
-	defer os.Remove(tmp) // 失败清理临时文件（尽力而为）
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
+	rel := dirRel + "/" + month + ".json"
+	tmpRel := rel + ".tmp"
+	// 经卷句柄写（卷决定是否加密）+ tmp→rename 原子替换。
+	w, werr := rootfs.WriteUserVisible(s.root, tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if werr != nil {
+		return werr
 	}
-	return os.Rename(tmp, path)
+	if _, cerr := w.Write(data); cerr != nil {
+		_ = w.Close()
+		_ = s.root.Remove(tmpRel) // 失败清理临时文件（尽力而为）
+		return cerr
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = s.root.Remove(tmpRel)
+		return cerr
+	}
+	if rerr := s.root.AtomicRename(tmpRel, rel); rerr != nil {
+		_ = s.root.Remove(tmpRel)
+		return rerr
+	}
+	return nil
 }
 
 // cloneUsageDay 深拷贝日桶（并发快照安全）。

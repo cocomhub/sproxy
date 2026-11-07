@@ -1,0 +1,13 @@
+# R30 登记表：`registry.UsageProvider` 直连点（卷用量查询单一查询面）
+#
+# 格式：<仓库相对路径>\t<允许的最大直连次数>\t<理由>
+# 规则：棘轮**只降不升** —— 新增文件或增加次数必须显式登记理由（把「评审记得看」变成「CI 必须过」）。
+# 判据：`.(registry.UsageProvider)` 类型断言的出现次数（文本计数，偏严不偏松）。
+#
+# 唯一实现：`pkg/server/volume_usage.go` 的 `Handlers.volumeUsage`（优先级链：
+# ① 配额层 QuotaVolume.VolumeUsed → ② 容量池 Pool.Usage → ③ 外部卷后端 UsageProvider）。
+# 全部消费方（`/api/volumes` 仪表、`/api/volumes/user` 列表、metrics）**必须**经它读取。
+#
+# 背景：该覆盖曾散在 3 个调用点各自实现（`volumes_api.go` / `user_volume_api.go` 各一份冗余复制）
+# ⇒ 多源即多漂移面（设计 §0 根因形态）。2026-10-17 收敛为唯一实现并加本门禁。
+pkg/server/volume_usage.go	1	唯一实现（volumeUsage 的优先级链第 ③ 支）

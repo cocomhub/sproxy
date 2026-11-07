@@ -20,6 +20,15 @@ import (
 	"time"
 )
 
+// headerFileChecksum 是校验和响应头名（mock 镜像生产契约）。
+const headerFileChecksum = "X-File-Checksum"
+
+// msgChecksumMismatch / msgNoSession 是 mock 端点错误文案。
+const (
+	msgChecksumMismatch = "checksum mismatch"
+	msgNoSession        = "no session"
+)
+
 // RemoteFile 是 mock 远程上的一个文件。
 type RemoteFile struct {
 	Data     []byte
@@ -141,17 +150,9 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	var files []listItem
 	for p, f := range m.files {
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(p, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(p, subdir+"/")
-		} else {
-			rel = p
-		}
-		if strings.Contains(rel, "/") {
-			continue // 非直接子项
+		rel, ok := childRelPath(p, subdir)
+		if !ok {
+			continue
 		}
 		files = append(files, listItem{
 			Name: rel, Size: len(f.Data), Checksum: f.Checksum, ModTime: f.MTime,
@@ -161,16 +162,8 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 		if d == subdir {
 			continue
 		}
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(d, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(d, subdir+"/")
-		} else {
-			rel = d
-		}
-		if strings.Contains(rel, "/") {
+		rel, ok := childRelPath(d, subdir)
+		if !ok {
 			continue
 		}
 		files = append(files, listItem{Name: rel, IsDir: true})
@@ -188,13 +181,31 @@ func (m *Remote) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": files, "total": total})
 }
 
+// childRelPath 返回 p 相对 subdir 的（直接子项）相对路径；p 不是 subdir 的直接子项时
+// （不在该目录下，或仍含更深的分隔符）返回 (rel, false)。
+func childRelPath(p, subdir string) (string, bool) {
+	var rel string
+	if subdir != "" {
+		if !strings.HasPrefix(p, subdir+"/") {
+			return "", false
+		}
+		rel = strings.TrimPrefix(p, subdir+"/")
+	} else {
+		rel = p
+	}
+	if strings.Contains(rel, "/") {
+		return "", false // 非直接子项
+	}
+	return rel, true
+}
+
 func (m *Remote) handleStat(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("filename")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if f, ok := m.files[name]; ok {
 		w.Header().Set("X-File-Size", strconv.Itoa(len(f.Data)))
-		w.Header().Set("X-File-Checksum", f.Checksum)
+		w.Header().Set(headerFileChecksum, f.Checksum)
 		w.Header().Set("X-File-MTime", strconv.FormatInt(f.MTime, 10))
 		w.Header().Set("X-File-IsDir", "false")
 		w.WriteHeader(http.StatusOK)
@@ -217,12 +228,12 @@ func (m *Remote) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("X-File-Checksum", f.Checksum)
+	w.Header().Set(headerFileChecksum, f.Checksum)
 	_, _ = w.Write(f.Data)
 }
 
 func (m *Remote) handleUpload(w http.ResponseWriter, r *http.Request) {
-	cs := r.Header.Get("X-File-Checksum")
+	cs := r.Header.Get(headerFileChecksum)
 	if cs == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "missing X-File-Checksum"})
 		return
@@ -249,7 +260,7 @@ func (m *Remote) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if SHA256Hex(data) != cs {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "checksum mismatch"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": msgChecksumMismatch})
 		return
 	}
 	m.mu.Lock()
@@ -260,7 +271,7 @@ func (m *Remote) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 func (m *Remote) handleUploadStatus(w http.ResponseWriter, _ *http.Request) {
 	// 简化：无会话返回 404，客户端 willContinue → 走 init 新会话
-	http.Error(w, "no session", http.StatusNotFound)
+	http.Error(w, msgNoSession, http.StatusNotFound)
 }
 
 func (m *Remote) handleUploadInit(w http.ResponseWriter, r *http.Request) {
@@ -325,7 +336,7 @@ func (m *Remote) handleUploadChunk(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	sess, ok := m.sessions[uploadID]
 	if !ok {
-		http.Error(w, "no session", http.StatusNotFound)
+		http.Error(w, msgNoSession, http.StatusNotFound)
 		return
 	}
 	sess.chunks[chunkIdx] = data
@@ -344,7 +355,7 @@ func (m *Remote) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 	defer m.mu.Unlock()
 	sess, ok := m.sessions[req.UploadID]
 	if !ok {
-		http.Error(w, "no session", http.StatusNotFound)
+		http.Error(w, msgNoSession, http.StatusNotFound)
 		return
 	}
 	delete(m.sessions, req.UploadID)
@@ -367,7 +378,7 @@ func (m *Remote) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 func (m *Remote) handleRename(w http.ResponseWriter, r *http.Request) {
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
-	cs := r.Header.Get("X-File-Checksum")
+	cs := r.Header.Get(headerFileChecksum)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	f, ok := m.files[from]
@@ -376,7 +387,7 @@ func (m *Remote) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cs == "" || f.Checksum != cs {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "checksum mismatch"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": msgChecksumMismatch})
 		return
 	}
 	if _, exists := m.files[to]; exists {
@@ -390,7 +401,7 @@ func (m *Remote) handleRename(w http.ResponseWriter, r *http.Request) {
 
 func (m *Remote) handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("filename")
-	cs := r.Header.Get("X-File-Checksum")
+	cs := r.Header.Get(headerFileChecksum)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	f, ok := m.files[name]
@@ -399,7 +410,7 @@ func (m *Remote) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if cs != "" && f.Checksum != cs {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "checksum mismatch"})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": msgChecksumMismatch})
 		return
 	}
 	delete(m.files, name)

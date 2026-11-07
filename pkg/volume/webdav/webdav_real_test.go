@@ -152,10 +152,10 @@ func TestWebDAVReal_ListDir_CompletePath(t *testing.T) {
 	if mk2Err := fs.MakeDir(ctx, "realroot/sub"); mk2Err != nil {
 		t.Fatalf("MakeDir realroot/sub: %v", mk2Err)
 	}
-	if wErr := fs.WriteFile(ctx, "realroot/a.txt", strings.NewReader("A"), 1, 0); wErr != nil {
+	if wErr := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "realroot/a.txt", strings.NewReader("A"), 1, 0); wErr != nil {
 		t.Fatalf("WriteFile realroot/a.txt: %v", wErr)
 	}
-	if w2Err := fs.WriteFile(ctx, "realroot/sub/b.txt", strings.NewReader("B"), 1, 0); w2Err != nil {
+	if w2Err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "realroot/sub/b.txt", strings.NewReader("B"), 1, 0); w2Err != nil {
 		t.Fatalf("WriteFile realroot/sub/b.txt: %v", w2Err)
 	}
 	entries, err := fs.ListDir(ctx, "realroot")

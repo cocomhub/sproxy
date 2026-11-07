@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
+	"github.com/cocomhub/sproxy/pkg/server/notify"
 )
 
 // alertTestChannel 记录告警消息的假渠道（cmd/sproxy 侧：实现 server.Notifier
@@ -34,7 +36,7 @@ func newAlertTestChannel(name string) *alertTestChannel {
 
 func (f *alertTestChannel) Name() string { return f.name }
 
-func (f *alertTestChannel) Send(_ context.Context, m server.NotifyMessage) error {
+func (f *alertTestChannel) Send(_ context.Context, m notify.NotifyMessage) error {
 	f.msgs <- m.Title + "|" + m.Text
 	return nil
 }
@@ -49,9 +51,9 @@ func testLogger() *slog.Logger {
 func TestWithNATAlert_FailureFiresAndPropagates(t *testing.T) {
 	t.Parallel()
 	ch := newAlertTestChannel("wecom")
-	eng := server.NewAlertEngine(server.AlertConfig{
+	eng := alerts.NewEngine(server.AlertConfig{
 		Enabled: true,
-		Rules:   []server.AlertRule{{Source: server.SourceNATFailure, Channels: []string{"wecom"}}},
+		Rules:   []server.AlertRule{{Source: alerts.SourceNATFailure, Channels: []string{"wecom"}}},
 	}, testLogger())
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
@@ -83,9 +85,9 @@ func TestWithNATAlert_FailureFiresAndPropagates(t *testing.T) {
 func TestWithNATAlert_SuccessRecovers(t *testing.T) {
 	t.Parallel()
 	ch := newAlertTestChannel("wecom")
-	eng := server.NewAlertEngine(server.AlertConfig{
+	eng := alerts.NewEngine(server.AlertConfig{
 		Enabled: true,
-		Rules:   []server.AlertRule{{Source: server.SourceNATFailure, Channels: []string{"wecom"}}},
+		Rules:   []server.AlertRule{{Source: alerts.SourceNATFailure, Channels: []string{"wecom"}}},
 	}, testLogger())
 	eng.Register(ch)
 	t.Cleanup(eng.Close)
@@ -137,7 +139,7 @@ func TestWithNATAlert_NilEngineNoOp(t *testing.T) {
 			t.Fatalf("nil engine 时错误应原样传播: %v", err)
 		}
 	}
-	if got := withNATAlert(nil, server.NewAlertEngine(server.AlertConfig{}, testLogger()), "peer-x"); got != nil {
+	if withNATAlert(nil, alerts.NewEngine(server.AlertConfig{}, testLogger()), "peer-x") != nil {
 		t.Fatal("dial==nil 时应返回 nil（不包装）")
 	}
 }

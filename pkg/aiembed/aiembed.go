@@ -43,6 +43,12 @@ type Config struct {
 	Model    string        // openai: text-embedding-3-small；ollama: nomic-embed-text
 	Dim      int           // 向量维数（<=0 → 默认 1536）
 	Timeout  time.Duration // 默认 30s
+	// Observer 是**成功一次嵌入**后的观察者（审计/可观测接缝）。
+	//
+	// 契约：只报告**规模元数据**（provider/model/条数），**绝不携带被嵌入的文本**——
+	// 文本属于用户内容，进审计/日志即扩散（设计 §5.7 同旨）；也不在失败时调用（失败由
+	// 调用方按自身语义决定是否留痕）。服务端装配时注入 `Handlers` 的 RecordAudit 包装。
+	Observer func(ctx context.Context, provider, model string, count int)
 }
 
 // Client 是 embedding 客户端。
@@ -155,8 +161,24 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("aiembed: 读响应: %w", err)
 	}
+	raw, err := parseEmbeddings(data, c.cfg.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) != len(texts) {
+		return nil, fmt.Errorf("aiembed: 响应 %d 条向量，want %d", len(raw), len(texts))
+	}
+	if c.cfg.Observer != nil {
+		c.cfg.Observer(ctx, c.cfg.Provider, c.cfg.Model, len(texts))
+	}
+	return toFloat32Vectors(raw), nil
+}
+
+// parseEmbeddings 按 provider 解析响应体为原始 [][]float64（ollama: embeddings[i]；
+// openai: data[i].embedding）。
+func parseEmbeddings(data []byte, provider string) ([][]float64, error) {
 	var raw [][]float64
-	if c.cfg.Provider == "ollama" {
+	if provider == "ollama" {
 		var or ollamaResponse
 		if err := json.Unmarshal(data, &or); err != nil {
 			return nil, fmt.Errorf("aiembed: 解析 ollama 响应: %w", err)
@@ -171,9 +193,11 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 			raw = append(raw, d.Embedding)
 		}
 	}
-	if len(raw) != len(texts) {
-		return nil, fmt.Errorf("aiembed: 响应 %d 条向量，want %d", len(raw), len(texts))
-	}
+	return raw, nil
+}
+
+// toFloat32Vectors 把 [][]float64 转成归一化的 [][]float32。
+func toFloat32Vectors(raw [][]float64) [][]float32 {
 	out := make([][]float32, len(raw))
 	for i, v := range raw {
 		vec := make([]float32, len(v))
@@ -182,7 +206,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 		out[i] = normalize(vec)
 	}
-	return out, nil
+	return out
 }
 
 // normalize 归一化向量（供余弦相似度；零向量返回原样避免除零）。

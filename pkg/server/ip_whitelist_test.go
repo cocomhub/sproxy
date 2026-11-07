@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // newIPGateServer 装配带凭据 Ring 的完整路由 handler（IP 门集成测试用）。
@@ -194,12 +196,12 @@ func TestTrustProxy_ResolveNoTrustedIgnoresXFF(t *testing.T) {
 func TestTrustProxy_ResolveChainRightToLeft(t *testing.T) {
 	t.Parallel()
 	// 信任最近一跳 + 中间跳：链 "1.2.3.4, 5.6.7.8, 9.9.9.9" → 右向左跳过信任项 → 1.2.3.4。
-	trusted := parseIPNets([]string{"9.9.9.9/32", "5.6.7.8/32"})
+	trusted := netutil.ParseIPNets([]string{"9.9.9.9/32", "5.6.7.8/32"})
 	if got := resolveClientIP("9.9.9.9:443", "1.2.3.4, 5.6.7.8, 9.9.9.9", trusted); got != "1.2.3.4" {
 		t.Fatalf("双信任跳解析 = %q, want 1.2.3.4", got)
 	}
 	// 仅信任最近一跳：链 "1.2.3.4, 9.9.9.9" → 1.2.3.4。
-	oneHop := parseIPNets([]string{"9.9.9.9/32"})
+	oneHop := netutil.ParseIPNets([]string{"9.9.9.9/32"})
 	if got := resolveClientIP("9.9.9.9:443", "1.2.3.4, 9.9.9.9", oneHop); got != "1.2.3.4" {
 		t.Fatalf("单信任跳解析 = %q, want 1.2.3.4", got)
 	}
@@ -212,7 +214,7 @@ func TestTrustProxy_ResolveChainRightToLeft(t *testing.T) {
 // TestTrustProxy_ResolveAllTrustedFallback：链中所有条目都在信任列表 → 回退 RemoteAddr。
 func TestTrustProxy_ResolveAllTrustedFallback(t *testing.T) {
 	t.Parallel()
-	trusted := parseIPNets([]string{"9.9.9.9/32", "5.6.7.8/32"})
+	trusted := netutil.ParseIPNets([]string{"9.9.9.9/32", "5.6.7.8/32"})
 	if got := resolveClientIP("9.9.9.9:443", "5.6.7.8, 9.9.9.9", trusted); got != "9.9.9.9" {
 		t.Fatalf("全信任链 = %q, want 回退 RemoteAddr 9.9.9.9", got)
 	}
@@ -222,7 +224,7 @@ func TestTrustProxy_ResolveAllTrustedFallback(t *testing.T) {
 // 忽略整条回退 RemoteAddr（fail-closed，不 panic）。
 func TestTrustProxy_ResolveMalformedFallback(t *testing.T) {
 	t.Parallel()
-	trusted := parseIPNets([]string{"9.9.9.9/32"})
+	trusted := netutil.ParseIPNets([]string{"9.9.9.9/32"})
 	if got := resolveClientIP("9.9.9.9:443", "not-an-ip, 9.9.9.9", trusted); got != "9.9.9.9" {
 		t.Fatalf("畸形 XFF = %q, want 回退 RemoteAddr", got)
 	}
@@ -238,7 +240,7 @@ func TestTrustProxy_ResolveMalformedFallback(t *testing.T) {
 // TestTrustProxy_ResolveIPv6：IPv6 信任代理与 XFF。
 func TestTrustProxy_ResolveIPv6(t *testing.T) {
 	t.Parallel()
-	trusted := parseIPNets([]string{"::1/128"})
+	trusted := netutil.ParseIPNets([]string{"::1/128"})
 	if got := resolveClientIP("[::1]:56789", "2001:db8::5", trusted); got != "2001:db8::5" {
 		t.Fatalf("IPv6 信任代理解析 = %q, want 2001:db8::5", got)
 	}
@@ -330,13 +332,13 @@ func TestIPWhitelist_ValidatePureIPNormalized(t *testing.T) {
 // TestIPWhitelist_CoverLoopback：AllowIPsCoverLoopback 判定（启动告警辅助）。
 func TestIPWhitelist_CoverLoopback(t *testing.T) {
 	t.Parallel()
-	if !AllowIPsCoverLoopback([]string{"127.0.0.1/32", "::1/128"}) {
+	if !netutil.AllowIPsCoverLoopback([]string{"127.0.0.1/32", "::1/128"}) {
 		t.Fatal("v4+v6 回环均覆盖应为 true")
 	}
-	if AllowIPsCoverLoopback([]string{"127.0.0.1/32"}) {
+	if netutil.AllowIPsCoverLoopback([]string{"127.0.0.1/32"}) {
 		t.Fatal("仅 v4 回环应 false（缺 ::1）")
 	}
-	if AllowIPsCoverLoopback([]string{"10.0.0.0/8"}) {
+	if netutil.AllowIPsCoverLoopback([]string{"10.0.0.0/8"}) {
 		t.Fatal("不含任何回环应 false")
 	}
 }
@@ -344,7 +346,7 @@ func TestIPWhitelist_CoverLoopback(t *testing.T) {
 // TestTrustProxy_ParseIPNets：parseIPNets 支持 CIDR 与纯 IP 归一。
 func TestTrustProxy_ParseIPNets(t *testing.T) {
 	t.Parallel()
-	nets := parseIPNets([]string{"127.0.0.1", "10.0.0.0/8", "::1"})
+	nets := netutil.ParseIPNets([]string{"127.0.0.1", "10.0.0.0/8", "::1"})
 	if len(nets) != 3 {
 		t.Fatalf("parseIPNets len = %d, want 3", len(nets))
 	}

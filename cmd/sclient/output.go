@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
+	"sort"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/i18n"
@@ -39,6 +41,8 @@ type OutputFormatter interface {
 	PrintVersionList(filename string, versions []client.VersionInfo)
 	// PrintStat 输出文件元信息。
 	PrintStat(info *client.FileInfo, filename string)
+	// PrintMetaExtra 输出文件元数据 extra（KV；空 map = 不输出）。
+	PrintMetaExtra(extra map[string]any)
 	// PrintTransferStats 输出传输统计（表格一行 / JSON stats 对象）。
 	PrintTransferStats(stats *TransferStats)
 	// Printf 输出格式化字符串（JSON 模式忽略）。
@@ -89,6 +93,9 @@ func (f *TextFormatter) PrintShareCreated(link *client.ShareLink, shareURL strin
 	fmt.Fprintf(f.w, "Token: %s\n", link.Token)
 	fmt.Fprintln(f.w, i18n.F("有效期至: %s", link.ExpiresAt))
 	fmt.Fprintln(f.w, i18n.F("最大下载次数: %d", link.MaxDownloads))
+	if link.Volume != "" {
+		fmt.Fprintln(f.w, i18n.F("源卷: %s", link.Volume))
+	}
 	fmt.Fprintln(f.w, i18n.F("一次性: %v", link.OneTime))
 }
 
@@ -105,39 +112,50 @@ func (f *TextFormatter) PrintCloudTaskList(tasks []cloudTaskInfo) {
 		fmt.Fprintln(f.w, i18n.T("暂无云端下载任务"))
 		return
 	}
-	fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n",
+	fmt.Fprintf(f.w, "%-36s  %-20s  %-18s  %-20s  %-8s  %s\n",
 		i18n.T("任务ID"), i18n.T("文件名"), i18n.T("状态"), "ETag", i18n.T("组ID"), "URL")
 	for _, t := range tasks {
-		shortID := t.ID
-		if len(shortID) > 36 {
-			shortID = shortID[:16] + "..." + shortID[len(shortID)-16:]
-		}
-		shortName := t.Filename
-		if len(shortName) > 20 {
-			shortName = shortName[:17] + "..."
-		}
-		status := t.Status
-		if t.TotalSize > 0 && t.Status == "downloading" {
-			pct := t.Downloaded * 100 / t.TotalSize
-			status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
-		}
-		etag := t.ETag
-		if len(etag) > 20 {
-			etag = etag[:17] + "..."
-		}
-		if etag == "" {
-			etag = "-"
-		}
-		groupID := t.GroupID
-		if groupID == "" {
-			groupID = "-"
-		}
-		shortURL := t.URL
-		if len(shortURL) > 40 {
-			shortURL = shortURL[:37] + "..."
-		}
-		fmt.Fprintf(f.w, "%-36s  %-20s  %-12s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
+		fmt.Fprint(f.w, formatCloudTaskRow(t)) // formatCloudTaskRow 已含尾部 \n，Fprintln 会双重换行
 	}
+}
+
+// formatCloudTaskRow 格式化单个云端任务为一行表格（长字段截断、空字段占位）。
+func formatCloudTaskRow(t cloudTaskInfo) string {
+	shortID := t.ID
+	if len(shortID) > 36 {
+		shortID = shortID[:16] + "..." + shortID[len(shortID)-16:]
+	}
+	shortName := t.Filename
+	if len(shortName) > 20 {
+		shortName = shortName[:17] + "..."
+	}
+	status := t.Status
+	if t.TotalSize > 0 && t.Status == "downloading" {
+		pct := t.Downloaded * 100 / t.TotalSize
+		status = fmt.Sprintf("%s (%d%%)", t.Status, pct)
+	}
+	etag := t.ETag
+	if len(etag) > 20 {
+		etag = etag[:17] + "..."
+	}
+	if etag == "" {
+		etag = "-"
+	}
+	groupID := t.GroupID
+	if groupID == "" {
+		groupID = "-"
+	}
+	shortURL := t.URL
+	if len(shortURL) > 40 {
+		shortURL = shortURL[:37] + "..."
+	}
+	// IntegrityStatus 完整性问题：damaged 在文本面必须与 completed 区分——
+	// damaged 意味着内容损坏/重下（不应被当可靠成功）；verified/unverified 不追加
+	// （成功任务默认无标记，JSON 输出仍有 integrity_status 供脚本消费）。
+	if t.IntegrityStatus == "damaged" {
+		status += " (damaged)"
+	}
+	return fmt.Sprintf("%-36s  %-20s  %-18s  %-20s  %-8s  %s\n", shortID, shortName, status, etag, groupID, shortURL)
 }
 
 func (f *TextFormatter) PrintCloudTaskCancelResult(taskID string, success bool, message string) {
@@ -179,6 +197,77 @@ func (f *TextFormatter) PrintStat(info *client.FileInfo, filename string) {
 		mt := time.Unix(0, info.ModTime)
 		fmt.Fprintf(f.w, "mtime:    %s\n", mt.Format(time.RFC3339))
 	}
+}
+
+// PrintMetaExtra 输出文件元数据 extra（KV 键值行；空 = 不输出）。
+func (f *TextFormatter) PrintMetaExtra(extra map[string]any) {
+	if len(extra) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := extra[k]
+		if s, ok := v.(string); ok {
+			// 人类可视化：时间键（UTC RFC3339 存储）转本地时区；source_url 等 URL 解码为可见字符
+			if display, changed := humanExtraDisplay(k, s); changed {
+				fmt.Fprintf(f.w, "extra.%s: %s\n", k, display)
+				continue
+			}
+			fmt.Fprintf(f.w, "extra.%s: %s\n", k, s)
+			continue
+		}
+		b, _ := json.Marshal(v)
+		fmt.Fprintf(f.w, "extra.%s: %s\n", k, string(b))
+	}
+}
+
+// metaTimeKeys 是 meta extra 里承载 RFC3339 时间的键（存储 UTC，展示转本地）。
+var metaTimeKeys = map[string]bool{
+	"transferred_at": true, "created_at": true, "updated_at": true, "mtime": true, "ctime": true,
+	// 下载审计时间（云端转存写入；UTC 存储 → 本地展示）
+	"downloaded_at": true, "x_download_started_at": true, "x_download_finished_at": true,
+	"x_source_created_at": true, "x_source_modified_at": true,
+}
+
+// humanExtraDisplay 人类可视化单值字符串：时间键转本地时区、source_url 解码为可见字符。
+// 返回 (展示值, 是否变更)；未变更原样输出（原始内容仍可用 --json 输出）。
+func humanExtraDisplay(k, s string) (string, bool) {
+	if metaTimeKeys[k] {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.Local().Format("2006-01-02 15:04:05 MST"), true
+		}
+	}
+	if k == "source_url" || k == "share_url" || k == "resolved_url" {
+		if decoded, err := url.QueryUnescape(s); err == nil && decoded != s {
+			return decoded, true
+		}
+	}
+	return s, false
+}
+
+// localTimeDisplay 若 k 是时间键且 v 可解析为 RFC3339 → 返回本地时区表示；否则原样。
+func localTimeDisplay(k, v string) string {
+	if !metaTimeKeys[k] {
+		return v
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return v
+	}
+	return t.Local().Format("2006-01-02 15:04:05 MST")
+}
+
+// PrintMetaExtra 输出 meta extra（JSON 模式：并入一个对象键）。
+func (f *JSONFormatter) PrintMetaExtra(extra map[string]any) {
+	if len(extra) == 0 {
+		return
+	}
+	enc := json.NewEncoder(f.w)
+	_ = enc.Encode(map[string]any{"extra": extra})
 }
 
 // PrintTransferStats 输出传输统计表格行（Text 模式）。
@@ -237,8 +326,9 @@ func (f *TextFormatter) PrintConfig(cfg *client.ConfigResponse) {
 	fmt.Fprintf(f.w, "  chunk_size:             %d\n", cfg.ChunkSize)
 	fmt.Fprintf(f.w, "  upload_session_ttl:     %s\n", cfg.UploadSessionTTL)
 	fmt.Fprintf(f.w, "  versioning_enabled:     %v\n", cfg.VersioningEnabled)
-	fmt.Fprintf(f.w, "  cloud_max_concurrent:   %d\n", cfg.CloudMaxConcurrent)
-	fmt.Fprintf(f.w, "  addr:                   %s\n", cfg.Addr)
+	fmt.Fprintf(f.w, "  cloud_max_concurrent:       %d\n", cfg.CloudMaxConcurrent)
+	fmt.Fprintf(f.w, "  cloud_transfer_concurrency: %d\n", cfg.CloudTransferConcurrency)
+	fmt.Fprintf(f.w, "  addr:                       %s\n", cfg.Addr)
 	fmt.Fprintf(f.w, "  storage_root:           %s\n", cfg.StorageRoot)
 }
 

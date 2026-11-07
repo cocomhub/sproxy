@@ -39,16 +39,46 @@ func testSignerSK() string {
 	return strings.Repeat("ab", 32)
 }
 
+// defaultConfigSignerDirectCase 描述默认 ConfigSigner 直连测试用例。
+type defaultConfigSignerDirectCase struct {
+	name string
+	opts []Option
+	want bool // 是否期望出现 SproxySig 头
+}
+
+// runDefaultConfigSignerDirectCase 执行单个默认 ConfigSigner 直连用例：
+// 发起 /probe 请求并断言签名头行为。
+func runDefaultConfigSignerDirectCase(t *testing.T, tc defaultConfigSignerDirectCase) {
+	t.Helper()
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	c := NewFileClient(ts.URL, tc.opts...)
+	if _, err := c.doRequest(context.Background(), "GET", "/probe", nil, nil); err != nil {
+		t.Fatalf("doRequest: %v", err)
+	}
+	if tc.want {
+		if !strings.HasPrefix(gotAuth, "SproxySig ") {
+			t.Errorf("默认 ConfigSigner 应带 SproxySig 头, got %q", gotAuth)
+		}
+		if !strings.Contains(gotAuth, " skey-id="+testClientEntryID+" ") {
+			t.Errorf("SproxySig 头应携带 skey-id=<skeyID>（v2 必传）, got %q", gotAuth)
+		}
+	} else if gotAuth != "" {
+		t.Errorf("accessKeySecret==\"\" 时不应带签名头, got %q", gotAuth)
+	}
+}
+
 // 默认行为不变（直连）：配置 access_key+secret+id 时发送 SproxySig 头且带 skey-id
 // （与 4A 既有签名路径一致）；accessKeySecret=="" 时不带签名头（公开端点直达）。
 func TestRequestSigner_DefaultConfigSigner_Direct(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	for _, tc := range []struct {
-		name string
-		opts []Option
-		want bool // 是否期望出现 SproxySig 头
-	}{
+	for _, tc := range []defaultConfigSignerDirectCase{
 		{name: "with-credentials", opts: []Option{
 			WithAccessKey(testSignerAK, testSignerSK()),
 			WithAccessKeyID(testClientEntryID),
@@ -56,27 +86,7 @@ func TestRequestSigner_DefaultConfigSigner_Direct(t *testing.T) {
 		{name: "no-secret-no-header", opts: []Option{}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotAuth string
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotAuth = r.Header.Get("Authorization")
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer ts.Close()
-
-			c := NewFileClient(ts.URL, tc.opts...)
-			if _, err := c.doRequest(context.Background(), "GET", "/probe", nil, nil); err != nil {
-				t.Fatalf("doRequest: %v", err)
-			}
-			if tc.want {
-				if !strings.HasPrefix(gotAuth, "SproxySig ") {
-					t.Errorf("默认 ConfigSigner 应带 SproxySig 头, got %q", gotAuth)
-				}
-				if !strings.Contains(gotAuth, " skey-id="+testClientEntryID+" ") {
-					t.Errorf("SproxySig 头应携带 skey-id=<skeyID>（v2 必传）, got %q", gotAuth)
-				}
-			} else if gotAuth != "" {
-				t.Errorf("accessKeySecret==\"\" 时不应带签名头, got %q", gotAuth)
-			}
+			runDefaultConfigSignerDirectCase(t, tc)
 		})
 	}
 }

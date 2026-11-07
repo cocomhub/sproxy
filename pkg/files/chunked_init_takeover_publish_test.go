@@ -82,8 +82,8 @@ func TestService_UploadInit_TakeoverDoesNotPublishToTakeoverSession(t *testing.T
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	env := newChunkedTestEnv(t)
-	cap := &fakeCapacity{}
-	env.capacity = cap // 启用 P5 回退预留支，验证「本次预留」被归还
+	capMock := &fakeCapacity{}
+	env.capacity = capMock // 启用 P5 回退预留支，验证「本次预留」被归还
 
 	const uploadID = "takeover-route"
 	content := []byte("0123456789")
@@ -113,8 +113,8 @@ func TestService_UploadInit_TakeoverDoesNotPublishToTakeoverSession(t *testing.T
 	if env.routeReleases != 1 {
 		t.Errorf("route.Release 应恰好被调用 1 次（回滚本次预留）, got %d", env.routeReleases)
 	}
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	// A 遗留的在途临时名对它已「无人认领」（B 记录的是 bClaimedTemp）⇒ 必须删除。
 	if n := countInflightTempFiles(t, env); n != 0 {
@@ -132,10 +132,10 @@ func TestService_UploadInit_TakeoverDuringP5ReserveStillRollsBack(t *testing.T) 
 	const uploadID = "takeover-p5"
 	content := []byte("0123456789")
 	checksum := sha256Hex(content)
-	cap := &fakeCapacity{tryHook: func() {
+	capMock := &fakeCapacity{tryHook: func() {
 		takeoverSameID(t, env, uploadID, "dir/takeover.bin", checksum, int64(len(content)))
 	}}
-	env.capacity = cap
+	env.capacity = capMock
 	h := env.handlers(4)
 
 	rec := env.doJSON(t, h, http.MethodPost, "/upload/init", h.UploadInit, map[string]any{
@@ -150,8 +150,8 @@ func TestService_UploadInit_TakeoverDuringP5ReserveStillRollsBack(t *testing.T) 
 	if env.routeReleases != 1 {
 		t.Errorf("route.Release 应恰好被调用 1 次, got %d", env.routeReleases)
 	}
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Errorf("本次 P5 预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	if n := countInflightTempFiles(t, env); n != 0 {
 		t.Errorf("回滚后不得残留 A 的在途临时文件, got %d", n)
@@ -317,21 +317,8 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 		t.Fatalf("副本应继承注册世代: got %d want %d", cp.gen, s.gen)
 	}
 
-	gated := []struct {
-		name  string
-		apply func(expect *ChunkedUploadSession) bool
-	}{
-		{"route", func(e *ChunkedUploadSession) bool { return env.us.setSessionRouteIfCurrent(e, "volX", nil, nil, nil) }},
-		{"p5", func(e *ChunkedUploadSession) bool { return env.us.setSessionStorageMgrReservedIfCurrent(e, 5) }},
-		{"temp", func(e *ChunkedUploadSession) bool {
-			return env.us.setSessionTempPathIfCurrent(e, "user/.inflight-t.part")
-		}},
-	}
-	for _, g := range gated {
-		if !g.apply(cp) {
-			t.Errorf("%s: 同世代的**副本**必须被接受（按世代判定，而非指针身份）", g.name)
-		}
-	}
+	gated := newGatedPublishOps(env)
+	assertSameGenCopyAccepted(t, gated, cp)
 	got := env.us.GetSession(uploadID)
 	if got.Volume != "volX" || got.StorageMgrReserved != 5 || got.TempPath != "user/.inflight-t.part" {
 		t.Fatalf("发布必须写到**表内**对象: volume=%q p5=%d temp=%q", got.Volume, got.StorageMgrReserved, got.TempPath)
@@ -342,6 +329,43 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 	if _, err := env.us.CreateSession(uploadID, "dir/gen.bin", int64(len(content)), 4, 3, sha256Hex(content), 0); err != nil {
 		t.Fatalf("接管 CreateSession: %v", err)
 	}
+	assertStaleSessionRejected(t, gated, s, cp)
+	if got := env.us.GetSession(uploadID); got.Volume != "" || got.StorageMgrReserved != 0 || got.TempPath != "" {
+		t.Errorf("被拒的发布不得改动接管会话: volume=%q p5=%d temp=%q",
+			got.Volume, got.StorageMgrReserved, got.TempPath)
+	}
+}
+
+// gatedPublishOp 门控发布操作条目（具名类型，供断言 helper 共用，降低原测试函数复杂度）。
+type gatedPublishOp struct {
+	name  string
+	apply func(expect *ChunkedUploadSession) bool
+}
+
+// newGatedPublishOps 构建三个门控方法的操作条目（route / p5 / temp）。
+func newGatedPublishOps(env *chunkedTestEnv) []gatedPublishOp {
+	return []gatedPublishOp{
+		{"route", func(e *ChunkedUploadSession) bool { return env.us.setSessionRouteIfCurrent(e, "volX", nil, nil, nil) }},
+		{"p5", func(e *ChunkedUploadSession) bool { return env.us.setSessionStorageMgrReservedIfCurrent(e, 5) }},
+		{"temp", func(e *ChunkedUploadSession) bool {
+			return env.us.setSessionTempPathIfCurrent(e, "user/.inflight-t.part")
+		}},
+	}
+}
+
+// assertSameGenCopyAccepted 同世代的**副本**必须被接受（按世代判定，而非指针身份）。
+func assertSameGenCopyAccepted(t *testing.T, gated []gatedPublishOp, cp *ChunkedUploadSession) {
+	t.Helper()
+	for _, g := range gated {
+		if !g.apply(cp) {
+			t.Errorf("%s: 同世代的**副本**必须被接受（按世代判定，而非指针身份）", g.name)
+		}
+	}
+}
+
+// assertStaleSessionRejected 旧世代会话对象与旧副本都必须被拒（同 id 已被接管）。
+func assertStaleSessionRejected(t *testing.T, gated []gatedPublishOp, s, cp *ChunkedUploadSession) {
+	t.Helper()
 	for _, g := range gated {
 		if g.apply(s) {
 			t.Errorf("%s: 旧世代的会话对象不得再发布（同 id 已被接管）", g.name)
@@ -349,10 +373,6 @@ func TestUploadStore_GatedPublish_UsesGenerationNotPointer(t *testing.T) {
 		if g.apply(cp) {
 			t.Errorf("%s: 旧世代的副本不得再发布（同 id 已被接管）", g.name)
 		}
-	}
-	if got := env.us.GetSession(uploadID); got.Volume != "" || got.StorageMgrReserved != 0 || got.TempPath != "" {
-		t.Errorf("被拒的发布不得改动接管会话: volume=%q p5=%d temp=%q",
-			got.Volume, got.StorageMgrReserved, got.TempPath)
 	}
 }
 

@@ -16,10 +16,12 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -221,18 +223,21 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 		logger:         testLogger(),
 		auditLogger:    testLogger(),
 		uploadingStop:  make(chan struct{}),
-		metrics:        NewMetrics(),
+		metrics:        metrics.NewMetrics(),
 		globalRoot:     vs.DefaultRoot(),
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		volSet:         vs,
 		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
-		checksumStores: make(map[string]*checksum.ChecksumStore),
+		checksumStores: make(map[string]checksum.ChecksumStoreIface),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
-		rebalanceProg:  newRebalanceProgress(),
+		rebalanceProg:  metrics.NewRebalanceProgress(),
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// 测试夹具：把「配额不足 ⇒ 排队重试」的等待上限压到最小（生产恒 0 = 30s 默认，语义不变）——
+	// 否则「配额故意打满断言 507」的用例各白等 30s，批量累计触发包超时（CI 实测：8 个串行 30s）。
+	h.quotaWaitTimeout = 50 * time.Millisecond
 	return h
 }
 
@@ -397,7 +402,7 @@ var _ syncpkg.FS = syncFSV3{}
 func (syncFSV3) ListDir(context.Context, string) ([]syncpkg.Entry, error) { return nil, nil }
 func (syncFSV3) Stat(context.Context, string) (*syncpkg.Entry, error)     { return nil, nil }
 func (syncFSV3) OpenRead(context.Context, string) (io.ReadCloser, error)  { return nil, nil }
-func (syncFSV3) WriteFile(context.Context, string, io.Reader, int64, int64) error {
+func (syncFSV3) WriteFile(context.Context, syncpkg.LogicalKey, string, io.Reader, int64, int64) error {
 	return nil
 }
 func (syncFSV3) Rename(context.Context, string, string) error { return nil }
@@ -451,7 +456,7 @@ func TestAssembleVolumes_External_Dispatch(t *testing.T) {
 	t.Cleanup(func() { _ = vs.Close() })
 
 	// external map 持有 ext1；roots 不含它
-	if got := vs.External("ext1"); got == nil {
+	if vs.External("ext1") == nil {
 		t.Fatal("External(ext1) = nil, want 外部后端")
 	}
 	if vs.Root("ext1") != nil {
@@ -546,5 +551,53 @@ func TestAssembleVolumes_ExternalDefaultVolume_FailClosed(t *testing.T) {
 	_, err := assembleVolumes(cfg, testLogger())
 	if err == nil {
 		t.Fatal("外部首卷（默认卷）应装配失败")
+	}
+}
+
+// TestAssembleVolumes_DeferredType_SkipsBackend（Imp-2 装配时序守护）：标记为推迟装配的
+// 类型（如 secretdata）在 assembleVolumes 中**跳过 registry.NewBackend 构造**（其构造依赖
+// 已装配卷集，此时 set 未就绪）——但卷元数据与容量池仍登记（set.All 可见、Pool 可用），
+// external 留空待装配层补装（cmd/sproxy attachSecretdataVolumes）。证明 config 声明 secretdata
+// 卷不再因「卷集未就绪」而装配失败（config.example vault 示例可用）。
+func TestAssembleVolumes_DeferredType_SkipsBackend(t *testing.T) {
+	t.Parallel()
+	typ := "fake-deferred-v3"
+	be, unreg := registerFakeBackendV3(typ)
+	defer unreg()
+	registry.MarkDeferredType(typ)
+	t.Cleanup(func() { registry.UnmarkDeferredTypeForTest(typ) })
+	_ = be
+
+	dir := t.TempDir()
+	cfg := Default()
+	cfg.StorageRoot = dir
+	cfg.Volumes = []VolumeConfig{
+		{Name: "main", Root: dir},
+		{Name: "sd", Type: typ, VolCapacity: 100, Extra: map[string]any{"key": "val"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	vs, err := assembleVolumes(cfg, testLogger())
+	if err != nil {
+		t.Fatalf("assembleVolumes 应成功（deferred 类型跳过 backend 构造）: %v", err)
+	}
+	t.Cleanup(func() { _ = vs.Close() })
+	// 卷元数据仍登记（set.All 可见）+ 容量池已建；external 留空待补装。
+	if vs.External("sd") != nil {
+		t.Fatal("deferred 卷 backend 应留空（待 set 就绪后补装）")
+	}
+	if vs.Pool("sd") == nil {
+		t.Fatal("deferred 卷容量池应登记（配额核算不缺失）")
+	}
+	found := false
+	for _, v := range vs.All() {
+		if v.Name == "sd" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("deferred 卷元数据应登记进 set.All（供补装/查询）")
 	}
 }

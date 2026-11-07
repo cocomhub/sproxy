@@ -29,7 +29,7 @@ import (
 //     （外部 module，无本仓路径）。
 //  2. `.goreleaser.yaml`：必须有 `before.hooks` 且其中生成 dirty_info（GoReleaser 不走
 //     Makefile，故 Makefile 依赖无法覆盖它）。
-func TestMakefileTargetsCompilingAllNeedPrepare(t *testing.T) {
+func TestMakefileTargetsCompilingAllNeedPrepare(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	root := moduleRoot(t)
 

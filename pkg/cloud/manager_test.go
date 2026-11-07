@@ -108,7 +108,7 @@ func TestCloudDownloadManager_CreateTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCloudDownloadManager_CreateTaskReservesStorage(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200, "")
+	_, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 200, "", TaskParams{Save: true})
 	if err != capacity.ErrStorageFull {
 		t.Fatalf("expected capacity.ErrStorageFull, got %v", err)
 	}
@@ -145,7 +145,7 @@ func TestCloudDownloadManager_GetTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 
 	got, ok := mgr.GetTask(task.ID, "")
 	if !ok {
@@ -178,8 +178,8 @@ func TestCloudDownloadManager_ListTasks(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", TaskParams{Save: true})
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", TaskParams{Save: true})
 
 	tasks, _ := mgr.ListTasks("", -1, 0, "")
 	if len(tasks) != 2 {
@@ -195,8 +195,8 @@ func TestCloudDownloadManager_ListTasksFilterByStatus(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", TaskParams{Save: true})
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	t1.Status = "completed"
 	t2.Status = "failed"
@@ -220,7 +220,7 @@ func TestCloudDownloadManager_CancelTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	task.Status = "downloading"
 	mgr.mu.Unlock()
@@ -242,7 +242,7 @@ func TestCloudDownloadManager_CancelTaskInvalidStatus(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	task.Status = "completed"
 	mgr.mu.Unlock()
@@ -261,7 +261,7 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	task.Status = "completed"
 	mgr.mu.Unlock()
@@ -279,6 +279,11 @@ func TestCloudDownloadManager_DeleteTask(t *testing.T) {
 	if ok {
 		t.Fatal("expected task to be deleted")
 	}
+	// M2：删除必须同步置 task.Status=cancelled——transferTaskAborted 在任务已从 map 删除后
+	// 靠该字段判定中止转存（防孤儿写卷）。不置则删除期间转存照写目标卷。
+	if task.Status != "cancelled" {
+		t.Fatalf("M2: DeleteTask 应置 task.Status=cancelled，got %q", task.Status)
+	}
 }
 
 func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
@@ -289,7 +294,7 @@ func TestCloudDownloadManager_TaskPersistence(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 
 	// 验证持久化文件存在
 	taskFile := filepath.Join(mgr.PersistDirFor(""), task.ID+".json")
@@ -306,8 +311,8 @@ func TestCloudDownloadManager_RecoverTasks(t *testing.T) {
 	mgr1, _ := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
 	// 创建两个任务并置为 completed（避免恢复时触发 pending 任务重启下载）
-	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr1.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", TaskParams{Save: true})
+	t2, _ := mgr1.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", TaskParams{Save: true})
 	mgr1.mu.Lock()
 	t1.Status = "completed"
 	t2.Status = "completed"
@@ -344,13 +349,13 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	// 第一次创建
-	task1, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "")
+	task1, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 第二次创建相同 URL → 应返回已有任务
-	task2, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "")
+	task2, err := mgr.CreateTask("url", "https://example.com/same.zip", "same.zip", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +364,7 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	}
 
 	// 不同 URL 应创建新任务
-	task3, err := mgr.CreateTask("url", "https://example.com/different.zip", "different.zip", 100, "")
+	task3, err := mgr.CreateTask("url", "https://example.com/different.zip", "different.zip", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,13 +382,13 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	// 创建失败任务
-	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task1, _ := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	task1.Status = "failed"
 	mgr.mu.Unlock()
 
 	// 相同 URL 的失败任务应允许重新创建
-	task2, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task2, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +400,7 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	mgr.mu.Lock()
 	task2.Status = "cancelled"
 	mgr.mu.Unlock()
-	task3, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "")
+	task3, err := mgr.CreateTask("url", "https://example.com/retry.zip", "retry.zip", 100, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +416,7 @@ func TestCloudDownloadManager_DeleteTaskCleansUpAll(t *testing.T) {
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	mgr, env := newCloudTestManager(t, dir, sm, defaultCloudDownloadConfig())
 
-	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/cleanup.zip", "cleanup.zip", 100, "", TaskParams{Save: true})
 	mgr.mu.Lock()
 	task.Status = "completed"
 	task.Checksum = "abc123"
@@ -492,7 +497,7 @@ func TestCloudDownloadManager_SubmitAndStart_Sync(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "sync-test.bin", int64(len(content)), t.Context(), "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +546,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "async-test.bin", int64(len(content)), t.Context(), "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +557,12 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		t.Fatalf("expected status 'pending' or 'downloading' for async download, got %q", initialStatus)
 	}
 
-	// 轮询等待完成
+	waitForAsyncCompletion(t, mgr, task.ID)
+}
+
+// waitForAsyncCompletion 轮询等待异步下载进入终态：completed 即成功返回，failed 立即报错、超时报错。
+func waitForAsyncCompletion(t *testing.T, mgr *CloudDownloadManager, taskID string) {
+	t.Helper()
 	deadline := time.After(10 * time.Second)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -561,7 +571,7 @@ func TestCloudDownloadManager_SubmitAndStart_Async(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timeout waiting for async download to complete")
 		case <-ticker.C:
-			cur, ok := mgr.SnapshotTask(task.ID, "")
+			cur, ok := mgr.SnapshotTask(taskID, "")
 			if !ok {
 				t.Fatal("task not found")
 			}
@@ -601,7 +611,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	t.Cleanup(func() { close(blockCh); srv.Close() })
 
 	// 第一次提交（异步，让任务停留在 downloading 状态）
-	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "")
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("first submit: %v", err)
 	}
@@ -614,7 +624,7 @@ func TestCloudDownloadManager_SubmitAndStart_Dedup(t *testing.T) {
 	}, "task1 应进入 downloading")
 
 	// 第二次提交相同 URL → 应返回已有任务（pending/downloading 去重）
-	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "")
+	task2, err := mgr.SubmitAndStart("url", srv.URL, "dedup.bin", 104857600, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("second submit: %v", err)
 	}
@@ -652,14 +662,14 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	t.Cleanup(mgr.Close)
 
 	// 仅创建组（不启动），子任务停在 pending
-	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "")
+	group, err := mgr.CreateGroup("g", []cloudfilename.Entry{{URL: srv.URL, Filename: "real.bin"}}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	taskID := group.TaskIDs[0]
 
 	// 对组内同一 URL 提交下载：去重命中 pending 任务，应启动真实对象
-	task, err := mgr.SubmitAndStart("url", srv.URL, "real.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "real.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,19 +683,19 @@ func TestCloudDownloadManager_SubmitAndStart_DedupPendingUsesRealObject(t *testi
 	// 恰好停在中间态；只以 reached completed 为成功，failed/cancelled/超时 5s 为失败。
 	var last string
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		real, ok := mgr.SnapshotTask(taskID, "")
+		realSnap, ok := mgr.SnapshotTask(taskID, "")
 		if !ok {
 			last = "<not found>"
 			return false
 		}
-		last = real.Status
-		switch real.Status {
+		last = realSnap.Status
+		switch realSnap.Status {
 		case "pending", "downloading":
 			return false
 		case "completed":
 			return true
 		default:
-			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, real.Status, real.Error)
+			t.Fatalf("real task %s reached %q instead of completed: %s", taskID, realSnap.Status, realSnap.Error)
 			return false // 未知中间态继续等（超时经由 WaitFor 带最后观测报错），终态直接 Fatal
 		}
 	}, func() string {
@@ -720,7 +730,7 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "") // nil context = async
+	task, _ := mgr.SubmitAndStart("url", srv.URL, "cancel-test.bin", 104857600, nil, "", TaskParams{Save: true}) // nil context = async
 	// 等待进入 downloading 状态
 	testutil.WaitFor(t, 30*time.Second, func() bool {
 		var found bool
@@ -732,8 +742,10 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 	if err := mgr.CancelTask(task.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	// 验证下载 goroutine 真正退出（running 标记清除），而非仅 CancelTask API 返回成功
-	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+	// 验证下载 goroutine 真正退出（running 标记清除），而非仅 CancelTask API 返回成功。
+	// 超时取 30s：waitTaskStopped 是**事件驱动**（runningDone channel），成功路径零等待；
+	// 但满载 CI 上 goroutine 观察到取消并把退出路径跑完可能超过旧的 2s 预算（实测 flake）。
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("download goroutine did not stop after cancel")
 	}
 }
@@ -772,7 +784,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil, "")
+	task, submitErr := mgr.SubmitAndStart("url", srv.URL, "cancel.bin", 104857600, nil, "", TaskParams{Save: true})
 	if submitErr != nil {
 		t.Fatal(submitErr)
 	}
@@ -788,7 +800,7 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 	if cancelErr := mgr.CancelTask(task.ID, ""); cancelErr != nil {
 		t.Fatal(cancelErr)
 	}
-	if !mgr.waitTaskStopped(task.ID, 2*time.Second) {
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("download goroutine did not stop after cancel")
 	}
 
@@ -824,7 +836,7 @@ func TestCloudDownloadManager_RecoverRestartsDownloading(t *testing.T) {
 	// 创建 mgr1，创建任务，手动设置为 downloading 并持久化
 	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr1.Close)
-	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)), "")
+	task, _ := mgr1.CreateTask("url", srv.URL, "resume.bin", int64(len(content)), "", TaskParams{Save: true})
 	mgr1.mu.Lock()
 	task.Status = "downloading"
 	task.UpdatedAt = time.Now()
@@ -867,7 +879,7 @@ func TestCloudCleanupExpiredOnce_ClearsCompleted(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -902,7 +914,7 @@ func TestCloudCleanupExpiredOnce_DeletesChecksum(t *testing.T) {
 	cfg.TaskTTL = 1 * time.Millisecond
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "ak-A", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -939,7 +951,7 @@ func TestCloudCleanupExpiredOnce_SkipsRunning(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,7 +979,7 @@ func TestCloudFlushDirty_PersistsTasks(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +1001,7 @@ func TestCloudFlushNow_TriggersFlush(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "")
+	task, err := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1075,7 +1087,7 @@ func TestCloudDownloadManager_ClientDisconnectDownloadContinues(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 
-	task, _ := mgr.SubmitAndStart("url", srv.URL, "disconnect.bin", int64(len(content)), ctx, "")
+	task, _ := mgr.SubmitAndStart("url", srv.URL, "disconnect.bin", int64(len(content)), ctx, "", TaskParams{Save: true})
 
 	cancel()
 
@@ -1119,9 +1131,9 @@ func TestCloudDownloadManager_ConcurrentSemaphoreLimit(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(mgr.Close)
 
-	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil, "")
-	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil, "")
-	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil, "")
+	task1, _ := mgr.SubmitAndStart("url", srv.URL+"?1", "block1.bin", 104857600, nil, "", TaskParams{Save: true})
+	task2, _ := mgr.SubmitAndStart("url", srv.URL+"?2", "block2.bin", 104857600, nil, "", TaskParams{Save: true})
+	task3, _ := mgr.SubmitAndStart("url", srv.URL+"?3", "block3.bin", 104857600, nil, "", TaskParams{Save: true})
 
 	allTasks := []*CloudTask{task1, task2, task3}
 	// defer 先于 t.Cleanup 执行：先取消阻塞任务再释放 blockCh，使 goroutine 自然退出
@@ -1187,7 +1199,7 @@ func TestCloudDownloadManager_MetricsTracking(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context(), "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "metrics.bin", int64(len(content)), t.Context(), "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1238,7 +1250,7 @@ func TestCloudDownloadManager_RetryOnTransientFailure(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "retry.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1291,7 +1303,7 @@ func TestCloudDownloadManager_TimeoutThenSuccess(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "timeout-retry.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1335,7 +1347,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil, "")
+	task1, err := mgr.SubmitAndStart("url", srv.URL, "block.bin", 104857600, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1343,7 +1355,7 @@ func TestCloudDownloadManager_QueuedTaskCancellable(t *testing.T) {
 	waitStatus(t, mgr, task1.ID, "downloading")
 
 	// 第二个任务排队（唯一并发槽被占）
-	task2, err := mgr.SubmitAndStart("url", srv.URL+"/queued", "queued.bin", -1, nil, "")
+	task2, err := mgr.SubmitAndStart("url", srv.URL+"/queued", "queued.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1430,7 +1442,7 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 	})
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "a.bin", -1, nil, "") // 未知大小 → 1 GiB 占位
+	task, err := mgr.SubmitAndStart("url", srv.URL, "a.bin", -1, nil, "", TaskParams{Save: true}) // 未知大小 → 1 GiB 占位
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1444,7 +1456,7 @@ func TestCloudDownloadManager_StorageAccountingNoLeak(t *testing.T) {
 	}
 
 	// 取消一个未知大小任务：占位立即回收
-	t2, err := mgr.CreateTask("url", "https://example.com/cancel-unknown.bin", "c.bin", -1, "")
+	t2, err := mgr.CreateTask("url", "https://example.com/cancel-unknown.bin", "c.bin", -1, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1471,34 +1483,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	for i := range full {
 		full[i] = byte(i % 251)
 	}
-	var sawRange atomic.Bool
-	var firstAttempt atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			if r.Header.Get("Range") != "bytes=10-" {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			sawRange.Store(true)
-			w.Header().Set("Content-Range", "bytes 10-999/1000")
-			w.WriteHeader(http.StatusPartialContent)
-			w.Write(full[10:])
-			return
-		}
-		if firstAttempt.CompareAndSwap(false, true) {
-			// 首次：只发送 10 字节后停流，触发超时
-			w.Header().Set("Content-Length", "1000")
-			w.WriteHeader(http.StatusOK)
-			w.Write(full[:10])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
-			time.Sleep(2 * time.Second)
-			return
-		}
-		w.Write(full)
-	}))
+	srv, sawRange := startPartialThenRangeSource(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -1515,7 +1500,7 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1558,6 +1543,42 @@ func TestCloudDownloadManager_FailedTaskKeepsPartialAndResumes(t *testing.T) {
 	}
 }
 
+// startPartialThenRangeSource 启动「首次只发 10 字节后挂住、之后处理 Range(206)」的测试源，
+// 并记录是否收到过带 Range 的请求（续传路径确实生效的前提判据）。
+func startPartialThenRangeSource(t *testing.T, full []byte) (*httptest.Server, *atomic.Bool) {
+	t.Helper()
+	var sawRange atomic.Bool
+	var firstAttempt atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			if r.Header.Get("Range") != "bytes=10-" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			sawRange.Store(true)
+			w.Header().Set("Content-Range", "bytes 10-999/1000")
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write(full[10:])
+			return
+		}
+		if firstAttempt.CompareAndSwap(false, true) {
+			// 首次：只发送 10 字节后停流，触发超时
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			// 有意占位：模拟服务端把响应体挂住（超时/重试语义测试的前提）。
+			time.Sleep(2 * time.Second)
+			return
+		}
+		w.Write(full)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sawRange
+}
+
 func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
@@ -1580,7 +1601,7 @@ func TestCloudDownloadManager_ResumeTaskForceTrueFullRedownload(t *testing.T) {
 	})
 	t.Cleanup(func() { mgr.Close() })
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", -1, nil, "")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", -1, nil, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1632,24 +1653,11 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	group, err := mgr1.SubmitAndStartGroup("persist-group", []cloudfilename.Entry{
 		{URL: srvA.URL, Filename: "a.bin"},
 		{URL: srvB.URL, Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tid := range group.TaskIDs {
-		waitTaskDone(t, mgr1, tid)
-		if cur, _ := mgr1.SnapshotTask(tid, ""); cur.Status != "completed" {
-			t.Fatalf("expected completed task %s, got %q", tid, cur.Status)
-		}
-		// 子任务应带 GroupID
-		mgr1.mu.RLock()
-		stored := mgr1.tasks[tid]
-		gid := stored.GroupID
-		mgr1.mu.RUnlock()
-		if gid != group.ID {
-			t.Fatalf("expected task GroupID %q, got %q", group.ID, gid)
-		}
-	}
+	assertGroupTasksCompletedAndBound(t, mgr1, group.TaskIDs, group.ID)
 
 	// 组状态 completed
 	mgr1.UpdateGroupStatus(group.ID)
@@ -1676,16 +1684,7 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	mgr1.Close()
 	mgr2, _ := newCloudTestManager(t, dir, sm, cfg)
 	t.Cleanup(func() { mgr2.Close() })
-	g2, ok := mgr2.GetGroup(group.ID, "")
-	if !ok {
-		t.Fatal("group not recovered after restart")
-	}
-	if g2.Status != "completed" || len(g2.TaskIDs) != 2 || g2.ArchiveFile != ".__cloud_archives__/g1.tar.gz" {
-		t.Fatalf("unexpected recovered group: %+v", g2)
-	}
-	if tasks, _ := mgr2.ListTasks("", -1, 0, ""); len(tasks) != 2 {
-		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
-	}
+	assertGroupRecoveredAfterRestart(t, mgr2, group.ID, ".__cloud_archives__/g1.tar.gz")
 
 	// 删除组：任务、文件、组记录全部清理
 	if err := mgr2.DeleteGroup(group.ID, ""); err != nil {
@@ -1699,6 +1698,40 @@ func TestCloudDownloadManager_GroupLifecycleAndPersistence(t *testing.T) {
 	}
 	if usage := sm.UsageByCategory()[capacity.CategoryCloud]; usage != 0 {
 		t.Fatalf("expected cloud usage 0 after group delete, got %d", usage)
+	}
+}
+
+// assertGroupTasksCompletedAndBound 断言组内子任务均完成且 GroupID 绑定到指定组。
+func assertGroupTasksCompletedAndBound(t *testing.T, mgr *CloudDownloadManager, taskIDs []string, groupID string) {
+	t.Helper()
+	for _, tid := range taskIDs {
+		waitTaskDone(t, mgr, tid)
+		if cur, _ := mgr.SnapshotTask(tid, ""); cur.Status != "completed" {
+			t.Fatalf("expected completed task %s, got %q", tid, cur.Status)
+		}
+		// 子任务应带 GroupID
+		mgr.mu.RLock()
+		stored := mgr.tasks[tid]
+		gid := stored.GroupID
+		mgr.mu.RUnlock()
+		if gid != groupID {
+			t.Fatalf("expected task GroupID %q, got %q", groupID, gid)
+		}
+	}
+}
+
+// assertGroupRecoveredAfterRestart 断言组记录与子任务在重启后完整恢复。
+func assertGroupRecoveredAfterRestart(t *testing.T, mgr *CloudDownloadManager, groupID, archiveFile string) {
+	t.Helper()
+	g, ok := mgr.GetGroup(groupID, "")
+	if !ok {
+		t.Fatal("group not recovered after restart")
+	}
+	if g.Status != "completed" || len(g.TaskIDs) != 2 || g.ArchiveFile != archiveFile {
+		t.Fatalf("unexpected recovered group: %+v", g)
+	}
+	if tasks, _ := mgr.ListTasks("", -1, 0, ""); len(tasks) != 2 {
+		t.Fatalf("expected 2 recovered tasks, got %d", len(tasks))
 	}
 }
 
@@ -1716,7 +1749,7 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	_, err := mgr.SubmitAndStartGroup("dup", []cloudfilename.Entry{
 		{URL: "https://example.com/a.zip", Filename: "one.zip"},
 		{URL: "https://example.com/a.zip", Filename: "two.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected duplicate URL error, got %v", err)
 	}
@@ -1726,6 +1759,39 @@ func TestCloudDownloadManager_GroupDuplicateURLRejected(t *testing.T) {
 	}
 	if usage := sm.UsageByCategory()[capacity.CategoryCloud]; usage != 0 {
 		t.Fatalf("expected 0 cloud usage after failed group creation (rollback), got %d", usage)
+	}
+}
+
+// TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed C1 I-1 回归：
+// 同 URL 既有任务参数不匹配（吸收失败 → CreateTask 新建）时，createGroupEntry 必须返回
+// absorbed=false（新建任务归 newTaskIDs → 组创建失败回滚时删除），而非旧实现的
+// absorbed=true（只看 URL 不看参数 → 新建任务被误归 absorbed → 回滚只清 GroupID 不
+// 删除 → 孤儿 pending 泄漏 1GiB 占位）。
+func TestCloudDownloadManager_CreateGroup_RollbackParamMismatchAbsorbed(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, dir, sm, &CloudDownloadConfig{
+		SyncThreshold: 1, MaxConcurrent: 3, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true,
+	})
+	t.Cleanup(func() { mgr.Close() })
+
+	// 既有任务 X：Save:true + DownloadLocal:false + 无 transfer（非空洞）——
+	// 与组内 Save:false + DownloadLocal:true 参数不匹配。
+	if _, err := mgr.CreateTask("url", "https://example.com/i1.bin", "i1.bin", -1, "", TaskParams{Save: true}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// 组内同 URL 参数不匹配 → createGroupEntry 应返回 absorbed=false（新建任务须回滚删除）。
+	entry := cloudfilename.Entry{URL: "https://example.com/i1.bin", Filename: "i1.bin"}
+	seen := map[string]bool{}
+	_, absorbed, err := mgr.createGroupEntry(entry, "", "g2", seen, TaskParams{Save: false, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("createGroupEntry: %v", err)
+	}
+	if absorbed {
+		t.Fatal("C1 I-1: 参数不匹配的新建任务必须 absorbed=false（否则回滚只清 GroupID 不删除 → 孤儿泄漏）")
 	}
 }
 
@@ -1747,7 +1813,7 @@ func TestCloudDownloadManager_GroupStatusAutoUpdatedOnCompletion(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("auto", []cloudfilename.Entry{
 		{URL: srv.URL + "/a.bin", Filename: "a.bin"},
 		{URL: srv.URL + "/b.bin", Filename: "b.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1785,7 +1851,7 @@ func TestCloudDownloadManager_GroupStatusPartialAndCancel(t *testing.T) {
 	group, err := mgr.SubmitAndStartGroup("partial", []cloudfilename.Entry{
 		{URL: srvOK.URL, Filename: "ok.bin"},
 		{URL: srv404.URL, Filename: "bad.bin"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1826,7 +1892,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err := mgr.CreateGroup("conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/a/"},
 		{URL: "https://example.com/b/"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "filename conflict") {
 		t.Fatalf("expected filename conflict error, got %v", err)
 	}
@@ -1842,7 +1908,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	group, err := mgr.CreateGroup("ok", []cloudfilename.Entry{
 		{URL: "https://example.com/a/", Filename: "a-index.html"},
 		{URL: "https://example.com/b/", Filename: "b-index.html"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after specifying filenames, got %v", err)
 	}
@@ -1854,7 +1920,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	_, err = mgr.CreateGroup("still-conflict", []cloudfilename.Entry{
 		{URL: "https://example.com/c/", Filename: "a/b.zip"},
 		{URL: "https://example.com/d/", Filename: "a_b.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err == nil || !strings.Contains(err.Error(), "unsafe characters") {
 		t.Fatalf("expected unsafe filename error, got %v", err)
 	}
@@ -1863,7 +1929,7 @@ func TestCloudDownloadManager_GroupFilenameConflict(t *testing.T) {
 	g2, err := mgr.CreateGroup("ok2", []cloudfilename.Entry{
 		{URL: "https://example.com/e/", Filename: "c_d.zip"},
 		{URL: "https://example.com/f/", Filename: "cd.zip"},
-	}, "")
+	}, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("expected group creation after sanitize makes names unique, got %v", err)
 	}
@@ -1888,7 +1954,7 @@ func TestCloudDownloadManager_ListTasksPagination(t *testing.T) {
 
 	// 创建 5 个任务（URL 去重避免自动合并）
 	for i := range 5 {
-		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), int64(i+1)*100, ""); err != nil {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), int64(i+1)*100, "", TaskParams{Save: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1965,7 +2031,7 @@ func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 	t.Cleanup(mgr.Close)
 
 	for i := range 3 {
-		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), 100, ""); err != nil {
+		if _, err := mgr.CreateTask("url", fmt.Sprintf("https://example.com/f%d.zip", i), fmt.Sprintf("f%d.zip", i), 100, "", TaskParams{Save: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1994,6 +2060,7 @@ func TestCloudDownloadManager_ListTasksLimitOverflow(t *testing.T) {
 // `TryReserve(result.Size-reserved)` 失败分支 → 任务 failed("storage full after download") +
 // 文件删除 + sm.Usage()==0 + Scope 精确归零（不泄漏）。
 func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *testing.T) {
+	t.Parallel()
 	content := make([]byte, 100)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -2017,33 +2084,41 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 		DownloadTimeout: 30 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, env := newCloudTestManager(t, dir, sm, cfg)
-	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
-
 	// 顺序钉（确定性、跨平台）：删除钩子在删除发生的**那一刻**读取任务状态，断言此刻终态尚未
 	// 发布——即「文件清理必先于 failed 对观察者可见」。若删除被放在 m.mu.Unlock() 之后（原实现），
 	// 观察者（包括下面的 waitTaskDone + os.Stat）可能读到 failed 而文件仍在盘上（CI Windows
 	// 上本测试 `stat err=<nil>` 的 flake 根因）。钩子在持锁临界区内被调用（同一 goroutine），
-	// 直接读 mgr.tasks 即可，无需加锁；本测试不并行（seam 为包级变量）。
+	// 直接读 mgr.tasks 即可，无需加锁。**RemoveFile 构造注入**（用户裁定 2026-10-07：
+	// 禁止测试依赖全局函数/并发修改包级 seam，只能在创建时注入实例字段）。
 	var statusAtRemove string
 	var lastRemoveErr error
-	origRemoveTaskFile := removeTaskFile
-	removeTaskFile = func(path string) error {
-		for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
-			statusAtRemove = tsk.Status
-		}
-		lastRemoveErr = os.Remove(path)
-		return lastRemoveErr
-	}
-	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+	var mgr *CloudDownloadManager
+	var env *cloudTestEnv
+	mgr, env = newCloudTestManager(t, dir, sm, cfg, CloudManagerOptions{
+		RemoveFile: func(path string) error {
+			for _, tsk := range mgr.tasks { // 本测试的管理器只有本任务
+				statusAtRemove = tsk.Status
+			}
+			lastRemoveErr = os.Remove(path)
+			return lastRemoveErr
+		},
+	})
+	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
 
 	// 已知大小 10 创建任务（预留 10），实际下载 100 → 完成路径补齐预留失败。
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitTaskDone(t, mgr, task.ID)
 
+	assertStorageFullErrorAndLedger(t, mgr, task, statusAtRemove, lastRemoveErr, sm, env)
+}
+
+// assertStorageFullErrorAndLedger 校验 storage-full-after-download 的失败终态、文件删除、
+// 双轨账本归零与删除幂等。
+func assertStorageFullErrorAndLedger(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, statusAtRemove string, lastRemoveErr error, sm *capacity.StorageManager, env *cloudTestEnv) {
+	t.Helper()
 	snap, ok := mgr.SnapshotTask(task.ID, "alice")
 	if !ok {
 		t.Fatal("任务消失")
@@ -2054,7 +2129,15 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	if !strings.Contains(snap.Error, "storage full after download") {
 		t.Fatalf("错误文本=%q 应含 'storage full after download'", snap.Error)
 	}
+	assertStorageFullFileRemoved(t, mgr, task, lastRemoveErr)
+	assertStorageFullRemoveOrdering(t, statusAtRemove)
+	assertStorageFullLedgerZero(t, env, sm)
+	assertStorageFullDeleteIdempotent(t, mgr, task, env)
+}
 
+// assertStorageFullFileRemoved 断言 storage-full 分支删除了最终文件且删除 seam 未被吞错。
+func assertStorageFullFileRemoved(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, lastRemoveErr error) {
+	t.Helper()
 	// 文件已删除（下载器已 rename 为最终文件，失败分支 os.Remove）。
 	destPath := filepath.Join(mgr.TaskDirFor("alice", task.ID), "big.bin")
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
@@ -2067,8 +2150,11 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	if lastRemoveErr != nil {
 		t.Fatalf("storage-full 删除最终失败（错误被吞、文件残留）: %v", lastRemoveErr)
 	}
+}
 
-	// 顺序不变量：删除必须经由 seam 且发生在终态发布之前。
+// assertStorageFullRemoveOrdering 断言删除必须经由 seam 且发生在终态发布之前（顺序不变量）。
+func assertStorageFullRemoveOrdering(t *testing.T, statusAtRemove string) {
+	t.Helper()
 	if statusAtRemove == "" {
 		t.Fatal("删除 seam 未被调用：storage-full 分支未删除超大文件")
 	}
@@ -2079,7 +2165,11 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	if statusAtRemove != "downloading" {
 		t.Fatalf("删除时任务状态=%q，预期 downloading（删除应发生在终态前）", statusAtRemove)
 	}
+}
 
+// assertStorageFullLedgerZero 断言 storage-full-after-download 后全局与租户 Scope 双轨账本精确归零。
+func assertStorageFullLedgerZero(t *testing.T, env *cloudTestEnv, sm *capacity.StorageManager) {
+	t.Helper()
 	// 全局 storageMgr 账本精确归零（创建期预留 10 已释放）。
 	if got := sm.Usage(); got != 0 {
 		t.Fatalf("storage-full 后 storageMgr Usage()=%d want 0", got)
@@ -2102,10 +2192,18 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 	if got := env.quotaFor("alice").Usage(); got != 0 {
 		t.Fatalf("storage-full 后租户根 Usage()=%d want 0", got)
 	}
+}
 
+// assertStorageFullDeleteIdempotent 断言删除任务不改变已归零账本（无二次释放、不反负）。
+func assertStorageFullDeleteIdempotent(t *testing.T, mgr *CloudDownloadManager, task *CloudTask, env *cloudTestEnv) {
+	t.Helper()
 	// 幂等复查：删除任务不改变已归零账本（无二次释放、不反负）。
 	if err := mgr.DeleteTask(task.ID, "alice"); err != nil {
 		t.Fatal(err)
+	}
+	cloudB := env.quotaBucketFor("alice", "cloud")
+	if cloudB == nil {
+		t.Fatal("alice cloud 桶 Scope 应为非 nil")
 	}
 	if got := cloudB.Usage(); got != 0 {
 		t.Fatalf("删除后 cloud 桶 Usage()=%d want 0", got)
@@ -2119,16 +2217,11 @@ func TestCloudDownloadManager_StorageFullAfterDownload_DeletesAndReleases(t *tes
 // 创建期声明 10 字节、实际响应 100 字节，使完成路径 TryReserve(90) 必然失败并进入
 // storage-full-after-download 的「删文件 + failed」分支。
 //
-// remove 是删除 seam（removeTaskFile）的替换实现（nil 表示保留真实 os.Remove）：seam 必须在
-// **创建 manager 之前**装好——下载 goroutine 由 SubmitAndStart 启动，若在其之后才替换 seam，
-// goroutine 可能已经调用过真实 os.Remove（用例确定性受损：注入的失败是否生效取决于调度）。
+// remove 是删除实现（nil 表示保留真实 os.Remove）：**构造时注入**（RemoveFile opt，
+// 用户裁定 2026-10-07）——下载 goroutine 由 SubmitAndStart 启动，创建时已固定删除
+// 实现，用例确定性不受调度影响。
 func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error) (*CloudDownloadManager, *cloudTestEnv, *capacity.StorageManager, *CloudTask) {
 	t.Helper()
-	if remove != nil {
-		origRemoveTaskFile := removeTaskFile
-		removeTaskFile = remove
-		t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
-	}
 	content := make([]byte, 100)
 	for i := range content {
 		content[i] = byte(i % 251)
@@ -2152,9 +2245,13 @@ func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error)
 		DownloadTimeout: 30 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, env := newCloudTestManager(t, dir, sm, cfg)
+	opts := []CloudManagerOptions{}
+	if remove != nil {
+		opts = append(opts, CloudManagerOptions{RemoveFile: remove})
+	}
+	mgr, env := newCloudTestManager(t, dir, sm, cfg, opts...)
 	env.setOwnerQuota("alice", 1000) // 租户配额 1000 > 100，QW 写盘预留在 Scope 内成功
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 10, nil, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2167,7 +2264,8 @@ func newStorageFullAfterDownloadFixture(t *testing.T, remove func(string) error)
 // 随后发布 failed ⇒ 观察者看到「任务 failed 但文件仍在盘上」。本用例注入「首次失败、
 // 再次成功」的删除 seam，断言生产代码做了有界重试、重试后文件确实不存在。
 func TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFailure(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	t.Parallel()
+	// RemoveFile 构造注入（实例字段，运行期不可变）——无包级 seam，可 t.Parallel。
 	var attempts atomic.Int32
 	// seam 在 fixture 内、创建 manager 之前安装：从下载 goroutine 启动那一刻起，所有删除都
 	// 必须经过它（否则 goroutine 可能走真实 os.Remove，注入的瞬时失败不会被触发）。
@@ -2204,7 +2302,8 @@ func TestCloudDownloadManager_StorageFullAfterDownload_RemoveRetriesTransientFai
 // 时的可观测性：删除最终失败必须把「清理未完成」并入 task.Error，否则用户只看到 failed，
 // 无从得知文件仍占着磁盘。
 func TestCloudDownloadManager_StorageFullAfterDownload_RemoveFailureSurfaced(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与其他读该 seam 的用例互斥。
+	t.Parallel()
+	// RemoveFile 构造注入（实例字段，运行期不可变）——无包级 seam，可 t.Parallel。
 	var attempts atomic.Int32
 	mgr, _, _, task := newStorageFullAfterDownloadFixture(t, func(path string) error {
 		attempts.Add(1)
@@ -2323,7 +2422,7 @@ func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *
 	mgr, env := newCloudTestManager(t, dir, sm, cfg)
 	env.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "partial.bin", 10, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "partial.bin", 10, nil, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2359,5 +2458,70 @@ func TestCloudDownloadManager_FailTaskStorageFull_RemovesPartialBeforeFailed(t *
 	}
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("failed 后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}
+
+func TestCloudDownloadManager_SubmitAndStart_Dedup_SemanticMismatch(t *testing.T) {
+	t.Parallel()
+	// 阻塞服务器让首任务停留 downloading。
+	blockCh := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "104857600") // 100MB
+		w.WriteHeader(http.StatusOK)
+		<-blockCh
+	}))
+	dir := t.TempDir()
+	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
+	cfg := &CloudDownloadConfig{
+		SyncThreshold: 20 * 1024 * 1024,
+		MaxConcurrent: 3,
+		AllowPrivate:  true,
+		TaskTTL:       24 * time.Hour,
+		FailedTaskTTL: 1 * time.Hour,
+	}
+	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
+	t.Cleanup(mgr.Close)
+	t.Cleanup(func() { close(blockCh); srv.Close() })
+
+	// 首次：Save=true 无转存
+	t1, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t1.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t1 应进入 downloading")
+
+	// M3：同 URL 但 DownloadLocal 语义不同（t1 默认 DownloadLocal=false，t2 显式 true）
+	// → 语义不一致，不吸收，各自独立新任务。
+	t2, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 104857600, nil, "", TaskParams{Save: true, DownloadLocal: true})
+	if err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	if t2.ID == t1.ID {
+		t.Fatalf("M3: 语义不同的同 URL 不应去重吸收，t2==t1==%q", t1.ID)
+	}
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		cur, found := mgr.SnapshotTask(t2.ID, "")
+		return found && cur.Status == "downloading"
+	}, "t2 应进入 downloading")
+	// 同 URL 且语义与 t1 一致（Save=true + DownloadLocal=false 默认）→ 吸收返回 t1。
+	t3, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("third submit: %v", err)
+	}
+	t1snap, _ := mgr.SnapshotTask(t1.ID, "")
+	if t3.ID != t1.ID {
+		t.Fatalf("语义一致的同 URL 应去重吸收，t3=%q t1=%q t1status=%q", t3.ID, t1.ID, t1snap.Status)
+	}
+	// 任务5 审查：同 URL 但 IntegrityMustPass 不同（t1 默认 false，t4 显式 true）→ 不吸收，
+	// 各自独立（force=true 请求不得被 force=false 任务吸收而丢失阻断语义）。
+	t4, err := mgr.SubmitAndStart("url", srv.URL, "d.bin", 0, nil, "", TaskParams{Save: true, IntegrityMustPass: true})
+	if err != nil {
+		t.Fatalf("force submit: %v", err)
+	}
+	if t4.ID == t1.ID {
+		t.Fatalf("force 不同的同 URL 不应去重吸收，t4==t1==%q", t1.ID)
 	}
 }

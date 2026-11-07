@@ -34,30 +34,32 @@ func IsPrivateIP(ip net.IP) bool {
 	}
 	// 额外检查 IPv4 保留地址段（IPv6 地址不会进入此分支）
 	if ip4 := ip.To4(); ip4 != nil {
-		// 0.0.0.0/8 "this network"
-		if ip4[0] == 0 {
-			return true
-		}
-		// 127.0.0.0/8 全范围环回（IsLoopback 只检查 127.0.0.1）
-		if ip4[0] == 127 {
-			return true
-		}
-		// CGNAT 100.64.0.0/10
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return true
-		}
-		// 198.18.0.0/15 benchmark
-		if ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) {
-			return true
-		}
-		// 广播 255.255.255.255
-		if ip4.Equal(net.IPv4bcast) {
-			return true
-		}
-		// 240.0.0.0/4 reserved
-		if ip4[0] >= 240 {
-			return true
-		}
+		return isPrivateIPv4(ip4)
+	}
+	return false
+}
+
+// isPrivateIPv4 检查 IPv4 地址是否属于 IsPrivateIP 标准方法未覆盖的额外保留段：
+// 0.0.0.0/8、127/8 全范围环回、CGNAT 100.64/10、198.18/15 benchmark、
+// 广播 255.255.255.255、240.0.0.0/4 保留。
+func isPrivateIPv4(ip4 net.IP) bool {
+	if ip4[0] == 0 {
+		return true
+	}
+	if ip4[0] == 127 {
+		return true
+	}
+	if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return true
+	}
+	if ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) {
+		return true
+	}
+	if ip4.Equal(net.IPv4bcast) {
+		return true
+	}
+	if ip4[0] >= 240 {
+		return true
 	}
 	return false
 }

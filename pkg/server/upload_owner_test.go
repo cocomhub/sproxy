@@ -64,7 +64,7 @@ func newOwnerUploadEnv(t *testing.T) *ownerUploadEnv {
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))
-	h.checksumStores = make(map[string]*checksum.ChecksumStore)
+	h.checksumStores = make(map[string]checksum.ChecksumStoreIface)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
 		t.Fatal("创建 anonymous 租户失败")

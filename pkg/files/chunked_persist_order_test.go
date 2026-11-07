@@ -53,65 +53,77 @@ func TestUploadStore_PersistOrdering_ConcurrentPersistsConvergeToNewest(t *testi
 
 	const workers = 32
 	for range workers {
-		wg.Go(func() {
-			for i := range markCh {
-				cs := strings.Repeat(string(rune('a'+i%26)), 32)
-				if err := us.MarkChunkReceived("conc-1", i, cs); err != nil {
-					t.Errorf("MarkChunkReceived(%d): %v", i, err)
-					return
-				}
-			}
-		})
+		wg.Go(func() { markChunkWorker(t, us, markCh) })
 	}
 	// 同步持久化穿插（与异步 persistCh 并发）。
 	for range 32 {
-		wg.Go(func() {
-			if err := us.PersistNow("conc-1"); err != nil {
-				t.Errorf("PersistNow: %v", err)
-			}
-		})
+		wg.Go(func() { persistNowWorker(t, us) })
 	}
 	wg.Wait()
 
 	// 等所有异步持久化落盘完成（per-id 锁已保证拍序==写序；此等待只是确保 I/O 结束）。
 	ok := testutil.WaitForBool(5*time.Second, func() bool {
-		us.mu.RLock()
-		s := us.sessions["conc-1"]
-		us.mu.RUnlock()
-		if s == nil {
-			return false
-		}
-		// 全部收到（内存最新态）。
-		for _, r := range s.ReceivedChunks {
-			if !r {
-				return false
-			}
-		}
-		// 磁盘也要全部收到（最终收敛）。
-		data, err := os.ReadFile(filepath.Join(tmp, "conc-1", "session.json"))
-		if err != nil {
-			return false
-		}
-		var onDisk struct {
-			ReceivedChunks []bool `json:"received_chunks"`
-		}
-		if json.Unmarshal(data, &onDisk) != nil {
-			return false
-		}
-		if len(onDisk.ReceivedChunks) != totalChunks {
-			return false
-		}
-		for _, r := range onDisk.ReceivedChunks {
-			if !r {
-				return false
-			}
-		}
-		return true
+		return persistConverged(us, tmp, totalChunks)
 	})
 	if !ok {
 		data, _ := os.ReadFile(filepath.Join(tmp, "conc-1", "session.json"))
 		t.Fatalf("磁盘最终未收敛到最新态（旧快照覆盖了新快照）——per-id 串行锁失效？session.json:\n%s", truncateStr(string(data), 1200))
 	}
+}
+
+// markChunkWorker 并发标记收到的分块（抽取自 PersistOrdering 的 worker goroutine 体）。
+func markChunkWorker(t *testing.T, us *UploadStore, markCh <-chan int) {
+	t.Helper()
+	for i := range markCh {
+		cs := strings.Repeat(string(rune('a'+i%26)), 32)
+		if err := us.MarkChunkReceived("conc-1", i, cs); err != nil {
+			t.Errorf("MarkChunkReceived(%d): %v", i, err)
+			return
+		}
+	}
+}
+
+// persistNowWorker 并发穿插同步持久化（抽取自 PersistOrdering 的 persist goroutine 体）。
+func persistNowWorker(t *testing.T, us *UploadStore) {
+	t.Helper()
+	if err := us.PersistNow("conc-1"); err != nil {
+		t.Errorf("PersistNow: %v", err)
+	}
+}
+
+// persistConverged 检查内存与磁盘是否都已收敛到「全部分块收到」（抽取自 PersistOrdering 的
+// WaitFor 断言闭包）。返回 false 即尚未收敛，供轮询继续等待。
+func persistConverged(us *UploadStore, tmp string, totalChunks int) bool {
+	us.mu.RLock()
+	s := us.sessions["conc-1"]
+	us.mu.RUnlock()
+	if s == nil {
+		return false
+	}
+	for _, r := range s.ReceivedChunks {
+		if !r {
+			return false
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, "conc-1", "session.json"))
+	if err != nil {
+		return false
+	}
+	var onDisk struct {
+		ReceivedChunks []bool `json:"received_chunks"`
+	}
+	if json.Unmarshal(data, &onDisk) != nil {
+		return false
+	}
+	if len(onDisk.ReceivedChunks) != totalChunks {
+		return false
+	}
+	for _, r := range onDisk.ReceivedChunks {
+		if !r {
+			return false
+		}
+	}
+	return true
 }
 
 func truncateStr(s string, n int) string {

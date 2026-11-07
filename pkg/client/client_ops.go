@@ -59,7 +59,18 @@ func calculateChecksum(filePath string) (string, error) {
 // 因此无法在 body 流式写入的同时获取 checksum 并设置 header。io.TeeReader 方案在此不适用。
 // 对于 ≤ 100 MiB 的文件推荐使用本方法。超过 100 MiB 的大文件请使用 ChunkedUpload
 // 分块上传以获得更好的性能与并发控制。Upload 不会自动委派到 ChunkedUpload。
-func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (*UploadResult, error) {
+func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string, opts ...UploadOption) (*UploadResult, error) {
+	return c.uploadWithOpts(ctx, localPath, remotePath, opts...)
+}
+
+// uploadWithOpts 是 Upload 的可选项实现。
+func (c *FileClient) uploadWithOpts(ctx context.Context, localPath, remotePath string, opts ...UploadOption) (*UploadResult, error) {
+	uo := uploadOptions{}
+	for _, o := range opts {
+		if o != nil {
+			o(&uo)
+		}
+	}
 	if remotePath == "" {
 		return nil, fmt.Errorf("remotePath 不能为空")
 	}
@@ -94,41 +105,10 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	uploadWg.Go(func() {
 		defer pw.Close()
 		defer mw.Close()
-		select {
-		case <-ctx.Done():
-			pw.CloseWithError(ctx.Err())
-			return
-		default:
-		}
-		if c.volume != "" {
-			if vErr := mw.WriteField("volume", c.volume); vErr != nil {
-				pw.CloseWithError(fmt.Errorf("写入 volume 字段: %w", vErr))
-				return
-			}
-		}
-		part, wErr := mw.CreateFormFile("file", remoteClean)
-		if wErr != nil {
-			pw.CloseWithError(wErr)
-			return
-		}
-		var src io.Reader = file
-		if c.progressFn != nil {
-			c.progressFn("上传", 0, fileSize)
-			src = NewProgressReader(file, fileSize, func(read, total int64) {
-				c.progressFn("上传", read, total)
-			})
-		}
-		if _, copyErr := io.Copy(part, src); copyErr != nil {
-			pw.CloseWithError(copyErr)
-			return
-		}
+		streamUploadMultipart(ctx, pw, mw, uploadFileParams{file: file, remoteName: remoteClean, fileSize: fileSize, volume: c.volume, progressFn: c.progressFn})
 	})
 
-	headers := make(http.Header)
-	headers.Set(headerContentType, mw.FormDataContentType())
-	headers.Set(headerFileChecksum, fileChecksum)
-	headers.Set("X-File-Path", remoteClean)
-	headers.Set(headerFileMTime, fmt.Sprintf("%d", stat.ModTime().UnixNano()))
+	headers := buildUploadHeaders(mw, fileChecksum, remoteClean, stat.ModTime().UnixNano(), uo.MetaExtra)
 
 	resp, err := c.doRequest(ctx, "POST", "/upload", pr, headers)
 	uploadWg.Wait()
@@ -139,24 +119,7 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		// 服务端标记超限（X-Auto-Chunked: true）→ 自动转分块重试（roadmap 2.3 P0）：
-		// 普通上传超 max_upload_bytes 时无需调用方感知，客户端自动切分块协议。
-		if resp.StatusCode == http.StatusRequestEntityTooLarge && resp.Header.Get(headerAutoChunk) == "true" {
-			pr.Close()
-			cr, cerr := c.ChunkedUpload(ctx, localPath, remotePath)
-			if cerr != nil {
-				return nil, cerr
-			}
-			return &UploadResult{Success: cr.Success, Message: cr.Message, Checksum: cr.FileChecksum}, nil
-		}
-		err := fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
-		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
-		// （与 doRequest 的 507 映射一致；上传是对 507 做业务响应的路径，需在此补映射）。
-		if resp.StatusCode == http.StatusInsufficientStorage {
-			return nil, fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
-		}
-		return nil, err
+		return c.handleUploadError(ctx, resp, localPath, remotePath, pr, uo.MetaExtra)
 	}
 
 	var result UploadResult
@@ -174,12 +137,93 @@ func (c *FileClient) Upload(ctx context.Context, localPath, remotePath string) (
 	return &result, nil
 }
 
+// uploadFileParams 描述 multipart 的 file 数据段参数（打包为一组避免
+// streamUploadMultipart 参数过多——S107）。
+type uploadFileParams struct {
+	file       *os.File
+	remoteName string // multipart form 的 filename（已 filepath.ToSlash + Clean）
+	fileSize   int64
+	volume     string // 可选 volume 字段
+	progressFn func(string, int64, int64)
+}
+
+// streamUploadMultipart 在 io.Pipe 写侧流式构建上传 multipart 体（volume 字段 + file 数据段）。
+// 任一阶段 ctx 取消或写入失败即关闭 pw。
+func streamUploadMultipart(ctx context.Context, pw *io.PipeWriter, mw *multipart.Writer, p uploadFileParams) {
+	if uploadContextAborted(ctx, pw) {
+		return
+	}
+	if p.volume != "" {
+		if vErr := mw.WriteField("volume", p.volume); vErr != nil {
+			pw.CloseWithError(fmt.Errorf("写入 volume 字段: %w", vErr))
+			return
+		}
+	}
+	part, wErr := mw.CreateFormFile("file", p.remoteName)
+	if wErr != nil {
+		pw.CloseWithError(wErr)
+		return
+	}
+	var src io.Reader = p.file
+	if p.progressFn != nil {
+		p.progressFn("上传", 0, p.fileSize)
+		src = NewProgressReader(p.file, p.fileSize, func(read, total int64) {
+			p.progressFn("上传", read, total)
+		})
+	}
+	if _, copyErr := io.Copy(part, src); copyErr != nil {
+		pw.CloseWithError(copyErr)
+		return
+	}
+}
+
+// uploadContextAborted 检查上传 ctx 是否已取消，是则关闭 pw 并返回 true。
+func uploadContextAborted(ctx context.Context, pw *io.PipeWriter) bool {
+	select {
+	case <-ctx.Done():
+		pw.CloseWithError(ctx.Err())
+		return true
+	default:
+		return false
+	}
+}
+
+// handleUploadError 处理普通上传的非 2xx 响应：自动转分块/507 映射/普通错误。
+// 自动转分块成功路径返回 UploadResult（含新会话 checksum），其余返回错误。
+func (c *FileClient) handleUploadError(ctx context.Context, resp *http.Response, localPath, remotePath string, pr *io.PipeReader, metaExtra map[string]any) (*UploadResult, error) {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	// 服务端标记超限（X-Auto-Chunked: true）→ 自动转分块重试（roadmap 2.3 P0）：
+	// 普通上传超 max_upload_bytes 时无需调用方感知，客户端自动切分块协议。
+	if resp.StatusCode == http.StatusRequestEntityTooLarge && resp.Header.Get(headerAutoChunk) == "true" {
+		pr.Close()
+		// 元数据必须随分块 init 一起带过去：WithMetaExtra 只在单次上传走 header，
+		// 自动转分块时若不透传，大文件的 meta 会静默丢失。
+		cr, cerr := c.ChunkedUpload(ctx, localPath, remotePath, WithChunkedMetaExtra(metaExtra))
+		if cerr != nil {
+			return nil, cerr
+		}
+		return &UploadResult{Success: cr.Success, Message: cr.Message, Checksum: cr.FileChecksum}, nil
+	}
+	err := fmt.Errorf("上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+	// （与 doRequest 的 507 映射一致；上传是对 507 做业务响应的路径，需在此补映射）。
+	if resp.StatusCode == http.StatusInsufficientStorage {
+		return nil, fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+	}
+	return nil, err
+}
+
 // Mkdir 在服务端创建指定子目录。
 func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 	if containsPathTraversal(dirname) {
 		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
 	}
-	urlPath := "/mkdir?dirname=" + url.QueryEscape(dirname)
+	// 卷上下文（多卷）：漏带会导致服务端按 auto 解析 ⇒ `--volume`/卷 URI 静默失效
+	// （表现：mkdir 落在本地卷、加密卷上看不到目录）。
+	mkQuery := url.Values{}
+	mkQuery.Set("dirname", dirname)
+	c.appendVolumeQuery(mkQuery)
+	urlPath := "/mkdir?" + mkQuery.Encode()
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf(errFmtRequestFailed, err)
@@ -196,11 +240,20 @@ func (c *FileClient) Mkdir(ctx context.Context, dirname string) error {
 }
 
 // Rmdir 在服务端删除指定目录（含所有内容）。
-func (c *FileClient) Rmdir(ctx context.Context, dirname string) error {
+// Rmdir 删除目录（force=true 表示「已确认删除」，服务端据此放行递归删；false → 服务端 400）。
+// 确认责任在调用方（CLI 的 --force 或非空目录的交互确认）——服务端 require force 是**最后一道**
+// 闸门，客户端把「用户已确认」翻成 force=true。
+func (c *FileClient) Rmdir(ctx context.Context, dirname string, force bool) error {
 	if containsPathTraversal(dirname) {
 		return fmt.Errorf("dirname 不能包含路径穿越符 '..'")
 	}
-	urlPath := "/rmdir?dirname=" + url.QueryEscape(dirname)
+	rmQuery := url.Values{}
+	rmQuery.Set("dirname", dirname)
+	if force {
+		rmQuery.Set("force", "true")
+	}
+	c.appendVolumeQuery(rmQuery)
+	urlPath := "/rmdir?" + rmQuery.Encode()
 	resp, err := c.doRequest(ctx, "POST", urlPath, nil, nil)
 	if err != nil {
 		return fmt.Errorf(errFmtRequestFailed, err)
@@ -301,7 +354,31 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 	serverCS := resp.Header.Get(headerFileChecksum)
 	contentLength := resp.ContentLength
 
-	// 创建父目录（如果不存在）
+	// 创建父目录 + 写正文 + 完整性校验（2026-10-23 抽离：单流整流可能断流/错位 ⇒
+	// 无 checksum 时补大小 + 零窗兑底，有 checksum 时逐字节比对）。
+	if err := c.writeBodyToOutput(outputPath, resp.Body, contentLength, serverCS); err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+
+	// 恢复文件修改时间
+	c.restoreFileMTimeAfterDownload(outputPath, resp)
+
+	return nil
+}
+
+// verifySingleStreamOutput 是单流下载的完整性兑底（无服务端 checksum 时）：大小一致 +
+// 无大段零填充（2026-10-23：外部卷整流中途断流/错位会静默产出零填充文件）。
+func verifySingleStreamOutput(outputPath string, size int64) error {
+	if err := verifyOutputSize(outputPath, size); err != nil {
+		return err
+	}
+	return verifyNoHugeZeroRuns(outputPath, size)
+}
+
+// writeBodyToOutput 把响应体写入输出文件并按完整性策略校验（2026-10-23 抽离，降 gocognit）：
+// 有服务端 checksum → SHA-256 比对；无（外部卷整流）→ 大小 + 大段零窗兑底。
+func (c *FileClient) writeBodyToOutput(outputPath string, body io.Reader, size int64, serverCS string) error {
 	if ensureErr := ensureParentDir(outputPath); ensureErr != nil {
 		return fmt.Errorf("创建输出目录失败: %w", ensureErr)
 	}
@@ -310,29 +387,20 @@ func (c *FileClient) downloadTo(ctx context.Context, filename, outputPath, kind 
 		return fmt.Errorf("创建文件失败: %w", err)
 	}
 	defer out.Close()
-
-	var src io.Reader = resp.Body
+	src := io.Reader(body)
 	if c.progressFn != nil {
-		c.progressFn("下载", 0, contentLength)
-		src = NewProgressReader(resp.Body, contentLength, func(read, total int64) {
+		c.progressFn("下载", 0, size)
+		src = NewProgressReader(body, size, func(read, total int64) {
 			c.progressFn("下载", read, total)
 		})
 	}
 	if _, err := io.Copy(out, src); err != nil {
 		return fmt.Errorf("写入文件失败: %w", err)
 	}
-
 	if serverCS != "" {
-		if err := c.verifyChecksumAfterDownload(outputPath, serverCS); err != nil {
-			os.Remove(outputPath)
-			return fmt.Errorf("校验和验证失败: %w", err)
-		}
+		return c.verifyChecksumAfterDownload(outputPath, serverCS)
 	}
-
-	// 恢复文件修改时间
-	c.restoreFileMTimeAfterDownload(outputPath, resp)
-
-	return nil
+	return verifySingleStreamOutput(outputPath, size)
 }
 
 // verifyChecksumAfterDownload 验证下载文件的 SHA-256 与服务端返回的一致。
@@ -377,29 +445,13 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	headers := make(http.Header)
 
 	// 先通过 Stat 获取远端 checksum
-	fileChecksum := ""
-	if info, statErr := c.Stat(ctx, filename); statErr == nil && info.Checksum != "" {
-		fileChecksum = info.Checksum
-	} else if statErr != nil {
-		if errors.Is(statErr, ErrNotFound) {
-			return fmt.Errorf("文件不存在: %s", filename)
-		}
-		return fmt.Errorf("获取文件信息失败: %w", statErr)
-	} else {
-		return fmt.Errorf("远端文件 checksum 为空，无法删除: %s", filename)
+	fileChecksum, err := c.resolveDeleteChecksum(ctx, filename)
+	if err != nil {
+		return err
 	}
-
 	// 如果指定了本地文件路径，额外校验本地文件 checksum 与远端一致
-	if localPath != "" {
-		localCS, err := calculateChecksum(localPath)
-		if err != nil {
-			return fmt.Errorf("计算本地文件 SHA-256 失败: %w", err)
-		}
-		if localCS != fileChecksum {
-			return fmt.Errorf("本地文件 SHA-256 与远端不匹配，拒绝删除（远端: %s, 本地: %s）",
-				shortid.ShortHash(fileChecksum), shortid.ShortHash(localCS))
-		}
-		c.logger.Debug("本地文件校验通过", "local_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
+	if cerr := verifyLocalChecksum(c, localPath, fileChecksum); cerr != nil {
+		return cerr
 	}
 
 	headers.Set(headerFileChecksum, fileChecksum)
@@ -411,11 +463,7 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		if resp.StatusCode == http.StatusInsufficientStorage {
-			return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body)))
-		}
-		return fmt.Errorf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return deleteStatusError(resp)
 	}
 
 	var result UploadResult
@@ -428,6 +476,47 @@ func (c *FileClient) Delete(ctx context.Context, filename string, localPath stri
 	}
 
 	return nil
+}
+
+// resolveDeleteChecksum 通过 Stat 获取远端文件 checksum（删除前身份校验）。
+func (c *FileClient) resolveDeleteChecksum(ctx context.Context, filename string) (string, error) {
+	info, statErr := c.Stat(ctx, filename)
+	if statErr == nil && info.Checksum != "" {
+		return info.Checksum, nil
+	}
+	if statErr != nil {
+		if errors.Is(statErr, ErrNotFound) {
+			return "", fmt.Errorf("文件不存在: %s", filename)
+		}
+		return "", fmt.Errorf("获取文件信息失败: %w", statErr)
+	}
+	return "", fmt.Errorf("远端文件 checksum 为空，无法删除: %s", filename)
+}
+
+// verifyLocalChecksum 若指定本地路径，校验本地 SHA-256 与远端一致（一致才删除）。
+func verifyLocalChecksum(c *FileClient, localPath, fileChecksum string) error {
+	if localPath == "" {
+		return nil
+	}
+	localCS, err := calculateChecksum(localPath)
+	if err != nil {
+		return fmt.Errorf("计算本地文件 SHA-256 失败: %w", err)
+	}
+	if localCS != fileChecksum {
+		return fmt.Errorf("本地文件 SHA-256 与远端不匹配，拒绝删除（远端: %s, 本地: %s）",
+			shortid.ShortHash(fileChecksum), shortid.ShortHash(localCS))
+	}
+	c.logger.Debug("本地文件校验通过", "local_path", localPath, "checksum", shortid.ShortHash(fileChecksum))
+	return nil
+}
+
+// deleteStatusError 把删除请求的非 2xx 响应映射为错误（507 映射为 ErrStorageFull）。
+func deleteStatusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if resp.StatusCode == http.StatusInsufficientStorage {
+		return fmt.Errorf("%w: %s", ErrStorageFull, fmt.Sprintf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body)))
+	}
+	return fmt.Errorf("删除失败 (HTTP %d): %s", resp.StatusCode, string(body))
 }
 
 // FileInfo 表示远端单个文件的元信息（与服务端 listFiles 响应对齐）。
@@ -709,3 +798,18 @@ func (c *FileClient) BatchRename(ctx context.Context, operations []BatchRenameOp
 // TunnelDo 通过加密隧道发送一个 HTTP 请求。
 //
 // 使用方式与标准 http.Client.Do 相同。需要先通过 WithTunnel 配置隧道密钥。
+
+// buildUploadHeaders 组装上传请求头（Content-Type/checksum/path/mtime/meta-extra）。
+func buildUploadHeaders(mw *multipart.Writer, checksum, remoteClean string, mtimeUnix int64, metaExtra map[string]any) http.Header {
+	headers := make(http.Header)
+	headers.Set(headerContentType, mw.FormDataContentType())
+	headers.Set(headerFileChecksum, checksum)
+	headers.Set("X-File-Path", remoteClean)
+	headers.Set(headerFileMTime, fmt.Sprintf("%d", mtimeUnix))
+	if len(metaExtra) > 0 {
+		if hdr, herr := encodeMetaExtraHeader(metaExtra); herr == nil {
+			headers.Set(headerFileMetaExtra, hdr)
+		}
+	}
+	return headers
+}

@@ -169,7 +169,7 @@ func TestTenantCache_SuccessAndReuse(t *testing.T) {
 	if first == nil {
 		t.Fatal("TenantFor 应返回租户")
 	}
-	if second := c.TenantFor("alice"); second != first {
+	if c.TenantFor("alice") != first {
 		t.Fatal("同一 owner 应复用缓存中的同一个租户（句柄不得重复打开）")
 	}
 	// 空 owner 不归一（策略在调用方）：本类型按非法 owner fail-closed。

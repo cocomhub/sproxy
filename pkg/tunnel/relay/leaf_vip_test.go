@@ -96,7 +96,7 @@ func TestNewVirtualIPDialPolicy_NoSelfVIP(t *testing.T) {
 // TestNewVirtualIPDialPolicy_RejectsIPv6Subnet 校验 IPv6 子网被拒绝（虚拟 IP 仅支持 IPv4）。
 func TestNewVirtualIPDialPolicy_RejectsIPv6Subnet(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
 		}
 	}()

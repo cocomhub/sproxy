@@ -25,24 +25,30 @@ func TestFrameRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw, encErr := mux.EncodeFrame(tt.streamID, tt.ftype, tt.payload)
-			if encErr != nil {
-				t.Fatalf("EncodeFrame: %v", encErr)
-			}
-			sid, ftype, payload, err := mux.DecodeFrame(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sid != tt.streamID {
-				t.Fatalf("expected streamID %d, got %d", tt.streamID, sid)
-			}
-			if ftype != tt.ftype {
-				t.Fatalf("expected frameType %d, got %d", tt.ftype, ftype)
-			}
-			if len(payload) != len(tt.payload) {
-				t.Fatalf("expected payload len %d, got %d", len(tt.payload), len(payload))
-			}
+			frameRoundTrip(t, tt.streamID, tt.ftype, tt.payload)
 		})
+	}
+}
+
+// frameRoundTrip 断言一次帧编解码往返与输入一致。
+func frameRoundTrip(t *testing.T, streamID mux.StreamID, ftype mux.FrameType, payload []byte) {
+	t.Helper()
+	raw, encErr := mux.EncodeFrame(streamID, ftype, payload)
+	if encErr != nil {
+		t.Fatalf("EncodeFrame: %v", encErr)
+	}
+	sid, gotType, gotPayload, err := mux.DecodeFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sid != streamID {
+		t.Fatalf("expected streamID %d, got %d", streamID, sid)
+	}
+	if gotType != ftype {
+		t.Fatalf("expected frameType %d, got %d", ftype, gotType)
+	}
+	if len(gotPayload) != len(payload) {
+		t.Fatalf("expected payload len %d, got %d", len(payload), len(gotPayload))
 	}
 }
 

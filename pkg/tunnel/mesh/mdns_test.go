@@ -140,19 +140,9 @@ func TestMDNSTXTRoundtrip(t *testing.T) {
 	}
 }
 
-// TestMDNSAnnouncementRoundtrip 覆盖"构造宣告报文 → 解析 → 应用到对端缓存"全链路
-// （无需组播，确定性单测）。
-func TestMDNSAnnouncementRoundtrip(t *testing.T) {
-	srv, err := NewMDNS(MDNSConfig{
-		NodeID:     "node-a",
-		SignalAddr: "192.168.1.10:40001",
-		Services:   []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}},
-		IPs:        []net.IP{net.ParseIP("192.168.1.10")},
-		VirtualIP:  netip.MustParseAddr("100.64.0.5"),
-	})
-	if err != nil {
-		t.Fatalf("NewMDNS: %v", err)
-	}
+// mdnsTestBuildAnnouncement 将 srv 的宣告记录编码为一条响应报文（确定性 roundtrip 用）。
+func mdnsTestBuildAnnouncement(t *testing.T, srv *MDNSServer) []byte {
+	t.Helper()
 	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
 	if serr := b.StartAnswers(); serr != nil {
 		t.Fatalf("StartAnswers: %v", serr)
@@ -162,12 +152,27 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
+	return msg
+}
 
-	// 对端（BrowseOnly）解析该宣告并应发现 node-a。
-	recv, err := NewMDNS(MDNSConfig{NodeID: "node-b", BrowseOnly: true})
-	if err != nil {
-		t.Fatalf("NewMDNS(recv): %v", err)
+// mdnsTestParseAnswers 解析宣告报文并返回全部 answer 记录（供应用到浏览方）。
+func mdnsTestParseAnswers(t *testing.T, msg []byte) []dnsmessage.Resource {
+	t.Helper()
+	var p dnsmessage.Parser
+	if _, serr := p.Start(msg); serr != nil {
+		t.Fatalf("解析: %v", serr)
 	}
+	mdnsTestSkipQuestions(t, &p)
+	answers, err := p.AllAnswers()
+	if err != nil {
+		t.Fatalf("AllAnswers: %v", err)
+	}
+	return answers
+}
+
+// mdnsTestParseAnswersAsResponse 解析宣告报文，校验其为响应后返回全部 answer 记录。
+func mdnsTestParseAnswersAsResponse(t *testing.T, msg []byte) []dnsmessage.Resource {
+	t.Helper()
 	var p dnsmessage.Parser
 	h, err := p.Start(msg)
 	if err != nil {
@@ -176,6 +181,18 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 	if !h.Response {
 		t.Fatal("宣告报文应为响应")
 	}
+	mdnsTestSkipQuestions(t, &p)
+	answers, err := p.AllAnswers()
+	if err != nil {
+		t.Fatalf("AllAnswers: %v", err)
+	}
+	return answers
+}
+
+// mdnsTestSkipQuestions 消费 dnsmessage.Parser 的 question 段直到段结束
+// （宣告报文的 question 段固定存在，逐个跳过后再取 answers）。
+func mdnsTestSkipQuestions(t *testing.T, p *dnsmessage.Parser) {
+	t.Helper()
 	for {
 		if _, qerr := p.Question(); qerr != nil {
 			if qerr == dnsmessage.ErrSectionDone {
@@ -184,19 +201,18 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 			t.Fatalf("Question: %v", qerr)
 		}
 	}
-	answers, err := p.AllAnswers()
-	if err != nil {
-		t.Fatalf("AllAnswers: %v", err)
-	}
+}
+
+// mdnsTestApplyAnswers 把 answer 记录依次应用到浏览方 recv。
+func mdnsTestApplyAnswers(recv *MDNSServer, answers []dnsmessage.Resource) {
 	for _, a := range answers {
 		recv.applyAnswer(a)
 	}
+}
 
-	peers := recv.Peers()
-	if len(peers) != 1 {
-		t.Fatalf("对端发现 %d 个节点, want 1（peers=%+v）", len(peers), peers)
-	}
-	got := peers[0]
+// mdnsTestAssertAnnouncePeer 断言 roundtrip 解析出的对端各字段等于 node-a 的宣告值。
+func mdnsTestAssertAnnouncePeer(t *testing.T, got MDNSPeer) {
+	t.Helper()
 	if got.NodeID != "node-a" {
 		t.Errorf("NodeID = %q, want node-a", got.NodeID)
 	}
@@ -214,6 +230,50 @@ func TestMDNSAnnouncementRoundtrip(t *testing.T) {
 	}
 }
 
+// mdnsTestApplyAnswersForSecret 以指定共享密钥构造浏览方（BrowseOnly）并将 answers 应用，
+// 返回其对端列表（密钥认证分支专用：正确密钥/错误密钥/无密钥三态）。
+func mdnsTestApplyAnswersForSecret(t *testing.T, answers []dnsmessage.Resource, secret string) []MDNSPeer {
+	t.Helper()
+	recv, rerr := NewMDNS(MDNSConfig{NodeID: "node-x", BrowseOnly: true, Secret: secret})
+	if rerr != nil {
+		t.Fatalf("NewMDNS(recv): %v", rerr)
+	}
+	for _, a := range answers {
+		recv.applyAnswer(a)
+	}
+	return recv.Peers()
+}
+
+// TestMDNSAnnouncementRoundtrip 覆盖"构造宣告报文 → 解析 → 应用到对端缓存"全链路
+// （无需组播，确定性单测）。
+func TestMDNSAnnouncementRoundtrip(t *testing.T) {
+	srv, err := NewMDNS(MDNSConfig{
+		NodeID:     "node-a",
+		SignalAddr: "192.168.1.10:40001",
+		Services:   []hub.Service{{Name: "echo", Addr: "192.168.1.10:2222"}},
+		IPs:        []net.IP{net.ParseIP("192.168.1.10")},
+		VirtualIP:  netip.MustParseAddr("100.64.0.5"),
+	})
+	if err != nil {
+		t.Fatalf("NewMDNS: %v", err)
+	}
+	msg := mdnsTestBuildAnnouncement(t, srv)
+
+	// 对端（BrowseOnly）解析该宣告并应发现 node-a。
+	recv, err := NewMDNS(MDNSConfig{NodeID: "node-b", BrowseOnly: true})
+	if err != nil {
+		t.Fatalf("NewMDNS(recv): %v", err)
+	}
+	answers := mdnsTestParseAnswersAsResponse(t, msg)
+	mdnsTestApplyAnswers(recv, answers)
+
+	peers := recv.Peers()
+	if len(peers) != 1 {
+		t.Fatalf("对端发现 %d 个节点, want 1（peers=%+v）", len(peers), peers)
+	}
+	mdnsTestAssertAnnouncePeer(t, peers[0])
+}
+
 // TestMDNSSecretAuth（安全审查 D 回归）：配置共享密钥后，mDNS TXT 携带 HMAC 签名；
 // 浏览方用正确密钥发现对端，错误密钥忽略（防广告伪造/MITM），无密钥 = LAN 信任放行。
 // 用确定性 roundtrip（构造宣告 → 解析 → 应用到各密钥浏览方），不依赖组播。
@@ -226,51 +286,18 @@ func TestMDNSSecretAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMDNS(A): %v", err)
 	}
-	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
-	if serr := b.StartAnswers(); serr != nil {
-		t.Fatalf("StartAnswers: %v", serr)
-	}
-	srvA.appendRecords(&b)
-	msg, err := b.Finish()
-	if err != nil {
-		t.Fatalf("Finish: %v", err)
-	}
-	var p dnsmessage.Parser
-	if _, serr := p.Start(msg); serr != nil {
-		t.Fatalf("解析: %v", serr)
-	}
-	for {
-		if _, qerr := p.Question(); qerr != nil {
-			if qerr == dnsmessage.ErrSectionDone {
-				break
-			}
-			t.Fatalf("Question: %v", qerr)
-		}
-	}
-	answers, err := p.AllAnswers()
-	if err != nil {
-		t.Fatalf("AllAnswers: %v", err)
-	}
-	applyTo := func(secret string) []MDNSPeer {
-		recv, rerr := NewMDNS(MDNSConfig{NodeID: "node-x", BrowseOnly: true, Secret: secret})
-		if rerr != nil {
-			t.Fatalf("NewMDNS(recv): %v", rerr)
-		}
-		for _, a := range answers {
-			recv.applyAnswer(a)
-		}
-		return recv.Peers()
-	}
+	msg := mdnsTestBuildAnnouncement(t, srvA)
+	answers := mdnsTestParseAnswers(t, msg)
 	// 正确密钥 → 发现 A。
-	if peers := applyTo("S"); len(peers) != 1 || peers[0].NodeID != "node-a" {
+	if peers := mdnsTestApplyAnswersForSecret(t, answers, "S"); len(peers) != 1 || peers[0].NodeID != "node-a" {
 		t.Fatalf("正确密钥应发现 node-a, got %+v", peers)
 	}
 	// 错误密钥 → 忽略（签名不匹配）。
-	if peers := applyTo("T"); len(peers) != 0 {
+	if peers := mdnsTestApplyAnswersForSecret(t, answers, "T"); len(peers) != 0 {
 		t.Fatalf("错误密钥不应发现 node-a, got %+v", peers)
 	}
 	// 无密钥（LAN 信任）→ 放行。
-	if peers := applyTo(""); len(peers) != 1 {
+	if peers := mdnsTestApplyAnswersForSecret(t, answers, ""); len(peers) != 1 {
 		t.Fatalf("无密钥 LAN 信任应发现 node-a, got %+v", peers)
 	}
 }
@@ -446,34 +473,9 @@ func TestMDNSFingerprintBroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMDNS(recv): %v", err)
 	}
-	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
-	if serr := b.StartAnswers(); serr != nil {
-		t.Fatalf("StartAnswers: %v", serr)
-	}
-	srv.appendRecords(&b)
-	msg, err := b.Finish()
-	if err != nil {
-		t.Fatalf("Finish: %v", err)
-	}
-	var p dnsmessage.Parser
-	if _, serr := p.Start(msg); serr != nil {
-		t.Fatalf("解析: %v", serr)
-	}
-	for {
-		if _, qerr := p.Question(); qerr != nil {
-			if qerr == dnsmessage.ErrSectionDone {
-				break
-			}
-			t.Fatalf("Question: %v", qerr)
-		}
-	}
-	answers, err := p.AllAnswers()
-	if err != nil {
-		t.Fatalf("AllAnswers: %v", err)
-	}
-	for _, a := range answers {
-		recv.applyAnswer(a)
-	}
+	msg := mdnsTestBuildAnnouncement(t, srv)
+	answers := mdnsTestParseAnswers(t, msg)
+	mdnsTestApplyAnswers(recv, answers)
 	peers := recv.Peers()
 	if len(peers) != 1 {
 		t.Fatalf("对端发现 %d 个节点, want 1", len(peers))
@@ -508,34 +510,9 @@ func TestMDNSFingerprintInSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMDNS(recv): %v", err)
 	}
-	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true})
-	if serr := b.StartAnswers(); serr != nil {
-		t.Fatalf("StartAnswers: %v", serr)
-	}
-	srv.appendRecords(&b)
-	msg, err := b.Finish()
-	if err != nil {
-		t.Fatalf("Finish: %v", err)
-	}
-	var p dnsmessage.Parser
-	if _, serr := p.Start(msg); serr != nil {
-		t.Fatalf("解析: %v", serr)
-	}
-	for {
-		if _, qerr := p.Question(); qerr != nil {
-			if qerr == dnsmessage.ErrSectionDone {
-				break
-			}
-			t.Fatalf("Question: %v", qerr)
-		}
-	}
-	answers, err := p.AllAnswers()
-	if err != nil {
-		t.Fatalf("AllAnswers: %v", err)
-	}
-	for _, a := range answers {
-		recv.applyAnswer(a)
-	}
+	msg := mdnsTestBuildAnnouncement(t, srv)
+	answers := mdnsTestParseAnswers(t, msg)
+	mdnsTestApplyAnswers(recv, answers)
 	if peers := recv.Peers(); len(peers) != 1 || peers[0].Fingerprint != fp {
 		t.Fatalf("正确密钥应发现 node-a 且指纹正确, got %+v", peers)
 	}

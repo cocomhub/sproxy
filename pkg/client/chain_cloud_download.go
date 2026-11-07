@@ -22,9 +22,10 @@ const TypeCloudDownload = "cloud_download"
 
 // Sentinel errors for CloudDownloadChain.
 var (
-	ErrClientNil     = errors.New("client is nil")
-	ErrArchiveFailed = errors.New("archive failed")
-	ErrStorageFull   = errors.New("storage full")
+	ErrClientNil        = errors.New("client is nil")
+	ErrArchiveFailed    = errors.New("archive failed")
+	ErrStorageFull      = errors.New("storage full")
+	ErrLocalNotVerified = errors.New("local file not verified; skipping remote cleanup")
 )
 
 func init() {
@@ -33,22 +34,38 @@ func init() {
 
 // CloudDownloadChain 云端下载链式操作，实现 ChainRunner 接口。
 type CloudDownloadChain struct {
-	ChainID      string                `json:"chain_id"`
-	CurrentPhase string                `json:"phase"`
-	CurStatus    string                `json:"status"`
-	URLs         []string              `json:"urls"`
-	Entries      []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
-	TaskIDs      []string              `json:"task_ids,omitempty"`
-	ArchiveName  string                `json:"archive_name"`
-	LocalDir     string                `json:"local_dir"`
-	LocalPath    string                `json:"local_path,omitempty"`
-	KeepFiles    bool                  `json:"keep_files"`
-	Completed    int                   `json:"completed"`
-	Failed       int                   `json:"failed"`
-	Total        int                   `json:"total"`
-	Error        string                `json:"error,omitempty"`
-	CreatedAt    time.Time             `json:"created_at"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	ChainID       string                `json:"chain_id"`
+	CurrentPhase  string                `json:"phase"`
+	CurStatus     string                `json:"status"`
+	URLs          []string              `json:"urls"`
+	Entries       []cloudfilename.Entry `json:"entries,omitempty"` // URL→可选保存文件名；空则回退 URLs
+	TaskIDs       []string              `json:"task_ids,omitempty"`
+	ArchiveName   string                `json:"archive_name"`
+	LocalDir      string                `json:"local_dir"`
+	LocalPath     string                `json:"local_path,omitempty"`
+	LocalVerified bool                  `json:"local_verified,omitempty"` // 本地文件校验通过；cleanupRemote 仅当其 true 才删云端
+	KeepFiles     bool                  `json:"keep_files"`
+	// Transfer 转存目标（链式透传 submit 请求；nil = 不转存）。
+	Transfer *TransferSpec `json:"transfer,omitempty"`
+	// Save 保留 cloud 桶副本（nil = 默认 true）。
+	Save *bool `json:"save,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。
+	DownloadLocal bool `json:"download_local,omitempty"`
+	// IntegrityMustPass 强制源文件完整性（语义校验失败阻断；透传服务端）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+	// MetaExtra 转存产物的自定义元数据（透传服务端，与来源信息合并写目标卷）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
+	Completed int            `json:"completed"`
+	Failed    int            `json:"failed"`
+	Total     int            `json:"total"`
+	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
+	Damaged int `json:"damaged,omitempty"`
+	// seenCompleted 已计数的 completed 任务 ID（R6-I1：防 storage-full 重试轮重复累计；
+	// 非持久化，链实例生命周期内有效）。
+	seenCompleted map[string]bool `json:"-"`
+	Error         string          `json:"error,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 
 	// 持久化字段：恢复时自动恢复；同时是唯一数据源（SetOptions 从 chainOptions 桥接至此）
 	PollInterval time.Duration `json:"poll_interval"` // 轮询间隔，恢复时保持
@@ -87,20 +104,26 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		}
 	}
 	return &CloudDownloadChain{
-		ChainID:      chainID,
-		CurrentPhase: "",
-		CurStatus:    StatusRunning,
-		URLs:         urls, // 兼容旧持久化状态；新状态以 Entries 为准
-		Entries:      entries,
-		ArchiveName:  archiveName,
-		LocalDir:     localDir,
-		KeepFiles:    opts.keepFiles,
-		Total:        len(entries),
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		PollInterval: fixPollInterval(opts.pollInterval),
-		Timeout:      opts.timeout,
-		client:       client,
+		ChainID:           chainID,
+		seenCompleted:     make(map[string]bool),
+		CurrentPhase:      "",
+		CurStatus:         StatusRunning,
+		URLs:              urls, // 兼容旧持久化状态；新状态以 Entries 为准
+		Entries:           entries,
+		ArchiveName:       archiveName,
+		LocalDir:          localDir,
+		KeepFiles:         opts.keepFiles,
+		Transfer:          opts.transfer,
+		Save:              opts.save,
+		DownloadLocal:     opts.downloadLocal,
+		IntegrityMustPass: opts.forceIntegrity,
+		MetaExtra:         opts.metaExtra,
+		Total:             len(entries),
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		PollInterval:      fixPollInterval(opts.pollInterval),
+		Timeout:           opts.timeout,
+		client:            client,
 	}, nil
 }
 
@@ -109,25 +132,30 @@ func (c *CloudDownloadChain) Phase() string  { return c.CurrentPhase }
 func (c *CloudDownloadChain) Status() string { return c.CurStatus }
 func (c *CloudDownloadChain) State() map[string]any {
 	return map[string]any{
-		"type":          TypeCloudDownload,
-		"chain_id":      c.ChainID,
-		"phase":         c.CurrentPhase,
-		"status":        c.CurStatus,
-		"urls":          c.URLs,
-		"entries":       c.Entries,
-		"task_ids":      c.TaskIDs,
-		"archive_name":  c.ArchiveName,
-		"local_dir":     c.LocalDir,
-		"local_path":    c.LocalPath,
-		"keep_files":    c.KeepFiles,
-		"completed":     c.Completed,
-		"failed":        c.Failed,
-		"total":         c.Total,
-		"error":         c.Error,
-		"created_at":    c.CreatedAt,
-		"updated_at":    c.UpdatedAt,
-		"poll_interval": c.PollInterval,
-		"timeout":       c.Timeout,
+		"type":                TypeCloudDownload,
+		"chain_id":            c.ChainID,
+		"phase":               c.CurrentPhase,
+		"status":              c.CurStatus,
+		"urls":                c.URLs,
+		"entries":             c.Entries,
+		"task_ids":            c.TaskIDs,
+		"archive_name":        c.ArchiveName,
+		"local_dir":           c.LocalDir,
+		"local_path":          c.LocalPath,
+		"local_verified":      c.LocalVerified,
+		"keep_files":          c.KeepFiles,
+		"completed":           c.Completed,
+		"failed":              c.Failed,
+		"total":               c.Total,
+		"error":               c.Error,
+		"created_at":          c.CreatedAt,
+		"updated_at":          c.UpdatedAt,
+		"poll_interval":       c.PollInterval,
+		"timeout":             c.Timeout,
+		"transfer":            c.Transfer,
+		"save":                c.Save,
+		"download_local":      c.DownloadLocal,
+		"integrity_must_pass": c.IntegrityMustPass,
 	}
 }
 
@@ -152,6 +180,11 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.PollInterval = fixPollInterval(opts.pollInterval)
 	c.Timeout = opts.timeout
 	c.KeepFiles = opts.keepFiles
+	// 转存/保留/下载本地参数同样桥接（C1：此前遗漏导致 CLI 旗标空转）。
+	c.Transfer = opts.transfer
+	c.Save = opts.save
+	c.DownloadLocal = opts.downloadLocal
+	c.IntegrityMustPass = opts.forceIntegrity
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。
@@ -185,90 +218,142 @@ func (c *CloudDownloadChain) Run(ctx context.Context, reportFn ProgressFunc) (er
 	// 统一错误处理：任何阶段失败都设置状态
 	defer func() {
 		if err != nil {
-			c.CurStatus = StatusFailed
-			c.CurrentPhase = PhaseFailed
-			c.Error = err.Error()
-			c.UpdatedAt = time.Now()
+			c.markFailed(err)
 		}
 	}()
 
+	for {
+		done, stageErr := c.runStage(ctx, reportFn)
+		if stageErr != nil {
+			return stageErr
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// beginPhase 把链推入下一阶段并做统一的状态推进/持久化/日志/进度上报。
+func (c *CloudDownloadChain) beginPhase(ctx context.Context, reportFn ProgressFunc, phase, msg string, current, total int) {
+	c.CurrentPhase = phase
+	c.UpdatedAt = time.Now()
+	c.saveState(ctx)
+	slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", phase)
+	reportFn(ctx, ProgressInfo{Phase: phase, Message: msg, Current: current, Total: total})
+}
+
+// markFailed 在失败时统一写入失败状态。
+func (c *CloudDownloadChain) markFailed(err error) {
+	c.CurStatus = StatusFailed
+	c.CurrentPhase = PhaseFailed
+	c.Error = err.Error()
+	c.UpdatedAt = time.Now()
+}
+
+// markCompleted 在链走完时统一置为完成态。
+func (c *CloudDownloadChain) markCompleted() {
+	c.CurrentPhase = PhaseCompleted
+	c.CurStatus = StatusCompleted
+	c.UpdatedAt = time.Now()
+}
+
+// runStage 执行当前阶段的一个状态推进，返回 done=true 表示链已完成、只需返回。
+func (c *CloudDownloadChain) runStage(ctx context.Context, reportFn ProgressFunc) (bool, error) {
 	switch c.CurrentPhase {
-	case "":
-		fallthrough
-	case PhaseSubmitting:
+	case "", PhaseSubmitting:
 		// 在提交任务前先持久化状态，确保崩溃恢复后不会重复提交
-		c.CurrentPhase = PhaseSubmitting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseSubmitting)
-		reportFn(ctx, ProgressInfo{Phase: PhaseSubmitting, Message: "submit cloud download tasks", Current: 0, Total: len(c.URLs)})
+		c.beginPhase(ctx, reportFn, PhaseSubmitting, "submit cloud download tasks", 0, len(c.URLs))
 		if err := c.submitTasks(ctx); err != nil {
 			// 部分提交失败时清理已成功提交的任务：它们已在服务端开始下载，若本链
 			// 中止且用户不再重试，会成为孤儿持续占用服务端存储直到 TTL。
 			// 清理失败不影响主错误返回（主错误已足够用户了解失败原因）。
 			_ = c.cleanupRemote(context.WithoutCancel(ctx))
-			return err
+			return false, err
 		}
 		c.CurrentPhase = PhaseWaiting
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting, "completed", c.Completed, "total", c.Total)
-		reportFn(ctx, ProgressInfo{Phase: PhaseWaiting, Message: "waiting for downloads to complete", Current: c.Completed, Total: c.Total})
-		fallthrough
+		return false, nil
 
 	case PhaseWaiting:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseWaiting)
+		c.beginPhase(ctx, reportFn, PhaseWaiting, "waiting for downloads to complete", c.Completed, c.Total)
 		if err := c.waitForTasks(ctx); err != nil {
-			return err
+			return false, err
+		}
+		if !c.DownloadLocal {
+			// 客户端不下载本地（只转存/只保留）：等待完成后直接完成，跳过
+			// archive/download/cleaning（H1b：否则仍拉取本地，正交性破坏）。
+			c.markCompleted()
+			return true, nil
 		}
 		c.CurrentPhase = PhaseArchiving
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
-		reportFn(ctx, ProgressInfo{Phase: PhaseArchiving, Message: "packaging archive", Current: 0, Total: 1})
-		fallthrough
+		return false, nil
 
 	case PhaseArchiving:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseArchiving)
+		c.beginPhase(ctx, reportFn, PhaseArchiving, "packaging archive", 0, 1)
 		if err := c.archiveTasks(ctx); err != nil {
-			return err
+			return false, err
 		}
 		c.CurrentPhase = PhaseDownloading
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
-		reportFn(ctx, ProgressInfo{Phase: PhaseDownloading, Message: "downloading to local", Current: 0, Total: 1})
-		fallthrough
+		return false, nil
 
 	case PhaseDownloading:
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseDownloading)
+		c.beginPhase(ctx, reportFn, PhaseDownloading, "downloading to local", 0, 1)
 		if err := c.downloadToLocal(ctx); err != nil {
-			return err
+			return false, err
 		}
-		// 默认清理远端文件，keepFiles 时跳过
 		if c.KeepFiles {
-			break
+			// 保留远端文件，不再清理
+			c.markCompleted()
+			return true, nil
 		}
 		c.CurrentPhase = PhaseCleaning
-		c.UpdatedAt = time.Now()
-		c.saveState(ctx)
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		reportFn(ctx, ProgressInfo{Phase: PhaseCleaning, Message: "cleaning remote files", Current: 0, Total: len(c.TaskIDs) + 1})
-		fallthrough
+		return false, nil
 
 	case PhaseCleaning:
-		// KeepFiles=true 时不会进入此分支（下载阶段已 break）
-		slog.Debug("cloud download chain", "chain_id", c.ChainID, "phase", PhaseCleaning)
-		_ = c.cleanupRemote(ctx) // 清理失败不影响主流程成功
+		// KeepFiles=true 时不会进入此分支（下载阶段已提前完成）
+		c.beginPhase(ctx, reportFn, PhaseCleaning, "cleaning remote files", 0, len(c.TaskIDs)+1)
+		if err := c.cleanupRemote(ctx); err != nil {
+			// 清理失败：保留云端（尤其未校验时不删云端），显式报错，禁止静默跳过。
+			return false, fmt.Errorf("清理云端文件失败，已保留云端: %w", err)
+		}
+		c.markCompleted()
+		return true, nil
 
 	default:
-		return fmt.Errorf("unknown phase: %s", c.CurrentPhase)
+		return false, fmt.Errorf("unknown phase: %s", c.CurrentPhase)
 	}
+}
 
-	c.CurrentPhase = PhaseCompleted
-	c.CurStatus = StatusCompleted
-	c.UpdatedAt = time.Now()
-	return nil
+// cloudDownloadEntries 返回链式下载条目（Entries 优先，回退 URLs 生成）。
+func cloudDownloadEntries(c *CloudDownloadChain) []cloudfilename.Entry {
+	if len(c.Entries) > 0 {
+		return c.Entries
+	}
+	var out []cloudfilename.Entry
+	for _, u := range c.URLs {
+		out = append(out, cloudfilename.Entry{URL: u})
+	}
+	return out
+}
+
+// cloudDownloadTransferOpts 组装转存/保留选项（transfer/save 透传服务端）。
+func cloudDownloadTransferOpts(c *CloudDownloadChain) []CloudDownloadOption {
+	var opts []CloudDownloadOption
+	if c.Transfer != nil {
+		opts = append(opts, WithCloudDownloadTransfer(c.Transfer))
+	}
+	if c.Save != nil {
+		opts = append(opts, WithCloudDownloadSave(*c.Save))
+	}
+	if c.DownloadLocal {
+		opts = append(opts, WithCloudDownloadLocal(true))
+	}
+	if c.IntegrityMustPass {
+		opts = append(opts, WithCloudDownloadIntegrityMustPass(true))
+	}
+	if len(c.MetaExtra) > 0 {
+		opts = append(opts, WithCloudDownloadMetaExtra(c.MetaExtra))
+	}
+	return opts
 }
 
 // submitTasks 批量提交云端下载任务。
@@ -282,13 +367,9 @@ func (c *CloudDownloadChain) submitTasks(ctx context.Context) error {
 	}
 	// 统一走带保存文件名的 Entries；为防御直接构造/旧持久化状态（Entries 为空），
 	// 回退为从 URLs 生成条目（filename 为空，服务端自动生成）。
-	entries := c.Entries
-	if len(entries) == 0 {
-		for _, u := range c.URLs {
-			entries = append(entries, cloudfilename.Entry{URL: u})
-		}
-	}
-	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries)
+	entries := cloudDownloadEntries(c)
+	dlOpts := cloudDownloadTransferOpts(c)
+	tasks, err := c.client.CloudDownloadBatchEntries(ctx, entries, dlOpts...)
 	if err != nil {
 		return fmt.Errorf("批量提交云端下载失败: %w", err)
 	}
@@ -338,115 +419,174 @@ func (c *CloudDownloadChain) waitForTasks(ctx context.Context) error {
 		// 每次重试前归零计数器，基于本次轮询结果重新统计
 		c.Completed = 0
 		c.Failed = 0
+		// R6-I1：Damaged 不归零——seenCompleted 已防跨轮重复计（completed 终态计一次），
+		// 归零会让重试轮丢失计数（dmg-1 continue 后 Damaged 被清零）。
 		submitFailedCount = 0
 
 		results, err := c.pollAllTasks(ctx)
 		if err != nil {
 			return err
 		}
-		var storageFullURLs []string
-		var storageFullIDs []string
-		cancelled := 0
-		for _, r := range results {
-			switch r.Status {
-			case TaskStatusCompleted:
-				c.Completed++
-			case TaskStatusCancelled:
-				cancelled++
-			case TaskStatusFailed:
-				if isStorageFullError(r.Error) {
-					storageFullURLs = append(storageFullURLs, r.URL)
-					storageFullIDs = append(storageFullIDs, r.ID)
-				} else {
-					c.Failed++
-				}
-			}
-		}
+		storageFullURLs, storageFullIDs, cancelled := c.tallyResults(results)
 		if len(storageFullURLs) == 0 {
 			// 无存储超限重试：若仍有失败/取消任务（含重试提交失败的 URL），链式操作不得
 			// 声称成功（禁止静默失败）。cancelled 计入失败（用户确认 cancelled=失败）。
-			if c.Failed+cancelled+submitFailedCount > 0 {
-				if cancelled > 0 {
-					return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
-						c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
-				}
-				return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+			if waitErr := c.waitFailure(cancelled, submitFailedCount); waitErr != nil {
+				return waitErr
 			}
 			return nil
 		}
-		if attempt < maxAttempts-1 {
-			// 移除旧失败任务 ID，后续追加新提交的 ID
-			failedSet := make(map[string]struct{}, len(storageFullIDs))
-			for _, id := range storageFullIDs {
-				failedSet[id] = struct{}{}
-			}
-			var remaining []string
-			for _, id := range c.TaskIDs {
-				if _, ok := failedSet[id]; !ok {
-					remaining = append(remaining, id)
-				}
-			}
-			c.TaskIDs = remaining
-
-			// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
-			delay := 10 * time.Second * (1 << attempt)
-			if c.backoffFn != nil {
-				delay = c.backoffFn(attempt)
-			}
-			// 检查上下文剩余时间，避免超时
-			if deadline, ok := ctx.Deadline(); ok {
-				remaining := time.Until(deadline)
-				if remaining < delay {
-					delay = remaining
-				}
-			}
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				// timer 可能已触发，drain channel 防阻塞
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return ctx.Err()
-			}
-			if len(storageFullURLs) > 0 {
-				// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
-				// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
-				retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
-				for _, u := range storageFullURLs {
-					retryEntries = append(retryEntries, c.entryForURL(u))
-				}
-				tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries)
-				cancel()
-				if err != nil {
-					return fmt.Errorf("重试批量提交失败: %w", err)
-				}
-				// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败，计入 submitFailedCount
-				// 而非静默丢弃（否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作
-				// 会错误报告成功）
-				c.TaskIDs = remaining
-				for _, t := range tasks {
-					if t.ID != "" {
-						c.TaskIDs = append(c.TaskIDs, t.ID)
-						continue
-					}
-					submitFailedCount++
-				}
-				if len(c.TaskIDs) == 0 && submitFailedCount > 0 {
-					// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
-					// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
-					return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", submitFailedCount)
-				}
-			}
-			// 更新 Total 为本次重试后的 TaskIDs 总数
-			c.Total = len(c.TaskIDs)
-		} else {
+		if attempt >= maxAttempts-1 {
+			// 最后一次尝试仍存储超限：计入失败，循环结束返回 ErrStorageFull。
 			c.Failed += len(storageFullURLs)
+			continue
+		}
+		if retryErr := c.retryStorageFull(ctx, storageFullURLs, storageFullIDs, attempt); retryErr != nil {
+			return retryErr
 		}
 	}
 	return fmt.Errorf("storage full after %d attempts: %w", maxAttempts, ErrStorageFull)
+}
+
+// tallyResults 统计一轮轮询结果：完成/失败计数写入 c.Completed/c.Failed，
+// 存储超限任务单独归集（用于重试提交）；返回存储超限的 URL/ID 列表与取消计数。
+func (c *CloudDownloadChain) tallyResults(results []*CloudTask) (storageFullURLs, storageFullIDs []string, cancelled int) {
+	for _, r := range results {
+		switch r.Status {
+		case TaskStatusCompleted:
+			// R6-I1 根因：storage-full 重试轮重复轮询已完成任务 → Completed/Damaged
+			// 每轮累加虚高。用 seenCompleted 防重复计（不移除 TaskIDs——archive 阶段仍需）。
+			if !c.markCompletedSeen(r.ID) {
+				continue
+			}
+			c.Completed++
+			// R3-I3：completed 但完整性损坏（damaged）——默认放行语义，不当作可靠成功。
+			if r.IntegrityStatus == "damaged" {
+				c.Damaged++
+			}
+		case TaskStatusCancelled:
+			cancelled++
+		case TaskStatusFailed:
+			if isStorageFullError(r.Error) {
+				storageFullURLs = append(storageFullURLs, r.URL)
+				storageFullIDs = append(storageFullIDs, r.ID)
+			} else {
+				c.Failed++
+			}
+		}
+	}
+	return storageFullURLs, storageFullIDs, cancelled
+}
+
+// waitFailure 根据失败/取消计数构造链式操作失败错误（无失败返回 nil）。
+func (c *CloudDownloadChain) waitFailure(cancelled, submitFailedCount int) error {
+	if c.Failed+cancelled+submitFailedCount > 0 {
+		if cancelled > 0 {
+			return fmt.Errorf("%d 个云端下载任务失败（其中 %d 个被取消，共 %d 个）",
+				c.Failed+cancelled+submitFailedCount, cancelled, c.Total+submitFailedCount)
+		}
+		return fmt.Errorf("%d 个云端下载任务失败（共 %d 个）", c.Failed+submitFailedCount, c.Total+submitFailedCount)
+	}
+	// R3-I3：完整性损坏放行（damaged）→ 警告但继续（用户裁定 2026-10-06：警告继续——
+	// 不整链阻断，正常文件可得，damaged 项审计可见）。
+	return nil
+}
+
+// retryStorageFull 处理存储超限重试：移除失败任务 ID、指数退避等待、用独立超时的
+// context 重试提交（保留原 URL 在 Entries 中指定的保存文件名）。调用方保证
+// storageFullURLs 非空；失败返回 error（含「所有重试提交都再次失败」的显式错误）。
+func (c *CloudDownloadChain) retryStorageFull(ctx context.Context, storageFullURLs, storageFullIDs []string, attempt int) error {
+	// 移除旧失败任务 ID，后续追加新提交的 ID
+	failedSet := make(map[string]struct{}, len(storageFullIDs))
+	for _, id := range storageFullIDs {
+		failedSet[id] = struct{}{}
+	}
+	var remaining []string
+	for _, id := range c.TaskIDs {
+		if _, ok := failedSet[id]; !ok {
+			remaining = append(remaining, id)
+		}
+	}
+	c.TaskIDs = remaining
+
+	// 指数退避等待：默认 10s, 20s, 40s；测试可注入 backoffFn 缩短
+	if err := c.waitBackoff(ctx, attempt); err != nil {
+		return err
+	}
+	// 使用独立超时的 context 重试，避免原始 context 过期导致重试失败。
+	// 重试条目保留原 URL 在 Entries 中指定的保存文件名（若指定过）。
+	tasks, err := c.resubmitStorageFull(ctx, storageFullURLs)
+	if err != nil {
+		return err
+	}
+	// 新提交的任务添加回 TaskIDs；无 ID = 提交再次失败（计入 failedCount 用于显式报错，
+	// 而非静默丢弃——否则该 URL 从 TaskIDs 消失、下一轮统计全完成后链式操作会错误报告
+	// 成功）。注意：失败任务数在 waitForTasks 每轮循环开头归零，且「有失败任务」的最终
+	// 判定在下一轮轮询结果后作出——故本计数与 waitFailure 读取值一致（保持既有行为逐字
+	// 不变）；禁止静默失败语义由 TaskIDs 清空 + 下方显式报错兜底。
+	c.TaskIDs = remaining
+	var failedCount int
+	for _, t := range tasks {
+		if t.ID != "" {
+			c.TaskIDs = append(c.TaskIDs, t.ID)
+			continue
+		}
+		failedCount++
+	}
+	if len(c.TaskIDs) == 0 && failedCount > 0 {
+		// 所有重试提交都再次失败、没有可轮询的任务：直接报错，
+		// 避免下一轮空轮询返回误导性的"没有可轮询的任务"
+		return fmt.Errorf("%d 个云端下载任务重试提交失败（存储空间不足）", failedCount)
+	}
+	// 更新 Total 为本次重试后的 TaskIDs 总数
+	c.Total = len(c.TaskIDs)
+	return nil
+}
+
+// waitBackoff 指数退避等待（默认 10s, 20s, 40s；测试可注入 backoffFn 缩短；受 ctx
+// 剩余时间约束）。返回 nil 表示等待完成；ctx 提前取消返回其错误。
+func (c *CloudDownloadChain) waitBackoff(ctx context.Context, attempt int) error {
+	delay := 10 * time.Second * (1 << attempt)
+	if c.backoffFn != nil {
+		delay = c.backoffFn(attempt)
+	}
+	// 检查上下文剩余时间，避免超时
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < delay {
+			delay = remaining
+		}
+	}
+	timer := time.NewTimer(delay)
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		// timer 可能已触发，drain channel 防阻塞
+		if !timer.Stop() {
+			<-timer.C
+		}
+		return ctx.Err()
+	}
+}
+
+// resubmitStorageFull 用独立超时的 context 重试提交存储超限 URL（重试条目保留原 URL 在
+// Entries 中指定的保存文件名）。
+func (c *CloudDownloadChain) resubmitStorageFull(ctx context.Context, storageFullURLs []string) ([]CloudTask, error) {
+	retryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	retryEntries := make([]cloudfilename.Entry, 0, len(storageFullURLs))
+	for _, u := range storageFullURLs {
+		retryEntries = append(retryEntries, c.entryForURL(u))
+	}
+	// M5：storage-full 重试透传四参（transfer/save/download_local/integrity_must_pass）——与 submitTasks
+	// 同一收口 cloudDownloadTransferOpts(c)，避免重试条目丢失转存/保存语义（此前
+	// 仅 URL+filename 重提交 → 转存后任务被当成纯下载，save=false 语义不落地）。
+	tasks, err := c.client.CloudDownloadBatchEntries(retryCtx, retryEntries, cloudDownloadTransferOpts(c)...)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("重试批量提交失败: %w", err)
+	}
+	return tasks, nil
 }
 
 // pollAllTasks 轮询所有任务状态直到全部完成。
@@ -473,61 +613,87 @@ func (c *CloudDownloadChain) pollAllTasks(ctx context.Context) ([]*CloudTask, er
 		case <-timeoutCtx.Done():
 			return nil, timeoutCtx.Err()
 		case <-ticker.C:
-			// 并发查询所有任务状态
-			type taskResult struct {
-				index int
-				task  *CloudTask
-				err   error
+			// 并发查询所有任务状态；未全部到达终态时继续下一轮（results==nil）。
+			results, err := c.pollRound(timeoutCtx)
+			if err != nil {
+				return nil, err
 			}
-			resultCh := make(chan taskResult, len(c.TaskIDs))
-			var wg sync.WaitGroup
-			cancelCtx, cancelAll := context.WithCancel(timeoutCtx)
-			defer cancelAll()
-
-			for i, taskID := range c.TaskIDs {
-				wg.Go(func() {
-					select {
-					case <-cancelCtx.Done():
-						return
-					default:
-					}
-					status, err := c.client.GetCloudTask(cancelCtx, taskID)
-					select {
-					case resultCh <- taskResult{index: i, task: status, err: err}:
-					case <-cancelCtx.Done():
-					}
-				})
-			}
-			go func() {
-				wg.Wait()
-				close(resultCh)
-			}()
-
-			results := make([]*CloudTask, len(c.TaskIDs))
-			allDone := true
-			for r := range resultCh {
-				if r.err != nil {
-					cancelAll()
-					// 消费剩余结果，避免 goroutine 泄漏
-					for range resultCh {
-					}
-					return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
-				}
-				results[r.index] = r.task
-				switch r.task.Status {
-				case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
-					// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
-					// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
-					// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
-				default:
-					allDone = false
-				}
-			}
-			if allDone {
+			if results != nil {
 				return results, nil
 			}
 		}
 	}
+}
+
+// pollResult 是一轮并发查询中某任务的查询结果（index 回溯到 TaskIDs 下标）。
+type pollResult struct {
+	index int
+	task  *CloudTask
+	err   error
+}
+
+// pollRound 并发查询所有任务状态（一轮）：任一查询失败立即返回错误并消费剩余
+// 结果（防 goroutine 泄漏）；全部到达终态（完成/失败/取消）返回 results，否则
+// 返回 (nil, nil) 让外层继续轮询。
+func (c *CloudDownloadChain) pollRound(ctx context.Context) ([]*CloudTask, error) {
+	resultCh := make(chan pollResult, len(c.TaskIDs))
+	cancelCtx, cancelAll := context.WithCancel(ctx)
+	defer cancelAll()
+
+	c.startPollQueries(cancelCtx, resultCh)
+	return c.collectPollResults(cancelCtx, resultCh, cancelAll)
+}
+
+// startPollQueries 启动全部任务的并发查询 goroutine，全部查询退出后关闭 resultCh。
+func (c *CloudDownloadChain) startPollQueries(cancelCtx context.Context, resultCh chan<- pollResult) {
+	var wg sync.WaitGroup
+	for i, taskID := range c.TaskIDs {
+		wg.Go(func() {
+			select {
+			case <-cancelCtx.Done():
+				return
+			default:
+			}
+			status, err := c.client.GetCloudTask(cancelCtx, taskID)
+			select {
+			case resultCh <- pollResult{index: i, task: status, err: err}:
+			case <-cancelCtx.Done():
+			}
+		})
+	}
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+}
+
+// collectPollResults 汇总一轮并发查询：任一失败立即取消并消费剩余结果（防泄漏）；
+// 全部到达终态返回 results，否则返回 (nil, nil) 让外层继续轮询。
+func (c *CloudDownloadChain) collectPollResults(cancelCtx context.Context, resultCh <-chan pollResult, cancelAll context.CancelFunc) ([]*CloudTask, error) {
+	results := make([]*CloudTask, len(c.TaskIDs))
+	allDone := true
+	for r := range resultCh {
+		if r.err != nil {
+			cancelAll()
+			// 消费剩余结果，避免 goroutine 泄漏（错误已定位，剩余值丢弃）。
+			for range resultCh { // NOSONAR: S108 — 排空通道防止发送方 goroutine 泄漏，循环体有意为空
+			}
+			return nil, fmt.Errorf("查询任务 %s 失败: %w", c.TaskIDs[r.index], r.err)
+		}
+		results[r.index] = r.task
+		switch r.task.Status {
+		case TaskStatusCompleted, TaskStatusFailed, TaskStatusCancelled:
+			// 已完成/失败/取消均为终态：继续等待其他任务，不立即中止。
+			// 取消不再立即失败整链——与组链 waitForGroup 的"等所有任务终态后
+			// 整体报错"语义对齐（用户确认 cancelled=失败，但失败时机延后到终态收敛）。
+		default:
+			allDone = false
+		}
+	}
+	if allDone {
+		return results, nil
+	}
+	return nil, nil
 }
 
 // archiveTasks 打包归档所有已下载的文件。
@@ -554,13 +720,24 @@ func (c *CloudDownloadChain) downloadToLocal(ctx context.Context) error {
 	localPath := filepath.Join(c.LocalDir, archiveName)
 	c.LocalPath = localPath
 	if err := c.client.ChunkedDownload(ctx, archiveName, localPath, WithChunkedKind(DownloadKindCloudArchive)); err != nil {
+		// 下载/校验失败：LocalVerified 保持 false，禁止后续误删云端。
+		c.LocalVerified = false
 		return fmt.Errorf("下载归档文件失败: %w", err)
 	}
+	// 下载成功且 ChunkedDownload 已完成 SHA-256 校验（verifyDownloadChecksum），
+	// 本地文件已确认与远端一致——以此为 cleanupRemote 删除云端的前置条件。
+	c.LocalVerified = true
 	return nil
 }
 
-// cleanupRemote 清理远端任务及关联文件。清理失败时继续处理剩余任务。
+// cleanupRemote 清理远端任务及关联文件。
+// 硬性语义：**仅当本地文件校验通过（LocalVerified=true）才删除云端任务**。
+// LocalVerified 为 false（下载/校验未成功，或 resume 恢复时未置位）时跳过清理并返回
+// ErrLocalNotVerified——确保不会在本地校验和未经确认的情况下误删云端文件。
 func (c *CloudDownloadChain) cleanupRemote(ctx context.Context) error {
+	if !c.LocalVerified {
+		return fmt.Errorf("本地文件尚未校验通过，跳过云端清理: %w", ErrLocalNotVerified)
+	}
 	var errs []error
 	for _, taskID := range c.TaskIDs {
 		if err := c.client.DeleteCloudTask(ctx, taskID); err != nil {
@@ -588,4 +765,18 @@ func isStorageFullError(errMsg string) bool {
 		strings.Contains(lower, "存储已满") ||
 		strings.Contains(lower, "超出配额") ||
 		strings.Contains(lower, "磁盘空间")
+}
+
+// markCompletedSeen 标记 completed 任务已计数（防 storage-full 重试轮重复累计）。
+// 返回 false = 该 ID 已计过（跳过）；true = 首次（继续计数）。延迟初始化（Restore
+// 恢复的链 seenCompleted 非持久化为 nil）。
+func (c *CloudDownloadChain) markCompletedSeen(id string) bool {
+	if c.seenCompleted == nil {
+		c.seenCompleted = make(map[string]bool)
+	}
+	if c.seenCompleted[id] {
+		return false
+	}
+	c.seenCompleted[id] = true
+	return true
 }

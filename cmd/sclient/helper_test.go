@@ -69,50 +69,55 @@ func TestIsTextExt(t *testing.T) {
 func TestBuildTunnelRequest(t *testing.T) {
 	t.Parallel()
 
-	t.Run("basic_get", func(t *testing.T) {
-		req, err := buildTunnelRequest(tunnelReqOpts{method: "GET", targetURL: "http://example.com"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if req.Method != "GET" {
-			t.Errorf("expected GET, got %s", req.Method)
-		}
-	})
+	t.Run("basic_get", testBuildTunnelRequestBasicGet)
+	t.Run("with_body", testBuildTunnelRequestWithBody)
+	t.Run("with_headers", testBuildTunnelRequestWithHeaders)
+	t.Run("invalid_url", testBuildTunnelRequestInvalidURL)
+}
 
-	t.Run("with_body", func(t *testing.T) {
-		req, err := buildTunnelRequest(tunnelReqOpts{method: "POST", targetURL: "http://example.com", body: "hello"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		body, _ := req.GetBody()
-		if body == nil {
-			t.Error("expected non-nil GetBody")
-		}
-	})
+func testBuildTunnelRequestBasicGet(t *testing.T) {
+	req, err := buildTunnelRequest(tunnelReqOpts{method: "GET", targetURL: "http://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Method != "GET" {
+		t.Errorf("expected GET, got %s", req.Method)
+	}
+}
 
-	t.Run("with_headers", func(t *testing.T) {
-		req, err := buildTunnelRequest(tunnelReqOpts{
-			method:    "GET",
-			targetURL: "http://example.com",
-			headers:   []string{"X-Custom: value1", "Authorization: Bearer token"},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if req.Header.Get("X-Custom") != "value1" {
-			t.Errorf("expected X-Custom: value1, got %s", req.Header.Get("X-Custom"))
-		}
-		if req.Header.Get("Authorization") != "Bearer token" {
-			t.Errorf("expected Authorization: Bearer token, got %s", req.Header.Get("Authorization"))
-		}
-	})
+func testBuildTunnelRequestWithBody(t *testing.T) {
+	req, err := buildTunnelRequest(tunnelReqOpts{method: "POST", targetURL: "http://example.com", body: "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := req.GetBody()
+	if body == nil {
+		t.Error("expected non-nil GetBody")
+	}
+}
 
-	t.Run("invalid_url", func(t *testing.T) {
-		_, err := buildTunnelRequest(tunnelReqOpts{method: "GET", targetURL: "://invalid"})
-		if err == nil {
-			t.Error("expected error for invalid URL")
-		}
+func testBuildTunnelRequestWithHeaders(t *testing.T) {
+	req, err := buildTunnelRequest(tunnelReqOpts{
+		method:    "GET",
+		targetURL: "http://example.com",
+		headers:   []string{"X-Custom: value1", "Authorization: Bearer token"},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Header.Get("X-Custom") != "value1" {
+		t.Errorf("expected X-Custom: value1, got %s", req.Header.Get("X-Custom"))
+	}
+	if req.Header.Get("Authorization") != "Bearer token" {
+		t.Errorf("expected Authorization: Bearer token, got %s", req.Header.Get("Authorization"))
+	}
+}
+
+func testBuildTunnelRequestInvalidURL(t *testing.T) {
+	_, err := buildTunnelRequest(tunnelReqOpts{method: "GET", targetURL: "://invalid"})
+	if err == nil {
+		t.Error("expected error for invalid URL")
+	}
 }
 
 // ---- resolveOutputPath ----

@@ -22,7 +22,7 @@ type memWriter struct {
 	files map[string]string
 }
 
-func (m *memWriter) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (m *memWriter) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	b, _ := io.ReadAll(r)
 	m.files[path] = string(b)
 	return nil
@@ -61,7 +61,7 @@ func TestFS_WithoutWriter_ErrReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(err, ErrReadOnly) {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("WriteFile = %v, want ErrReadOnly", err)
 	}
 	if err := fs.Rename(context.Background(), "a", "b"); !errors.Is(err, ErrReadOnly) {
@@ -81,7 +81,7 @@ func TestFS_WithWriter_WriteForwards(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs.WithWriter(w)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("hello"), 5, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", strings.NewReader("hello"), 5, 0); err != nil {
 		t.Fatalf("WriteFile = %v", err)
 	}
 	if w.files["a.txt"] != "hello" {

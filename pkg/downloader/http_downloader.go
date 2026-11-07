@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"net"
@@ -16,12 +17,19 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
+
+// headerLastModified 是 Last-Modified 响应头名（stdlib 无对应常量；If-Range 续传一致性校验用）。
+const headerLastModified = "Last-Modified"
+
+// warnETagSaveFailed 是 ETag 伴侣文件落盘失败告警文案（三条完成路径共用同一说明）。
+const warnETagSaveFailed = "保存 ETag 伴侣失败，续传将无 If-Range 一致性校验"
 
 // HTTPDownloader 是内置 HTTP/HTTPS 下载器。
 type HTTPDownloader struct {
@@ -37,8 +45,15 @@ type HTTPDownloader struct {
 	IdleTimeout time.Duration
 }
 
+// 编译期断言：HTTPDownloader 声明其 Result.Checksum 为下载器自算（② 态）。
+var _ IntegrityProvider = (*HTTPDownloader)(nil)
+
+// IntegrityMode 返回 HTTP 下载器的完整性归属：自算 checksum（② 态）。
+// HTTP 下载完成时自算 SHA-256 并比对 Content-Length，无服务端带外对账。
+func (d *HTTPDownloader) IntegrityMode() IntegrityMode { return ModeSelfVerified }
+
 // NewHTTPDownloader 创建 HTTPDownloader（默认 http.Client）。
-// 注入现状（原 TODO 审计结论，2026-09-14）：自定义注入**已存在**，只是不是 functional
+// 注入现状（审计结论（原待办）——已定，2026-09-14）：自定义注入**已存在**，只是不是 functional
 // options 形式——HTTPDownloader 的 ValidateURLAfterDo / Timeout / IdleTimeout 字段供装配期
 // 覆盖，测试路径另有 newHTTPDownloaderWithClient 注入整只 *http.Client（含自定义 Transport）。
 func NewHTTPDownloader() *HTTPDownloader {
@@ -185,7 +200,7 @@ func extractETag(resp *http.Response) string {
 func (d *HTTPDownloader) finalizeDownload(partialPath, destPath string, modTime time.Time, etag string) error {
 	if etag != "" {
 		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
+			d.getLogger().Warn(warnETagSaveFailed,
 				"path", etagPath(partialPath), "error", err)
 		}
 	}
@@ -253,65 +268,21 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 	defer resp.Body.Close()
 
 	if existingSize > 0 {
-		switch resp.StatusCode {
-		case http.StatusPartialContent:
-			result, rerr := d.handleRangeResume(ctx, resp, partialPath, destPath, existingSize, cachedETag, onProgress, sinkFactory)
-			if !errors.Is(rerr, errRangeMismatch) {
-				return result, rerr
-			}
-			// 部分文件与服务端不一致：丢弃后全量重下（本次调用内完成）
-			d.getLogger().Info("range resume mismatch, fallback to full download",
-				"url", source, "partial_size", existingSize)
-			_ = resp.Body.Close()
-			_ = os.Remove(partialPath)
-			_ = os.Remove(etagPath(partialPath))
-			// 丢弃了 existingSize 字节 ⇒ 交由 writeFullBody 的 Finish(success, oldSize) 回拨。
-			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "", existingSize)
-
-		case http.StatusOK:
-			// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
-			// 删除部分文件和 ETag 缓存，走全量下载路径
-			_ = os.Remove(partialPath)
-			_ = os.Remove(etagPath(partialPath))
-
-		case http.StatusRequestedRangeNotSatisfiable:
-			// 416：若部分文件已等于服务端总大小，仅当能确认内容一致（缓存的
-			// ETag 与 416 响应 ETag 匹配）时才收尾；否则回退全量重下，防止
-			// "同尺寸但内容已变"的陈旧 partial 被静默收尾为错误文件（数据损坏）。
-			if total := parseSuffixRange(resp.Header.Get("Content-Range")); total == existingSize {
-				respETag := extractETag(resp)
-				if cachedETag != "" && respETag == cachedETag {
-					result, rerr := d.finalizePartial(partialPath, destPath, resp, existingSize)
-					if rerr != nil {
-						// **不删除 partial（审计 416 窄口修复）**：finalizePartial 的所有失败点
-						// （open/hash/rename 失败）partial 都在磁盘 ⇒ 保留后磁盘==账本==committed
-						// 一致，无需回拨；删除会让 partial 的 committed 占用残留（桶>磁盘），
-						// 需 ≤30min 周期扫描修正。open/hash 失败是本地 IO 错误（不可重试，
-						// 任务终态失败），保留不影响结论。
-						return nil, rerr
-					}
-					return result, nil
-				}
-				d.getLogger().Info("416 finalize skipped: cannot verify partial content identity, fallback to full download",
-					"url", source, "partial_size", existingSize, "cached_etag", cachedETag != "", "resp_etag", respETag)
-			}
-			// 部分文件比服务端当前文件大（远程文件被替换/变短）或无法确认内容一致：
-			// 删除陈旧 partial 后全量重下，而不是返回 416 让任务永久失败
-			_ = resp.Body.Close()
-			_ = os.Remove(partialPath)
-			_ = os.Remove(etagPath(partialPath))
-			return d.writeFull(ctx, source, destPath, onProgress, sinkFactory, 0, "", existingSize)
-
-		default:
-			_, _ = io.Copy(io.Discard, resp.Body)
-			return nil, d.statusError(resp.StatusCode)
+		result, handled, rerr := d.resumeExistingPartial(ctx, resp, partialWrite{
+			source: source, destPath: destPath, onProgress: onProgress, sinkFactory: sinkFactory,
+			partialPath:  partialPath,
+			existingSize: existingSize,
+			cachedETag:   cachedETag,
+		})
+		if handled {
+			return result, rerr
 		}
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// 非 200 时排空响应体，确保连接可复用
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, d.statusError(resp.StatusCode)
+		return nil, d.statusError(resp)
 	}
 
 	// existingSize>0 且走到此处只有一种可能：上面 StatusOK 分支已删掉 .partial ⇒ 丢弃的
@@ -319,10 +290,80 @@ func (d *HTTPDownloader) DownloadWithWriter(ctx context.Context, source string, 
 	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, existingSize)
 }
 
+// writeTarget 是全量下载的目标上下文（source/dest + 进度回调 + 记账 sink），
+// 收敛续传/全量回退路径间重复传递（避免 go:S107 参数爆炸）。
+type writeTarget struct {
+	source      string
+	destPath    string
+	onProgress  ProgressFunc
+	sinkFactory SinkFactory
+}
+
+// partialWrite 是续传写盘会话的文件上下文（writeTarget + partial 路径 + 既有大小 +
+// 缓存 ETag），供 resumeExistingPartial/handleRangeResume/fallbackToFullDownload 复用。
+type partialWrite struct {
+	writeTarget
+	partialPath  string
+	existingSize int64
+	cachedETag   string
+}
+
+// resumeExistingPartial 处理存在部分文件时对 206 / 200 / 416 三类响应的续传分派。
+// 返回 (result, handled, err)：handled=true 表示已出结果，调用方应直接返回
+// (result, err)；handled=false 表示服务端回 200 且 partial 已删除，调用方应继续走
+// 全量下载（writeFullBody）。区分于 errRangeMismatch 的错误会通过 err 透传。
+func (d *HTTPDownloader) resumeExistingPartial(ctx context.Context, resp *http.Response, pw partialWrite) (*Result, bool, error) {
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+		result, rerr := d.handleRangeResume(ctx, resp, pw)
+		if !errors.Is(rerr, errRangeMismatch) {
+			return result, true, rerr
+		}
+		// 部分文件与服务端不一致：丢弃后全量重下（本次调用内完成）
+		d.getLogger().Info("range resume mismatch, fallback to full download",
+			"url", pw.source, "partial_size", pw.existingSize)
+		// 丢弃了 existingSize 字节 ⇒ 交由 writeFullBody 的 Finish(success, oldSize) 回拨。
+		result, rerr = d.fallbackToFullDownload(ctx, resp, pw)
+		return result, true, rerr
+
+	case http.StatusOK:
+		// 服务端不支持 Range（或 If-Range 验证失败导致回退 200），
+		// 删除部分文件和 ETag 缓存，走全量下载路径
+		_ = os.Remove(pw.partialPath)
+		_ = os.Remove(etagPath(pw.partialPath))
+		return nil, false, nil
+
+	case http.StatusRequestedRangeNotSatisfiable:
+		// 416：若部分文件已等于服务端总大小，仅当能确认内容一致（缓存的
+		// ETag 与 416 响应 ETag 匹配）时才收尾；否则回退全量重下，防止
+		// "同尺寸但内容已变"的陈旧 partial 被静默收尾为错误文件（数据损坏）。
+		result, rerr := d.tryFinalizeOn416(resp, pw.partialPath, pw.destPath, pw.existingSize, pw.cachedETag, pw.source)
+		if result != nil {
+			return result, true, nil
+		}
+		if rerr != nil {
+			// **不删除 partial（审计 416 窄口修复）**：finalizePartial 的所有失败点
+			// （open/hash/rename 失败）partial 都在磁盘 ⇒ 保留后磁盘==账本==committed
+			// 一致，无需回拨；删除会让 partial 的 committed 占用残留（桶>磁盘），
+			// 需 ≤30min 周期扫描修正。open/hash 失败是本地 IO 错误（不可重试，
+			// 任务终态失败），保留不影响结论。
+			return nil, true, rerr
+		}
+		// 部分文件比服务端当前文件大（远程文件被替换/变短）或无法确认内容一致：
+		// 删除陈旧 partial 后全量重下，而不是返回 416 让任务永久失败
+		result, rerr = d.fallbackToFullDownload(ctx, resp, pw)
+		return result, true, rerr
+
+	default:
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, true, d.statusError(resp)
+	}
+}
+
 // writeFull 执行不带 Range 的全量下载（已知 totalSize 或续传信息不一致时回退使用）。
 // discardedSize 语义同 writeFullBody（调用方删掉的既有 .partial 字节数）。
-func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, fromRange int64, ifRange string, discardedSize int64) (*Result, error) {
-	resp, err := d.doGet(ctx, source, fromRange, ifRange)
+func (d *HTTPDownloader) writeFull(ctx context.Context, wt writeTarget, fromRange int64, ifRange string, discardedSize int64) (*Result, error) {
+	resp, err := d.doGet(ctx, wt.source, fromRange, ifRange)
 	if err != nil {
 		return nil, err
 	}
@@ -334,9 +375,9 @@ func (d *HTTPDownloader) writeFull(ctx context.Context, source, destPath string,
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, resp.Body)
-		return nil, d.statusError(resp.StatusCode)
+		return nil, d.statusError(resp)
 	}
-	return d.writeFullBody(ctx, resp, destPath, onProgress, sinkFactory, discardedSize)
+	return d.writeFullBody(ctx, resp, wt.destPath, wt.onProgress, wt.sinkFactory, discardedSize)
 }
 
 // doGet 发起 GET 请求；existingSize>0 时携带 Range 和 If-Range 头。
@@ -382,12 +423,38 @@ func (d *HTTPDownloader) validateAfterDo(resp *http.Response) error {
 	return nil
 }
 
-// statusError 将非 2xx 状态转为错误；5xx 标记为可重试。
-func (d *HTTPDownloader) statusError(code int) error {
-	if code >= 500 {
-		return retryablef("http status %d", code)
+// statusError 将非 2xx 状态转为错误：5xx / 429（限流）/ 408（请求超时）标记为可重试——
+// 三者都是瞬时条件，此前只重试 5xx，导致 CDN 限流一次即任务失败。
+// 429/503 若带 `Retry-After`，随错误携带建议等待时长（秒数或 HTTP-date）。
+func (d *HTTPDownloader) statusError(resp *http.Response) error {
+	code := resp.StatusCode
+	if code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
+		return retryableAfterf(parseRetryAfter(resp.Header), "http status %d", code)
 	}
 	return fmt.Errorf("http status %d", code)
+}
+
+// parseRetryAfter 解析 `Retry-After`（秒数或 HTTP-date）；无法解析/已过期 ⇒ 0。
+func parseRetryAfter(h http.Header) time.Duration {
+	if h == nil {
+		return 0
+	}
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // writeFullBody 将 200 响应体写入 .partial 文件并在成功后原子重命名。
@@ -400,14 +467,7 @@ func (d *HTTPDownloader) statusError(code int) error {
 // 路径的绝对值记账（任务账本 = result.Size）使差额再也无法由释放路径抹平。
 func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response, destPath string, onProgress ProgressFunc, sinkFactory SinkFactory, discardedSize int64) (*Result, error) {
 	// 从 Last-Modified 响应头提取原始文件修改时间
-	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
-		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
-			modTime = t
-		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
-			modTime = t
-		}
-	}
+	modTime := parseLastModified(resp)
 
 	partialPath := destPath + ".partial"
 	if dir := filepath.Dir(destPath); dir != "." {
@@ -437,34 +497,15 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	}
 	done := func(success bool, oldSize int64) { fin(success, oldSize) }
 
+	// 流式整文件 SHA-256（M5 修复：Result.Meta 已移除——可信卷 meta 由写路径
+	// 装饰器/本地卷到达即建自算，下载器无需额外双哈希；此处保持原 sha256 计算）。
 	h := sha256.New()
 	tee := io.TeeReader(resp.Body, h)
 
-	// 写入带进度回调的文件
-	const copyBufferSize = 32 * 1024
-	buf := make([]byte, copyBufferSize)
-	var downloaded int64
-	for {
-		n, readErr := tee.Read(buf)
-		if n > 0 {
-			if _, err := sink.Write(buf[:n]); err != nil {
-				// 写失败（磁盘/配额满）：保留已写部分，错误不可重试
-				done(false, 0)
-				return nil, fmt.Errorf("write file: %w", err)
-			}
-			downloaded += int64(n)
-			if onProgress != nil {
-				onProgress(downloaded, totalSize)
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			// 读取失败（网络/超时）：保留 .partial 供续传，可重试
-			done(false, 0)
-			return nil, retryablef("read body: %w", readErr)
-		}
+	// 写入带进度回调的文件；中断可重试，写失败不可重试
+	downloaded, loopErr := copyBodyWithProgress(tee, sink, onProgress, 0, totalSize, done, "write file: %w")
+	if loopErr != nil {
+		return nil, loopErr
 	}
 
 	if err := f.Close(); err != nil {
@@ -478,19 +519,14 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 	// 从而发送 If-Range 头校验远程内容一致性，避免盲追加导致混合文件。
 	// 仅 Warn 失败（finalizeDownload 中还有一次兜底写入，此处持久化失败不影响
 	// 当前下载完成，仅影响"续传时 If-Range 校验"的可用性）。
-	if etag != "" {
-		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
-				"path", etagPath(partialPath), "error", err)
-		}
-	}
+	d.saveEtagCompanion(partialPath, etag)
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
 		done(false, 0)
 		return nil, err
 	}
 	// 落定成功：释放未用 reserve + 释放被丢弃的既有 partial 占用（discardedSize，无则为 0）。
 	done(true, discardedSize)
-	return &Result{Size: downloaded, Checksum: checksum, ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: downloaded, Checksum: checksum, ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
 }
 
 // wrapSink 用 sinkFactory 包装写盘 writer 并返回 sink 与其终态回调。
@@ -498,7 +534,7 @@ func (d *HTTPDownloader) writeFullBody(ctx context.Context, resp *http.Response,
 // resume 为 true 表示在既有 .partial 上追加（增量），false 表示新建/截断重建。
 func (d *HTTPDownloader) wrapSink(w io.Writer, contentLength int64, sinkFactory SinkFactory, resume bool) (QuotaSink, func(success bool, oldSize int64), error) {
 	if sinkFactory == nil {
-		return &rawSink{w: w}, func(bool, int64) {}, nil
+		return &rawSink{w: w}, func(bool, int64) { /* 无 sink 包装 */ }, nil
 	}
 	sink, err := sinkFactory(w, contentLength, resume)
 	if err != nil {
@@ -511,12 +547,72 @@ func (d *HTTPDownloader) wrapSink(w io.Writer, contentLength int64, sinkFactory 
 type rawSink struct{ w io.Writer }
 
 func (r *rawSink) Write(p []byte) (int, error) { return r.w.Write(p) }
-func (r *rawSink) Finish(bool, int64)          {}
+func (r *rawSink) Finish(bool, int64)          { /* raw sink 直接写：无收尾 */ }
+
+// parseLastModified 从响应 Last-Modified 头解析原始文件修改时间；
+// 头缺失或两种 RFC1123 格式都无法解析时返回零值时间。
+func parseLastModified(resp *http.Response) time.Time {
+	var modTime time.Time
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
+		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
+			modTime = t
+		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
+			modTime = t
+		}
+	}
+	return modTime
+}
+
+// copyBodyWithProgress 从 tee 逐块读取写入 sink，累计本次会话写入字节并回调进度
+// （进度按 baseDownloaded+已读 上报，Range 续传时 baseDownloaded=既有部分大小）。
+// 写盘失败返回不可重试错误，读取中断返回可重试错误；两者都先调用 done(false, 0)。
+// 正常读尽（EOF）返回已写字节数与 nil。
+func copyBodyWithProgress(tee io.Reader, sink QuotaSink, onProgress ProgressFunc, baseDownloaded, totalSize int64, done func(success bool, oldSize int64), writeErrFmt string) (int64, error) {
+	const copyBufferSize = 32 * 1024
+	buf := make([]byte, copyBufferSize)
+	var downloaded int64
+	for {
+		n, readErr := tee.Read(buf)
+		if n > 0 {
+			if _, err := sink.Write(buf[:n]); err != nil {
+				// 写失败（磁盘/配额满）：保留已写部分，错误不可重试
+				done(false, 0)
+				return downloaded, fmt.Errorf(writeErrFmt, err)
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(baseDownloaded+downloaded, totalSize)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			// 读取失败（网络/超时）：保留 .partial 供续传，可重试
+			done(false, 0)
+			return downloaded, retryablef("read body: %w", readErr)
+		}
+	}
+	return downloaded, nil
+}
+
+// saveEtagCompanion 持久化 ETag 伴侣文件，使正常中断→续传流程中 loadETag 能读到
+// 非空 ETag，从而发送 If-Range 头校验远程内容一致性（避免盲追加导致混合文件）。
+// 失败仅 Warn：finalizeDownload 中还有一次兜底写入，此处失败不影响当前下载完成。
+func (d *HTTPDownloader) saveEtagCompanion(partialPath, etag string) {
+	if etag == "" {
+		return
+	}
+	if err := saveETag(etagPath(partialPath), etag); err != nil {
+		d.getLogger().Warn(warnETagSaveFailed,
+			"path", etagPath(partialPath), "error", err)
+	}
+}
 
 // handleRangeResume 处理 Range 续传场景：追加写入部分文件并校验。
 // 当服务端返回的 Content-Range 与本地部分文件不一致时返回 errRangeMismatch，
 // 由调用方回退全量下载。
-func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag string, onProgress ProgressFunc, sinkFactory SinkFactory) (*Result, error) {
+func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Response, pw partialWrite) (*Result, error) {
 	cr := resp.Header.Get("Content-Range")
 	if cr == "" {
 		return nil, errRangeMismatch
@@ -526,81 +622,48 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	if n, err := fmt.Sscanf(cr, "bytes %d-%d/%d", &startByte, &endByte, &totalSize); err != nil || n != 3 {
 		return nil, errRangeMismatch
 	}
-	if startByte != existingSize {
+	if startByte != pw.existingSize {
 		return nil, errRangeMismatch
 	}
 	// 交叉校验响应 ETag 与发送的 If-Range：合规服务端在 If-Range 匹配时返回相同
 	// ETag 的 206；若返回不同 ETag，说明服务端忽略 If-Range 且内容已变，继续追加
 	// 会产生混合文件，必须回退全量下载。
-	if respETag := extractETag(resp); respETag != "" && cachedETag != "" && respETag != cachedETag {
+	if respETag := extractETag(resp); respETag != "" && pw.cachedETag != "" && respETag != pw.cachedETag {
 		return nil, errRangeMismatch
 	}
 
-	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
-		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
-			modTime = t
-		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
-			modTime = t
-		}
-	}
+	modTime := parseLastModified(resp)
 
-	// 流式计算已有部分文件的 SHA-256（不整体读入内存）
-	// 本地文件 I/O 错误不可重试（与 write to partial file 的分类一致），重试只会空耗
-	h := sha256.New()
-	if pf, err := os.Open(partialPath); err == nil {
-		if _, copyErr := io.Copy(h, pf); copyErr != nil {
-			pf.Close()
-			return nil, fmt.Errorf("hash existing partial: %w", copyErr)
-		}
-		pf.Close()
-	} else {
-		return nil, fmt.Errorf("open partial file: %w", err)
+	// 流式计算已有部分文件的 SHA-256（不整体读入内存），返回可继续写入的哈希
+	// （本地文件 I/O 错误不可重试，与 write to partial file 的分类一致，重试只会空耗）
+	h, err := hashExistingPartial(pw.partialPath)
+	if err != nil {
+		return nil, err
 	}
 
 	// 以追加模式打开部分文件
-	f, err := os.OpenFile(partialPath, os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(pw.partialPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("open partial file for append: %w", err)
 	}
 	defer f.Close()
 
 	// 可选写盘记账 sink（cloud QuotaWriter）；创建失败不可重试。
-	sink, fin, wrapErr := d.wrapSink(f, totalSize-existingSize, sinkFactory, true)
+	sink, fin, wrapErr := d.wrapSink(f, totalSize-pw.existingSize, pw.sinkFactory, true)
 	if wrapErr != nil {
 		return nil, wrapErr
 	}
 	done := func(success bool, oldSize int64) { fin(success, oldSize) }
 
 	tee := io.TeeReader(resp.Body, h)
-
-	const copyBufferSize = 32 * 1024
-	buf := make([]byte, copyBufferSize)
-	var downloaded int64
-	for {
-		n, readErr := tee.Read(buf)
-		if n > 0 {
-			if _, err := sink.Write(buf[:n]); err != nil {
-				done(false, 0)
-				return nil, fmt.Errorf("write to partial file: %w", err)
-			}
-			downloaded += int64(n)
-			if onProgress != nil {
-				onProgress(existingSize+downloaded, totalSize)
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			// 读取中断（网络/超时）：保留部分文件，供下一次续传
-			done(false, 0)
-			return nil, retryablef("read body: %w", readErr)
-		}
+	// 追加写入带进度回调；中断可重试，写失败不可重试
+	downloaded, loopErr := copyBodyWithProgress(tee, sink, pw.onProgress, pw.existingSize, totalSize, done, "write to partial file: %w")
+	if loopErr != nil {
+		return nil, loopErr
 	}
 
 	// 校验总大小：服务端声明的 total 与本地已写入不一致时回退全量
-	downloadedTotal := existingSize + downloaded
+	downloadedTotal := pw.existingSize + downloaded
 	if totalSize > 0 && downloadedTotal != totalSize {
 		done(false, 0)
 		return nil, errRangeMismatch
@@ -614,25 +677,63 @@ func (d *HTTPDownloader) handleRangeResume(ctx context.Context, resp *http.Respo
 	fullChecksum := hex.EncodeToString(h.Sum(nil))
 	etag := extractETag(resp)
 	// 立即持久化 ETag 伴侣文件（与 writeFullBody 一致）
-	if etag != "" {
-		if err := saveETag(etagPath(partialPath), etag); err != nil {
-			d.getLogger().Warn("保存 ETag 伴侣失败，续传将无 If-Range 一致性校验",
-				"path", etagPath(partialPath), "error", err)
-		}
-	}
-	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
+	d.saveEtagCompanion(pw.partialPath, etag)
+	if err := d.finalizeDownload(pw.partialPath, pw.destPath, modTime, etag); err != nil {
 		done(false, 0)
 		return nil, err
 	}
 	done(true, 0)
-	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: downloadedTotal, Checksum: fullChecksum, ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
+}
+
+// hashExistingPartial 打开既有部分文件并流式计算其 SHA-256，返回可继续写入的哈希
+// （后续追加内容经 TeeReader 继续喂入）。打开/读取失败为不可重试的本地 IO 错误。
+func hashExistingPartial(partialPath string) (hash.Hash, error) {
+	pf, err := os.Open(partialPath)
+	if err != nil {
+		return nil, fmt.Errorf("open partial file: %w", err)
+	}
+	h := sha256.New()
+	if _, copyErr := io.Copy(h, pf); copyErr != nil {
+		pf.Close()
+		return nil, fmt.Errorf("hash existing partial: %w", copyErr)
+	}
+	pf.Close()
+	return h, nil
+}
+
+// tryFinalizeOn416 处理服务端返回 416 时的收尾判定：仅当部分文件大小等于远端总大小
+// 且缓存 ETag 与 416 响应 ETag 匹配（内容身份可确认）时才收尾为最终文件；否则返回
+// (nil, nil) 交由调用方回退全量重下，防止 "同尺寸但内容已变" 的陈旧 partial 被静默
+// 收尾为错误文件（数据损坏）。finalizePartial 的失败错误原样返回。
+func (d *HTTPDownloader) tryFinalizeOn416(resp *http.Response, partialPath, destPath string, existingSize int64, cachedETag, source string) (*Result, error) {
+	if parseSuffixRange(resp.Header.Get("Content-Range")) != existingSize {
+		return nil, nil
+	}
+	respETag := extractETag(resp)
+	if cachedETag == "" || respETag != cachedETag {
+		d.getLogger().Info("416 finalize skipped: cannot verify partial content identity, fallback to full download",
+			"url", source, "partial_size", existingSize, "cached_etag", cachedETag != "", "resp_etag", respETag)
+		return nil, nil
+	}
+	return d.finalizePartial(partialPath, destPath, resp, existingSize)
+}
+
+// fallbackToFullDownload 丢弃陈旧/不一致的 .partial（含 ETag 伴侣）后回退全量重下。
+// discardedSize（=existingSize）由 writeFull 作为 Finish(success, oldSize) 回拨，
+// 否则配额桶恒高于磁盘（被丢弃的字节此前已记入配额）。
+func (d *HTTPDownloader) fallbackToFullDownload(ctx context.Context, resp *http.Response, pw partialWrite) (*Result, error) {
+	_ = resp.Body.Close()
+	_ = os.Remove(pw.partialPath)
+	_ = os.Remove(etagPath(pw.partialPath))
+	return d.writeFull(ctx, writeTarget{source: pw.source, destPath: pw.destPath, onProgress: pw.onProgress, sinkFactory: pw.sinkFactory}, 0, "", pw.existingSize)
 }
 
 // finalizePartial 处理服务端返回 416 且 total==existingSize 的场景：
 // 本地部分文件已完整，直接计算哈希并收尾为最终文件。
 func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *http.Response, existingSize int64) (*Result, error) {
 	var modTime time.Time
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
 		if t, parseErr := time.Parse(time.RFC1123, lm); parseErr == nil {
 			modTime = t
 		} else if t, parseErr := time.Parse(time.RFC1123Z, lm); parseErr == nil {
@@ -657,7 +758,7 @@ func (d *HTTPDownloader) finalizePartial(partialPath, destPath string, resp *htt
 	if err := d.finalizeDownload(partialPath, destPath, modTime, etag); err != nil {
 		return nil, err
 	}
-	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ModTime: modTime, ETag: etag}, nil
+	return &Result{Size: existingSize, Checksum: hex.EncodeToString(h.Sum(nil)), ChecksumAlgorithm: IntegrityChecksumSHA256, ModTime: modTime, ETag: etag}, nil
 }
 
 // parseSuffixRange 解析 416 响应中的 "bytes */<total>" 形式 Content-Range。

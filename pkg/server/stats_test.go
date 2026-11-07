@@ -18,6 +18,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -165,7 +166,7 @@ func TestStats_SkipsInternalDirsAtAnyDepth(t *testing.T) {
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
 	// 复用 statsHandler 的 WalkDir 逻辑：以空 owner 全局视角统计，验证内部目录被跳过
-	totalFiles, totalSize := h.walkUploadStats(dir)
+	totalFiles, totalSize := ops.WalkUploadStats(dir, h.logger)
 	if totalFiles != 2 { // user.txt + sub/foo.__bar.txt
 		t.Fatalf("全局统计文件数 = %d, want 2（用户文件 + 深层 .__ 普通文件）", totalFiles)
 	}
@@ -214,7 +215,7 @@ func TestStats_OwnerScopedCategories(t *testing.T) {
 	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
 
-	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(ownerRoot)
+	userFiles, chunked, versions, cloud := ops.WalkUploadStatsByCategory(ownerRoot, h.logger)
 	// user=4, versions=3, chunked=5, cloud=3（archive 并入 cloud）
 	if userFiles != 4 {
 		t.Fatalf("userFiles = %d, want 4", userFiles)
@@ -335,7 +336,7 @@ func TestStats_CategoryWalker_SkipsTaskStateDirs(t *testing.T) {
 	var cfg atomic.Pointer[Config]
 	cfg.Store(&Config{StorageRoot: dir})
 	h := &Handlers{cfgPtr: &cfg, logger: testLogger()}
-	userFiles, chunked, versions, cloud := h.walkUploadStatsByCategory(root)
+	userFiles, chunked, versions, cloud := ops.WalkUploadStatsByCategory(root, h.logger)
 	if userFiles != 5 {
 		t.Fatalf("userFiles = %d, want 5（任务状态目录跳过）", userFiles)
 	}
@@ -380,18 +381,18 @@ func TestStats_OwnerScopedUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: env.h.storageMgr}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: env.h.storageMgr}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
 		AllowPrivate:  true,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 	t.Cleanup(func() { mgr.Close() })
-	task, err := mgr.SubmitAndStart("url", srv.URL, "c.bin", int64(len(content)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "c.bin", int64(len(content)), t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +448,7 @@ func TestStorageConfig_Put(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -479,7 +480,7 @@ func TestStorageConfig_Put_BadRequest(t *testing.T) {
 	// 无效请求体
 	body := bytes.NewReader([]byte(`invalid json`))
 	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -499,7 +500,7 @@ func TestStorageConfig_Put_NegativeValue(t *testing.T) {
 
 	body := bytes.NewReader([]byte(`{"max_storage_bytes": -1}`))
 	req, _ := http.NewRequest(http.MethodPut, url+"/api/config", body)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)

@@ -88,43 +88,43 @@ func (e *Exporter) Export(ctx context.Context) (*Manifest, error) {
 // 目录条目不下发、仅作为遍历节点；文件条目保持相对路径（ToSlash）。
 func (e *Exporter) recursiveList(ctx context.Context) ([]client.FileInfo, error) {
 	var out []client.FileInfo
-	var walk func(subdir string) error
-	walk = func(subdir string) error {
-		var files []client.FileInfo
-		var err error
-		if subdir == "" {
-			files, err = e.Client.List(ctx)
-		} else {
-			files, err = e.Client.List(ctx, subdir)
-		}
-		if err != nil {
-			return fmt.Errorf("列出 %q 失败: %w", subdir, err)
-		}
-		for _, f := range files {
-			if f.IsDir {
-				child := subdir
-				if child != "" {
-					child += "/"
-				}
-				child += f.Name
-				if err := walk(child); err != nil {
-					return err
-				}
-				continue
-			}
-			name := f.Name
-			if subdir != "" {
-				name = subdir + "/" + f.Name
-			}
-			f.Name = name
-			out = append(out, f)
-		}
-		return nil
-	}
-	if err := walk(""); err != nil {
+	if err := e.walkSubdir(ctx, "", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// walkSubdir 递归列出单个目录：目录条目作为遍历节点继续下钻，文件条目收集进 out。
+func (e *Exporter) walkSubdir(ctx context.Context, subdir string, out *[]client.FileInfo) error {
+	var files []client.FileInfo
+	var err error
+	if subdir == "" {
+		files, err = e.Client.List(ctx)
+	} else {
+		files, err = e.Client.List(ctx, subdir)
+	}
+	if err != nil {
+		return fmt.Errorf("列出 %q 失败: %w", subdir, err)
+	}
+	for _, f := range files {
+		if f.IsDir {
+			if err := e.walkSubdir(ctx, joinSubdir(subdir, f.Name), out); err != nil {
+				return err
+			}
+			continue
+		}
+		f.Name = joinSubdir(subdir, f.Name)
+		*out = append(*out, f)
+	}
+	return nil
+}
+
+// joinSubdir 拼接子目录相对路径（空父目录不加前缀斜杠）。
+func joinSubdir(subdir, name string) string {
+	if subdir == "" {
+		return name
+	}
+	return subdir + "/" + name
 }
 
 // Importer 把导出的 <in> 目录导入到目标机：
@@ -153,73 +153,62 @@ func (im *Importer) Import(ctx context.Context) (*ImportSummary, error) {
 	}
 	sum := &ImportSummary{IgnoreErrors: im.IgnoreErrors}
 	for _, f := range m.Files {
-		local := filepath.Join(im.InDir, "files", filepath.FromSlash(f.Name))
-		cs, err := fileSHA256(local)
-		if err != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("本地文件缺失或不可读: %w", err))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
+		if im.importFile(ctx, f, sum) {
+			return sum, sum.SummaryError()
 		}
-		// 防静默错迁：本地文件 checksum 必须与 manifest 一致才允许上传。
-		if cs != f.Checksum {
-			im.recordFailure(sum, f.Name, fmt.Errorf("本地校验失败: manifest checksum %s != 实际 %s（请重新导出该文件）", f.Checksum, cs))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		// 幂等/冲突分类：目标已存在且 checksum 相同 → SKIPPED；不同 → CONFLICT。
-		status, sErr := im.targetStatus(ctx, f.Name, f.Checksum)
-		if sErr != nil {
-			im.recordFailure(sum, f.Name, sErr)
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		switch status {
-		case StatusSkipped:
-			sum.Add(StatusSkipped, f.Size)
-			continue
-		case StatusConflict:
-			im.recordFailure(sum, f.Name, fmt.Errorf("%w: %s", ErrConflict, f.Name))
-			sum.Add(StatusConflict, f.Size)
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		if _, uErr := im.Client.Upload(ctx, local, f.Name); uErr != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传失败: %w", uErr))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		// 上传后复核：目标 checksum == manifest checksum（假成功红线）。
-		status, err = im.targetStatus(ctx, f.Name, f.Checksum)
-		if err != nil {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传后复核失败: %w", err))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		if status == StatusConflict {
-			im.recordFailure(sum, f.Name, fmt.Errorf("上传后校验不一致: %s", f.Name))
-			if !im.IgnoreErrors {
-				return sum, sum.SummaryError()
-			}
-			continue
-		}
-		sum.Add(StatusImported, f.Size)
 	}
 	if !sum.Ok() {
 		return sum, sum.SummaryError()
 	}
 	return sum, nil
+}
+
+// importFile 处理单个文件的导入：本地 checksum 校验 → 目标存在分类（SKIPPED/CONFLICT）→
+// 上传 → 上传后复核。返回 true 表示需中止（IgnoreErrors=false 且发生失败）；成功 /
+// IgnoreErrors 已吞掉错误时返回 false（继续下一文件）。
+func (im *Importer) importFile(ctx context.Context, f FileEntry, sum *ImportSummary) bool {
+	local := filepath.Join(im.InDir, "files", filepath.FromSlash(f.Name))
+	cs, err := fileSHA256(local)
+	if err != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("本地文件缺失或不可读: %w", err))
+		return !im.IgnoreErrors
+	}
+	// 防静默错迁：本地文件 checksum 必须与 manifest 一致才允许上传。
+	if cs != f.Checksum {
+		im.recordFailure(sum, f.Name, fmt.Errorf("本地校验失败: manifest checksum %s != 实际 %s（请重新导出该文件）", f.Checksum, cs))
+		return !im.IgnoreErrors
+	}
+	// 幂等/冲突分类：目标已存在且 checksum 相同 → SKIPPED；不同 → CONFLICT。
+	status, sErr := im.targetStatus(ctx, f.Name, f.Checksum)
+	if sErr != nil {
+		im.recordFailure(sum, f.Name, sErr)
+		return !im.IgnoreErrors
+	}
+	switch status {
+	case StatusSkipped:
+		sum.Add(StatusSkipped, f.Size)
+		return false
+	case StatusConflict:
+		im.recordFailure(sum, f.Name, fmt.Errorf("%w: %s", ErrConflict, f.Name))
+		sum.Add(StatusConflict, f.Size)
+		return !im.IgnoreErrors
+	}
+	if _, uErr := im.Client.Upload(ctx, local, f.Name); uErr != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传失败: %w", uErr))
+		return !im.IgnoreErrors
+	}
+	// 上传后复核：目标 checksum == manifest checksum（假成功红线）。
+	status, err = im.targetStatus(ctx, f.Name, f.Checksum)
+	if err != nil {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传后复核失败: %w", err))
+		return !im.IgnoreErrors
+	}
+	if status == StatusConflict {
+		im.recordFailure(sum, f.Name, fmt.Errorf("上传后校验不一致: %s", f.Name))
+		return !im.IgnoreErrors
+	}
+	sum.Add(StatusImported, f.Size)
+	return false
 }
 
 // probeTarget 目标机探活（GET /healthz），不可达先失败再开跑。

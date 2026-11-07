@@ -52,14 +52,19 @@ func newDirectCmd(t *testing.T, sets map[string]string) *cobra.Command {
 	return cmd
 }
 
+// directFactoryFromResolved 构造统一 context 模式的直连测试 factory（env 段带 server_url）。
+func directFactoryFromResolved(t *testing.T, envData map[string]any) clientfactory.Factory {
+	t.Helper()
+	return factoryFromResolvedData(t, envData, nil)
+}
+
 // TestFactory_NewClient_DirectCAWired 验证：直连模式（非 xfer）下 --ca-file <自签CA>
 // 经 factory.NewClient 装配到 FileClient（不报错、无 InitError——CA 文件被消费）。
 // RootCAs 的具体装配由 pkg/client 内部包测试断言（cafile_test.go）。
 func TestFactory_NewClient_DirectCAWired(t *testing.T) {
 	t.Parallel()
 	certFile := genDirectCACert(t)
-	binder := &mockCfgBinder{data: map[string]any{"server_url": "https://127.0.0.1:18083"}}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := directFactoryFromResolved(t, map[string]any{"server_url": "https://127.0.0.1:18083"})
 
 	svc, err := f.NewClient(newDirectCmd(t, map[string]string{"ca-file": certFile}))
 	if err != nil {
@@ -77,8 +82,7 @@ func TestFactory_NewClient_DirectCAWired(t *testing.T) {
 // InsecureSkipVerify=true（直连面安全 flag 生效，不报错）。
 func TestFactory_NewClient_DirectInsecureWired(t *testing.T) {
 	t.Parallel()
-	binder := &mockCfgBinder{data: map[string]any{"server_url": "https://127.0.0.1:18083"}}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := directFactoryFromResolved(t, map[string]any{"server_url": "https://127.0.0.1:18083"})
 
 	svc, err := f.NewClient(newDirectCmd(t, map[string]string{"insecure": "true"}))
 	if err != nil {
@@ -97,8 +101,7 @@ func TestFactory_NewClient_DirectInsecureWired(t *testing.T) {
 func TestFactory_NewClient_DirectCAAndInsecureMutuallyExclusive(t *testing.T) {
 	t.Parallel()
 	certFile := genDirectCACert(t)
-	binder := &mockCfgBinder{data: map[string]any{"server_url": "https://127.0.0.1:18083"}}
-	f := clientfactory.New("test.yaml", func() clientfactory.CfgBinder { return binder })
+	f := directFactoryFromResolved(t, map[string]any{"server_url": "https://127.0.0.1:18083"})
 
 	_, err := f.NewClient(newDirectCmd(t, map[string]string{"ca-file": certFile, "insecure": "true"}))
 	if err == nil {

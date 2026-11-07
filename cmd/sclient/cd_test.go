@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/pkg/cli"
 )
 
 func TestResolveRemotePath(t *testing.T) {
@@ -134,5 +136,87 @@ func TestLoadCurrentDir_FileWithWhitespace(t *testing.T) {
 	got := loadCurrentDir()
 	if got != "nested/path" {
 		t.Errorf("expected 'nested/path', got %q", got)
+	}
+}
+
+// ---- 卷感知工作目录（用户口径 2026-10-13）----
+
+// runCdAndCapture 执行一次 cd（隔离 XDG 缓存），返回 stdout 与执行后的 state。
+func runCdAndCapture(t *testing.T, st *state.State, args ...string) string {
+	t.Helper()
+	var out strings.Builder
+	cmd := NewCmdCd(st, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("cd %v: %v", args, err)
+	}
+	return out.String()
+}
+
+func TestCd_VolumeURI_SwitchesVolumeAndDir(t *testing.T) {
+	_ = setCacheDirForTest(t)
+	st := &state.State{}
+	runCdAndCapture(t, st, "vault:/docs/top")
+	if st.CurrentVolume != "vault" || st.CurrentDir != "docs/top" {
+		t.Fatalf("cd vault:/docs/top => vol=%q dir=%q", st.CurrentVolume, st.CurrentDir)
+	}
+	if got := loadCurrentVolume(); got != "vault" {
+		t.Fatalf("卷应持久化：loadCurrentVolume()=%q", got)
+	}
+	if got := loadCurrentDir(); got != "docs/top" {
+		t.Fatalf("目录应持久化：loadCurrentDir()=%q", got)
+	}
+	if got := st.Location(); got != "vault:/docs/top" {
+		t.Fatalf("Location()=%q", got)
+	}
+	// `A:` / `A:/` = 卷根（保留卷、目录归零）。
+	runCdAndCapture(t, st, "vault:")
+	if st.CurrentVolume != "vault" || st.CurrentDir != "" {
+		t.Fatalf("cd vault: => vol=%q dir=%q", st.CurrentVolume, st.CurrentDir)
+	}
+	// 相对路径保持当前卷。
+	runCdAndCapture(t, st, "sub")
+	if st.CurrentVolume != "vault" || st.CurrentDir != "sub" {
+		t.Fatalf("cd sub => vol=%q dir=%q", st.CurrentVolume, st.CurrentDir)
+	}
+	// `..` 保持当前卷。
+	runCdAndCapture(t, st, "..")
+	if st.CurrentVolume != "vault" || st.CurrentDir != "" {
+		t.Fatalf("cd .. => vol=%q dir=%q", st.CurrentVolume, st.CurrentDir)
+	}
+}
+
+func TestCd_LeadingSlashReturnsToLocalVolume(t *testing.T) {
+	_ = setCacheDirForTest(t)
+	st := &state.State{CurrentVolume: "vault", CurrentDir: "docs"}
+	saveCurrentVolumeValue("vault")
+	runCdAndCapture(t, st, "/other")
+	if st.CurrentVolume != "" || st.CurrentDir != "other" {
+		t.Fatalf("cd /other 应回到本地卷：vol=%q dir=%q", st.CurrentVolume, st.CurrentDir)
+	}
+	if got := loadCurrentVolume(); got != "" {
+		t.Fatalf("本地卷应持久化为空：%q", got)
+	}
+	if got := st.Location(); got != "/other" {
+		t.Fatalf("Location()=%q", got)
+	}
+	// `cd /` = 本地卷根。
+	runCdAndCapture(t, st, "/")
+	if st.CurrentVolume != "" || st.CurrentDir != "" || st.Location() != "/" {
+		t.Fatalf("cd / => vol=%q dir=%q loc=%q", st.CurrentVolume, st.CurrentDir, st.Location())
+	}
+}
+
+func TestPwd_ShowsVolumeQualifiedPath(t *testing.T) {
+	_ = setCacheDirForTest(t)
+	var out strings.Builder
+	st := &state.State{CurrentVolume: "vault", CurrentDir: "docs"}
+	cmd := NewCmdPwd(st, cli.IOStreams{Out: &out, ErrOut: io.Discard})
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("pwd: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "vault:/docs" {
+		t.Fatalf("pwd 输出=%q want vault:/docs", got)
 	}
 }

@@ -21,7 +21,8 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--access-key` | (空) | SproxySig 认证 AccessKey（服务端凭据 Ring 登记对应 AK/SK 时需要） |
 | `--access-key-secret` | (空) | SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线） |
 | `--access-key-id` | (空) | SproxySig SK 条目 ID（skey-id；v2 协议必传，`trust renew` 回填） |
-| `--volume` | (空) | 存储卷上下文；空 = auto。`upload`/`download`/`list`/`stat`/`delete`/`mv` 等文件操作限定到指定卷 |
+| ~~`--volume`~~ | — | **已移除**（2026-10-14）：卷寻址统一为**路径内卷 URI**（`<卷名>:/<路径>`）或 `cd <卷名>:/…` 设定的工作目录卷 |
+| `--download-proxy` | (空) | 下载回退代理地址（如 `http://127.0.0.1:1080`）；直连服务端失败/超时自动经此代理重发，空 = 关闭回退 |
 
 > `mesh` / `relay` / `p2p` / `socks` / `udp` 等命令另有各自的 `--hub`（Hub 的 ws/wss 地址）；
 > 而 `relay status` / `relay stats` / `relay remove-node` 需要的是 Hub 的 **HTTP 管理地址**，
@@ -50,6 +51,7 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 |---|---|---|
 | `--insecure` | false | 跳过 TLS 证书校验。**双语义**：HTTP 直连面不限地址；xfer tcp+tls 面**仅限 loopback hub**（远程必须改用 `--ca-file`，fail-closed） |
 | `--ca-file` | (空) | xfer tcp+tls 的受信 CA 文件（PEM）；服务端自签证书时使用，与 `--insecure` 互斥 |
+| `--protocol-salt-key` | (空) | 协议域分离盐自定义密钥（64 hex）；派生替换默认 sproxy 盐防协议指纹识别。⚠️ 必须与握手对端使用相同 key（stealth 部署配合加密内嵌派生盐） |
 | `--client-cert` | (空) | mTLS 客户端证书路径（PEM），需与 `--client-key` 成对 |
 | `--client-key` | (空) | mTLS 客户端私钥路径（PEM） |
 | `--client-cert-allow-missing` | false | 客户端证书加载失败时继续执行（默认失败即退出） |
@@ -64,12 +66,16 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`delete`](#delete) | 删除文件 |
 | [`mv`](#mv) | 重命名 / 移动 |
 | [`stat`](#stat) | 查询文件元信息 |
-| [`list`](#list) | 列出文件 |
+| [`ls`](#ls) | 列出文件/目录（`list` 为等价别名） |
+| [`tree`](#tree) | 树形递归显示目录结构 |
 | [`mkdir`](#mkdir) | 创建目录 |
 | [`rmdir`](#rmdir) | 删除目录 |
 | [`search`](#search) | 搜索文件 |
 | [`du`](#du) | 查看目录空间占用（递归统计） |
 | [`df`](#df) | 查看卷水位与磁盘空间 |
+| [`quota`](#quota) | 查看本 owner 配额（**跨卷联邦视图** + 逐卷明细） |
+| [`share`](#share) | 分享链接管理（create / list / revoke；**支持外部卷/加密卷**） |
+| [`trash`](#trash) | 回收站管理（list / restore / empty；**多卷**：`--volume` / `--all`） |
 | [`batch`](#batch) | 从文件逐行读取命令批量执行（并发） |
 | [`batch-delete`](#batch-delete) | 批量删除文件 |
 | [`batch-rename`](#batch-rename) | 批量重命名文件 |
@@ -89,8 +95,65 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | [`relay`](#relay) | 中继节点：连接到 Hub，转发请求到本地 HTTP 服务 |
 | [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | [`config`](#config) | 配置管理 |
+| [`sealfile`](#sealfile) | 本地文件加解密（与 secretdata 卷同内核；加密产物可作卷加载播放） |
 | [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
+
+## 卷感知工作目录（`cd <卷名>:/<目录>`）
+
+工作目录**含所在卷**：`cd` 支持卷 URI，其后所有相对路径操作默认只作用于**当前工作目录所在卷**
+（用户口径 2026-10-13）。
+
+```bash
+sclient cd vault:/docs      # 切到加密卷 vault 的 /docs（工作目录 = vault:/docs）
+sclient pwd                 # 打印 vault:/docs
+sclient ls                  # 列 vault:/docs（工作目录卷；无需任何 flag）
+sclient upload ./a.bin      # 目标卷 = vault，路径 = docs/a.bin
+sclient cd /                # 前导 `/` = **本地卷**根（回到默认卷）
+sclient cd other:/x         # 切到另一卷 other 的 /x
+```
+
+规则：
+
+- `<卷名>:/<路径>` = 该卷根起算的**绝对路径**（不受当前工作目录影响）；`<卷名>:` / `<卷名>:/` = 卷根。
+- 前导 `/` 开头的路径 = **本地卷**（默认卷）根起算，并**离开**当前卷。
+- 相对路径沿用当前工作目录（含所在卷）。
+- 优先级：**位置参数卷 URI** > **工作目录所在卷**（`cd <卷名>:/…`）> 配置 `volume`/auto
+  （同一命令多个位置参数指向不同卷时报错，不静默取其一；`mv`/`cp` 的第二端为跨卷目标）。
+- 其它命令可用卷 URI 一次性寻址（不改工作目录）：`ls vault:/`、`meta vault:/a.txt`、
+  `download vault:/a.txt`、`mv vault:/a vault:/b`、`delete vault:/a`。
+
+### 跨卷操作（两端卷 URI）
+
+```bash
+sclient mv vault:/a.txt other:/a.txt                 # 跨卷移动（两端卷 URI；目标不同卷即跨卷）
+sclient cp main:/a.txt vault:/a.txt                   # 跨卷复制（两端 URI）
+sclient volume move a.txt --from-volume vault --to-volume other   # 旧式跨卷移动（`volume` 子命令）
+```
+
+**外部/加密卷已覆盖（2026-10-13）**：任一端为外部/加密卷（secretdata 等）均可工作——复制段经
+**统一写内核**（配额双账本 / sidecar / 封印与 `cp`/上传同口径），移动 = 复制成功**之后**删源
+（外部卷经接缝硬删、本地卷走既有 `delete` 路径）。移动**非原子**：删源失败会返回错误并说明
+「已复制到目标，源删除失败」，此时目标已写入、源仍在（重试或手工清理）。同一文件名（同 rel）在
+**其它**卷已存在 → 409（AD-4 防跨卷双份；移动**豁免源卷**本身——它就是被搬走的那份）。
+
+### cp（复制，源保留）
+
+```bash
+sclient cp a.txt b.txt                  # 同卷复制（默认与源同卷）
+sclient cp disk1:/a.txt disk2:/a.txt      # 目标卷（两端卷 URI）
+sclient cp vault:/a.txt vault:/b.txt      # 卷 URI（同卷）
+sclient cp main:/a.txt vault:/a.txt       # 跨卷（两端 URI）
+sclient cp a.txt b.txt --force            # 允许覆盖已存在目标
+```
+
+- **默认不覆盖**：目标已存在 → 409（绝不静默覆盖用户内容）；`--force` 才覆盖（先删后写，非原子）。
+- **同卷 + 卷支持底层 blob 直拷**（如 secretdata 加密卷）：复制**不重新加解密**——同容器直接共享
+  分块（零 blob 写、O(meta)），跨容器则字节拷贝分块（内容零改动）；删源或删副本都安全（引用计数为
+  「存在即引用」）。跨卷因目标卷独立密钥**必须重新加密**。
+- **配额与写入同口径**：复制经与上传相同的**双账本预留**（owner Scope + 卷容量池），配额不足 →
+  `507` fail-closed（目标不落半态）。注意：外部卷的 `volumes[].capacity` 在**上传与复制**都不做
+  写时拦截（由真值/周期对账收敛），二者口径一致。
 
 ## 当前目录概念
 
@@ -105,6 +168,30 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 - 包含 `..` 的相对路径在**客户端**就被拒绝（与服务端 ValidateFilePath 对称），
   无需向服务端发送注定失败的请求
 
+## 卷 URI 寻址（`<卷名>:/<路径>`）
+
+文件操作的位置参数**一律**用**卷 URI**（唯一寻址方式；`--volume` 已移除）：
+
+```bash
+sclient ls     vault:/                 # 列出加密卷 vault 的根目录
+sclient meta   vault:/docs/top.txt     # 取元信息（含明文 checksum）
+sclient download vault:/docs/top.txt   # 下载
+sclient mv     vault:/a.txt vault:/b.txt
+sclient delete vault:/b.txt
+```
+
+- `<卷名>:` 或 `<卷名>:/` = 卷根；路径部分按普通相对路径解析（仍受 `cd` 影响）。
+- 等价性：`sclient ls vault:/x` ≡ `cd vault:/ && sclient ls x`。同一命令多个位置参数
+  **卷名不一致时报错**（不静默取其一）；一致则等价。
+- `mv`/`cp` 的两端可分别带卷名：不同卷 → **跨卷迁移/复制**；同卷 → 同卷改名/复制。
+- `upload` 的位置参数是**本地文件路径**（不使用卷 URI）⇒ 目标卷经 `cd <卷名>:/<目录>` 设定
+  （工作目录卷）；`download` 的远端参数用卷 URI。
+- 与 URL/盘符的歧义按语法消除：要求冒号后紧跟**单个**斜杠，故 `https://…` 与 `C:\…` 不会被误判。
+
+**为什么要它**：加密卷（`type: secretdata`）等非默认卷的浏览/改名/删除不必再记 flag，
+路径自述归属；同时这也是列出加密卷内容的推荐方式——**未指定卷的 `ls` 只列本地卷**
+（搜索索引不含外部卷）。
+
 ## 子命令详情
 
 ### sproxy-mcp（MCP server 二进制）
@@ -115,13 +202,13 @@ sclient 维护一个**持久化的工作目录**（存于 XDG cache），影响�
 ```bash
 sproxy-mcp --server https://127.0.0.1:18083 \
   --access-key <AK> --access-key-secret <SK> --access-key-id <skey-id> \
-  [--volume docs] [--transport stdio|sse] [--sse-addr :18900]
+  [--transport stdio|sse] [--sse-addr :18900]
 ```
 
 - `--server`（必填）：sproxy 服务端地址
 - `--access-key` / `--access-key-secret` / `--access-key-id`：SproxySig 凭据三要素
   （全部省略时走服务端免认证场景）
-- `--volume`：可选卷上下文（缺省 auto）
+- 卷上下文：由**路径内卷 URI** 或 `cd` 设定的工作目录卷给出（`--volume` 已移除）
 - `--transport`：传输方式，`stdio`（默认，本地 AI CLI）或 `sse`（远程 HTTP）
 - `--sse-addr`：SSE 传输监听地址，默认 `:18900`（`--transport=sse` 时生效）
 
@@ -181,7 +268,7 @@ sclient stat <filename>
 
 输出文件 size、checksum、mod_time。不下载内容。
 
-### list
+### ls（别名 list）
 
 ```bash
 sclient list                # 列当前目录
@@ -203,7 +290,10 @@ sclient rmdir <dirname>
 sclient rmdir --force <dirname>
 ```
 
-非空目录在没有 `--force` 时会有交互式确认提示。
+非空目录在没有 `--force` 时会有交互式确认提示；用户确认（或 `--force`）后 CLI 才把
+`force=true` 发给服务端（**服务端恒要求该确认**——这是最后一道闸门）。显式指定**外部/加密卷**
+时（`rmdir vault:/dir --force`）删除落在**该卷自己的键空间**：经接缝**递归删除**（先子后父），
+绝不牵连本地卷的同名目录。
 
 ### cd / pwd
 
@@ -558,6 +648,12 @@ HTTPS 走 CONNECT 隧道（端到端 TLS，代理不可见明文）。
   出口（逗号分隔 node-id，可多次）——被排除节点**仍可被 `--smart` 选为中转中间节点**（能中转但不出站）；
   `--exit` 固定节点时 `--exit-exclude` 无意义（fail-closed 报错）。`--exit-only` 强制恒经出口；无 `--exit`/`--exit-auto` 时
   恒本地直连（本机出口语义）。`--local-timeout` 控制本地直连探测超时（默认 3s）。
+- **上游代理**（线路B）：`--upstream-proxy http://user:pass@host:port`——本地 mesh 拨号失败/超时后
+  自动经上游 HTTP 代理 CONNECT 转发（本地直连不通时经国内服务器→新加坡出口）。数据面目标 TLS
+  端到端加密；上游控制面 CONNECT 带 Basic 认证。
+- **路由追踪**：`--mesh-route-header`（响应加 X-Mesh-Path 头：`<exitNode>|<kind>|<e2e>`）+
+  `--mesh-trace-header`（X-Mesh-Trace 请求级追踪 ID）——绝对 URI 转发 Debug 日志带 route/trace；
+  CONNECT 隧道仅日志（数据面透明无法插头）。默认关（拓扑不泄露给客户端）。
 - **认证**：`--proxy-user`/`--proxy-pass` 任一配置即启用 `Proxy-Authorization: Basic` 校验
   （未认证回 407）；监听默认 `127.0.0.1`（裸 `:port` 归一，LAN 暴露需显式监听地址）。
 - 与 socks 相同的 TURN / mDNS / hub / `--gateway` / `--smart` 参数组。
@@ -576,6 +672,24 @@ sclient cloud-download --url-file <file>     # 每行 URL 或 URL<TAB>FILENAME
   `cancel` / `resume-chain` / `resume-download` / `group`（任务组）/ `resume`；
 - 任务状态：`pending | downloading | completed | failed | cancelled`；失败自动重试（`cloud_max_retries`）。
 
+**归档转存（统一转存）**：`cloud-download archive` 与 `cloud-download-group archive` 支持
+`--target <卷 URI 路径>`（cd/mv 同规约，`<卷名>:/<路径>`）——打包后转存到该卷（**任意存储卷，含
+本地卷**——统一卷模型 U3；本地卷 target 产物落 `<owner>/user/<rel>`、可经 `/download` 命中），不落服务端
+archive 桶；不带卷名的纯路径回落**当前工作目录**（`cd <卷名>:/<目录>`，与 cp/mv/delete 同语义：
+相对路径拼当前目录，前导 `/` 绕过当前目录，`..` 拒绝）。可选 `--encrypt`（流式加密，密钥来自
+服务端 `archive.key_file`，产物为 `<名>.tar.gz.aes`）、`--cipher`（默认 aes-256-gcm，**须与
+`--encrypt` 同用**）、`--compress`（gzip 默认 / zstd / brotli）——均仅与 `--target` 同用
+（否则报错，不静默忽略）。未指定 `--target` 时行为不变（落 archive 桶）。CLI 仅把 URI 归一为
+请求体的 `target_volume`/`target_path`，协议零改动：
+
+```bash
+sclient cloud-download archive <task-id> --target vault:/backups/a.tar.gz   # 指定文件路径
+sclient cloud-download archive <task-id> --target disk2:/                    # 目标是目录（默认文件名）
+sclient cloud-download archive <task-id> --target vault:/b/a.tar.gz --encrypt --compress zstd
+cd vault:/backups && sclient cloud-download archive <task-id> --target a.tar.gz  # 当前目录内（= vault:/backups/a.tar.gz）
+sclient cloud-download-group archive <group-id> --target vault:/backups/     # 组归档转存
+```
+
 ### genkey
 
 ```bash
@@ -583,6 +697,17 @@ sclient genkey
 ```
 
 打印新的 64 位 hex AES-256 密钥（不写入配置文件）。
+
+### checksum
+
+```bash
+sclient checksum rebuild                 # 从对象 meta 重建当前主体的 checksum 台账
+sclient checksum rebuild --owner alice   # 指定 owner（**仅 admin**；否则 403）
+```
+
+从对象 meta sidecar 的 `TotalSHA256` 回填 per-tenant checksum 台账（`meta/checksums.json`），
+返回回填条数。**何时需要**：台账「部分缺失/被裁剪」时（台账**全空**时 `list` 会自动自愈，
+无需手动执行）。
 
 ### config
 
@@ -652,6 +777,34 @@ sclient df
 - 配额受限时显示已用/上限/水位百分比；未受限显示已用/不限
 - `--json` 输出原始统计对象
 
+
+### quota
+
+查看本 owner 的配额。**权威源是跨卷联邦视图**（片 5，设计
+`docs/designs/2026-10-16-quota-volume-layer.md` §1.5）：用户配额**按卷持有** ⇒ 用户视图 =
+对「该用户可访问的卷」**求和**（只含 ACL 允许的卷，不泄露他人卷用量）。
+
+```bash
+sclient quota          # 汇总 + 逐卷明细
+sclient quota --json   # {"quota": <集中树水位>, "federated": <跨卷视图>}
+```
+
+输出示例：
+
+```
+已用 2.9 KiB / 上限 8.0 KiB
+  v1  1000 B / 4.0 KiB
+  v2  2.0 KiB / 4.0 KiB
+```
+
+语义要点：
+
+- **未知 ≠ 0**：某卷无每用户配额权威（未装配配额层 / 该 owner 未登记）时显示
+  `未知（该卷无每用户配额权威）`，**不会**显示成「已用 0」；此时汇总带 `提示：……汇总**不完整**`。
+- **上限 0 = 不限**（不是「零配额」）：显示 `/ 不限`，汇总带 `（含不限卷）`。
+- `--json` 的 `quota` 键是**旧集中树**水位（`/api/stats`，向后兼容保留），`federated` 键是
+  **跨卷权威视图**；服务端无 `/api/quota`（旧版本）时向 stderr 告警并回落集中树视图。
+
 ### batch
 
 ```bash
@@ -697,8 +850,16 @@ sclient volume delete <name>
 sclient volume copy <file> --from-volume <a> --to-volume <b>
 sclient volume move <file> --from-volume <a> --to-volume <b>
 sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
+sclient volume refresh [<卷名>]        # 强制刷新卷缓存（无参 = 全部卷）
+sclient volume trace   <逻辑路径> [--volume <v>] [--depth N] [--disk] [--json]
+sclient volume explain <真实路径> [--volume <v>] [--disk] [--json]
 ```
 
+- **`volume refresh` 是唯一「强制感知进程外改动」的入口**：服务端卷状态缓存**默认永不过期**
+  （2026-10-29 裁定），本进程的写由事件写穿（下一次读立即可见），但本机直写盘 / 同根多实例 /
+  备份恢复 / 网盘 App 直改**不会**被自动感知。无参 = 清空**全部卷**缓存；带卷名 = 只清该卷
+  （secretdata 等外部卷还会重扫内存索引）。幂等，可随时重复执行。等价入口：`POST /api/volumes/refresh`、
+  Web UI 工具栏「强制刷新」按钮。
 - 管理当前用户的**用户自有卷**（网盘盘，仅外部类型）：create 创建 / list 列出我的 / delete 删除
 - 卷间操作：`copy` 跨卷复制（保留源）、`move` 跨卷移动（源被移除）、`rebalance` 卷再平衡（异步提交）
 - `copy`/`move` 的 `--from-volume` 缺省取当前 `--vol` 卷上下文；`--to-volume` 必填
@@ -711,6 +872,34 @@ sclient volume rebalance --from-volume <a> --to-volume <b> [--max-bytes <n>]
 - `volume list` 输出 name/type/capacity 表格，`--json` 输出机器可读
 - `volume delete` 删除用户卷：被**活跃同步任务引用**时服务端返回 409（需先取消任务）
 - 用户卷寻址：同步任务 `remote.volume` 填用户卷名，任务 owner 必须匹配卷 owner（跨用户 404 防枚举）
+
+#### 真实存储审查（`volume trace` / `volume explain`）
+
+secretdata 卷的物理布局刻意不可读（随机容器名、`q`/`z` 标记、meta pad、嵌套容器），
+这两个命令用于**只读审查**「逻辑对象落在哪些真实文件」与「真实文件是干什么的」：
+
+```bash
+# 正向：逻辑路径 → 容器链 + meta blob + 各分块 + parity（+ 去重池引用）
+sclient volume trace data:/photos/2026/a.jpg
+# 反向：真实路径（容器目录或单个 blob）→ 用途 + 逻辑归属
+sclient volume explain data:k3f9a/8xQ.../7xQ...z...
+```
+
+- 卷名可用 `--volume`、`<卷>:<路径>` 前缀或当前卷上下文指定（三者优先级同上传）
+- `--depth N`（默认 1，最大 3）展开子树：子项按索引展示（名称/大小/类型/meta/分块数；子目录显示
+  `dir_id`，不为其做后端 ListDir），
+  在途上传也作为子项出现；`--disk` 的磁盘核验**只作用于根节点**
+- 树形输出同时显示**真实容器名与其逻辑目录名**（如 `容器 XqZdBO… → alice/user/kv`），
+  把盘上的随机目录与用户认识的路径对上
+- 对**正在上传**的目标路径，`trace` 不再 404：显示 `上传中（meta 尚未提交）` + 已上传/总量/块数；
+  此时 `explain` 对在途分块给出 `upload_in_progress`（不是孤儿）
+- 默认只读服务端索引（快）；`--disk` 同时对比磁盘，输出差异码（`blob_missing` / `blob_orphan` /
+  `size_mismatch` / `meta_unreadable` / `container_not_indexed` / `parent_unresolved` / …）
+- 退出码：`0` 一致（含**上传中**、去重共享等信息态）；`3` 发现**真实差异**（缺失/孤儿/大小不符/
+  meta 不可读等，便于脚本门禁）；`1` 参数/服务端错误。`--json` 与文本模式**退出码一致**
+- 仅对实现 `StorageInspector` 的卷可用（当前 = secretdata）；其它卷明确报「不支持审查」，**不返回空结果**
+- **只读审计，不构成删除建议**：`blob_orphan` 仅表示索引无引用，回收请走 GC（有 re-confirm 流程）
+- 只解 meta（名称/尺寸/分块索引等），不读取内容、不落地明文
 
 ### backup
 
@@ -741,6 +930,83 @@ sclient migrate mirror-config <in> [--print] [--write <path>]
 - 通用 flags：`--yes`（跳过交互确认，纯脚本模式）、`--ignore-errors`、`--no-verify`（跳过导入后校验，慎用）
 - 迁移期间源端变化：manifest 记录 mtime/checksum，导入后校验发现差异 → 提示重导该文件（幂等重跑即可收敛）
 
+### sealfile
+
+```bash
+sclient sealfile encrypt <file> [--key <密钥>] [--owner <owner>] [--output-dir <目录>]
+sclient sealfile decrypt <输出目录> [卷内文件名] --key <密钥> [-o 还原文件]
+sclient sealfile info <输出目录> [文件名] --key <密钥>
+```
+
+本地文件加解密（**不连服务端**），与 sproxy `secretdata` 卷**同一写内核**（`secretdata.NewFS`）：
+加密产物可直接作为 `type: secretdata` 卷根加载到 sproxy，播放器 Range 直接播放。
+
+- **encrypt**：加密源文件到输出目录。产物为 secretdata 卷布局（逻辑键 `<owner>/user/<名>`，
+  磁盘为随机加密容器）。视频文件缺省按扩展名自动关键帧分块（MP4 走 go-mp4、其它走 ffprobe
+  兜底，与 sproxy 完全同款）；`--video-keyframe` / `--fixed` 显式覆盖（互斥）。输出打印
+  blocklet 模式（关键帧是否生效的可观测性）。
+- **decrypt**：整文件解密还原（含 SHA-256 全量校验，fail-closed）。位置参数 1 = 产物目录，
+  位置参数 2 = 卷内文件名（**短名**，缺省取 `<owner>/user/` 下唯一文件）；`-o/--output` 指定
+  还原路径（缺省 = 产物目录父目录/<短名>）。
+- **info**：查看产物卷信息（文件列表 / 大小 / sha256 / 分块数 / blocklet 模式）。
+- **--key**：64 hex 字面量或 secrets 卷密钥文件路径（文件内容**原样字节**作 secret——与
+  `secret_url` 读取同一语义，不要求 hex）。缺省读配置 `sealfile.key`。
+- **--owner**：逻辑 owner（默认 `anonymous`）。产物布局 `<owner>/user/<名>` 对齐服务器键空间
+  （`Location.FSPath` 恒 owner 前缀）。**注意**：签名请求的 owner 即 **AK 字符串**（非凭据
+  Ring 的 Owner 字段），加密产物要被某请求命中须用对应 AK；未认证请求用 `anonymous`。
+- **加载到 sproxy**：产物目录配置为 `type: secretdata` 卷（`extra.root` 指向产物目录 +
+  `secret_url` 指向同一密钥文件），播放器直接 Range 播放（`/download?filename=<名>&volume=<卷名>`）。
+
+**配置段（config.yaml 顶层）**：
+
+```yaml
+sealfile:
+  key: "..."            # 密钥：64 hex 字面量或密钥文件路径（原样字节）
+  algorithm: ""         # 加密算法（缺省 shardseal 默认）
+  block_policy:         # 分块策略（同 secretdata extra.block_policy）
+    mode: random
+    min: "1MiB"
+    max: "200MiB"
+  out_dir: "./sealed"   # 输出目录（encrypt 产物 / info 定位）
+  owner: anonymous      # 逻辑 owner（默认 anonymous）
+```
+
+优先级：CLI flag > 配置 > 默认。
+
+### share
+
+分享链接管理。**分享源可以是外部卷/加密卷**（如 `secretdata` vault）：卷定位走卷 URI、
+`cd` 设定的工作目录卷，或（都不给时）服务端**自动定位**（本地卷优先，未命中再扫外部卷）。
+
+```bash
+sclient share create vault:/docs/report.pdf        # 卷 URI（推荐：多卷同名时语义确定）
+sclient share create docs/report.pdf               # 用 cd 的工作目录卷
+sclient share create report.pdf --ttl 168h --one-time
+sclient share list                                 # 输出含 VOLUME 列（源卷）
+sclient share revoke <token>
+```
+
+- 卷优先级：**位置参数卷 URI** > **`cd` 工作目录卷** > 服务端自动定位（不带 `volume` 字段）。
+- 分享记录**固化源卷**：创建后即使同名文件出现在别的卷，链接仍指向创建时的卷。
+- 外部/加密卷分享访问时由服务端**透明解密**返回明文，`Content-Length` 为明文长度。
+
+### trash
+
+回收站管理。**每卷独立回收站**（软删落文件所在卷）；列表默认**汇总** owner 可见的全部卷，
+每条带 `VOLUME` 列。
+
+```bash
+sclient trash list                     # 汇总（全部卷）
+sclient trash list --volume vault       # 只看某卷
+sclient trash restore <trash_rel>       # 缺省跨卷定位
+sclient trash restore <trash_rel> --volume vault
+sclient trash empty --yes               # **只清默认卷**（安全默认，不静默扩大）
+sclient trash empty --yes --volume vault
+sclient trash empty --yes --all         # 清全部卷（含外部/加密卷）
+```
+
+`--all` 与 `--volume` 互斥；`empty` 必须带 `--yes`。
+
 ## 常见错误排查
 
 | 现象 | 可能原因 |
@@ -748,6 +1014,6 @@ sclient migrate mirror-config <in> [--print] [--write <path>]
 | `路径包含父级引用 '..'` | 客户端预拦截了不安全路径，去掉 `..` 或用绝对路径 |
 | `tunnel error (HTTP 401)` | 外层 `POST /tunnel` SproxySig 验签失败（凭据缺失/非法/过期/重放），检查 `access_key`/`access_key_secret` 是否与服务端凭据 Ring 一致 |
 | `tunnel error (HTTP 400)` | 隧道密钥与服务端不一致，或网络中间层破坏了请求体 |
-| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端凭据 Ring 非空时），检查 `~/.config/sproxy/sclient.yaml` 的 `access_key`/`access_key_secret` 是否与服务端一致 |
+| `unauthorized` (401) | SproxySig 签名缺失/非法/过期（服务端凭据 Ring 非空时），检查 `~/.config/sproxy/config.yaml` 当前 context user 段的 `access_key`/`access_key_secret` 是否与服务端一致（或 `sclient trust login` 重新绑定） |
 | `源文件 SHA-256 校验失败` | mv 期间本地文件已变，刷新本地 checksum 后重试 |
 | `文件已存在但 checksum 不匹配` (409) | 服务端已有同名文件且内容不同，先 mv 或 delete |

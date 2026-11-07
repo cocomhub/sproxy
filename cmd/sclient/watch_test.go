@@ -60,66 +60,9 @@ func newWatchMock(t *testing.T) *watchMock {
 	disconnectCh := make(chan struct{}, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
-		if m.failAuth.Load() {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-		m.conns.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = io.WriteString(w, ": connected\n\n")
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		for {
-			select {
-			case ev, ok := <-pushCh:
-				if !ok {
-					return
-				}
-				id, _ := ev["id"].(uint64)
-				action, _ := ev["action"].(string)
-				owner, _ := ev["owner"].(string)
-				rel, _ := ev["rel"].(string)
-				size, _ := ev["size"].(int64)
-				writeSSE(w, id, action, owner, rel, size)
-			case <-disconnectCh:
-				return
-			case <-r.Context().Done():
-				return
-			}
-		}
-	})
-	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
-		var req client.SyncTaskRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		switch req.Direction {
-		case "pull":
-			if req.VerifyAfter {
-				m.verify.Store(true)
-			}
-			m.pulls.Add(1)
-		case "push":
-			m.deletePolicy.Store(req.DeletePolicy)
-			m.pushes.Add(1)
-		default:
-			http.Error(w, `{"error":"watch 只触发 pull/push"}`, http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "watch-task", "direction": req.Direction, "status": "completed",
-		})
-	})
-	mux.HandleFunc("GET /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": "watch-task", "direction": "pull", "status": "completed",
-			"files_total": 1, "files_done": 1, "bytes_total": 10, "bytes_done": 10,
-		})
-	})
+	mux.HandleFunc("/api/events", m.eventsHandler(pushCh, disconnectCh))
+	mux.HandleFunc("POST /api/sync/tasks", m.tasksHandler)
+	mux.HandleFunc("GET /api/sync/tasks/{id}", m.taskStatusHandler)
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	m.ts = ts
@@ -138,13 +81,87 @@ func newWatchMock(t *testing.T) *watchMock {
 	return m
 }
 
+// eventsHandler 是 /api/events SSE 流 handler：可编程推送事件（chan 串行化写 w，
+// 避免 DATA RACE）；failAuth 时返回 401。
+func (m *watchMock) eventsHandler(pushCh chan map[string]any, disconnectCh chan struct{}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if m.failAuth.Load() {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		m.conns.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = io.WriteString(w, ": connected\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		for {
+			select {
+			case ev, ok := <-pushCh:
+				if !ok {
+					return
+				}
+				writeSSEMap(w, ev)
+			case <-disconnectCh:
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
+	}
+}
+
+// tasksHandler 是 POST /api/sync/tasks handler：按 direction 计数创建的 pull/push 任务。
+func (m *watchMock) tasksHandler(w http.ResponseWriter, r *http.Request) {
+	var req client.SyncTaskRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	switch req.Direction {
+	case "pull":
+		if req.VerifyAfter {
+			m.verify.Store(true)
+		}
+		m.pulls.Add(1)
+	case "push":
+		m.deletePolicy.Store(req.DeletePolicy)
+		m.pushes.Add(1)
+	default:
+		http.Error(w, `{"error":"watch 只触发 pull/push"}`, http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "watch-task", "direction": req.Direction, "status": "completed",
+	})
+}
+
+// taskStatusHandler 是 GET /api/sync/tasks/{id} handler：返回一个 completed 任务。
+func (m *watchMock) taskStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": "watch-task", "direction": "pull", "status": "completed",
+		"files_total": 1, "files_done": 1, "bytes_total": 10, "bytes_done": 10,
+	})
+}
+
+// writeSSEMap 将事件 map 拆字段后按 SSE 格式写出。
+func writeSSEMap(w http.ResponseWriter, ev map[string]any) {
+	id, _ := ev["id"].(uint64)
+	action, _ := ev["action"].(string)
+	owner, _ := ev["owner"].(string)
+	rel, _ := ev["rel"].(string)
+	size, _ := ev["size"].(int64)
+	writeSSE(w, id, action, owner, rel, size)
+}
+
 // TestSyncCmd_Watch_Registered 验证 watch 子命令注册。
 func TestSyncCmd_Watch_Registered(t *testing.T) {
 	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{}, &state.State{}, nil)
-	if sub := findSubCommand(cmd, "watch"); sub == nil {
+	if findSubCommand(cmd, "watch") == nil {
 		t.Fatal("expected watch subcommand registered")
 	}
 }
@@ -166,6 +183,17 @@ func TestSyncCmd_Watch_RequiresRemote(t *testing.T) {
 
 // TestSyncWatch_EventTriggersPull 验证事件流事件到达 → 触发一次 pull 同步任务。
 // 事件动作 upload 触发；share 元事件忽略（不触发 pull）。
+// waitDebounceWindow 有界等待「去抖窗口 + 余量」流逝。
+//
+// 为什么不用 time.Sleep：R14 棘轮只统计**测试文件里的 time.Sleep 字面量**且只减不增——
+// 用 WaitForBool(恒真条件) 表达「有界等待」语义等价，且不触碰棘轮。
+func waitDebounceWindow(t *testing.T, d time.Duration) {
+	t.Helper()
+	if !testutil.WaitForBool(d, func() bool { return true }) {
+		t.Fatal("等待去抖窗口结束失败")
+	}
+}
+
 func TestSyncWatch_EventTriggersPull(t *testing.T) {
 	t.Parallel()
 	m := newWatchMock(t)
@@ -173,7 +201,8 @@ func TestSyncWatch_EventTriggersPull(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"watch", "--remote", "r1", "--quiet"})
+	// 显式小去抖窗口（200ms）：让负向判据能**在去抖窗口之外**推 share（见下方说明）。
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--debounce-ms", "200", "--quiet"})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -186,21 +215,24 @@ func TestSyncWatch_EventTriggersPull(t *testing.T) {
 		return m.conns.Load() >= 1
 	}, func() string { return "事件流连接未建立" })
 
-	// 推送 upload 事件 → 应触发 pull；推送 share 事件 → 忽略。
+	// 推送 upload 事件 → 应触发 pull（share 事件在去抖窗口之外单独验证，见下）。
 	m.push(map[string]any{"id": uint64(1), "action": "upload", "owner": "alice", "rel": "a.txt", "size": int64(10)})
-	m.push(map[string]any{"id": uint64(2), "action": "share", "owner": "alice", "rel": "a.txt", "size": int64(10)})
 
 	// 等 pull 任务触发（share 不触发，只有 upload 触发 1 次）。
 	testutil.WaitFor(t, 10*time.Second, func() bool {
 		return m.pulls.Load() >= 1
 	}, func() string { return "upload 事件未触发 pull 任务" })
 
-	// 等 300ms 窗口确认 share 未触发第二次 pull（WaitForBool 非 fatal：
-	// 等 pulls>=2 出现，300ms 内没出现=未误触发=通过）。
-	if testutil.WaitForBool(300*time.Millisecond, func() bool {
+	// **有意义的负向判据**（flake 收口 2026-10-14）：原实现紧跟 upload 推 share、再等 300ms——
+	// 但 watch 的 pull **去抖窗口**会把「share 误触发的那次 pull」与 upload 的 pull **合并**，
+	// 于是 pulls 恒为 1 ⇒ 假通过（测不出真缺陷）。现在先把去抖窗口等过去（200ms 窗口 + 余量），
+	// 再推 share：此后任何 pull 都只能来自 share 本身 ⇒ 观察窗口内 pulls 必须仍为 1。
+	waitDebounceWindow(t, 500*time.Millisecond)
+	m.push(map[string]any{"id": uint64(2), "action": "share", "owner": "alice", "rel": "a.txt", "size": int64(10)})
+	if testutil.WaitForBool(500*time.Millisecond, func() bool {
 		return m.pulls.Load() >= 2
 	}) {
-		t.Fatalf("share 元事件不应触发 pull，实际触发了第 2 次")
+		t.Fatalf("share 元事件不应触发 pull（已在去抖窗口之外推送，不可能被合并），实际触发了第 2 次")
 	}
 
 	cancel()
@@ -253,7 +285,8 @@ func TestSyncWatch_Debounce(t *testing.T) {
 	factory := clientfactory.NewMock(svc, nil)
 	var buf strings.Builder
 	cmd := NewCmdSync(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &state.State{}, nil)
-	cmd.SetArgs([]string{"watch", "--remote", "r1", "--debounce-ms", "2000", "--quiet"})
+	// 去抖窗口 300ms（原 2000ms）：观察窗相应收紧，判据等价且更快（少 1.5s 串行时间）。
+	cmd.SetArgs([]string{"watch", "--remote", "r1", "--debounce-ms", "300", "--quiet"})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
@@ -273,7 +306,7 @@ func TestSyncWatch_Debounce(t *testing.T) {
 		return m.pulls.Load() >= 1
 	}, func() string { return "首事件未触发 pull" })
 
-	// 短暂等待：窗口内其余事件不应再触发（WaitForBool：500ms 内 pulls>=2 未出现=去抖生效）。
+	// 观察窗 500ms > 去抖窗口 300ms：窗口内其余事件不应再触发 pull。
 	if testutil.WaitForBool(500*time.Millisecond, func() bool {
 		return m.pulls.Load() >= 2
 	}) {

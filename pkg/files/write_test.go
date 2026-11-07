@@ -13,6 +13,7 @@ package files
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -35,6 +36,8 @@ func (m *fakeMetrics) RecordUpload(bytes int64)                           { m.up
 func (m *fakeMetrics) RecordDownload(int64)                               {}
 func (m *fakeMetrics) RecordDelete()                                      { m.deleteCalls++ }
 func (m *fakeMetrics) RecordVolumeIO(string, string, time.Duration, bool) {}
+func (m *fakeMetrics) RecordUploadForOwner(string, int64)                 {}
+func (m *fakeMetrics) RecordDownloadForOwner(string, int64)               {}
 
 // locateOwnerFileDefault 复刻生产 locateOwnerFile 的单卷/默认卷快路径：stat 命中即定位
 // （默认卷名 = 卷集合默认卷；VolSet 未装配时为空串）。多卷下的逐卷探测不在替身范围。
@@ -58,7 +61,7 @@ func (e *dirsEnv) locateOwnerFileDefault(owner, rel string) (FileLocation, bool)
 // （owner Scope 由 quotaScopeFor 解析、卷容量池由 volSet.Pool 提供），使写面的
 // 预留/提交/释放走与生产相同的双账本语义（dedup 配额只计首份的断言依赖它）。
 // 显式卷 ACL/唯一性与容量路由语义不在替身范围（那些分支由 pkg/server 的集成测试覆盖）。
-func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (e *dirsEnv) routeUploadDefault(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	owner = normalizeOwner(owner)
 	tnt := e.tenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
@@ -68,21 +71,10 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 	if e.volSet != nil {
 		vol = e.volSet.Default().Name
 	}
-	route := UploadRoute{VolumeName: vol, Tenant: tnt}
-	if sc := e.quotaScopeFor(owner, rel); sc != nil {
-		if res, err := sc.TryReserve(size); err == nil {
-			route.Scope = sc
-			route.ScopeRes = res
-		}
-	}
-	if vol != "" && e.volSet != nil {
-		if pool := e.volSet.Pool(vol); pool != nil {
-			if res, err := pool.TryReserve(size); err == nil {
-				route.Pool = pool
-				route.PoolRes = res
-			}
-		}
-	}
+	// 记账口径与生产同源（加密卷按物理占用；见 UploadRoute.PhysSize / TenantPhysSizer）。
+	route := UploadRoute{VolumeName: vol, Tenant: tnt, PhysSize: TenantPhysSizer(tnt)}
+	e.reserveScope(&route, owner, rel, route.PhysicalSize(size))
+	e.reservePool(&route, vol, route.PhysicalSize(size))
 	route.Release = func() {
 		if route.ScopeRes != nil {
 			route.ScopeRes.Release()
@@ -92,6 +84,29 @@ func (e *dirsEnv) routeUploadDefault(owner, rel, explicitVol string, size int64,
 		}
 	}
 	return route, nil
+}
+
+// reserveScope 按 owner 配额 Scope 预留容量（无 Scope 或预留失败则保持零值）。
+func (e *dirsEnv) reserveScope(route *UploadRoute, owner, rel string, size int64) {
+	if sc := e.quotaScopeFor(owner, rel); sc != nil {
+		if res, err := sc.TryReserve(size); err == nil {
+			route.Scope = sc
+			route.ScopeRes = res
+		}
+	}
+}
+
+// reservePool 按卷容量池预留容量（卷未装配 / 空卷名 / 预留失败则保持零值）。
+func (e *dirsEnv) reservePool(route *UploadRoute, vol string, size int64) {
+	if vol == "" || e.volSet == nil {
+		return
+	}
+	if pool := e.volSet.Pool(vol); pool != nil {
+		if res, err := pool.TryReserve(size); err == nil {
+			route.Pool = pool
+			route.PoolRes = res
+		}
+	}
 }
 
 // enableWriteDefaults 打开写面族的两条真实装配路径（写前视图定位 + 卷路由）并重建 Service。
@@ -126,7 +141,7 @@ func uploadReq(t *testing.T, actor, remotePath string, body []byte, checksum str
 		t.Fatalf("关闭 multipart writer: %v", err)
 	}
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	if remotePath != "" {
 		req.Header.Set("X-File-Path", remotePath)
 	}
@@ -177,7 +192,7 @@ func TestService_Upload_SuccessWritesFileAndHeaders(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("上传应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := rr.Header().Get(headerContentType); ct != "application/json" {
 		t.Fatalf("Content-Type=%q want application/json", ct)
 	}
 	resp := decodeResp(t, rr)
@@ -406,7 +421,7 @@ func TestService_Upload_RouteErrorMapsStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newDirsEnv(t)
 			env.enableWriteDefaults()
-			env.routeUpload = func(string, string, string, int64, string) (UploadRoute, error) {
+			env.routeUpload = func(context.Context, string, string, string, int64, string) (UploadRoute, error) {
 				return UploadRoute{}, tc.err
 			}
 			env.rebuild()

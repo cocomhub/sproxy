@@ -59,7 +59,7 @@
 ## 百度网盘后端（BaiduPCS plugin）
 
 `sproxy baidupcs --bduss <BDUSS> [--binary /path/to/BaiduPCS-Go] [--root /baidu]`：
-百度网盘存储后端自检命令。独立 module `pkg/baidupcs` 引用外部 fork
+百度网盘存储后端自检命令。独立 module `pkg/volume/ext/baidupcs` 引用外部 fork
 （github.com/cocomhub/BaiduPCS-Go，经 replace 接入），二进制优先 + 库兜底双路径，
 避免开源实现受本仓强校验污染。
 
@@ -150,7 +150,7 @@ sproxy 服务端可代替客户端从外部 URL 下载文件（云端离线下�
 - **Web UI**：云端下载弹窗含任务/组双 Tab、进度条、恢复/取消/打包按钮，输入多行 URL 可"创建组"。
 - **CLI**：`sclient cloud-download`（链式）、`submit/wait/fetch/resume` 及 `group/group-list/group-archive/group-cancel/group-resume` 子命令。
 
-相关配置键（见 `config.example.yaml`）：`cloud_max_concurrent`、`cloud_max_batch_urls`、`cloud_sync_threshold`、`cloud_download_timeout`、`cloud_download_idle_timeout`、`cloud_max_retries`、`cloud_retry_delay`、`cloud_task_ttl`、`cloud_failed_task_ttl`、`cloud_download_allow_private`、`cloud_downloader` 等。
+相关配置键（见 `config.example.yaml`）：`cloud_max_concurrent`、`cloud_transfer_concurrency`、`cloud_max_batch_urls`、`cloud_sync_threshold`、`cloud_download_timeout`、`cloud_download_idle_timeout`、`cloud_max_retries`、`cloud_retry_delay`、`cloud_task_ttl`、`cloud_failed_task_ttl`、`cloud_download_allow_private`、`cloud_downloader` 等。
 
 
 ## 典型用法

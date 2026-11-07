@@ -124,7 +124,7 @@ func TestUploadChunk_TempPathEmpty_ReturnsRetry500(t *testing.T) {
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload/chunk", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	rr := httptest.NewRecorder()
 	env.mux["alice"].ServeHTTP(rr, req)
 	if rr.Code != http.StatusInternalServerError {
@@ -222,7 +222,7 @@ func TestCompleteOverwrite_VersionBackup(t *testing.T) {
 	newContent := []byte("b")
 	fileChecksum := sha256Hex(newContent)
 	uploadID := "complete-ov-version"
-	code, resp := env.initAs(t, "alice", uploadID, "ov.bin", int64(len(newContent)), 4096, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "ov.bin", totalSize: int64(len(newContent)), chunkSize: 4096, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -283,7 +283,7 @@ func TestChunkedUpload_ConcurrentChunks_Race(t *testing.T) {
 	chunkSize := int64(4096)
 	totalChunks := 3
 	uploadID := "concurrent-seek"
-	code, resp := env.initAs(t, "alice", uploadID, "conc.bin", int64(len(content)), chunkSize, totalChunks, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "conc.bin", totalSize: int64(len(content)), chunkSize: chunkSize, totalChunks: totalChunks, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -398,7 +398,7 @@ func TestUploadChunk_OversizedLastChunk_TruncatedToRemainder(t *testing.T) {
 	}
 	// 截断后 == total_size，complete 全文件校验通过。
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	cresp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	cresp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatal(err)
 	}

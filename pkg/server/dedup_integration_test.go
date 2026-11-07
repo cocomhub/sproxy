@@ -50,7 +50,7 @@ func TestDedupIntegration_EnabledCreatesHardlink(t *testing.T) {
 		t.Fatalf("dedup 开启时同内容文件应为硬链接（同 inode）: a=%v b=%v", ia, ib)
 	}
 	// 物理占用只计一份（b.txt 未新增 inode）。
-	if n := ib.Sys(); n != nil {
+	if ib.Sys() != nil {
 		t.Logf("b.txt 链接数=%d", fileNlink(ib))
 	}
 }

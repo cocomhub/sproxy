@@ -25,6 +25,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // UserVolume 是用户自有卷的持久化描述（JSON 友好）。
@@ -39,6 +40,23 @@ type UserVolume struct {
 	// ExtraEnc 是 Extra 的加密信封（base64：nonce || AES-256-GCM 密文）。
 	// masterKey 启用时落盘（明文 Extra 不落盘）；旧文件/未启用时为空（读明文 Extra）。
 	ExtraEnc string `json:"extra_enc,omitempty"`
+	// ACL 是卷访问控制（2026-10-06 S1 修复）：新创建/恢复的用户卷**强制**注入
+	// Mode=Allow + 单 owner 白名单（owner-only，防跨 owner 数据面越权）。**已存卷零值
+	// 兼容**：旧文件无该字段读回零值 ACL（Mode=="" = 默认开放），维持现状不静默收紧
+	// 既有共享卷；新卷 owner-only 语义由创建/恢复路径注入保证。
+	ACL volume.ACL `json:"acl"`
+}
+
+// volumeFromUserVolume 把 store 持久化模型转换为 pkg/volume.Volume（装配/拆除共用）。
+// Owner 不落入 volume.Volume（卷集无 owner 字段）；owner 归属校验由装配层闭包查 store 完成。
+func volumeFromUserVolume(uv UserVolume) volume.Volume {
+	return volume.Volume{
+		Name:     uv.Name,
+		Type:     uv.Type,
+		Capacity: uv.Capacity,
+		Extra:    uv.Extra,
+		ACL:      uv.ACL, // 保留持久化 ACL（新卷 owner-only；已存卷零值 = 开放，兼容不收紧）
+	}
 }
 
 // UserVolumeStore 把每 owner 的卷元数据持久化到
@@ -88,7 +106,7 @@ func (s *UserVolumeStore) dirFor(owner string) string {
 	return filepath.Join(s.root, owner, "meta", "volume")
 }
 
-// Root 返回用户卷 store 的存储根（counter 持久化用：<root>/<owner>/meta/volume/<name>.capacity.json）。
+// Root 返回用户卷 store 的存储根（counter 持久化用：<root>/<owner>/meta/volume/<name>.capacity（非 .json，避开 store 扫描））。
 func (s *UserVolumeStore) Root() string { return s.root }
 
 // pathFor 返回 owner 的卷文件路径。
@@ -252,7 +270,9 @@ func (s *UserVolumeStore) Delete(owner, name string) error {
 		}
 		return fmt.Errorf("用户卷 store: 检查 %s 失败: %w", path, err)
 	}
-	if err := os.Remove(path); err != nil {
+	// path 由 pathFor 从入口 242 行 ValidSegmentName 校验后的 owner/name 段构造，
+	// Sonar 无法建模该自定义消毒函数（Create/List 同构防护）。
+	if err := os.Remove(path); err != nil { // NOSONAR
 		return fmt.Errorf("用户卷 store: 删除 %s 失败: %w", path, err)
 	}
 	return nil
@@ -299,7 +319,9 @@ func (s *UserVolumeStore) ScanRestore() ([]UserVolume, error) {
 // 调用方须已持有 owner 锁。文件权限 0600（审查 P2：Extra 可能含凭据，收紧默认权限）。
 func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "*.json.tmp")
+	// path 由 Create 入口 validate（101 行 ValidSegmentName）后的段构造；
+	// 临时文件亦落在该目录内，Sonar 无法建模消毒函数。
+	tmp, err := os.CreateTemp(dir, "*.json.tmp") // NOSONAR
 	if err != nil {
 		return fmt.Errorf("用户卷 store: 创建临时文件失败: %w", err)
 	}
@@ -320,7 +342,8 @@ func (s *UserVolumeStore) writeFileAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("用户卷 store: 关闭临时文件失败: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	// 同 CreateTemp：rename 目标 path 源自已校验段。
+	if err := os.Rename(tmpName, path); err != nil { // NOSONAR
 		return fmt.Errorf("用户卷 store: 原子重命名失败: %w", err)
 	}
 	return nil

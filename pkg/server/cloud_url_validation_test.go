@@ -3,16 +3,20 @@
 
 package server
 
-import "testing"
+import (
+	"testing"
 
-// 请求边界校验的用例：`validateCloudDownloadURL` 属**装配层的请求校验**（与 pkg/files 的
-// 「路径解析留在装配层」同一分工——它只服务 HTTP 入口，领域侧只接收已清洗的 URL/文件名）。
-// 云任务管理器迁入 pkg/cloud（S4-B）后，这些用例随之留在装配层。
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
+)
+
+// 请求边界校验的用例：`ValidateCloudDownloadURL` 随云任务创建入口迁入
+// `pkg/server/cloudtasks`（P1-c S2a：单条/批量两条入口共用同一清洗规则），组创建仍在
+// 装配层、经同一导出函数取用。用例留在本包以保持「装配层入口的请求边界」视角不变。
 //
 // 用例名与迁移前完全一致（核对 ② 只禁丢失，允许换宿主文件）。
 
 func TestValidateCloudDownloadURL_Valid(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/file.zip", "", false)
+	url, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/file.zip", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -25,7 +29,7 @@ func TestValidateCloudDownloadURL_Valid(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
-	url, filename, err := validateCloudDownloadURL("https://example.com/data.bin", "custom.dat", false)
+	url, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/data.bin", "custom.dat", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -38,35 +42,35 @@ func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("", "", false)
+	_, _, err := cloudtasks.ValidateCloudDownloadURL("", "", false)
 	if err == nil {
 		t.Fatal("expected error for empty URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("ftp://example.com/file.zip", "", false)
+	_, _, err := cloudtasks.ValidateCloudDownloadURL("ftp://example.com/file.zip", "", false)
 	if err == nil {
 		t.Fatal("expected error for ftp URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
+	_, _, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
 	if err == nil {
 		t.Fatal("expected error for unsafe filename")
 	}
 }
 
 func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
-	_, _, err := validateCloudDownloadURL("not-a-url", "", false)
+	_, _, err := cloudtasks.ValidateCloudDownloadURL("not-a-url", "", false)
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 }
 
 func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
-	_, filename, err := validateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "", false)
+	_, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}

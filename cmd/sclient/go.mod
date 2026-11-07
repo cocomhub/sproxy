@@ -6,7 +6,8 @@ require (
 	github.com/adrg/xdg v0.5.3
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
-	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.0.0
+	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.17.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
@@ -14,13 +15,15 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/term v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/cocomhub/sproxy/pkg/baidupcs v0.17.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
@@ -54,7 +57,6 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
@@ -69,6 +71,8 @@ replace github.com/cocomhub/sproxy => ../../
 
 replace github.com/cocomhub/sproxy/pkg/telemetry/ext/otel => ../../pkg/telemetry/ext/otel
 
+replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ../../pkg/volume/ext/baidupcs
+
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../pkg/tunnel/xfer/ext/webrtc
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
@@ -76,3 +80,5 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic
+
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../pkg/media/ext/mp4

@@ -45,19 +45,9 @@ func Resolve(cfg *Config, args ResolveArgs) (*Resolved, error) {
 	}
 
 	// 无 --context：先确定 base（current-context），再单项覆盖。
-	baseName := cfg.CurrentContext
-	if baseName == "" && args.Environment == "" && args.User == "" {
-		return nil, fmt.Errorf("未指定 context/env/user 且 current-context 未设置：请先运行 sclient context use <name>")
-	}
-	var base *Context
-	if baseName != "" {
-		base = cfg.FindContext(baseName)
-		if base == nil {
-			return nil, fmt.Errorf("current-context %q 不存在（sclient context use <name> 重新设置）", baseName)
-		}
-	} else {
-		// current 缺失但有单项覆盖：从一个「空 base」开始，仅当两项都给定才算完整。
-		base = &Context{}
+	base, berr := resolveBase(cfg, args)
+	if berr != nil {
+		return nil, berr
 	}
 	envName := base.Environment
 	userName := base.User
@@ -74,7 +64,7 @@ func Resolve(cfg *Config, args ResolveArgs) (*Resolved, error) {
 		Environment: cfg.FindEnvironment(envName),
 		User:        cfg.FindUser(userName),
 		Volume:      base.Volume,
-		ContextName: baseName,
+		ContextName: cfg.CurrentContext,
 	}
 	if res.Environment == nil {
 		return nil, fmt.Errorf("environment %q 不存在（sclient env list 查看）", envName)
@@ -83,6 +73,25 @@ func Resolve(cfg *Config, args ResolveArgs) (*Resolved, error) {
 		return nil, fmt.Errorf("user %q 不存在（sclient user list 查看）", userName)
 	}
 	return res, nil
+}
+
+// resolveBase 确定无 --context 时的 base context：current-context 优先；current
+// 缺失但存在单项覆盖（--env/--user）时从「空 base」开始（仅当两项都给定才算完整）。
+// current-context 缺失且无任何 flag → 报错并指引 `sclient context use`。
+func resolveBase(cfg *Config, args ResolveArgs) (*Context, error) {
+	baseName := cfg.CurrentContext
+	if baseName == "" && args.Environment == "" && args.User == "" {
+		return nil, fmt.Errorf("未指定 context/env/user 且 current-context 未设置：请先运行 sclient context use <name>")
+	}
+	if baseName == "" {
+		// current 缺失但有单项覆盖：从一个「空 base」开始，仅当两项都给定才算完整。
+		return &Context{}, nil
+	}
+	base := cfg.FindContext(baseName)
+	if base == nil {
+		return nil, fmt.Errorf("current-context %q 不存在（sclient context use <name> 重新设置）", baseName)
+	}
+	return base, nil
 }
 
 // resolveNamed 解析指定 context（--context 路径）：env/user 引用缺失报错。

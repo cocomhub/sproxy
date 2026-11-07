@@ -36,14 +36,36 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 	if m == nil {
 		return nil, fmt.Errorf("manifest 为空")
 	}
-	// 源机卷集合（manifest 文件条目中出现的卷；空 = auto/单卷视图）。
+	srcVols := collectSourceVolumes(m)
+	allowed := collectAllowedVolumes(vols)
+
+	var buf bytes.Buffer
+	buf.WriteString("# 迁移向导生成（sclient migrate mirror-config）——合并进目标机配置后重启生效\n")
+	if opts.TargetURL != "" {
+		buf.WriteString("# 目标机: " + opts.TargetURL + "\n")
+	}
+	writeVolumesSection(&buf, allowed)
+	writeSyncRemotesSection(&buf, m.Server.URL, opts)
+	writeFederationSection(&buf, m.Server.URL, opts)
+	writeSourceVolsSummary(&buf, srcVols)
+	// 单卷目标机：无冗余可配（零回归；不生成空 volumes 段）。
+	return buf.Bytes(), nil
+}
+
+// collectSourceVolumes 收集源机卷集合（manifest 文件条目中出现的卷；空 = auto/单卷视图）。
+func collectSourceVolumes(m *Manifest) map[string]bool {
 	srcVols := make(map[string]bool)
 	for _, f := range m.Files {
 		if f.Volume != "" {
 			srcVols[f.Volume] = true
 		}
 	}
-	// 目标卷列表（ACL 允许）。首卷为默认落盘卷；其余为冗余目标（mirror_to 候选）。
+	return srcVols
+}
+
+// collectAllowedVolumes 过滤目标卷列表（ACL 允许）并按卷名排序；首卷为默认落盘卷，
+// 其余为冗余目标（mirror_to 候选）。
+func collectAllowedVolumes(vols []client.VolumeInfo) []client.VolumeInfo {
 	var allowed []client.VolumeInfo
 	for _, v := range vols {
 		if v.Allowed {
@@ -51,14 +73,11 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 		}
 	}
 	sort.Slice(allowed, func(i, j int) bool { return allowed[i].Name < allowed[j].Name })
+	return allowed
+}
 
-	var buf bytes.Buffer
-	buf.WriteString("# 迁移向导生成（sclient migrate mirror-config）——合并进目标机配置后重启生效\n")
-	if opts.TargetURL != "" {
-		buf.WriteString("# 目标机: " + opts.TargetURL + "\n")
-	}
-
-	// volumes 段：目标卷名 + 多卷冗余（mirror_to = 下一卷；无卷不生成）。
+// writeVolumesSection 写 volumes 段：目标卷名 + 多卷冗余（mirror_to = 下一卷；无卷不生成）。
+func writeVolumesSection(buf *bytes.Buffer, allowed []client.VolumeInfo) {
 	if len(allowed) > 0 {
 		buf.WriteString("volumes:\n")
 		for i, v := range allowed {
@@ -69,11 +88,14 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 			buf.WriteString(line)
 		}
 	}
+}
 
-	// sync_remotes 段：源机为 direct 远端（manifest 无源机 URL 时不生成）。
-	if m.Server.URL != "" {
+// writeSyncRemotesSection 写 sync_remotes 段：源机为 direct 远端（serverURL 为空时不生成），
+// 附 SproxySig 凭据字段（非空才写）。
+func writeSyncRemotesSection(buf *bytes.Buffer, serverURL string, opts MirrorOptions) {
+	if serverURL != "" {
 		buf.WriteString("sync_remotes:\n")
-		line := fmt.Sprintf("  - name: src\n    kind: direct\n    url: %s\n", m.Server.URL)
+		line := fmt.Sprintf("  - name: src\n    kind: direct\n    url: %s\n", serverURL)
 		if opts.AccessKey != "" {
 			line += fmt.Sprintf("    access_key: %s\n", opts.AccessKey)
 		}
@@ -85,11 +107,14 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 		}
 		buf.WriteString(line)
 	}
+}
 
-	// federation 段：源机为联邦对端 hub。
-	if m.Server.URL != "" {
+// writeFederationSection 写 federation 段：源机为联邦对端 hub（serverURL 为空时不生成），
+// 附 SproxySig 凭据字段（非空才写）。
+func writeFederationSection(buf *bytes.Buffer, serverURL string, opts MirrorOptions) {
+	if serverURL != "" {
 		buf.WriteString("federation:\n  enabled: true\n  peers:\n")
-		line := fmt.Sprintf("    - id: src\n      url: %s\n", m.Server.URL)
+		line := fmt.Sprintf("    - id: src\n      url: %s\n", serverURL)
 		if opts.AccessKey != "" {
 			line += fmt.Sprintf("      access_key: %s\n", opts.AccessKey)
 		}
@@ -101,8 +126,10 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 		}
 		buf.WriteString(line)
 	}
+}
 
-	// 汇总注释（多卷/联邦语义说明）。
+// writeSourceVolsSummary 写汇总注释：源机卷列表（多卷/联邦语义说明）。
+func writeSourceVolsSummary(buf *bytes.Buffer, srcVols map[string]bool) {
 	if len(srcVols) > 0 {
 		var names []string
 		for v := range srcVols {
@@ -111,9 +138,6 @@ func GenerateMirrorConfig(m *Manifest, vols []client.VolumeInfo, opts MirrorOpti
 		sort.Strings(names)
 		buf.WriteString("# 源机卷: " + strings.Join(names, ", ") + "\n")
 	}
-
-	// 单卷目标机：无冗余可配（零回归；不生成空 volumes 段）。
-	return buf.Bytes(), nil
 }
 
 // MirrorConfigYAML 是 GenerateMirrorConfig 输出的可反解形状（供测试/调试断言）。

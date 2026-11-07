@@ -11,9 +11,28 @@ import (
 	"strings"
 )
 
-// State 管理 CLI 的漫游当前目录。
+// State 管理 CLI 的漫游当前目录（**含所在卷**）。
 type State struct {
+	// CurrentDir 是当前目录（卷内相对路径，空 = 卷根）。
 	CurrentDir string
+	// CurrentVolume 是当前目录所在卷（空 = 本地卷 / auto）。
+	// 由 `cd <卷名>:/<路径>` 设置；`cd /<路径>`（前导斜杠）显式回到**本地卷**。
+	// 持久化在 XDG 缓存（与 CurrentDir 并列的独立文件：旧缓存没有该文件 = 本地卷，零兼容负担）。
+	CurrentVolume string
+}
+
+// Location 返回当前工作目录的可读定位：`<卷名>:/<目录>`（本地卷省略卷名 ⇒ `/目录`）。
+func (s *State) Location() string {
+	if s == nil {
+		return "/"
+	}
+	if s.CurrentVolume == "" {
+		if s.CurrentDir == "" {
+			return "/"
+		}
+		return "/" + s.CurrentDir
+	}
+	return s.CurrentVolume + ":/" + s.CurrentDir
 }
 
 // ResolveRemotePath 根据当前目录和用户传入的路径，返回完整的远端路径。

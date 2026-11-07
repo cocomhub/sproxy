@@ -15,6 +15,8 @@ package server
 import (
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // TestVolumeWatermarkMetrics_SetVolumeUsage 验证 SetVolumeUsage 注入水位后
@@ -68,7 +70,7 @@ func TestVolumeWatermarkMetrics_BackupTaskCounters(t *testing.T) {
 // （测试/旧装配路径）。
 func TestVolumeWatermarkMetrics_NilSafe(t *testing.T) {
 	t.Parallel()
-	var m *Metrics
+	var m *metrics.Metrics
 	m.SetVolumeUsage("v", 1, 2)
 	m.RecordBackupTask()
 	m.RecordBackupTaskFailed()

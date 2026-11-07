@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/scheduler"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
@@ -46,7 +47,7 @@ func gcTestHandlers(t *testing.T, cfg *Config) *Handlers {
 		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
 		volSet:         vs,
 		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
-		checksumStores: make(map[string]*checksum.ChecksumStore),
+		checksumStores: make(map[string]checksum.ChecksumStoreIface),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
@@ -151,8 +152,8 @@ func TestVersionGCLoop_Stop(t *testing.T) {
 	h := gcTestHandlers(t, cfg)
 
 	// 模拟 RegisterRoutes 挂载路径：装配 scheduler 并注册 version-gc（间隔 1m）。
-	h.scheduler = NewScheduler(testLogger())
-	if err := h.scheduler.Register(Task{
+	h.scheduler = scheduler.NewScheduler(testLogger())
+	if err := h.scheduler.Register(scheduler.Task{
 		Name:            "version-gc",
 		Interval:        cfg.Versioning.GCInterval,
 		MaintenanceOnly: true,

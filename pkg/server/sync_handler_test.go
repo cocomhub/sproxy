@@ -5,6 +5,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -58,9 +59,7 @@ func newSyncTestEnvMulti(t *testing.T, remoteURL string, modifyCfg func(*Config)
 	remotes = append(remotes, extraRemotes...)
 	exec := syncexec.NewExecutor(h.syncTenantRoot, h.logger)
 	exec.SetTenantScopeResolver(h.SyncQuotaScope())
-	sm := syncmgr.NewManager(h.syncTenantRoot, h.listTenantIDs, nil, int(capacity.CategoryUserFiles), remotes,
-		exec, h.logger,
-		&syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true})
+	sm := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.syncTenantRoot, ListTenants: h.listTenantIDs, Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: h.logger, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true}})
 	sm.SetQuotaResolver(h.SyncQuotaStore())
 	h.SetSyncMgr(sm)
 
@@ -98,11 +97,11 @@ func emptyRemote(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/files", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(headerContentType, contentTypeJSON)
 		_, _ = w.Write([]byte(`{"files":[],"total":0}`))
 	})
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -138,7 +137,7 @@ func doSyncJSON(t *testing.T, method, url, body string) (int, []byte) {
 		t.Fatal(err)
 	}
 	if body != "" {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	}
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -384,7 +383,7 @@ func doSyncOwner(t *testing.T, mux *http.ServeMux, method, path, body string) (i
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
@@ -407,80 +406,73 @@ func TestSyncAPI_OwnerFiltering(t *testing.T) {
 	muxAdmin := syncOwnerMux(h, "")
 
 	// A 与 B 各创建任务
-	code, body := doSyncOwner(t, muxA, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"a.txt"}`)
-	if code != http.StatusCreated {
-		t.Fatalf("A 创建应 201, got %d: %s", code, body)
-	}
-	var taskA syncmgr.SyncTask
-	if err := json.Unmarshal(body, &taskA); err != nil {
-		t.Fatal(err)
-	}
-	if taskA.Owner != "ak-A" {
-		t.Fatalf("A 创建任务 Owner = %q, want ak-A", taskA.Owner)
-	}
-
-	code, body = doSyncOwner(t, muxB, "POST", "/api/sync/tasks", `{"direction":"push","remote":"r1","src":"b.txt"}`)
-	if code != http.StatusCreated {
-		t.Fatalf("B 创建应 201, got %d: %s", code, body)
-	}
-	var taskB syncmgr.SyncTask
-	if err := json.Unmarshal(body, &taskB); err != nil {
-		t.Fatal(err)
-	}
-	if taskB.Owner != "ak-B" {
-		t.Fatalf("B 创建任务 Owner = %q, want ak-B", taskB.Owner)
-	}
+	taskA := syncCreateTaskForOwner(t, muxA, "ak-A", "a.txt", "A")
+	taskB := syncCreateTaskForOwner(t, muxB, "ak-B", "b.txt", "B")
 
 	// A 的列表只含 A 的任务
-	code, body = doSyncOwner(t, muxA, "GET", "/api/sync/tasks", "")
-	if code != http.StatusOK {
-		t.Fatalf("A 列表应 200, got %d", code)
-	}
-	var listA struct {
-		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
-	}
-	if err := json.Unmarshal(body, &listA); err != nil {
-		t.Fatal(err)
-	}
-	if len(listA.Tasks) != 1 || listA.Tasks[0].ID != taskA.ID || listA.Tasks[0].Owner != "ak-A" {
-		t.Fatalf("A 列表应只含 A 的任务且带 owner: %s", body)
+	listA, bodyA := syncFetchTaskList(t, muxA, "A")
+	if len(listA) != 1 || listA[0].ID != taskA.ID || listA[0].Owner != "ak-A" {
+		t.Fatalf("A 列表应只含 A 的任务且带 owner: %s", bodyA)
 	}
 
 	// A Get B 的任务 → 404
-	code, _ = doSyncOwner(t, muxA, "GET", "/api/sync/tasks/"+taskB.ID, "")
-	if code != http.StatusNotFound {
-		t.Fatalf("A Get B 的任务应 404, got %d", code)
-	}
-
+	assertSyncOwnerDenied(t, muxA, "GET", "/api/sync/tasks/"+taskB.ID, "A Get B 的任务应")
 	// A 取消/删除 B 的任务 → 404
-	code, _ = doSyncOwner(t, muxA, "POST", "/api/sync/tasks/"+taskB.ID+"/cancel", "")
-	if code != http.StatusNotFound {
-		t.Fatalf("A 取消 B 的任务应 404, got %d", code)
-	}
-	code, _ = doSyncOwner(t, muxA, "DELETE", "/api/sync/tasks/"+taskB.ID, "")
-	if code != http.StatusNotFound {
-		t.Fatalf("A 删除 B 的任务应 404, got %d", code)
-	}
+	assertSyncOwnerDenied(t, muxA, "POST", "/api/sync/tasks/"+taskB.ID+"/cancel", "A 取消 B 的任务应")
+	assertSyncOwnerDenied(t, muxA, "DELETE", "/api/sync/tasks/"+taskB.ID, "A 删除 B 的任务应")
 
 	// B 的任务仍存在（未被 A 取消/删除）
-	code, _ = doSyncOwner(t, muxB, "GET", "/api/sync/tasks/"+taskB.ID, "")
+	code, _ := doSyncOwner(t, muxB, "GET", "/api/sync/tasks/"+taskB.ID, "")
 	if code != http.StatusOK {
 		t.Fatalf("B 的任务应仍存在, got %d", code)
 	}
 
 	// admin（空 owner）可见全部
-	code, body = doSyncOwner(t, muxAdmin, "GET", "/api/sync/tasks", "")
-	if code != http.StatusOK {
-		t.Fatalf("admin 列表应 200, got %d", code)
+	listAdmin, bodyAdmin := syncFetchTaskList(t, muxAdmin, "admin")
+	if len(listAdmin) != 2 {
+		t.Fatalf("admin 列表应含 2 条任务: %s", bodyAdmin)
 	}
-	var listAdmin struct {
-		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
+}
+
+// syncCreateTaskForOwner 以指定 owner 创建 push 同步任务并断言响应 owner 归属。
+func syncCreateTaskForOwner(t *testing.T, mux *http.ServeMux, owner, src, label string) syncmgr.SyncTask {
+	t.Helper()
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks", fmt.Sprintf(`{"direction":"push","remote":"r1","src":%q}`, src))
+	if code != http.StatusCreated {
+		t.Fatalf("%s 创建应 201, got %d: %s", label, code, body)
 	}
-	if err := json.Unmarshal(body, &listAdmin); err != nil {
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
 		t.Fatal(err)
 	}
-	if len(listAdmin.Tasks) != 2 {
-		t.Fatalf("admin 列表应含 2 条任务: %s", body)
+	if task.Owner != owner {
+		t.Fatalf("%s 创建任务 Owner = %q, want %s", label, task.Owner, owner)
+	}
+	return task
+}
+
+// syncFetchTaskList 以指定 owner 请求任务列表并断言 200，返回任务元数据与原始响应体。
+func syncFetchTaskList(t *testing.T, mux *http.ServeMux, label string) ([]syncmgr.SyncTaskMeta, string) {
+	t.Helper()
+	code, body := doSyncOwner(t, mux, "GET", "/api/sync/tasks", "")
+	if code != http.StatusOK {
+		t.Fatalf("%s 列表应 200, got %d", label, code)
+	}
+	var list struct {
+		Tasks []syncmgr.SyncTaskMeta `json:"tasks"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	return list.Tasks, string(body)
+}
+
+// assertSyncOwnerDenied 断言 owner mux 访问指定路径返回 404（跨租户不可见）。
+func assertSyncOwnerDenied(t *testing.T, mux *http.ServeMux, method, path, failPrefix string) {
+	t.Helper()
+	code, _ := doSyncOwner(t, mux, method, path, "")
+	if code != http.StatusNotFound {
+		t.Fatalf("%s 404, got %d", failPrefix, code)
 	}
 }
 
@@ -673,36 +665,15 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 10} })
 
 	mux := syncOwnerMux(h, "alice")
-	create := func(src, dst string) string {
-		t.Helper()
-		code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
-			`{"direction":"pull","remote":"r1","src":"`+src+`","dst":"`+dst+`","recursive":true}`)
-		if code != http.StatusCreated {
-			t.Fatalf("创建 pull(%s) 应 201, got %d: %s", src, code, body)
-		}
-		var task syncmgr.SyncTask
-		if err := json.Unmarshal(body, &task); err != nil {
-			t.Fatalf("解析失败: %v, body=%s", err, body)
-		}
-		return task.ID
-	}
-	idA := create("d1", "la")
-	idB := create("d2", "lb")
+	idA := createSyncPullTask(t, mux, "d1", "la")
+	idB := createSyncPullTask(t, mux, "d2", "lb")
 
 	// 等待两任务都到终态。
-	status := func(id string) string {
-		t.Helper()
-		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
-		var cur syncmgr.SyncTask
-		_ = json.Unmarshal(b, &cur)
-		return cur.Status
-	}
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		sA, sB := status(idA), status(idB)
-		terminal := func(s string) bool { return s == "completed" || s == "failed" || s == "cancelled" }
-		return terminal(sA) && terminal(sB)
+		return syncPullTaskTerminal(syncPullTaskStatus(t, mux, idA)) &&
+			syncPullTaskTerminal(syncPullTaskStatus(t, mux, idB))
 	}, "两个并发任务都应到达终态")
-	sA, sB := status(idA), status(idB)
+	sA, sB := syncPullTaskStatus(t, mux, idA), syncPullTaskStatus(t, mux, idB)
 	if sA != "completed" && sA != "failed" {
 		t.Fatalf("任务 A 应到终态, got %q", sA)
 	}
@@ -711,18 +682,9 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	}
 
 	// 至少一个任务失败（failed）或其文件级 ActionError（engine 吞错误后 completed）。
-	anyFileError := func(id string) bool {
-		_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
-		var cur syncmgr.SyncTask
-		_ = json.Unmarshal(b, &cur)
-		for _, r := range cur.Results {
-			if r.Action == "error" && r.Error != "" {
-				return true
-			}
-		}
-		return false
-	}
-	if sA != "failed" && sB != "failed" && !anyFileError(idA) && !anyFileError(idB) {
+	hasFailed := sA == "failed" || sB == "failed" ||
+		syncPullTaskHasFileError(t, mux, idA) || syncPullTaskHasFileError(t, mux, idB)
+	if !hasFailed {
 		t.Fatalf("两 pull 共 12 字节 > 上限 10，至少一个文件/任务应失败（A=%s B=%s）", sA, sB)
 	}
 
@@ -733,6 +695,49 @@ func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
 	if got := h.quotaBucketFor("alice", "user").Reserved(); got != 0 {
 		t.Fatalf("并发 pull 后 alice user 桶 Reserved()=%d want 0", got)
 	}
+}
+
+// createSyncPullTask 创建单个 pull 任务并返回任务 ID。
+func createSyncPullTask(t *testing.T, mux *http.ServeMux, src, dst string) string {
+	t.Helper()
+	code, body := doSyncOwner(t, mux, "POST", "/api/sync/tasks",
+		`{"direction":"pull","remote":"r1","src":"`+src+`","dst":"`+dst+`","recursive":true}`)
+	if code != http.StatusCreated {
+		t.Fatalf("创建 pull(%s) 应 201, got %d: %s", src, code, body)
+	}
+	var task syncmgr.SyncTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		t.Fatalf("解析失败: %v, body=%s", err, body)
+	}
+	return task.ID
+}
+
+// syncPullTaskStatus 查询任务当前状态。
+func syncPullTaskStatus(t *testing.T, mux *http.ServeMux, id string) string {
+	t.Helper()
+	_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+	var cur syncmgr.SyncTask
+	_ = json.Unmarshal(b, &cur)
+	return cur.Status
+}
+
+// syncPullTaskTerminal 判断任务状态是否为终态。
+func syncPullTaskTerminal(s string) bool {
+	return s == "completed" || s == "failed" || s == "cancelled"
+}
+
+// syncPullTaskHasFileError 报告任务是否含任一条文件级 error 结果。
+func syncPullTaskHasFileError(t *testing.T, mux *http.ServeMux, id string) bool {
+	t.Helper()
+	_, b := doSyncOwner(t, mux, "GET", "/api/sync/tasks/"+id, "")
+	var cur syncmgr.SyncTask
+	_ = json.Unmarshal(b, &cur)
+	for _, r := range cur.Results {
+		if r.Action == "error" && r.Error != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSyncAPI_RetryTask_PartialFiles 验证 POST /api/sync/tasks/{id}/retry：

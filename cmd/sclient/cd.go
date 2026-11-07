@@ -14,6 +14,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -30,65 +31,102 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) == 0 {
-				if st.CurrentDir == "" {
-					ios.WriteOutLine("/")
-				} else {
-					ios.WriteOutLine("/%s", st.CurrentDir)
-				}
+				printCurrentDirPath(st, ios)
 				return
 			}
-
 			path := args[0]
-			switch path {
-			case "/":
+			// 卷 URI（`<卷名>:/<路径>`；`<卷名>:` = 卷根）：切换工作目录**并切到该卷**。
+			// URI 里的路径是**该卷根起算的绝对路径**（不叠加原工作目录）。
+			if vol, inner, ok := splitVolumeURI(path); ok {
+				st.CurrentVolume = vol
 				st.CurrentDir = ""
-				saveCurrentDirValue(st.CurrentDir)
-				return
-			case ".":
-				return
-			case "..":
-				if st.CurrentDir == "" {
-					return
+				// URI 路径已含前导斜杠（卷根绝对）⇒ 状态内目录不带前导斜杠（既有约定）。
+				inner = strings.TrimPrefix(inner, "/")
+				switch {
+				case inner == "" || inner == ".":
+				case cdApplySpecialPath(st, inner):
+					// `..`/`.` 已按卷内语义处理（卷根下 `..` = 原地）
+				default:
+					cdApplyNormalPath(st, ios, inner)
 				}
-				parts := strings.Split(st.CurrentDir, "/")
-				if len(parts) <= 1 {
-					st.CurrentDir = ""
-				} else {
-					st.CurrentDir = strings.Join(parts[:len(parts)-1], "/")
-				}
+				saveCurrentVolumeValue(st.CurrentVolume)
 				saveCurrentDirValue(st.CurrentDir)
 				return
 			}
-
-			newDir := path
-			if st.CurrentDir != "" {
-				newDir = st.CurrentDir + "/" + path
+			// 前导 `/` = **本地卷**根（用户口径 2026-10-13）：显式离开当前卷 + 从根起算。
+			if strings.HasPrefix(path, "/") {
+				st.CurrentVolume = ""
+				st.CurrentDir = ""
+				saveCurrentVolumeValue("")
+				// 状态内目录**不带**前导斜杠（与既有约定一致）：去掉后按「从根起算」拼接。
+				path = strings.TrimPrefix(path, "/")
 			}
-			cleaned := filepath.ToSlash(filepath.Clean(newDir))
-			if cleaned == "." {
-				cleaned = ""
-			}
-			if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "../") {
-				ios.WriteErrLine("无效的路径")
+			if cdApplySpecialPath(st, path) {
+				saveCurrentVolumeValue(st.CurrentVolume)
 				return
 			}
-			st.CurrentDir = cleaned
-			saveCurrentDirValue(st.CurrentDir)
+			cdApplyNormalPath(st, ios, path)
+			saveCurrentVolumeValue(st.CurrentVolume)
 		},
 	}
+}
+
+// printCurrentDirPath 打印当前工作目录（`<卷名>:/<目录>`；本地卷省略卷名 ⇒ `/目录`）。
+func printCurrentDirPath(st *state.State, ios cli.IOStreams) {
+	ios.WriteOutLine("%s", st.Location())
+}
+
+// cdApplySpecialPath 处理 cd 的特殊路径（/、.、..）；返回 true 表示已处理（调用方直接返回）。
+func cdApplySpecialPath(st *state.State, path string) bool {
+	switch path {
+	case "/":
+		st.CurrentDir = ""
+		saveCurrentDirValue(st.CurrentDir)
+	case ".":
+		return true
+	case "..":
+		if st.CurrentDir == "" {
+			return true
+		}
+		parts := strings.Split(st.CurrentDir, "/")
+		if len(parts) <= 1 {
+			st.CurrentDir = ""
+		} else {
+			st.CurrentDir = strings.Join(parts[:len(parts)-1], "/")
+		}
+		saveCurrentDirValue(st.CurrentDir)
+		return true
+	default:
+		return false
+	}
+	return true
+}
+
+// cdApplyNormalPath 处理普通相对路径：拼接当前目录、清理、拒绝越界后写入目标目录。
+func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) {
+	newDir := path
+	if st.CurrentDir != "" {
+		newDir = st.CurrentDir + "/" + path
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(newDir))
+	if cleaned == "." {
+		cleaned = ""
+	}
+	if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "../") {
+		ios.WriteErrLine("无效的路径")
+		return
+	}
+	st.CurrentDir = cleaned
+	saveCurrentDirValue(st.CurrentDir)
 }
 
 // NewCmdPwd 创建独立的 pwd 命令工厂函数。
 func NewCmdPwd(st *state.State, ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pwd",
-		Short: "打印当前目录",
+		Short: "打印当前目录（含所在卷：`<卷名>:/<目录>`）",
 		Run: func(cmd *cobra.Command, args []string) {
-			if st.CurrentDir == "" {
-				ios.WriteOutLine("/")
-			} else {
-				ios.WriteOutLine("/%s", st.CurrentDir)
-			}
+			ios.WriteOutLine("%s", st.Location())
 		},
 	}
 }
@@ -101,9 +139,13 @@ func NewCmdMkdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 		Long:  "在服务端上传目录下创建指定子目录。路径相对当前目录 (cd)，支持绝对路径 (/开头)。",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -130,9 +172,13 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 		Long:  "删除服务端上传目录下的指定目录（含所有内容）。路径相对当前目录。\n使用 --force 跳过确认提示。",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -142,22 +188,19 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 				return fmt.Errorf(errFmtInvalidPath, err)
 			}
 
-			entries, listErr := svc.List(cmd.Context(), dirname)
+			// confirmed = 「用户已确认删除」。服务端 rmdir **恒**要求 force=true（最后一道闸门），
+			// 故此处的确认必须真的翻成 force=true 传给服务端——此前 CLI 从不发送该参数 ⇒
+			// `rmdir`（含 --force）恒 400「请使用 ?force=true 确认删除」（外部卷更早被 501 掩盖）。
 			force, _ := cmd.Flags().GetBool("force")
-
-			if listErr == nil && len(entries) > 0 && !force {
-				fmt.Fprintf(ios.ErrOut, "警告: 目录 '%s' 包含 %d 个条目，非空删除将清除所有内容\n", dirname, len(entries))
-				fmt.Fprint(ios.ErrOut, "确认删除? (y/N): ")
-				reader := bufio.NewReader(ios.In)
-				answer, _ := reader.ReadString('\n')
-				answer = strings.TrimSpace(strings.ToLower(answer))
-				if answer != "y" && answer != "yes" {
-					fmt.Fprintln(ios.Out, "已取消")
-					return nil
-				}
+			confirmed, cerr := confirmRmdir(cmd, svc, ios, dirname, force)
+			if cerr != nil {
+				return cerr
+			}
+			if !confirmed {
+				return nil // 用户取消（交互回答非 y）
 			}
 
-			if err := svc.Rmdir(cmd.Context(), dirname); err != nil {
+			if err := svc.Rmdir(cmd.Context(), dirname, confirmed); err != nil {
 				ios.WriteErrLine("删除目录失败: %v", err)
 				return fmt.Errorf("删除目录失败: %w", err)
 			}
@@ -173,10 +216,47 @@ func NewCmdRmdir(factory clientfactory.Factory, ios cli.IOStreams, st *state.Sta
 
 const cacheDirName = "sproxy"
 const cacheFile = "current_dir"
+const cacheFileVolume = "current_volume"
 
-// saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录。
+// stateScope 返回漫游状态的**作用域**（当前 context 名，已清洗为文件名安全形态）。
+// 空串 = 未解析 context（旧配置/测试）⇒ 回落历史全局文件，零回归。
+func stateScope() string {
+	if resolvedContext == nil {
+		return ""
+	}
+	return sanitizeScope(resolvedContext.ContextName)
+}
+
+// sanitizeScope 把 context 名清洗成文件名安全段（只保留 [A-Za-z0-9._-]；
+// 其余字符一律用下划线替代，避免路径穿越/分隔符污染缓存目录）。
+func sanitizeScope(name string) string {
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// stateFileName 返回按作用域隔离的缓存文件名：`current_dir.<scope>`；
+// scope 为空时返回历史全局名。
+func stateFileName(base string) string {
+	if s := stateScope(); s != "" {
+		return base + "." + s
+	}
+	return base
+}
+
+// saveCurrentDirValue 将指定目录持久化到 XDG 缓存目录（按 context 隔离）。
 func saveCurrentDirValue(dir string) {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(cacheFile)))
 	if err != nil {
 		return
 	}
@@ -184,15 +264,81 @@ func saveCurrentDirValue(dir string) {
 	_ = os.WriteFile(cachePath, []byte(dir), 0644)
 }
 
-// loadCurrentDir 从 XDG 缓存目录加载当前目录。
+// saveCurrentVolumeValue 持久化当前工作目录所在卷（空串也写：显式回到本地卷要覆盖旧值）。
+func saveCurrentVolumeValue(vol string) {
+	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(cacheFileVolume)))
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0755)
+	_ = os.WriteFile(cachePath, []byte(vol), 0644)
+}
+
+// loadCurrentVolume 从 XDG 缓存目录加载当前工作目录所在卷（无缓存 = 本地卷）。
+func loadCurrentVolume() string {
+	return strings.TrimSpace(readScopedState(cacheFileVolume))
+}
+
+// loadCurrentDir 从 XDG 缓存目录加载当前目录（按 context 隔离）。
 func loadCurrentDir() string {
-	cachePath, err := xdg.CacheFile(filepath.Join(cacheDirName, cacheFile))
+	return strings.TrimSpace(readScopedState(cacheFile))
+}
+
+// readScopedState 读取按作用域隔离的状态文件；作用域文件不存在时，从**历史全局文件**
+// 迁移一次（读取 + 写入作用域文件 + 删除全局文件，删除是原子的 ⇒ 多 context 并发迁移
+// 时只有一个能拿到旧值，其余回落到空，不会串环境）。
+func readScopedState(base string) string {
+	scoped, err := xdg.CacheFile(filepath.Join(cacheDirName, stateFileName(base)))
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
+	if data, rerr := os.ReadFile(scoped); rerr == nil {
+		return string(data)
+	}
+	// 仅当作用域非空才迁移（空作用域本身就是全局文件）。
+	if stateScope() == "" {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	legacy, lerr := xdg.CacheFile(filepath.Join(cacheDirName, base))
+	if lerr != nil {
+		return ""
+	}
+	data, rerr := os.ReadFile(legacy)
+	if rerr != nil {
+		return ""
+	}
+	_ = os.MkdirAll(filepath.Dir(scoped), 0o755)
+	if werr := os.WriteFile(scoped, data, 0o644); werr != nil {
+		return string(data) // 写失败也按旧值生效（不阻断命令）
+	}
+	_ = os.Remove(legacy) // 迁移完成：旧全局文件删除，避免其它 context 再继承
+	return string(data)
+}
+
+// confirmRmdir 决定「本次删除是否已获用户确认」（= 发给服务端的 force=true）：
+//   - `--force`：直接确认；
+//   - 空目录（列目录成功且无条目）：无需确认（与历史交互语义一致）；
+//   - 非空目录：交互确认，回答非 y/yes → (false, nil)（调用方按取消处理，**不删**）；
+//   - 列目录失败且未 `--force`：**不猜** → 返回错误（绝不静默递归删用户内容）。
+func confirmRmdir(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams, dirname string, force bool) (bool, error) {
+	if force {
+		return true, nil
+	}
+	entries, listErr := svc.List(cmd.Context(), dirname)
+	if listErr != nil {
+		fmt.Fprintf(ios.ErrOut, "无法确认目录内容（%v），请使用 --force 确认删除\n", listErr)
+		return false, fmt.Errorf("无法确认目录内容: %w", listErr)
+	}
+	if len(entries) == 0 {
+		return true, nil
+	}
+	fmt.Fprintf(ios.ErrOut, "警告: 目录 '%s' 包含 %d 个条目，非空删除将清除所有内容\n", dirname, len(entries))
+	fmt.Fprint(ios.ErrOut, "确认删除? (y/N): ")
+	answer, _ := bufio.NewReader(ios.In).ReadString('\n')
+	switch strings.TrimSpace(strings.ToLower(answer)) {
+	case "y", "yes":
+		return true, nil
+	}
+	fmt.Fprintln(ios.Out, "已取消")
+	return false, nil
 }

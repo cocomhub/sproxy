@@ -19,14 +19,14 @@ package server
 // 卷根不可达跳过该卷（fail-closed：不清 = 安全方向，不误删）。
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -82,7 +82,7 @@ func (h *Handlers) volumeRetentionPassFor(volName string) {
 		h.retentionCleanShares(v.Retention.ShareTTL, now, log)
 	}
 	// 审计：仅默认卷（单点权威）；按龄截断内存事件 + 落盘 audit.log 同步重写。
-	if v.Retention.AuditTTL > 0 && h.auditStore != nil {
+	if v.Retention.AuditTTL > 0 && h.auditJournal != nil {
 		h.retentionCleanAudit(v.Retention.AuditTTL, now, log)
 	}
 }
@@ -115,28 +115,33 @@ func (h *Handlers) retentionCleanVersions(v volume.Volume, now time.Time, log *s
 		owners = []string{storage.AnonymousOwner}
 	}
 	for _, owner := range owners {
-		// 版本目录 <卷根>/<owner>/version/ 下每个子目录是一个 rel。
-		verAbs, ok := root.Abs(owner + "/version")
-		if !ok {
+		h.retentionCleanVersionsOwner(root, v, owner, now, log)
+	}
+}
+
+// retentionCleanVersionsOwner 遍历单个 owner 的 version 桶目录，逐 rel 做保留期清理。
+func (h *Handlers) retentionCleanVersionsOwner(root *storage.Root, v volume.Volume, owner string, now time.Time, log *slog.Logger) {
+	// 版本目录 <卷根>/<owner>/version/ 下每个子目录是一个 rel。
+	verAbs, ok := root.Abs(owner + "/version")
+	if !ok {
+		return
+	}
+	entries, err := os.ReadDir(verAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		log.Warn("卷级 retention：读取版本桶失败", "volume", v.Name, "owner", owner, "error", err)
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
 			continue
 		}
-		entries, err := os.ReadDir(verAbs)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			log.Warn("卷级 retention：读取版本桶失败", "volume", v.Name, "owner", owner, "error", err)
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			rel := e.Name()
-			if err := h.retentionCleanVersionsRel(v, owner, rel, now, log); err != nil {
-				log.Warn("卷级 retention：清理版本目录失败（尽力而为）",
-					"volume", v.Name, "owner", owner, "rel", rel, "error", err)
-			}
+		rel := e.Name()
+		if err := h.retentionCleanVersionsRel(v, owner, rel, now, log); err != nil {
+			log.Warn("卷级 retention：清理版本目录失败（尽力而为）",
+				"volume", v.Name, "owner", owner, "rel", rel, "error", err)
 		}
 	}
 }
@@ -172,7 +177,7 @@ func (h *Handlers) retentionCleanVersionsRel(v volume.Volume, owner, rel string,
 // 持久化文件原子删。与 share-cleanup（expire_at 语义）并存：卷级兜底覆盖「expire_at
 // 很长但创建已久」的链接。
 func (h *Handlers) retentionCleanShares(ttl time.Duration, now time.Time, log *slog.Logger) {
-	// 复用 ShareStore 的锁与持久化删除路径：先取副本判定，再在锁内删除。
+	// 复用 share.Store 的锁与持久化删除路径：先取副本判定，再在锁内删除。
 	for _, link := range h.shareStore.List("") {
 		if volumeRetentionExpired(link.CreatedAt, now, ttl) {
 			if err := h.shareStore.Revoke(link.Token, ""); err != nil {
@@ -186,99 +191,41 @@ func (h *Handlers) retentionCleanShares(ttl time.Duration, now time.Time, log *s
 // 落盘同步重写：保留窗口内行（TS >= cutoff），写入临时文件后原子重命名
 // （audit.log 为 append-only JSON lines；重写不破坏审计连续性）。
 func (h *Handlers) retentionCleanAudit(ttl time.Duration, now time.Time, log *slog.Logger) {
+	if h.auditJournal == nil {
+		return
+	}
 	cutoff := now.Add(-ttl)
-	st := h.auditStore
-	// 内存：仅保留 TS >= cutoff 的事件。
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	kept := st.events[:0]
-	for _, ev := range st.events {
-		if !ev.TS.Before(cutoff) {
-			kept = append(kept, ev)
-		}
+	// TTL 只作用于**合规段族**（本 journal 即合规族；任务/WAL 族不受 TTL 约束 —— 设计 E25/M1-13）。
+	// 内存与磁盘在同一 Journal 事务内完成（Rewrite 内部实现：读入 → 过滤 → tmp → rename）。
+	if err := h.auditJournal.Rewrite(func(e audit.Entry) bool {
+		return !e.TS.Before(cutoff)
+	}); err != nil {
+		log.Warn("卷级 retention：审计日志重写失败（下次重试）", "error", err.Error())
 	}
-	st.events = kept
-	// 落盘同步重写（audit.log → tmp → rename）：先关闭当前 append 句柄——
-	// Windows 下对仍被打开的文件 Rename 覆盖会失败；重写后句柄置 nil，下次 Append 懒重开。
-	if st.file != nil {
-		_ = st.file.Close()
-		st.file = nil
-	}
-	if st.logPath != "" {
-		if err := rewriteAuditLog(st.logPath, cutoff, log); err != nil {
-			log.Warn("卷级 retention：审计日志重写失败（内存已截断，落盘待下次）", "error", err)
+	// **冷段（已归档段）同样受保留期约束**（评审 R13 P2）：`Rewrite` 只处理在线段，而开启归档后
+	// 超龄数据大多已搬到冷存储 ⇒ 不清理则「保留期不生效、磁盘只增不减」。
+	// 时间未知的冷段保守保留（PurgeCold 内保证）。
+	if coldFS := h.auditColdFS(); coldFS != nil {
+		// R14 NEW-4：远端冷卷的 List/Delete 可能无限挂起（此前用 context.Background()）⇒
+		// 保留期任务被永久阻塞、后续清理不再推进。给单轮清理一个明确上限。
+		pctx, cancel := context.WithTimeout(context.Background(), auditColdRetentionTimeout)
+		n, perr := audit.PurgeCold(pctx, coldFS, "", cutoff)
+		cancel()
+		if perr != nil {
+			log.Warn("卷级 retention：清理过期冷段失败（部分保留，下次重试）",
+				"removed", n, "error", perr.Error())
+		} else if n > 0 {
+			log.Info("卷级 retention：已清理过期冷段", "removed", n)
 		}
 	}
 }
 
+// auditColdRetentionTimeout 是**单轮**冷段保留期清理的时限（远端冷卷 List/Delete 不得无限挂起）。
+const auditColdRetentionTimeout = 30 * time.Second
+
 // rewriteAuditLog 把 audit.log 中 TS < cutoff 的行剔除后原子重写（tmp + rename）。
 // 源文件先读入内存并关闭句柄再 rename——Windows 下对仍被打开的 dest 文件 Rename 覆盖
 // 会 Access denied（本仓 storage.AtomicRename 同理：先关源再替）。
-func rewriteAuditLog(path string, cutoff time.Time, log *slog.Logger) error {
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	var kept []string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var ev AuditEvent
-		if uerr := json.Unmarshal([]byte(line), &ev); uerr != nil {
-			continue // 坏行剔除（与 load 同策略）
-		}
-		if ev.TS.Before(cutoff) {
-			continue
-		}
-		kept = append(kept, line)
-	}
-	scanErr := scanner.Err()
-	_ = f.Close() // 关闭源句柄（rename 前必须：Windows 对打开中的 dest 拒绝覆盖）
-	if scanErr != nil {
-		return scanErr
-	}
-	tmp := path + ".retention.tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	writer := bufio.NewWriter(out)
-	for _, line := range kept {
-		if _, err := writer.WriteString(line + "\n"); err != nil {
-			out.Close()
-			os.Remove(tmp)
-			return err
-		}
-	}
-	if err := writer.Flush(); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// 替换目标：先删后替（与仓库 AtomicRename 的 Windows 语义一致——rename 覆盖对
-	// 打开中/只读目标不可靠，先 Remove 再 rename 更稳；此处 dest 已关闭句柄）。
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
 
 // filesVersionTime 由版本条目还原创建时间（files.VersionIDTime 语义，fallback 用当前时间——
 // 历史回绕遗留 ID 回落零值，早于任何 cutoff → 删除，与全局保留期清理同策略）。
@@ -300,6 +247,9 @@ func (h *Handlers) removeVersionFile(tnt *storage.Tenant, owner, rel string, ent
 	if info, err := root.Stat(delRel); err == nil {
 		delSize = info.Size()
 	}
+	// 释放口径与写入/结算**同源**（独立复审「释放≠结算」类根治，2026-10-18）：必须在 Remove
+	// **之前**取卷自报实测足迹——否则对 secretdata（parity + meta pad）少释放 ⇒ 幽灵占用/假 507。
+	delSize = h.fileService().ReleaseChargeFor(tnt, owner, delRel, delSize)
 	if err := root.Remove(delRel); err != nil {
 		return err
 	}
@@ -308,7 +258,7 @@ func (h *Handlers) removeVersionFile(tnt *storage.Tenant, owner, rel string, ent
 }
 
 // retentionShareDir 返回分享持久化目录（默认卷 anonymous/meta/share）。
-// 供保留期清理按创建时间扫描持久化文件（当前实现直接经 ShareStore.List + Revoke
+// 供保留期清理按创建时间扫描持久化文件（当前实现直接经 share.Store.List + Revoke
 // 复用同一删除路径，本 helper 保留供未来按磁盘扫描形态扩展）。
 //
 //lint:file-ignore U1000 保留：磁盘扫描形态的演进钩子。

@@ -12,3 +12,4 @@ tools/genbenchview
 tools/gencoverview
 tools/genreport
 tools/gentimingview
+tools/randread

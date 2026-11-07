@@ -72,30 +72,38 @@ func TestService_UploadStatus_ByFilename_FileAlreadyCompleted(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newChunkedTestEnv(t)
-			svc := env.handlers(4)
-			abs := filepath.Join(env.dir, "user", "done.bin")
-			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-				t.Fatalf("MkdirAll: %v", err)
-			}
-			if err := os.WriteFile(abs, body, 0o644); err != nil {
-				t.Fatalf("WriteFile: %v", err)
-			}
-			if tc.seedLedger {
-				env.cs.Set("user/done.bin", sha256Hex(body))
-			}
-
-			rr, resp := statusByFilename(t, svc, "done.bin")
-			if rr.Code != http.StatusOK {
-				t.Fatalf("应 200, got %d: %s", rr.Code, rr.Body.String())
-			}
-			if !resp.Success || !resp.Completed || resp.Filename != "done.bin" {
-				t.Fatalf("响应=%+v want 完成态", resp)
-			}
-			if !tc.wantChecksm || resp.FileChecksum != sha256Hex(body) {
-				t.Fatalf("FileChecksum=%q want %q", resp.FileChecksum, sha256Hex(body))
-			}
+			checkFileAlreadyCompletedCase(t, tc.seedLedger, tc.wantChecksm, body)
 		})
+	}
+}
+
+// checkFileAlreadyCompletedCase 抽出的单用例断言 helper（降低
+// TestService_UploadStatus_ByFilename_FileAlreadyCompleted 复杂度）：种子台账可选，断言完成态与
+// checksum 台账/实时计算口径。
+func checkFileAlreadyCompletedCase(t *testing.T, seedLedger, wantChecksm bool, body []byte) {
+	t.Helper()
+	env := newChunkedTestEnv(t)
+	svc := env.handlers(4)
+	abs := filepath.Join(env.dir, "user", "done.bin")
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(abs, body, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if seedLedger {
+		env.cs.Set("user/done.bin", sha256Hex(body))
+	}
+
+	rr, resp := statusByFilename(t, svc, "done.bin")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("应 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !resp.Success || !resp.Completed || resp.Filename != "done.bin" {
+		t.Fatalf("响应=%+v want 完成态", resp)
+	}
+	if !wantChecksm || resp.FileChecksum != sha256Hex(body) {
+		t.Fatalf("FileChecksum=%q want %q", resp.FileChecksum, sha256Hex(body))
 	}
 }
 

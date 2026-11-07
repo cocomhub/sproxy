@@ -33,7 +33,7 @@ func (m *memWriterFS) Stat(context.Context, string) (*sync.Entry, error)     { r
 func (m *memWriterFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
-func (m *memWriterFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (m *memWriterFS) WriteFile(ctx context.Context, key sync.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	m.writeCalled = true
 	return nil
 }
@@ -63,7 +63,7 @@ func newTestBackend(t *testing.T, writable bool) (*FS, *memWriterFS) {
 func TestBackend_WritableInjectsWriter(t *testing.T) {
 	t.Parallel()
 	fs, w := newTestBackend(t, true)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), sync.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("writable=true WriteFile = %v, want 转发成功", err)
 	}
 	if !w.writeCalled {
@@ -75,7 +75,7 @@ func TestBackend_WritableInjectsWriter(t *testing.T) {
 func TestBackend_NotWritable_FailClosed(t *testing.T) {
 	t.Parallel()
 	fs, w := newTestBackend(t, false)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(err, ErrReadOnly) {
+	if err := fs.WriteFile(context.Background(), sync.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("writable=false WriteFile = %v, want ErrReadOnly", err)
 	}
 	if w.writeCalled {
@@ -108,7 +108,7 @@ func TestBackend_NewBackend_Writable(t *testing.T) {
 	}
 	w := &memWriterFS{}
 	fs = fs.WithWriter(w)
-	if err := fs.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), sync.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("writable=true WriteFile = %v, want 转发成功", err)
 	}
 	if !w.writeCalled {
@@ -119,7 +119,7 @@ func TestBackend_NewBackend_Writable(t *testing.T) {
 	if roErr != nil {
 		t.Fatal(roErr)
 	}
-	if werr := ro.WriteFile(context.Background(), "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(werr, ErrReadOnly) {
+	if werr := ro.WriteFile(context.Background(), sync.LogicalKey{}, "a.txt", strings.NewReader("x"), 1, 0); !errors.Is(werr, ErrReadOnly) {
 		t.Fatalf("writable=false WriteFile = %v, want ErrReadOnly", werr)
 	}
 }

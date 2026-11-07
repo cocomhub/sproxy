@@ -34,7 +34,7 @@ func TestService_IndexSnapshotReload(t *testing.T) {
 	// Service A：搜索触发索引构建。
 	env.rebuild()
 	s1 := env.newService()
-	if n, err := s1.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(n.Files) != 1 {
+	if n, err := s1.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(n.Files) != 1 {
 		t.Fatalf("搜索命中数 = %d err=%v, want 1（构建索引）", len(n.Files), err)
 	}
 	// 保存快照。
@@ -58,7 +58,7 @@ func TestService_IndexSnapshotReload(t *testing.T) {
 
 	// Service B（新实例）：搜索命中（载入快照，无需全量 WalkDir）。
 	s2 := env.newService()
-	if n, err := s2.Search(SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(n.Files) != 1 {
+	if n, err := s2.Search(t.Context(), SearchQuery{Owner: "alice", Query: "a.txt"}); err != nil || len(n.Files) != 1 {
 		t.Fatalf("重建后搜索命中数 = %d err=%v, want 1（快照载入）", len(n.Files), err)
 	}
 	// 载入路径不重建 → 快照文件 mtime 不变（变异：不载入 → 重建覆盖 → mtime 变 → 红）。

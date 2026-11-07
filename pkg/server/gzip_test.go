@@ -82,32 +82,44 @@ func TestGzipMiddleware_TableDriven(t *testing.T) {
 func assertGzipResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string, wantGzip bool) {
 	t.Helper()
 	if wantGzip {
-		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-			t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
-		}
-		found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
-		if !found {
-			t.Fatal("expected Vary: Accept-Encoding header")
-		}
-		gr, err := gzip.NewReader(rec.Body)
-		if err != nil {
-			t.Fatalf("failed to create gzip reader: %v", err)
-		}
-		defer gr.Close()
-		body, err := io.ReadAll(gr)
-		if err != nil {
-			t.Fatalf("failed to read decompressed body: %v", err)
-		}
-		if string(body) != wantBody {
-			t.Fatalf("expected decompressed body %q, got: %q", wantBody, string(body))
-		}
+		assertGzipCompressedResult(t, rec, wantBody)
 	} else {
-		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
-			t.Fatalf("expected no Content-Encoding, got: %q", enc)
-		}
-		if rec.Body.String() != wantBody {
-			t.Fatalf("expected body %q, got: %q", wantBody, rec.Body.String())
-		}
+		assertGzipPlainResult(t, rec, wantBody)
+	}
+}
+
+// assertGzipCompressedResult 断言响应已 gzip 压缩且解压后等于 wantBody。
+func assertGzipCompressedResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string) {
+	t.Helper()
+	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+		t.Fatalf("expected Content-Encoding: gzip, got: %q", enc)
+	}
+	found := slices.Contains(rec.Header().Values("Vary"), "Accept-Encoding")
+	if !found {
+		t.Fatal("expected Vary: Accept-Encoding header")
+	}
+	gr, err := gzip.NewReader(rec.Body)
+	if err != nil {
+		t.Fatalf("failed to create gzip reader: %v", err)
+	}
+	defer gr.Close()
+	body, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("failed to read decompressed body: %v", err)
+	}
+	if string(body) != wantBody {
+		t.Fatalf("expected decompressed body %q, got: %q", wantBody, string(body))
+	}
+}
+
+// assertGzipPlainResult 断言响应未压缩且完整等于 wantBody。
+func assertGzipPlainResult(t *testing.T, rec *httptest.ResponseRecorder, wantBody string) {
+	t.Helper()
+	if enc := rec.Header().Get("Content-Encoding"); enc != "" {
+		t.Fatalf("expected no Content-Encoding, got: %q", enc)
+	}
+	if rec.Body.String() != wantBody {
+		t.Fatalf("expected body %q, got: %q", wantBody, rec.Body.String())
 	}
 }
 
@@ -118,7 +130,7 @@ func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 	// Test with error status (should NOT be gzipped per middleware logic)
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("not found"))
+		_, _ = w.Write([]byte(msgNotFound))
 	})
 
 	mw := GzipMiddleware(slog.Default())
@@ -138,7 +150,7 @@ func TestGzipMiddleware_WriteHeaderAndFlush(t *testing.T) {
 	if rec.Header().Get("Content-Encoding") == "gzip" {
 		t.Fatal("expected no Content-Encoding: gzip for error response")
 	}
-	if body := rec.Body.String(); body != "not found" {
+	if body := rec.Body.String(); body != msgNotFound {
 		t.Fatalf("expected 'not found', got: %q", body)
 	}
 }
@@ -218,5 +230,26 @@ func TestGzipMiddleware_NoAcceptEncoding(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "plain") {
 		t.Fatalf("expected 'plain' in body, got: %q", rec.Body.String())
+	}
+}
+
+// TestGzipSkipRequest_FileResponsePaths 文件响应面必须跳过 gzip（P1 对抗评审）：
+// Content-Type 在 handler 内才设置，前置白名单看不到；若不跳过，可信卷读校验在 200 头
+// 之后失败时 gzip 会把「已校验前缀」打成无 Content-Length 的合法 gzip 流 → 静默截断。
+func TestGzipSkipRequest_FileResponsePaths(t *testing.T) {
+	t.Parallel()
+	for _, p := range []string{"/download", "/download/chunk", "/s3/bucket/key", "/dav", "/dav/x"} {
+		r := httptest.NewRequest("GET", p, nil)
+		r.Header.Set("Accept-Encoding", "gzip")
+		if !gzipSkipRequest(httptest.NewRecorder(), r) {
+			t.Fatalf("%s 应跳过 gzip（二进制文件响应）", p)
+		}
+	}
+	for _, p := range []string{"/api/tasks", "/api/files"} {
+		r := httptest.NewRequest("GET", p, nil)
+		r.Header.Set("Accept-Encoding", "gzip")
+		if gzipSkipRequest(httptest.NewRecorder(), r) {
+			t.Fatalf("%s 不应跳过 gzip", p)
+		}
 	}
 }

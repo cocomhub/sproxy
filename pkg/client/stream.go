@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 )
 
 // OpenDownload 流式下载远端文件，返回响应 body（io.ReadCloser）。
@@ -27,6 +28,14 @@ func (c *FileClient) OpenDownload(ctx context.Context, filename string) (io.Read
 	resp, err := c.doRequest(ctx, "GET", urlPath, nil, nil)
 	if err != nil {
 		return nil, fmt.Errorf(errFmtRequestFailed, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// **项目 not-exist 约定**（见 pkg/sync.IsNotExist）：卷内账本据「不存在 vs 真错误」
+		// 区分「空账本（首次运行）」与「不可确定 ⇒ 判损坏 ⇒ fail-closed 拒写」⇒
+		// 404 必须包装 os.ErrNotExist，否则该卷账本恒拒写（整卷不可用 ✗）。
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("下载失败 (状态码: %d): %s: %w", resp.StatusCode, string(body), os.ErrNotExist)
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))

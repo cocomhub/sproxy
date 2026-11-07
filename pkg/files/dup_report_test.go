@@ -117,18 +117,7 @@ func TestDedupReport_LedgerMatchesScan(t *testing.T) {
 	env.enableDedup()
 	env.enableWriteDefaults()
 
-	body := []byte("ledger-scan-same-content")
-	cs := sha256Hex(body)
-	if rr := env.upload(t, "alice", "a.txt", body, cs, 0); rr.Code != 200 {
-		t.Fatalf("上传 a.txt: %d %s", rr.Code, rr.Body.String())
-	}
-	if rr := env.upload(t, "alice", "b.txt", body, cs, 0); rr.Code != 200 {
-		t.Fatalf("上传 b.txt: %d %s", rr.Code, rr.Body.String())
-	}
-	unique := []byte("ledger-unique")
-	if rr := env.upload(t, "alice", "u.txt", unique, sha256Hex(unique), 0); rr.Code != 200 {
-		t.Fatalf("上传 u.txt: %d %s", rr.Code, rr.Body.String())
-	}
+	body, unique, _ := uploadLedgerFixture(t, env)
 
 	ds := env.dedupStoreFor("alice")
 	if ds == nil {
@@ -146,28 +135,50 @@ func TestDedupReport_LedgerMatchesScan(t *testing.T) {
 		t.Fatalf("ScanVolume: %v", err)
 	}
 
+	assertLedgerScanEquivalence(t, ledgerRep, scanRep, int64(len(body)), int64(len(unique)))
+}
+
+// uploadLedgerFixture 上传两同内容文件 + 一唯一文件（抽取自 LedgerMatchesScan 的上传段）。
+func uploadLedgerFixture(t *testing.T, env *dirsEnv) (body, unique []byte, cs string) {
+	t.Helper()
+	body = []byte("ledger-scan-same-content")
+	cs = sha256Hex(body)
+	if rr := env.upload(t, "alice", "a.txt", body, cs, 0); rr.Code != 200 {
+		t.Fatalf("上传 a.txt: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := env.upload(t, "alice", "b.txt", body, cs, 0); rr.Code != 200 {
+		t.Fatalf("上传 b.txt: %d %s", rr.Code, rr.Body.String())
+	}
+	unique = []byte("ledger-unique")
+	if rr := env.upload(t, "alice", "u.txt", unique, sha256Hex(unique), 0); rr.Code != 200 {
+		t.Fatalf("上传 u.txt: %d %s", rr.Code, rr.Body.String())
+	}
+	return body, unique, cs
+}
+
+// assertLedgerScanEquivalence 断言 ledger 与 scan 报告同输入同输出（组内容等价 + scan 语义精确；
+// 台账不存 size/mtime，见 ReportFromLedger 注释）。变异点：漏过滤 refs<2 → ledger 报告多出单引用组 → 红。
+func assertLedgerScanEquivalence(t *testing.T, ledgerRep, scanRep *Report, bodyLen, uniqueLen int64) {
+	t.Helper()
 	if len(ledgerRep.Groups) != 1 {
 		t.Fatalf("ledger 组数=%d want 1（唯一文件被过滤）(groups=%+v)", len(ledgerRep.Groups), ledgerRep.Groups)
 	}
 	if len(scanRep.Groups) != 1 {
 		t.Fatalf("scan 组数=%d want 1", len(scanRep.Groups))
 	}
-	// ScannedFiles/TotalBytes/DuplicateBytes 是 scan 语义（台账不存 size/mtime，
-	// 见 ReportFromLedger 注释）：只断言 scan 精确 + ledger 组内容等价。
 	if scanRep.ScannedFiles != 3 {
 		t.Fatalf("scan ScannedFiles=%d want 3", scanRep.ScannedFiles)
 	}
-	if scanRep.TotalBytes != int64(len(body))*2+int64(len(unique)) {
-		t.Fatalf("scan TotalBytes=%d want %d", scanRep.TotalBytes, int64(len(body))*2+int64(len(unique)))
+	if scanRep.TotalBytes != bodyLen*2+uniqueLen {
+		t.Fatalf("scan TotalBytes=%d want %d", scanRep.TotalBytes, bodyLen*2+uniqueLen)
 	}
-	if scanRep.DuplicateBytes != int64(len(body)) {
-		t.Fatalf("scan DuplicateBytes=%d want %d（2 份 × size×(2-1)）", scanRep.DuplicateBytes, int64(len(body)))
+	if scanRep.DuplicateBytes != bodyLen {
+		t.Fatalf("scan DuplicateBytes=%d want %d（2 份 × size×(2-1)）", scanRep.DuplicateBytes, bodyLen)
 	}
 	lg, sg := ledgerRep.Groups[0], scanRep.Groups[0]
 	if lg.Checksum != sg.Checksum || len(lg.Refs) != len(sg.Refs) {
 		t.Fatalf("组不一致: ledger=%+v scan=%+v", lg, sg)
 	}
-	// 台账不存 size/mtime：ledger.Size 恒 0、ModTime 恒 0（设计局限），只断言 refs 等价。
 	if lg.Size != 0 {
 		t.Fatalf("ledger 组 Size=%d want 0（台账不存 size）", lg.Size)
 	}

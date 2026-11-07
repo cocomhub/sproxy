@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,20 +257,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 	// Isolate XDG_CACHE_HOME to avoid loadCurrentDir() reading user's local cache,
 	// which would cause `list` to filter by a stale subdirectory path.
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, "cache"))
-	binName := "sclient"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	_ = binPath // sclient binary built but not directly exercised here (upload done via HTTP)
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sclient")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sclient: %v\n%s", err, out)
-	}
-
+	// 二进制统一经 e2eBinPath 构造（整包共享，只 build 一次）。
+	binPath := e2eBinPath(t, "cmd/sclient")
 	// sclient upload
 	uploadFile(t, baseURL, "sclient_test.txt", []byte("sclient e2e"), map[string]string{
 		"X-File-Checksum": sha256hex([]byte("sclient e2e")),
@@ -279,9 +266,8 @@ func TestE2E_SclientCLI(t *testing.T) {
 
 	// sclient list: use a temp config to avoid local tunnel interference.
 	// （v2 skey-id 必传：config 必须带 access_key_id 精确匹配服务端 seed 条目。）
-	cfgPath := filepath.Join(tmpDir, "sclient.yaml")
-	cfgContent := fmt.Sprintf("server_url: %s\naccess_key: %s\naccess_key_secret: %s\naccess_key_id: %s\n", baseURL, e2eTestAK, e2eTestSK, e2eTestID)
-	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0644); err != nil {
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := writeContextConfigYAML(t, cfgPath, baseURL, e2eTestAK, e2eTestSK, e2eTestID); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(binPath, "list", "--config", cfgPath)
@@ -416,17 +402,8 @@ func parseSeedFromAccessKeysYAML(t *testing.T, accessKeysYAML string) (string, s
 func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	binName := "sproxy"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	moduleRoot := e2eModuleRoot()
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
-	buildCmd.Dir = moduleRoot
-	if buildOut, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sproxy: %v\n%s", err, buildOut)
-	}
+	// 二进制统一经 e2eBinPath 构造（整包共享，只 build 一次）。
+	binPath := e2eBinPath(t, "cmd/sproxy")
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -449,7 +426,7 @@ func startSPROXYWithAccessKeys(t *testing.T, accessKeysYAML string) (string, fun
 		t.Fatalf("write temp config: %v", err)
 	}
 	cmd := exec.Command(binPath, "--addr", addr, "--storage-root", uploadsDir, "--config", configPath)
-	cmd.Dir = moduleRoot
+	cmd.Dir = e2eModuleRoot()
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
@@ -500,9 +477,14 @@ func TestE2E_SproxySigAuth(t *testing.T) {
 	}
 
 	// sclient list（SproxySig 签名）→ 退出码 0（未签名会 401 → 非零退出）。
-	// 服务端日志可确认 GET /api/files 被签名请求命中并返回 200。
+	// 统一 context：无 config.yaml 时连服务端命令 fail-closed → 用 --config 指向
+	// 临时 config.yaml（env 段 server_url + user 段凭据）。
 	bin := e2eBinPath(t, "cmd/sclient")
-	args := []string{"list", "--server", baseURL, "--access-key", ak, "--access-key-secret", sk, "--access-key-id", e2eTestID}
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	if werr := writeContextConfigYAML(t, cfgPath, baseURL, ak, sk, e2eTestID); werr != nil {
+		t.Fatalf("write config.yaml: %v", werr)
+	}
+	args := []string{"list", "--config", cfgPath}
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = e2eModuleRoot()
 	var stdout, stderr bytes.Buffer

@@ -62,7 +62,7 @@ type mockQuota struct {
 	used int64
 }
 
-func newMockQuota(max int64) *mockQuota { return &mockQuota{max: max} }
+func newMockQuota(limit int64) *mockQuota { return &mockQuota{max: limit} }
 
 func (q *mockQuota) TryReserve(size int64, _ int) error {
 	q.mu.Lock()

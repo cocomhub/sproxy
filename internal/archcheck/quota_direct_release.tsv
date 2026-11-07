@@ -1,0 +1,16 @@
+# 门禁 R44：账本原语（commitUp / releaseUp / releaseCommittedUp）**直调点**登记。
+#
+# 这些原语不加锁；直调点必须说明「为什么不会丢唤醒」：
+#   - 在 `Pool.withWaitLock(fn)` 的 fn 内（已持根等待锁，变更后统一广播）；
+#   - 或调用方已保证**不增加可用额度**（如 commit(actual ≥ amount) 快路）。
+# 新增直调点不登记 ⇒ 红；删掉直调点却没删登记 ⇒ 红（表腐化）。
+# 格式：<file>	<外层函数>	<被调方法>	<理由>
+pkg/quota/quota.go	commitReservation	commitUp	actual ≥ amount 的快路：reserved 与 committed 同增同减 ⇒ 可用额度不变，无需广播（actual < amount 的分支在 withWaitLock 内）
+pkg/quota/quota.go	commitUp	commitUp	沿父链递归传播，位于已持根等待锁的调用栈内（根锁由 commitReservation/releaseReserve 获取）
+pkg/quota/quota.go	releaseReserve	releaseUp	withWaitLock 的 fn 内：变更后由 withWaitLock 统一广播
+pkg/quota/quota.go	releaseUp	releaseUp	沿父链递归传播，位于 withWaitLock 的 fn 内
+pkg/quota/quota.go	ReleaseCommittedAndUnmount	releaseCommittedUp	withWaitLock 的 fn 内（卸载=一次性归还全部已提交额度）
+pkg/quota/quota.go	ReleaseCommitted	releaseCommittedUp	withWaitLock 的 fn 内
+pkg/quota/quota.go	releaseCommittedUp	releaseCommittedUp	沿父链递归传播，位于 withWaitLock 的 fn 内
+pkg/quota/quota.go	Release	releaseUp	withWaitLock 的 fn 内（放弃预留）
+pkg/quota/quota.go	ReleaseUsage	releaseCommittedUp	withWaitLock 的 fn 内（按 Scope 释放已提交占用）

@@ -101,3 +101,58 @@ func TestUpload_413NoHeaderNoFallback(t *testing.T) {
 		t.Fatal("413 无头应保持错误（不转分块）")
 	}
 }
+
+// TestUpload_AutoChunkCarriesMetaExtra 413 自动转分块时，UploadOption 的 WithMetaExtra
+// 必须透传到分块 init（否则大文件上传的元数据**静默丢失**——实测 1.88GB 转存归档后
+// meta 为空；小文件走单次上传才带得上，属路径行为不一致）。覆盖审计 2026-10-28。
+func TestUpload_AutoChunkCarriesMetaExtra(t *testing.T) {
+	t.Parallel()
+	var gotMeta map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(headerAutoChunk, "true")
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		_, _ = w.Write([]byte(`{"success":false,"message":"too large"}`))
+	})
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"success":false,"message":"not found"}`))
+	})
+	mux.HandleFunc("POST /upload/init", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		var req struct {
+			UploadID  string         `json:"upload_id"`
+			MetaExtra map[string]any `json:"meta_extra"`
+		}
+		_ = json.Unmarshal(body, &req)
+		gotMeta = req.MetaExtra
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"upload_id":"` + req.UploadID + `","chunk_size":1024}`))
+	})
+	mux.HandleFunc("POST /upload/chunk", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true}`))
+	})
+	mux.HandleFunc("POST /upload/complete", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"upload_id":"x","file_checksum":"abc"}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	filePath := filepath.Join(t.TempDir(), "big.dat")
+	if err := os.WriteFile(filePath, bytes.Repeat([]byte("x"), 4096), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	c := NewFileClient(ts.URL, WithChunkSize(1024))
+	want := map[string]any{"code": "EXAMPLE-001", "source": "manual_upload"}
+	if _, err := c.Upload(t.Context(), filePath, "big.dat", WithMetaExtra(want)); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if gotMeta == nil {
+		t.Fatal("分块 init 未携带 meta_extra（大文件元数据静默丢失）")
+	}
+	if gotMeta["code"] != "EXAMPLE-001" || gotMeta["source"] != "manual_upload" {
+		t.Fatalf("meta_extra = %v, want %v", gotMeta, want)
+	}
+}

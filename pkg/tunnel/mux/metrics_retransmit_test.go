@@ -80,7 +80,7 @@ func TestRetransmitMetrics_Exhausted(t *testing.T) {
 		}
 	}
 
-	if got := m.Metrics().RetransmitExhausted.Load(); got == 0 {
+	if m.Metrics().RetransmitExhausted.Load() == 0 {
 		t.Fatal("重传耗尽后 RetransmitExhausted 应 > 0")
 	}
 }
@@ -106,7 +106,7 @@ func TestRetransmitMetrics_QueueFull(t *testing.T) {
 	}
 	m.enqueueRetransmit([]byte("x"), 0) // 第 maxRetransmitQ+1 个 → 队列满 → 关闭
 
-	if got := m.Metrics().RetransmitQueueFull.Load(); got == 0 {
+	if m.Metrics().RetransmitQueueFull.Load() == 0 {
 		t.Fatal("队列满关闭后 RetransmitQueueFull 应 > 0")
 	}
 	// 关闭是异步（go m.Close()），等 mux done。

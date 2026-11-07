@@ -32,7 +32,7 @@ func TestNewCmdUDP_SubcommandAndFlags(t *testing.T) {
 		t.Fatal("udp 缺少 map 子命令")
 	}
 	for _, name := range []string{"listen", "exit", "remote", "mdns", "mdns-secret", "hub", "node-id", "route"} {
-		if f := mapCmd.Flags().Lookup(name); f == nil {
+		if mapCmd.Flags().Lookup(name) == nil {
 			t.Errorf("udp map 缺少 flag: %s", name)
 		}
 	}

@@ -65,7 +65,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))
-	h.checksumStores = make(map[string]*checksum.ChecksumStore)
+	h.checksumStores = make(map[string]checksum.ChecksumStoreIface)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
 	if h.tenantFor(anonymousOwner) == nil {
@@ -111,7 +111,7 @@ func TestUploadInit_HappyPath(t *testing.T) {
 	}
 	initJSON, _ := json.Marshal(initReq)
 
-	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init request failed: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestUploadInit_InvalidFilename(t *testing.T) {
 	}
 	initJSON, _ := json.Marshal(initReq)
 
-	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init request failed: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestUploadInit_InvalidChecksum(t *testing.T) {
 	}
 	initJSON, _ := json.Marshal(initReq)
 
-	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init request failed: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 
 	// 完成
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete request failed: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestUploadComplete_MissingChunks(t *testing.T) {
 
 	// 尝试完成（应该失败）
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete request failed: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestDownloadChunk_FirstChunk(t *testing.T) {
 	}
 	// 完成
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	z2, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z2, _ := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if z2 != nil {
 		z2.Body.Close()
 	}
@@ -504,7 +504,7 @@ func TestDownloadChunk_EntireFile(t *testing.T) {
 		z3.Body.Close()
 	}
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	z4, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z4, _ := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if z4 != nil {
 		z4.Body.Close()
 	}
@@ -541,7 +541,7 @@ func TestDownloadChunk_InvalidOffset(t *testing.T) {
 	uploadID := initSession(t, url, "small.txt", int64(len(fileData)), fileChecksum)
 	uploadChunk(t, url, uploadID, 0, fileChecksum, fileData)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	z5, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	z5, _ := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if z5 != nil {
 		z5.Body.Close()
 	}
@@ -591,7 +591,7 @@ func TestUploadComplete_SubDir(t *testing.T) {
 
 	// 完成
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete request failed: %v", err)
 	}
@@ -638,7 +638,7 @@ func initSessionEx(t *testing.T, baseURL, filename string, totalSize, chunkSize 
 		"file_checksum": fileChecksum,
 	}
 	initJSON, _ := json.Marshal(initReq)
-	resp, err := http.Post(baseURL+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(baseURL+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
@@ -698,7 +698,7 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 	}
 
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 
 	// Complete
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -794,7 +794,7 @@ func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
 		"file_checksum": cs,
 	}
 	initJSON, _ := json.Marshal(initReq)
-	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -830,7 +830,7 @@ func TestChunkedUpload_AlreadyExists_ChecksumMismatch(t *testing.T) {
 		"file_checksum": strings.Repeat("f", 64),
 	}
 	initJSON, _ := json.Marshal(initReq)
-	resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("init: %v", err)
 	}
@@ -884,9 +884,16 @@ func TestChunkedDigestConsistency(t *testing.T) {
 	uploadID := initSessionEx(t, url, "consistency-files.bin", int64(len(data)), chunkSize, totalChunks, cs)
 	uploadChunk(t, url, uploadID, 0, cs, data)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	z6, _ := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
-	if z6 != nil {
-		z6.Body.Close()
+	z6, cerr := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
+	if cerr != nil {
+		t.Fatalf("complete 请求失败: %v", cerr)
+	}
+	completeResp, _ := io.ReadAll(z6.Body)
+	z6.Body.Close()
+	// 必须断言 complete 的结果：此前忽略状态码，失败会推迟到下面的 download 才暴露，
+	// 报错信息指向「内容不一致」而不是真正的失败点（CI 上表现为难以定位的 flake）。
+	if z6.StatusCode != http.StatusOK {
+		t.Fatalf("complete status = %d, want 200: %s", z6.StatusCode, completeResp)
 	}
 
 	c := client.NewFileClient(url)
@@ -968,12 +975,7 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	uploadID := initSessionEx(t, url, "resume-dl-verify.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum)
 
 	// 1. 只上传前 3 个分块
-	for i := range 3 {
-		start := i * int(chunkSize)
-		end := min(start+int(chunkSize), len(fileData))
-		chunkData := fileData[start:end]
-		uploadChunk(t, url, uploadID, i, sha256hex(chunkData), chunkData)
-	}
+	helperChunkedUploadResumeUploadChunks(t, url, uploadID, chunkSize, fileData, []int{0, 1, 2})
 
 	// 2. 查询 uploadStatus 验证已接收列表
 	statusResp, err := http.Get(url + "/upload/status?upload_id=" + uploadID)
@@ -997,16 +999,11 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 
 	// 3. 补传缺失 chunk
-	for _, idx := range status.MissingChunks {
-		start := idx * int(chunkSize)
-		end := min(start+int(chunkSize), len(fileData))
-		chunkData := fileData[start:end]
-		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
-	}
+	helperChunkedUploadResumeUploadChunks(t, url, uploadID, chunkSize, fileData, status.MissingChunks)
 
 	// 4. uploadComplete -> 验证成功
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -1023,6 +1020,23 @@ func TestChunkedUpload_Resume(t *testing.T) {
 	}
 
 	// 5. 下载验证 checksum 一致
+	helperChunkedUploadResumeVerifyDownload(t, url, fileData, fileChecksum)
+}
+
+// helperChunkedUploadResumeUploadChunks 按给定分片索引列表逐片上传。
+func helperChunkedUploadResumeUploadChunks(t *testing.T, url, uploadID string, chunkSize int64, fileData []byte, indices []int) {
+	t.Helper()
+	for _, idx := range indices {
+		start := idx * int(chunkSize)
+		end := min(start+int(chunkSize), len(fileData))
+		chunkData := fileData[start:end]
+		uploadChunk(t, url, uploadID, idx, sha256hex(chunkData), chunkData)
+	}
+}
+
+// helperChunkedUploadResumeVerifyDownload 下载已上传文件并核对内容与 checksum 头。
+func helperChunkedUploadResumeVerifyDownload(t *testing.T, url string, fileData []byte, fileChecksum string) {
+	t.Helper()
 	dlResp, err := http.Get(url + "/download?filename=resume-dl-verify.bin")
 	if err != nil {
 		t.Fatalf("download: %v", err)
@@ -1080,7 +1094,7 @@ func TestChunkedUpload_RetryExhausted(t *testing.T) {
 
 	// complete 验证成功
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	cpResp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	cpResp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -1110,7 +1124,7 @@ func doUploadInit(t *testing.T, baseURL, filename string, totalSize int64, fileC
 		"file_mod_time": fileModTime,
 	}
 	initJSON, _ := json.Marshal(initReq)
-	resp, err := http.Post(baseURL+"/upload/init", "application/json", bytes.NewReader(initJSON))
+	resp, err := http.Post(baseURL+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 	if err != nil {
 		t.Fatalf("doUploadInit failed: %v", err)
 	}
@@ -1127,7 +1141,7 @@ func TestMergeAndRenameFile_InvalidPath(t *testing.T) {
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
-	resp, err := http.Post(url+"/upload/complete", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1171,7 +1185,7 @@ func TestChunkedUpload_ContextCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		// 已取消的 context 可能导致客户端 transport 层报错（如 "context canceled"），
@@ -1204,7 +1218,7 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 
 	// 完成上传 -> 触发 mergeAndRenameFile
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": initResp.UploadID})
-	resp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	resp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1241,7 +1255,7 @@ func TestUploadInit_RejectsNestedUploadID(t *testing.T) {
 			"file_checksum": sha256hex(body),
 		}
 		initJSON, _ := json.Marshal(initReq)
-		resp, err := http.Post(url+"/upload/init", "application/json", bytes.NewReader(initJSON))
+		resp, err := http.Post(url+"/upload/init", contentTypeJSON, bytes.NewReader(initJSON))
 		if err != nil {
 			t.Fatalf("init %q: %v", bad, err)
 		}

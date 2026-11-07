@@ -341,7 +341,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit 出口；无需内核 tun/tap 特权——curl --socks5-hostname / 系统代理指向即接入）。残余：tun/tap 内核虚拟网卡（整网段透明路由，需特权 + 平台集成）、虚拟 IP 分配 |
 | **P2：VPN 模式（tun/tap）** | `sclient mesh up`：虚拟子网路由进 tun/tap，整网段直达（ping/任意端口），非端口转发 | **已落地（用户态最小集）**（#522）：`sclient mesh up`（本地 SOCKS5 代理 + 虚拟子网路由到 --exit；无需内核 tun/tap 特权）。残余：tun/tap 内核虚拟网卡、虚拟 IP 分配 |
 | **P2：节点级状态仪表** | per-hop 延迟/丢包/带宽入 `/metrics` + WebUI 节点拓扑图 | **已落地（部分）**：`/metrics` 输出 per-node 质量明细（sproxy_hub_node_quality{node} 0/1/2 分档 + retransmits/errors/connected_seconds{node}）+ `/api/hub/nodes` 带 quality 分档（复用 #501 判据）。残余：延迟/RTT 实时指标、WebUI 节点拓扑图 |
-| **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | **已落地（F1 跨 hub 服务发现）**：FederationClient 加服务交换（SyncServices 拉 /api/hub/federation/services + CandidateServices 跨 peer 去重 + Start 周期同步）+ 服务端 federationServicesHandler + /api/hub/services 聚合联邦服务（mesh 过滤 + node+name 去重）。跨 hub 数据面中继已落地（`federation_forward.go` Forward/防环/故障转移 + 15 测试） |
+| **P2：mesh 集群化深化** | 多 hub 联邦已有基础（FederationClient 节点/路由交换），补跨 hub 服务发现 + 跨 hub 数据面中继（经上游 hub 路由） | **已落地（F1 跨 hub 服务发现）**：FederationClient 加服务交换（SyncServices 拉 /api/hub/federation/services + CandidateServices 跨 peer 去重 + Start 周期同步）+ 服务端 federationServicesHandler + /api/hub/services 聚合联邦服务（mesh 过滤 + node+name 去重）。跨 hub 数据面中继已落地（`pkg/server/federation/forward.go` Forward/防环 + 装配层故障转移 + 15 测试） |
 
 ---
 
@@ -528,7 +528,7 @@ SPDX-License-Identifier: Apache-2.0
 | **P1：mesh 域名/网段分流** | exit 策略补 `--route <domain|cidr>=<exit-group>` 分流规则（统一 socks/udp/http-proxy/mesh connect） | **已落地**：`meshconn.Conn.Routes` + `SelectRoute`（域名后缀/cidr 网段，声明序首命中）+ `AutoDial` 命中组走 `NewExitGroupDial`（socks/http-proxy 一处收益）；udp map 命中替换出口节点（单 mux 固定出口取组内第一）；`--route` 与 `--exit-only` 互斥 fail-closed；见 [cli.md](./cli.md#--route-分流规则socks--http-proxy--udp-map） |
 | **P1：多出口负载均衡** | exit 节点组补轮询/加权负载均衡（现在按序 failover） | **已落地**：`--exit-group-mode failover|round-robin|weighted`（默认 failover 零回归）+ `--exit-group-weight node:weight`；`PickExitGroup` 纯函数（round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，无论模式保留组内 failover 兜底；旧签名委托零回归） |
 | **P2：tun/tap 内核 VPN** | `sclient mesh up` 升级内核虚拟网卡（整网段透明路由，特权 + 平台集成） | **已落地（P1）**：`pkg/vpn` 接口 + `PlatformProbe` 三态 + `Router` 主循环 + `mesh up --tun --vip` fail-closed 装配（TUNDevice build tag 隔离：Linux tun 骨架 / Windows wintun 标注 / 未支持平台 stub）。残余：P2 真设备打开（Linux ioctl TUNSETIFF / Windows wintun.dll）+ MTU/地址装配；P3 真设备 e2e |
-| **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | **已落地**：`federation_forward.go` `FederationForwarder.Forward`（CONNECT 转发到联邦对端 hub）+ `X-Relay-Hop`/`X-Relay-Path` 防环（`defaultRelayMaxHops=4`，超限/回源 508）+ `PeersForNode` 故障转移按序尝试 + mesh 隔离；`federation_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） |
+| **P2：跨 hub 数据面中继** | 服务发现已落地，补跨 hub 数据面中继（经上游 hub 路由） | **已落地**：`pkg/server/federation/forward.go` `FederationForwarder.Forward`（CONNECT 转发到联邦对端 hub）+ `X-Relay-Hop`/`X-Relay-Path` 防环（`DefaultRelayMaxHops=4`，超限/回源 508）+ `PeersForNode` 故障转移按序尝试 + mesh 隔离；服务端 `relay_stream_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） |
 | **P2：WebUI 节点拓扑 + 延迟/RTT** | per-hop 延迟/丢包入 /metrics + WebUI 节点拓扑图 | **已落地**：mux 心跳 Ping/Pong 采样 RTT（`Metrics.LastRTTNanos`，无在途 ping 跳过防冒充）→ `/metrics` `sproxy_hub_node_rtt_ms` + `/api/hub/nodes` `rtt_ms`（-1=无采样显式未知）；WebUI Hub 面板 SVG 拓扑（hub 中心 + 叶子节点，边色=RTT 分档 <100ms 绿 / <500ms 黄 / ≥500ms 红，未知虚线 N/A；>200 节点降级提示不卡渲染）；见 [designs/2026-09-24-webui-topology.md](./designs/2026-09-24-webui-topology.md) |
 
 ### 11.2 审查待办（正确性补齐，批次 11 P2）
@@ -564,7 +564,7 @@ SPDX-License-Identifier: Apache-2.0
 | ③ | mesh 域名/网段分流 | `socks.go:30-38` 仅 --dial-allow/--dial-allow-cidr 出口白名单（非分流规则） | **已落地**：`meshconn.go` `SelectRoute`/`ParseRoutes` + `AutoDial` 命中走 `NewExitGroupDial`；udp.go `routeExitNode`；`--route` 与 `--exit-only` 互斥 |
 | ④ | 多出口负载均衡 | `exit_route.go` `PickExitGroup`（failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转）+ `NewExitGroupDialWithMode`（模式只影响起点选择，组内 failover 兜底不变）+ `--exit-group-mode`/`--exit-group-weight`（默认 failover 零回归） | **已落地** |
 | ⑤ | tun/tap 内核 VPN | `pkg/vpn` `TUNDevice`（Open/SetMTU/Addr）+ `PlatformProbe` 三态 + `Router`（读包 → vipTable 选路 → mesh dial → 写包）+ `mesh_up.go` `--tun/--vip` 装配（fail-closed） | **已落地（P1）**：`mesh up --tun` 探测/缺 VIP/未分配明确报错不静默回落；真设备打开 P2、e2e P3 |
-| ⑥ | 跨 hub 数据面中继 | `federation_forward.go` `Forward`/`PeersForNode`（X-Relay-Hop/X-Relay-Path 防环、defaultRelayMaxHops=4、故障转移、mesh 隔离）+ `federation_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） | **已落地** |
+| ⑥ | 跨 hub 数据面中继 | `pkg/server/federation/forward.go` `Forward`/`PeersForNode`（X-Relay-Hop/X-Relay-Path 防环、`DefaultRelayMaxHops=4`、故障转移、mesh 隔离）+ 服务端 `relay_stream_forward_test.go` 15 用例（CrossHubRelay_EndToEnd/LoopGuard/HopLimit/Failover/PathAccumulation） | **已落地** |
 | ⑦ | WebUI 拓扑+延迟/RTT | `mux.go` `Metrics.LastRTTNanos` + `pingSentAtNano`（pingLoop 记发出时刻、handlePongFrame 消费）；`metrics.go:writeHubNodeMetrics` `sproxy_hub_node_rtt_ms`（无采样 -1）；`hub_handler.go` `nodeRTTMs` → `/api/hub/nodes` `rtt_ms`；`app-render.js` `topologySvg`（边色分档/虚线 N/A）+ app.js `showHub` 装配；`web/e2e/webui_topology_e2e_test.go` 真浏览器 | **已落地** |
 | ⑧ | S3 complete ETag 校验 | `s3_multipart.go` `normalizeETag`（去引号归一）+ `validateCompleteParts`（PartNumber 范围/重复 400）+ 逐 part 单遍拷贝+哈希（`io.MultiWriter(f, md5.New())`）比对 400 + meta key 一致性 409 + 失败清理半截目标；见 `s3_complete_hardening_test.go`（TestS3Complete_TamperedETag_400_NoLeftover / MetaKeyMismatch_409 / UnquotedETag_200） | **已落地**（#575） |
 | ⑨ | S3 complete 配额记账 | `s3_multipart.go` complete 双账本 `TryReserve`（owner Scope + 卷容量池）超限 507 + 失败统一双 `Release` + 成功 `Commit`/覆盖写 `Adjust` 差分（至多一次，Reservation.done CAS）；见 `s3_complete_hardening_test.go`（TestS3Complete_Quota_OwnerExceeded_507 / PoolExceeded_507 / FailedEtagReleasesReservations / OverwriteShrink） | **已落地**（#575） |
@@ -747,7 +747,7 @@ SPDX-License-Identifier: Apache-2.0
 | 8 | 混沌测试 | HA 场景故障注入（kill -9/网络分区/延迟注入） | **已落地**：test/chaos/（ChaosNode 子进程包装 Kill9/Restart/PID 断言 + NetChaos 应用层 TCP proxy Pause/Resume）+ Kill9Restart/NetPartition 场景 + make test-chaos + CI chaos job + R14 棘轮登记 | P1 |
 | 9 | 压缩算法扩展 | zstd/brotli 高压缩比（存档/传输） | **已落地（#624）**：`pkg/compressx` 压缩注册表（gzip/zstd/brotli，Parse 显式校验）+ archive.go `Compression` 字段（Content-Type/扩展名按算法 + 非法 400）+ 依赖 klauspost/compress + andybalholm/brotli（含全仓子 module go.sum 同步） | P2 |
 | 10 | 计量报告 | quota 已有补 usage report 导出（per-owner 周期用量） | **已落地（P1）**：`pkg/server/usage_store.go`——usageStore 内存环（保留 92 日桶）+ 周期落盘快照（`<persistDir>/<owner>/<YYYY-MM>.json`，tmp+Rename 原子写）+ `RecordUsage` 日/月轮转 + `Summary` 闭区间聚合 + CSV 转义（RFC 4180）；纯逻辑层单测 6 例（轮转/求和/快照往返/环保留/转义）+ 变异验证 2 命中。残余：Metrics owner 维度 + 导出端点 + config 接线（片 2） | P2 |
-| 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | **已落地（P1）**：`pkg/server/ratelimit.go` 新增 per-endpoint 限流（endpoints 规则表 + endpoint_default 兜底，精确优先 + "/" 段边界前缀最长匹配，无匹配规则透传）+ 全局并发上限（sem 非阻塞信号量，max_concurrent 容量）；Middleware 放行链 = 并发闸 → per-IP 桶（含全局窗口回退）→ per-endpoint 桶 → coordinator（装配时）；`UpdateDimensions` 热更新（endpoints 全量替换/零值兜底 = 无兜底/max_concurrent<=0 = 关闭）；新维度默认关闭零回归。残余：config 接线 + 装配（片 2） | P2 |
+| 11 | 限流维度扩展 | per-endpoint/全局并发上限（现 per-IP/per-owner） | **已落地（P1）**：`pkg/server/ratelimit` 新增 per-endpoint 限流（endpoints 规则表 + endpoint_default 兜底，精确优先 + "/" 段边界前缀最长匹配，无匹配规则透传）+ 全局并发上限（sem 非阻塞信号量，max_concurrent 容量）；Middleware 放行链 = 并发闸 → per-IP 桶（含全局窗口回退）→ per-endpoint 桶 → coordinator（装配时）；`UpdateDimensions` 热更新（endpoints 全量替换/零值兜底 = 无兜底/max_concurrent<=0 = 关闭）；新维度默认关闭零回归。残余：config 接线 + 装配（片 2） | P2 |
 
 > 优先级：H1-H3（基础面，多语言/调度/可观测）> H4-H5（功能增量）> M1-M5 > H6。
 > 与 11.1-11.9 无冲突；全部零回归前置 + 注册表/配置开关扩展（演进原则 2/3）。
@@ -963,3 +963,347 @@ type LeaderElector interface {
 
 **设计覆盖**：roadmap 82 功能项全部有设计文件依据（62 份设计文档存 `.worktrees/docs/design-batch/docs/designs/`，17 首批 + 45 新增四批）。
 **本 agent 角色**：仅负责设计方案；实现由其他 agent 分派（按 11.13 优先级 S1→S2→S3 顺序）。
+
+---
+
+## 12. 下一阶段演进规划（v0.22+，2026-09-27 批次14 后盘点）
+
+> 基于批次 1-14 功能审查（含 68 项新实现全审）与第 10-11 章实施核对的新一轮规划。
+> 三部分：**12.1 未落地收尾**（既有规划残余，均有设计文档依据）→ **12.2 新方向**（批次14 后
+> 新增能力面 + 审查发现）→ **12.3 演进约束补充** → **12.4 优先级矩阵 v2**。
+> 状态核对口径与第 11 章一致：源码 grep 实证，未做 = 全仓无命中；部分 = 有基础形态缺完整能力。
+
+### 12.1 未落地收尾（既有规划残余，设计文档已在 docs/designs/）
+
+| # | 规划项 | 内容 | 设计依据 | 状态 | 优先级 |
+|---|--------|------|----------|------|--------|
+| 1 | **集群状态上移（11.11-②）** | 集群模式（state_store.type != local 或共享外部卷 + cluster.enabled）下凭据/dedup/分享/索引快照强制切 StateStore（主写副本读）；配额不迁（高频内存账本，LeaderElector 保写面唯一） | cluster-state-migration.md | **F1 完成**（接口+Local+注册表+R21 门禁），F2 逐 Store 适配：credential 适配器**测试已验证**（TestStateBackedCredentialStore_Compat）但**生产接线未做**（StateBacked 仅测试出现）——配接装配层待实施 | P1 |
+| 2 | **集群只读副本接入（11.11-③）** | 非主节点只读挂载（federated 只读形态 + WriteGuard 非主 503 + 读面全开 + 存储层恒 ErrReadOnly 双层兜底）；明确读写路由清单 | cluster-readonly-replica.md | **未实施**：federated 只读形态现成 + WriteGuard 已落地（#578），读面装配 + 路由清单待实施 | P1 |
+| 3 | **LeaderElector Mongo TTL 租约（11.11-① F2）** | 外部卷租约（S3 lease 文件/集中 DB TTL）——多节点共享存储场景真选主（Local flock 仅单机） | leader-elector.md | **未实施**：Local flock 恒主已落地（#578）；Mongo TTL 租约 F2 待实施 | P1 |
+| 4 | **StateStore F2-F5（11.12）** | checksum/dedup/share/index 迁移 + Mongo 实现 + CAS 事务 + Raft | statestore.md | **F1-F2 已完成**（credential #651 + checksum/dedup #663 + share/index #665 全部 StateStore 适配器 + 双读单写）；F3 Mongo 已落地（#656，与 12.1-3 TTL 租约合并）；F5 Raft（集群深水区，不排期） | P2 |
+| 5 | **计量报告片 2（11.10-10）** | Metrics owner 维度 + 导出端点 + config 接线（usage_store 纯逻辑层已落地） | usage-report.md | **片 2 未实施**：usageStore 内存环+落盘快照+CSV 转义已落地；owner 维度 metrics + GET /api/usage/export + config 待接线 | P2 |
+| 6 | **限流 config 接线片 2（11.10-11）** | RateLimitConfig 补 `endpoints` 段 + `max_concurrent`（ratelimit.go 逻辑层已落地，config 无字段） | ratelimit-dimensions.md | **片 2 未实施**：UpdateDimensions 已实现；config 段 + 装配接线待做 | P2 |
+| 7 | **VPN 真设备 P2/P3（11.1）** | Linux ioctl TUNSETIFF / Windows wintun.dll 真设备打开 + MTU/地址装配 + e2e | vpn-tuntap.md | P1 骨架已落地（#607）；P2/P3 未实施 | P2 |
+| 8 | **分享权限细化残余（10.5）** | ReadOnly 标志已落地（X-Share-ReadOnly 头）——补上传/ACL 细化档（allow_upload / 目录级授权） | 无（需新设计） | 部分（ReadOnly 已有，ACL 细化缺） | P3 |
+
+### 12.2 新方向（批次 14 后新增能力面 + 审查发现）
+
+> 批次 14 审查 68 项实现无 P0/P1/P2，但发现两个**已实现无设计文档**的能力面（FTP 后端、凭据
+> 自动轮换）——按「每项规划必须有设计文件依据」原则补设计；另有三个高价值深化面。
+
+| # | 方向 | 内容 | 现状证据 | 优先级 |
+|---|------|------|----------|--------|
+| 1 | **FTP 后端补设计** | #617 已实现 FTP 外部后端（sync.FS 实现 + 注册）但无设计文档——补 `docs/designs/2026-09-27-ftp-backend.md`（FTP 主动/被动模式、TLS 隐式/显式、路径语义、错误映射、测试面） | pkg/volume/ftp（已实现，无设计） | P2 |
+| 2 | **凭据自动轮换补设计 + 深化** | #641 已实现运行中凭据自动轮换（RenewAccessKey 热替换 + credrotate 统一工具）——设计已补（docs/designs/2026-09-27-credential-rotation.md）；深化（在途 drain / 跨实例协调）未实施 | pkg/client RenewAccessKey（已实现，设计已补） | P2 |
+| 3 | **备份引擎 P2 深化** | #619 已落地 P1 引擎（walk+manifest 比对+重试+verify）——补 P2：路由（/api/backup 端点）+ sclient 定时备份 + federated 写面装配 + 增量 E2E | backup-remote-volume.md | P2 |
+| 4 | **AI 事件流水线代码化（11.9-③ 从文档到实现）** | docs/ai-integration.md §3 已文档化事件流 SSE 消费模式——补服务端流水线组件（变更事件 → 规则匹配 → 触发 AI 处理任务队列），从「纯外部消费」升级为「可选内置流水线」 | **已落地（#667）**：AIEventConsumer（周期拉取 EventBus 快照 + 游标幂等 + 去重窗口 5m + 有界队列 + worker recover）+ ai.events 配置（enabled=false 零回归）。残余：enqueue 落审计（真向量/摘要后续片）+ 周期扫描兜底 E2 | P3 |
+| 5 | **WebUI i18n 动态文案迁移** | 11.10-H1 已落地 i18n.js 框架——app.js 全部动态文案迁移（当前覆盖关键按钮/导航，非全量） | i18n.js 已落地，残余 app.js 迁移 | P3 |
+| 6 | **多实例协调限流深化（#625 后续）** | rate_limit.coordinated 已配置字段（local/file backend）——补跨实例共享配额端到端验证（多副本写面唯一场景下的限流一致性） | config.go coordinated 字段已有 | P3 |
+
+### 12.3 演进约束（补充，批次 14 审查记录）
+
+13. **审查发现 P3 均为演进约束而非缺陷**：VPN P1 骨架（真设备打开为 OS 集成后续片）、
+    selfupdate 平台覆盖（Windows 两段式依赖外部重启时序）——记录为已知边界，不阻塞。
+14. **已实现无设计文档的能力面（FTP/凭据轮换）须补设计**：设计文档是「每项规划的依据」，
+    实现先行不豁免——补设计防能力面盲区（对齐演进原则 7 文档与代码同 PR 收敛）。
+15. **集群化收尾顺序**：状态上移（12.1-1）→ 只读副本接入（12.1-2）→ Mongo 租约（12.1-3）
+    为依赖链——StateStore 装配是副本读面的前置（副本读共享 StateStore 需先有集群模式装配）。
+
+### 12.4 优先级矩阵 v2（2026-09-27 按价值×投入重排）
+
+| 档位 | 项 | 价值 | 投入 | 依据 |
+|------|-----|------|------|------|
+| **S1（集群化收尾，架构基础）** | 12.1-1 状态上移生产接线 | 架构 | 2 人日 | F1 完成 + credential 适配已验证，剩装配 | **已落地**（#651） |
+| | 12.1-2 只读副本接入 | 架构 | 3 人日 | federated 只读 + WriteGuard 现成，剩装配 | **已落地**（#659） |
+| | 12.1-3 Mongo TTL 租约 | 架构 | 3 人日 | 多节点真选主前提 | **已落地**（#656，与 12.1-4 F3 Mongo 合并） |
+| **S2（可用性，紧接）** | 12.1-5 计量导出端点 | 可用性 | 1 人日 | usage_store 逻辑层已落地 | **已落地**（#652） |
+| | 12.1-6 限流 config 接线 | 可用性 | 1 人日 | UpdateDimensions 已实现 | **已落地**（#650） |
+| | 12.2-3 备份 P2（路由/CLI/定时） | 运维 | 3 人日 | P1 引擎已落地 | **已落地**（#664） |
+| **S3（补设计 + 深化）** | 12.2-1 FTP 后端补设计 | 文档 | 0.5 人日 | 已实现无设计 |
+| | 12.2-2 凭据轮换补设计 + drain | 文档+运维 | 2 人日 | 已实现无设计 |
+| | 12.1-7 VPN 真设备 | 能力 | 5 人日 | OS 集成深水区 |
+| **S4（长尾，按需）** | 12.1-4 StateStore F3-F5 | 架构 | 8+ 人日 | Mongo+Raft 深水区 |
+| | 12.1-8 分享 ACL 细化 | 安全 | 2 人日 | 需新设计 |
+| | 12.2-4/5/6 AI 流水线/i18n 迁移/协调限流 | 增量 | 各 2-3 人日 | 深化 |
+
+> **执行顺序**：S1（集群化收尾，StateStore 装配先行）→ S2（可用性，片 2 接线）→ S3（补设计 + 深化）
+> → S4（长尾按需）。
+> **依赖链**：12.1-1 状态上移 → 12.1-2 只读副本（副本读共享 StateStore）→ 12.1-3 Mongo 租约
+> （多节点真选主）→ 多副本升级完整形态（11.6-4）。
+> **投入估算**：S1 合计 ~8 人日（一周半），S2 合计 ~5 人日（一周），S3 合计 ~7.5 人日（并行一周半）。
+> **待人工决策**：① StateStore F2 各 Store 迁移顺序（credential 先行 vs 索引先行）；② Mongo 租约
+> ext 依赖（mongo-driver 放行已决策，TTL 索引语义细化）；③ 分享 ACL 细化是否进入排期（当前 P3）。
+
+> **人工决策（2026-09-27 已确认）**：
+> 1. **F2 迁移顺序 = 凭据先行**（设计 statestore.md §5.1 迁移矩阵本已定 P0=凭据是权威；且
+>    credential 适配器测试已验证 TestStateBackedCredentialStore_Compat，仅剩装配接线工作量最小）。
+>    顺序：credential → dedup（引用计数跨节点需 CAS）→ checksum（全量快照无需 CAS，最简）
+>    → share（Consume 计数 CAS）→ index（快照覆盖无需 CAS）。每片一 PR，带「读旧 meta/ 回退
+>    + 首次写迁新路径」双读单写（零回归铁律）。
+> 2. **Mongo 租约 TTL 语义 = 按设计文档原样落地**（leader-elector.md §2.3：TTL index 仅作崩溃
+>    兜底清理；主动续租周期 ttl/3；ttl 默认 30s / 续租 10s / 时钟偏移容忍 ±10s）。**12.1-3 与
+>    12.1-4 F3 Mongo 合并为一个 PR**——MongoStateStore 与 MongoLeaderElector 共用
+>    `state_store.mongo.*` 连接配置，一次搭好连接 + TTL 租约 + CAS。
+> 3. **分享 ACL 细化不排期**（保持 P3 长尾）：分享天然只读（ReadOnly + X-Share-ReadOnly 头已落地），
+>    allow_upload 是反模式（与「分享=消费方只读」语义冲突）；目录级授权已有 mesh acl / RBAC 覆盖；
+>    且无设计文档——排期前需先补设计（0.5-1 人日）。出现明确需求（allow_upload 真实场景）再重估。
+
+---
+
+## 13. 下一阶段演进规划（v0.23+，2026-09-28 深度盘点）
+
+> 基于前 12 章迭代与用户新一轮方向强调（**Web UI 易用性/可用性/所见即所得/面向人操作**，
+> 特别是「界面大小、可操作性」）的全量重排。本章把 **Web UI 体验作为头等优先级**（S1），
+> 同时承接 12 章全部未落地收尾 + 集群/组网/代理/第三方接入/架构重构五条深化线。
+> 状态核对口径与前章一致：源码 grep 实证，逐项带证据。
+> 亮点一：**可交互 Hub 拓扑**（当前 SVG 固定 640×220、半径 90、字号 9、无缩放/平移 → 彻底重做）。
+
+### 13.1 Web UI 易用性深化（重点：界面大小、可操作性、所见即所得）
+
+> 现状硬伤（源码实证，web/static/）：
+> - `.container{max-width:1000px}` 固定窄容器；`@media` 仅 4 处（全为暗色主题），**无任何响应式断点**
+>   ⇒ 大屏浪费空间、小屏/手机不可用。
+> - `topologySvg`（app-render.js:162-197）：**固定 640×220、节点铺满 90px 半径一圈、标签 9px、
+>   零缩放/平移/详情** ⇒ 节点一多挤成一团，正是用户点名的「太小、难以使用」。
+> - 文件表格无固定表头/固定操作列；1000 行以内靠「加载更多」分页（非虚拟滚动，大数据量卡顿）。
+> - 全部依赖原生 `confirm()`/`prompt()`（浏览自带，样式不可控、不可定制、体验割裂）。
+> - 工具栏按钮全部内联 `style` 挤在 `index.html`，无统一组件/间距体系。
+
+| # | 里程碑 | 内容 | 优先级 |
+|---|--------|------|--------|
+| **V1** | **可交互 Hub 拓扑浏览器**（拓扑图重做） | 见 13.1-a：固定静态图 → **自适应 + 缩放平移 + 节点详情 + 全屏** 拓扑浏览器（[设计](./designs/2026-09-28-webui-interactive-topology.md)） | **S1** |
+| **V2** | **响应式布局 + 容器解放** | `.container` 加大/自适应（min(1400px, 96vw)）+ 侧栏/工具栏响应式断点（≥1280 / 768-1279 / <768 折叠）；表格触屏友好（[设计](./designs/2026-09-28-webui-responsive-layout.md)） | S1 |
+| **V3** | **表格虚拟滚动 + 固定表头/首列** | 大目录（>1000）虚拟滚动（windowed），表头/文件名列 sticky，不再整页 innerHTML（[设计](./designs/2026-09-28-webui-virtual-scroll-table.md)） | S1 |
+| **V4** | **统一对话框/确认组件** | 替换原生 confirm/prompt：`showConfirm(title, desc, danger, onOk)` + 进度对话框 + 可取消；样式/键盘/ARIA 统一（[设计](./designs/2026-09-28-webui-dialog-component.md)） | S2 |
+| **V5** | **拖拽上传放置区 + 上传进度所见即所得** | 全局拖拽放置高亮区 + 上传队列卡片（文件名/大小/进度/速度/剩余/暂停取消）+ 完成 toast 跳转（[设计](./designs/2026-09-28-webui-drag-upload-queue.md)） | S2 |
+| **V6** | **所见即所得反馈体系** | 危险操作二次确认颜色分级、操作成功定位（删除后停留原目录/重命名后高亮）、骨架屏加载、空态引导文案（[设计](./designs/2026-09-28-webui-wysiwyg-feedback.md)） | S2 |
+| **V7** | **外部卷（egress/secretdata）Web UI** | 集群出口播放器 + 外部卷文件浏览：① 视频播放器组件（点击视频行 → `<video src="/download?volume=<卷>&filename=...">` Range 播放）；② `/api/files` 接外部卷 `ListDir`（明文目录浏览）——**已落地（①②，2026-10-06）**：`web/static/video-player.js` 播放器组件 + 文件页视频行「▶ 播放」弹窗（Range 标准播放）；`GET /api/files?volume=` 透传外部卷明文目录（`volume_category` 徽标 + 文件页卷下拉切换）。残余责任：holder_owner 专属浏览区 + 统一完善 UI（用户裁定后续统一完善） | S2 |
+
+### 13.2 可交互 Hub 拓扑（V1 专题）
+
+> 目标：彻底解决「拓扑太小难用」。当前实现（app-render.js `topologySvg`）：
+> 固定画布 640×220、节点环形均匀铺在 **radius 90** 一圈、节点 id 字号 **9px**、圆心距近重叠不可读、
+> **零缩放平移/tooltip/点击详情**；>200 节点直接降级表格。设计文档 `2026-09-28-webui-interactive-topology.md`。
+
+**设计要点**
+
+| 改进 | 方案 |
+|------|------|
+| **可缩放平移** | 滚轮 zoom（0.2×−4×，以指针为锚）+ 拖拽平移；SVG `<g transform>` 统一坐标系 |
+| **自适应画布** | `layoutTopology(nodes)` 纯函数：≤20 ring 布局；>20 力导向近似（分簇+筒距），画布随 `radius=90+len*step` 动态扩展，标签自动防重叠（碰撞后移） |
+| **标签可读** | 字号升 ≥10、hover 高亮同连通子图、tooltip 显示全 id/RTT/quality、点击固定选中 |
+| **节点详情面板** | 点击节点 → 右侧面板（id/RTT/quality/stale/连接数/出入度）+ 复制 id + 「sclient diag」提示 |
+| **全屏浏览** | 拓扑区域可全屏展开（最大视觉空间），表格↔拓扑切换开关（>200 不再硬降级） |
+| **可操作** | 工具栏按钮放大、键盘方向键平移、缩放指示器 + 回到中心按钮 |
+| **测试** | 纯函数 `node --test`（ring/voronoi 布局/防重叠/半径计算）+ Playwright e2e（滚轮缩放/拖拽平移/点击详情/全屏） |
+
+### 13.3 集群 / 组网 / 代理 / 第三方接入 / 架构 五维深化
+
+**13.3-① 集群化收尾（承接 12 章）**
+- 集群只读副本完整装配（12.1-2）：非主节点 federated 只读 + WriteGuard 双层兜底 + 读面水平扩展 + 共享 StateStore 读写分离 → 多副本「共享存储+选主」完整形态
+- 集群真选主 E2E：Multi-master Mongo TTL 租约 FAIL/故障转移实测（#656 已落地单测，补多节点集成）
+- 状态上移收尾：share/index 适配器生产的集群一致性（多节点共享 StateStore + EventBus 广播失效）
+- 写面收敛 Fortification：非主节点写 503 + Retry-After + Helm 只读副本拓扑
+
+**13.3·组网/隧道**
+- VPN 真设备 P2（Linux TUNSETIFF / Windows wintun.dll 打开 + MTU/地址装配）+ P3 e2e
+- SOCKS5 UDP-ASSOCIATE（现仅 CONNECT）——支持 UDP 隧道经 mesh
+- 隧道多类型目标 dial 强化 + 跨 hub 中继可配置并行通道
+
+**13.3·代理能力**
+- 服务端作为转发入口（mesh 服务端面）：sproxy 亦能充当 mesh 出口/代理（现仅 sclient 侧发起）
+- http-proxy 全面覆盖：mesh ≤ socks/http-proxy 全局路由 + 出口策略编排
+
+**13.3·第三方接入/生态**
+- **MCP 工具面扩充 + SSE 加固**（现有 9 工具）：目录浏览/事件流/同步状态/分享撤销 + SSE 认证强化
+- **服务端 WebDAV LOCK 持久化**（现 NewMemLS）——重启不破裂锁协议
+- OIDC/LDAP 演示收敛（# 监控一致性）、S3 兼容 sabled 加深、WebDAV 多卷接入
+
+**13.3·架构/可维护重构**
+- **统一中台网关认证**（SproxySig / Bearer / OIDC / LDAP 收敛单一入口）
+- 一致性：TypeStore 门禁扩展——StateStore 不可直写（R21 已有）+ 审计落盘扩展 + 指标统一
+- 可测试件：混沌注入完善（网络分区/延迟/Kill9 于集群场景）、e2e 覆盖扩充
+
+### 13.4 跨项目集成点（工作区价值）
+
+| 项目 | 集成 | 依赖能力 |
+|------|------|---------|
+| **download-manager P6-2** | 站点抓取走 sproxy+sclient 隧道（httpproxy/CONNECT） | sproxy http-proxy / sclient mesh 已就绪 |
+| **sdserver** | 站点任务强制 127.0.0.1:1080 代理（看到推进方向） | sproxy 前向代理 |
+| **sproxy-app** | Wails3 桌面壳接入 sproxy API（快捷/托盘/系统通知） | sproxy REST + /api/events SSE |
+| **stealth-builder** | 中继节点交付（relayd 增量混淆） | sproxy relay/socks/mesh |
+
+### 13.5 优先级矩阵 v3（价值×投入 × 易用性）
+
+| 档 | 项 | 价值维度 | 投入 |
+|----|-----|---------|------|
+| **S1（易用性头筹）** | V1 可交互 Hub 拓扑 | 易用性 | 3人日 |
+| **S1** | V2 响应式布局 + 容器解放 | 易用性 | 2人日 |
+| **S1** | V6 所见即所得反馈体系 | 可用性 | 2人日 |
+| **S1** | 12.1-2 集群只读副本装配 + 选主 e2e | 集群 | 3人日 |
+| **S2** | V3 虚拟滚动 + 固定表头 | 性能/可用 | 2人日 |
+| **S2** | VPN 真机 P2/P3 | 组网 | 5人日 |
+| **S2** | MCP 工具面扩充 + SSE | 生态 | 3人日 |
+| **S2** | 服务端 WebDAV LOCK 持久化 | 兼容 | 2人日 |
+| **S2** | V4/V5 对话框 + 拖拽上传 | 可用 | 3人日 |
+| **S3** | UDP-associate / 联邦回写 / 服务端代理入口 | 组网/架构 | 各 3-4人日 |
+
+**依赖链**：13.1-V1/V2/V6（Web UI 整体改造，一次性排期）> 13.3 集群（依赖 12.1 已落地 StateStore/只读）> 13.3·2 VPN（OS 集成）。投入估算：S1 ~11 人日，S2 ~15 人日，S3 ~12 人日。
+**待人工决策**（落地设计文档前）：
+① V1 拓扑布局偏好（环状≈力导向）；② V3 虚拟滚动对分页是否改 Lazy 无限滚动；③ 桌面壳 sproxy-app 是否纳入本次 roadmap 许诺实现；④ 服务端充当代理入口是否一阶段落地（当前 P 档）。
+
+---
+
+> **本章状态核对（2026-09-28）**：以下 Web UI 硬伤与集群状态均源码实证（行号如上）。
+> 既有 11/12 章 64 份设计文档 + 82 项全覆盖标准继续有效；本章为新增方向。
+
+## secretdata 生产化待办（用户裁定 2026-10-18）
+
+**优先级**：① 基于**百度网盘**的 secretdata 生产功能（完整/稳定/可用/**高性能**）→ ② secrets 按卷格式存取
+→ ③ 回收站各卷独立 + 汇总展示 → ④ 容量/配额收敛（生产级可长期维护）→ ⑤ 其余（不影响基础使用，记录待办）。
+
+### ① secretdata over 外部卷（baidupcs 优先）——**最高优先**
+- [x] **真实网盘 e2e（2026-10-19 补）**：`pkg/volume/ext/baidupcs/secretdata_real_e2e_test.go`
+      （`//go:build e2e`；运行时从 BaiduPCS-Go 配置读 BDUSS ⇒ 无凭据**干净 t.Skip**，CI 恒绿 ✓）覆盖：
+      secretdata over **真实**百度网盘的「写入 → 读回逐字节一致」· **远端每一个 blob 都不含明文标记**
+      （加密卷在外部卷上不泄明文——本特性的核心价值 ✓）· 覆盖写 · 删除 · 分块上传**复用调用方暂存路径**
+      （内层收到 `*os.File` ⇒ 块级交错/零二次拷贝的性能前提在**真实链路**成立，而非仅 fake ✓）。
+      运行：`cd pkg/volume/ext/baidupcs && GOWORK=off go test -tags=e2e -run TestE2E_SecretdataOverBaidupcs -count=1 -v`
+- [ ] **接线核实与收口**：`type: secretdata` + `extra.target: "<外部卷>/<子目录>"`（嵌套形态，装配层经
+      `TranslateNestedDecl` 翻译为封装声明）在**外部源**上的端到端可用性——装配层已支持（`pkg/volume/enclosure/attach.go`
+      列出 s3/baidupcs/pikpak/cluster 等外部源）；**单测已覆盖**（外部后端替身，`cmd/sproxy/secret_register_test.go`
+      的 `TestSetupSecretBackends_ConfigSecretdata_Assembled` / `multi_layer_chain_over_external_source` 子用例），
+      但**缺真实网盘 e2e**（e2e 只覆盖 local target）（2026-10-19 更正：此前记为「无任何测试覆盖」已 stale）。
+      `docs/secret-volume.md §3/§9` 的「对象存储类外部 target 仍预留」措辞已按实测更正（仅「外部卷**整卷**」仍预留）。
+- [ ] **性能：消除分块二次本地拷贝**：secretdata 上传每个加密分块用 `s.inner.WriteFile(ctx, key, path, reader, …)`
+      ⇒ 目标卷（baidupcs）会**再落一份本地 staging**（其 `WriteFromStagedPath` / `WithStagedLocalPath` 已具备）。
+      修：把 secretdata 的**临时分块路径**经 `syncpkg.WithStagedLocalPath`（或 `WriteFromStagedPath`）交给内层
+      ⇒ 峰值 1×、省一次本地拷贝（与既有 staging 架构一致，不另造机制）。
+- [ ] **读性能**：确认走 `RangeReader` 段级快路径（baidupcs 已实现 `OpenRangeRead`）⇒ 最小下载；量化
+      「每 4MiB 窗口的 HTTP 请求数」与顺序读吞吐（需实测）。
+- [ ] **稳定性**：远端错误 ⇒ 写失败 + 回滚不留半态（已有）；补「远端超时/重试/断连」下的集成测试
+      （用实现 `RangeReader` + `StagedPathReuse` 的**假外部 FS** 覆盖整链，避免依赖真实网盘凭据）。
+- [ ] **用户面**：`extra.target` 文档 + `config.example.yaml` 示例 + 建卷 API/Web UI 的嵌套建卷路径核对。
+
+### ② secrets 按卷格式存取（用户裁定：URI 读 + 缓存 + 隔离真实存储结构）——**已完成** ✓（2026-10-19 核实销账）
+- ✅ **经卷存取（按卷格式加密/封印）**：`cmd/sproxy/secret_register.go` 的 `secretsFSFor` 按**路径归属**
+  （部署事实，而非配置来源）判定——落在受管卷根内 ⇒ `server.NewRootSecretsFS`（走 `storage.Root`：
+  at-rest 透明加解密 + 封印 + 用户可见长度/容量接线；`pkg/server/secrets_api.go`、`pikpak` 主密钥同源）；
+  仅「**独立目录**」（不在任何卷根内，无卷语义可依附）保留裸 `NewLocalFS`，该回退分支已在 R26 门禁登记。
+- ✅ **使用方按 URI 配置读 + 隔离真实存储结构**：消费方只写 `extra.secret_url: secrets://<卷>/<名>`
+  （`secrets.NameFromURL` / `backend.OpenURL`），**完全不见底层布局**；内容在**装配期读一次并缓存注入**
+  （`defaultSecretdataSecret` → `secretdata.NewBackend` 持有密钥字节）；运行期读取点仅 `AccountPool.Use`
+  （会话级冷路径）与 secrets API ⇒ **无热点，无需额外读缓存**（如未来出现每请求读取再按需加缓存）。
+- ✅ **迁移口径（禁静默降级）**：用户裁定 2026-10-13「尚未上线 ⇒ 无兼容负担」——secrets **一律加密形态**，
+  不做「历史明文识别 / 读时迁移」；非加密容器按存储层既有报错 **fail-closed**（不静默降级、不自动改写）；
+  上线后若确需迁移，按彼时口径单独立项（记档于 `pkg/server/secrets_fs.go` 文件头）。
+- **取证**：`go test ./pkg/volume/secrets/ ./pkg/server/` secrets 用例全绿 · `internal/archcheck` R26
+  （`TestVolumeRootBypass`）通过 · `cmd/sproxy/secret_register_test.go` 的 `plaintextOnDisk` 断言
+  （加密卷上密钥不明文落盘）通过。
+
+### ③ 回收站：各卷独立 + 汇总展示（用户裁定：避免过多复杂度，参考常见 OS 策略）
+- [x] 软删落**文件所在卷**的 trash（`softDeleteToTrash(root=<文件所在卷>)` ✓ 已是）。
+- [ ] **列表/恢复/清空按各卷独立 + 跨卷汇总视图**（**已定位缺口** 2026-10-19）：`pkg/server/trash.go`
+      的 `listTrashHandler` 只用 `h.tenantFor(owner)` 的**默认卷根**（`root.Abs("trash")`）⇒ 其它卷
+      （`user` 卷 / 外部卷）里软删的文件**不可见、不可恢复** ✗；`EmptyTrash(owner)` 同限默认卷 ✗。
+      **实施**：① 服务面加卷维度（`ListTrash(owner, volume)` / `RestoreTrash(owner, trashRel, volume)` /
+      `EmptyTrash(owner, volume)`，`volume==""` = 汇总/全部）；② 卷枚举复用既有 `h.Volumes()`
+      （`registry.Set`）+ `walkExportVolumes` 的 owner 卷遍历口径；③ API `GET /api/trash?volume=`、
+      `POST /api/trash/restore`（加 `volume`）、`POST /api/trash/empty?volume=`，条目带 `volume` 字段；
+      ④ Web UI 增卷列 + 卷筛选（**硬规则**：Playwright 真浏览器 e2e + 纯函数 `node --test`）；
+      ⑤ `CleanupTrash`/`trashGCTask` 同步覆盖各卷。
+
+### ④ 容量/配额收敛（必须生产级、可长期维护）
+- [ ] 本地加密卷容量真值接 root 物理扫描（消除 ~0.1% 逻辑口径偏差）。
+- [ ] presign 直传 per-volume 记账/预检（#44① 的 (a) 半；默认禁 + 经写内核登记已做）。
+- [ ] 多 target 副本字节入账（`targets` 实验能力）。
+
+### ⑤ 其余（不影响基础使用）
+- [ ] `TransferFSFor` 第三返回值语义 / `DisableDoubleDownloadVerify` 规格-实现缺口。
+- [ ] Windows 文件锁 flake（`pkg/tunnel/hub` 持久化偶发）。
+- [ ] legacy meta（无 blocklet 索引）读内存退化为单块。
+- [ ] `Decl.SourceKey(owner)`（设计 §5；跨外部卷源封装前置）。
+- [ ] 卷非空但根不可解析时放行（与错密钥挂载期不可区分，既有锁定语义）；两条写路径 size 口径差异（既有锁定）。
+
+### ①-附：百度网盘「秒传收敛」下的本地临时空间策略（2026-10-18 用户提出）
+
+**领域约束（已取证）**：多分片上传后远端 md5 **非权威**（`MD5Unreliable`，`md5 (可能不正确)`）；
+**checksum 只在「同一文件重复上传（秒传）」命中后才收敛** —— 现实现已有该机制：
+`putAttempt` = 存在性检查 → 上传 → **ETag 复核 → 不匹配则 `RapidUpload` 刷新**（`adapter.go`，
+未命中码 31079）。
+
+**两种策略对比**（本地临时物 = 加密后产物）：
+
+| 维度 | S1 占本地临时空间（保留加密产物） | S2 重复计算（重读源 + 重加密） |
+|---|---|---|
+| 本地峰值 | 当前：**O(整个文件)** ✗（先全部加密落 temp 再上传） | O(1 块)（只留当前块） |
+| CPU/IO | 0（直接复用） | AES-GCM 重算 + 源重读（KDF 每文件一次，成本主要在加密/IO） |
+| 可重试性 | **强**：秒传刷新只读本地文件 | **仅当源可重读**；HTTP body / 纯流 **不可重读** ⇒ 无法重算 ✗ |
+| 秒传收敛 | 同一文件重复上传即可刷新 ✓ | 需先重算再刷新（多一轮 CPU/IO ✗） |
+| 崩溃残留 | 本地孤儿（可清）+ 远端已上传块需回滚 | 同左 |
+
+**关键洞察**：secretdata 是**分块存储**（每块一个对象）⇒ **秒传天然是「按块」的** ⇒ **无需**保留
+「整份加密文件」✗；每块上传时其本地文件**本来就在场**（加密产物）⇒ 秒传刷新**零重算** ✓。
+
+**推荐形态（混合 + 块级交错）**：
+1. **块级交错**（encrypt 块 k → 上传块 k → 丢弃）：本地 staging = **O(1 块)**（默认块 1–200MiB，
+   块内 blocklet 更细）⇒ 「空间不足」在多数场景**自然消失** ✓；秒传按块刷新 ✓；失败用既有
+   `rollbackWrite(uploaded…)` 回滚 ✓（远端孤儿由可选 GC/清理兜底，如实登记）。
+2. **回退链（回答「空间不足能否回退到重复计算」）**：
+   ① 产物在场 ⇒ **复用**（S1，零成本）→ ② 源**可重读**（本地文件/已暂存路径）⇒ **重算**（S2）→
+   ③ 都不可行（源已消费 + 产物已清）⇒ **fail-closed**（明确错误，绝不静默接受不可校验的写 ✗）。
+3. **空间治理**：沿用**既有** staging 配额（本卷自管，见 `stagingReserve`）⇒ 不足时按①→②→③ 回退，
+   而不是直接失败（除非源不可重读）。
+4. **不推荐**：长期保留「整份加密文件」✗（峰值 O(file)、崩溃残留、与按需/流式方向相悖；
+   且分块存储下**无必要**）。
+
+**实施状态（2026-10-18，块级交错已落地）**：
+
+- ✅ **块级交错上传**：`shardseal.EncryptShardsReaderToChunks`（新 sink 抽象：分块逐块交调用方、meta **不**在 shardseal 内加密，
+  `EncryptionResult.MetaBlob/MetaName` 留空、由调用方按最终 meta 自行加密一次）⇒ `secretdata.writeFileStream` 走 sink：**加密一块 → 上传一块 →
+  丢弃**，meta 留到末尾且**内存态**上传。实测（≈510KiB / 32KiB 块 = 16 块，
+  `TestWriteFile_InterleavedChunkUploadLocalPeakO1Block`）：本地分块副本峰值 **16 → 1**（O(file) → O(1 块)）。
+  staging 配额预留口径同步改为「单块上界 + meta pad」（`stagingReserveInterleaved`），不再随文件线性增长。
+- ✅ **所有分块上传点统一经 `WithStagedLocalPath`**（`uploadLocalChunk`）：数据分块、**parity**、**dedup**
+  单分块（此前 parity/dedup 走 `bytes.NewReader` 内存交付 ⇒ 内层二次落 staging）。
+- ✅ **回退链**：本地产物不可落盘（**临时目录不可用**）或 staging **配额**不足时——源**可重读**
+  （本地文件 / 已暂存路径，`replayableSourcePath`）⇒ 降级**内存交付**（写仍成功）；源不可重读
+  （管道 / 内存 reader）⇒ **fail-closed**（明确错误，无半态）。内层重试/秒传刷新期间本地产物**必须在场**
+  （生命周期契约：stagedPath 只读，删除一律在内层返回后）——已由「内层多遍读」用例锁定。
+  注：回退链只覆盖**落盘前**的可用性判定（临时目录不可用 / 配额拒绝）；**交错期间**落本地块
+  （`os.WriteFile`）失败时整次写直接失败并回滚，不回退。
+- ✅ **差分用例**：秒传收敛场景（fake 模拟多分片 md5 非权威 → 秒传刷新命中/未命中）+ 本地峰值对照
+  （峰值 ≤ 1 块；未命中 ⇒ fail-closed 无半态）。
+- ⚠️ **已知残余（如实登记）**：
+  1. **崩溃（非错误返回）时远端可能留孤儿块**：交错丢弃后进程崩溃 ⇒ 已上传块无记录 ⇒ 由既有可选 GC/清理兜底
+     （与删除路径的孤儿方向同源，见 `docs/secret-volume.md` §6.2）。
+  2. **内存写路径未交错**（`writeFileEncrypted`：非 seek 源 `io.ReadAll` 后整目录落 temp，本地峰值仍 O(file)；
+     dedup/erasure 走该路径）——未做原因：该路径明文已在内存（内存峰值 O(file) 才是主瓶颈）、且 parity 需全部
+     明文分块；交错需再引入一层 sink 分发且对 erasure/dedup 语义影响面更大。
+  3. **回退链的「重算」（②）落在上层**：本层不做单块重加密（无 per-block 加密 API；重算 = 上层重试整次写，
+     见 `pkg/backup.transferWithRetry`）⇒ 本层保证「源不被消费/销毁 + 失败返回明确错误 + 完整回滚」，
+     使上层重算可行。③ 的判据按设计原文取「源是否**路径**可重读（本地文件/已暂存路径）」。
+  4. **「先登记后上传」未覆盖全部上传点**（2026-10-19 新发现，本轮未改）：主写路径的分块/meta 已改
+     「先登记后上传」（内层「写成功但复核失败」时可从回滚集合删除），但下列上传点仍是「写后登记」——
+     目录 meta（`secretdata.go` `writeDirMetaLocked`，经 `updateDirMetaLocked` 用于目录改名/移动）、
+     同卷复制（`copy.go` `CopyFile`：meta 写入失败无登记/清理）、`copyContentBlobs`/`copyBlob`、
+     改名（`writeRenamedMetaLocked`）、**dedup 命中路径**（`features.go` `writeFileDedupHit`：失败时仅
+     `releasePoolRef`、不删已落 meta）。注：`UpdateMetaExtra`（`meta_provider.go`）用第三种写法
+     （失败即显式 `Delete`）——已覆盖，但同属未收敛族。**影响**：这些路径遇内层 write-then-fail 会在远端
+     留孤儿 blob（无数据丢失，属空间泄漏，由既有可选 GC 兜底）。
+     **最小修法**：抽 `uploadAndTrack`（登记→上传→失败即删）并让上述点统一调用。
+  5. **第三轮代码审核（2026-10-19，三路独立 fresh-context）发现 → 本轮已全部销账** ✓
+     （commit `807dc24b3`：降级哨兵分类 · 失败清理单一机制 · dedup 复制保 dataDir/引用 · 提交单一实现
+     `commitLocked` · 锁内远端删除全收口有界 ctx · baidupcs size 不符走有界重试 · 流式路径 size 告警）。
+     **仍未做（需产品裁定 / 非正确性问题）**：
+     - **远端「md5 非权威 + 未报 size」时零校验接受**（`baidupcs/storage.go` `verifyUnreliableMD5Size`）：
+       既不比 md5 也不比 size，仅 Warn 后接受——这是 R5-I1「无校验能力≠损坏」的**既有用户裁定**，
+       改成 fail-closed 会拒绝合法上传（远端确实可能不报 size），加 readback 又与本仓既有裁定
+       「必须 md5 一致才算上传成功」（已移除 readback 接受捷径）冲突 ⇒ **需裁定取向**。
+     - **内存交付降级无全局背压**：staging 配额不足时降级为内存交付（单次 ≤ 单块上限，有界），
+       并发多次降级无全局上限（既有非 seek 源内存写路径同样如此，非本轮回退链引入）⇒ 需引入
+       全局并发上限/配置项，属策略决策。
+     - **内存写路径（`writeFileEncrypted`）未交错**（见上方残余 2）：其明文**已在内存** ⇒ 交错只能把
+       本地 temp 峰值从 O(文件) 降到 O(单块)（内存峰值不变）⇒ 收益有限、需新增 Bytes 形态的 sink 入口。
+     - **限速包装曾使交错路径失效**：已修（`limitReader` 现透传 `Seek`/`ReadAt`/`SourcePath` 且
+       `ReadAt` 计入令牌桶）——留档备查，避免后续再引入「包装即丢能力」。

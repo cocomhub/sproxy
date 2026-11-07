@@ -10,7 +10,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 1. CLI 旗标（`--addr`、`--storage-root`）
 2. 环境变量（前缀 `SPROXY_`，例如 `SPROXY_ADDR=":18083"`）
 3. 配置文件 YAML（`--config sproxy.yaml`，默认 `sproxy.yaml`）
-4. Default()（`pkg/server/config.go`）
+4. Default()（`pkg/server/config/config.go`）
 
 配置文件不存在时不报错，仅使用环境变量与默认值。
 
@@ -26,7 +26,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `max_upload_bytes` | ByteSize | `1 GiB` | 普通（非分块）上传请求体上限（roadmap P0 恢复可配；`0`/缺省 = 1 GiB 默认，超过 413） |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
-| `registration.session_ttl` | duration | `24h` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
+| `registration.session_ttl` | duration | `7d` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
 | `registration.cli_ttl` | duration | `7d` | TOTP 登录（`login_type=cli`，`sclient trust login` 回填场景）的 session SK 有效期（D3） |
 | `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
@@ -55,6 +55,19 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `server_timeouts.write` | duration | `0` | 响应写出超时 |
 | `server_timeouts.idle` | duration | `0` | keep-alive 空闲超时 |
 | `server_timeouts.shutdown` | duration | `30s` | graceful shutdown 等待活跃请求结束的最长时间 |
+| **state_store** | object |  | 状态存储后端（statestore.md §5.3；默认 local 单节点零回归） |
+| `state_store.type` | string | `local` | 后端类型：`local`（缺省，单节点私有 JSON，零回归）/ `mongo`（集群共享 DB，F3 片）/ `raft`（未实现，装配拒绝）。集群模式（`cluster.enabled` 或 `type != local`）下凭据等状态切 StateStore（主写副本读，见 cluster-state-migration.md）；`type` 未注册/未实现 → 启动失败（fail-closed，不回落 local） |
+| `state_store.dir` | string | (空) | local 专属状态根（`<root>/state` 分片目录）；空 = `<storage_root>/state` |
+| `state_store.mongo.uri` | string | (空) | mongo 后端连接串（`type=mongo` 必填，F3 MongoStateStore 消费） |
+| `state_store.mongo.database` | string | (空) | mongo 数据库名（F3 默认 `sproxy`） |
+| `state_store.mongo.collection` | string | (空) | mongo 集合名（F3 默认 `sproxy_state`） |
+| **cluster** | object |  | 集群节点配置（cluster-scaling.md §2.1；空 = 单节点零回归） |
+| `cluster.enabled` | bool | `false` | 启用集群节点注册表（共享外部卷形态；true 时 `node_id` 必填，且凭据切 StateStore 后端） |
+| `cluster.node_id` | string | (空) | 本节点唯一 ID（`enabled` 时必填；跨节点唯一） |
+| `cluster.role` | string | `master` | 节点角色：`master`（主写面，默认）| `replica`（只读副本，需外部共享卷 + 非 local state_store） |
+| `cluster.index_resync_interval` | duration | `5m` | 索引 resync 兜底周期（0 = 关闭） |
+| `cluster.credential_sign_key` | string | (空) | 集群出口凭证**签发**密钥（64-hex 32B，仅配置凭证时必填）——签发仅持有节点持有；目标节点持同 key 验签授权（出口节点不持有，评审 I1）。签发入口：`sclient cluster credential issue`（本地签发输出 encoded 串） |
+| `cluster.credentials` | []object | 空 | 目标节点侧凭证池（`{encoded: "<Credential.Marshal 串>"}`）：按出口节点指纹（Recipient）索引，验签 + 时效 + volume/path 范围授权（替代静态 mesh_readers；空 = 零回归仅静态） |
 | **tls** | object |  | TLS 配置 |
 | `tls.enabled` | bool | `true` | 启用 TLS |
 | `tls.cert_file` | string | (空) | 证书路径（启用 TLS 时生效） |
@@ -72,12 +85,30 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `rate_limit.window` | duration | `1s` | 滑动窗口大小 |
 | `rate_limit.coordinated` | bool | `false` | 多实例协调（共享配额）。开启后按 `backend` 装配共享计数，多个 sproxy 实例共享同一限额，防分散绕过 |
 | `rate_limit.backend` | string | `local` | 协调后端：`local`（每实例独立计数，默认）/ `file`（storage 根下 `ratelimit/` 目录原子计数文件，多实例共享；跨进程协调语义在 Linux 上验证，Windows 降级为尽力而为） |
+| `rate_limit.endpoints` | map[path]→object | (空) | **per-endpoint 限流**（roadmap 12.1-6）：path → `{limit, window}` 规则表；空 = 不启用（零回归）。精确匹配优先 + `/` 段边界前缀最长匹配（如 `/download` 命中 `/download` 与 `/download/deep`，不命中 `/downloadx`）；无匹配规则透传（只限显式配置的端点，不误伤 hub/mux 长连）。规则非法值（limit≤0 / window≤0）沿用默认化（归 5 / 1s） |
+| `rate_limit.endpoints.<path>.limit` | int | (必填) | 该端点在窗口内允许请求数 |
+| `rate_limit.endpoints.<path>.window` | duration | (必填) | 该端点滑动窗口大小 |
+| `rate_limit.endpoint_default` | object | (空) | 未匹配任何端点规则时的兜底 `{limit, window}`；零值（limit≤0 且 window≤0）= 无兜底（透传） |
+| `rate_limit.max_concurrent` | int | `0` | 全局并发上限（同时处理中请求数）；`0` = 不启用（零回归）。并发闸满立即 429，不消耗 per-IP/全局/endpoint 配额。热更新仅生效于新请求，在途请求继续归还旧配额（不泄漏） |
 | `rate_limit.bandwidth.enabled` | bool | `false` | 文件级带宽限速（upload/download 传输路径 per-owner 令牌桶）；默认关零回归 |
 | `rate_limit.bandwidth.per_owner_bps` | int64 | `0` | 每 owner 限速（bytes/sec）；`<=0` = 不限速（启用时需 >0） |
 | `rate_limit.bandwidth.burst` | int64 | `per_owner_bps` | 令牌桶容量（单次突发字节）；`<=0` 回落 = 每 owner 限速（1 秒配额） |
 | `rate_limit.bandwidth.coord_backend` | string | `local` | 带宽限速跨实例协调后端：`local`（每实例独立 token 桶，默认，零回归）/ `file`（storage 根下 `bandwidth/` 目录原子计数文件，多实例共享 per-owner 字节配额）。**等待语义**：配额耗尽时传输等待窗口刷新（有界 5s，超时按未限速继续，不拒绝请求——与单实例 token 桶慢速行为一致）。跨进程协调在 Linux 上验证，Windows 降级为尽力而为 |
 | **审计** |  |  |  |
 | `audit.buffer_size` | int | `2048` | 有界内存环形审计缓冲条数（`GET /api/audit` 回看最近操作）；`0` = 关闭（返回空表）；负值非法 |
+| `audit.max_size` | ByteSize | `0`（关闭） | 审计日志轮转阈值（roadmap 11.5-⑥，如 `"10MiB"`）：>0 时按文件大小轮转（`audit.log` → `audit.log.1` … `audit.log.N`，保留 `max_archives` 份归档）；`0`/缺省 = 关闭轮转（零回归） |
+| `audit.max_archives` | int | `3` | 轮转保留归档份数（`audit.log.1` … `audit.log.N`）；`0` = 轮转即删不留档 |
+| `audit.max_total_bytes` | ByteSize | `1GiB` | 审计**全部段（热 + 归档）总字节硬上限**（设计 M1-8 / T8，防磁盘打满）：达上限先删**最旧归档**（有界保留）；删尽仍放不下则有界丢弃新条目（计入 `audit_dropped`，**绝不阻塞业务**）。`0` = 不限（不推荐） |
+| `audit.archive_dir` | string | `` | **冷段归档目录**（M4）：非空时**启动期 + 每次轮转后**把**封段**归档到该目录并回收本地封段（可指向挂载的冷卷目录；加密卷由卷自身提供 at-rest 加密）。归档**失败不丢段**（本地保留、下轮重试）。空 ⇒ 不归档 |
+| `audit.archive_keep` | int | `0` | 本地**保留**的最新封段数（便于近期查询/排障；`0` = 全部归档） |
+| `audit.archive_volume` | string | `` | **冷段归档卷**（M4，优选于 `archive_dir`）：非空时封段写入该卷的 `audit-archive/` 前缀 —— 加密/封装卷 ⇒ 冷段自带 at-rest 加密，容量/配额与普通卷一致；卷名须为**外部/封装/加密卷**（经 `Set.External` 解析；普通本地卷请用 `archive_dir`）。与 `archive_dir` 同时配置 ⇒ **以卷为准**；卷不存在 ⇒ 跳过归档并告警（不静默回落目录）。冷段**读侧**使用同一解析 ⇒ 归档后仍可查询 |
+| `audit.disabled` | bool | `false` | 显式关闭审计：读面返回空表、写入 no-op，且**不创建**任何审计目录/文件（与 `buffer_size=0` 的区别：后者只关内存环形缓冲，落盘仍在） |
+| `audit.startup.fail_fast` | bool | `false` | 审计落盘/服务装配失败时是否**中止启动**（`true` ⇒ panic ⇒ 进程退出，用于「合规要求审计必须可用」的部署）；**默认 `false` = 降级为仅内存 + Error 告警**（审计绝不阻断启动）。开启可避免「以为有审计、实际没落盘」的静默失效 |
+| `audit.enabled` | bool | `false` | **预留（未接线）**：通用 span 审计开关（`pkg/audit`，云下载/转存/加密阶段）；默认关。span sink 目录当前不可配（见下行；默认**用户私有缓存目录**） |
+| `audit.dir` | string | (空) | **预留（未接线）**：通用 span 审计 sink 根目录 |
+| `audit.archive.enabled` | bool | `false` | **预留**：span 审计**归档默认关**（规格 §4.5 未来扩展——`Archiver` 接口已预留、配置暂未接线）；开启需同时配置 `volume` + `path` |
+| `audit.archive.volume` | string | (空) | **预留**：归档目标卷（如 `secretdata://audit`） |
+| `audit.archive.path` | string | (空) | **预留**：归档目标卷内路径 |
 | `notify.enabled` | bool | `false` | 通知中心开关（roadmap P0）：`true` + 至少一条 rules 时装配（事件 → 渠道路由 + 去抖 + 重试 + 历史）。默认关零回归 |
 | `alerts.enabled` | bool | `false` | 阈值告警引擎开关：`true` + 至少一条 rules 时装配（复用 NotifyCenter 渠道；规则 source 匹配 → 状态机去抖 + 恢复通知）。默认关零回归 |
 | `alerts.rules[]` | array |  | 告警规则：`{source: "disk_watermark"\|\"volume_degraded\"\|\"sync_failed\"\|\"login_locked\"\|\"nat_failure\", threshold: 80, channels: ["wecom"]}`——source 精确匹配事件源；`nat_failure`（roadmap 11.1-①）= NAT/中继拨号失败（hub/relay/webrtc 打洞或出口拨号失败，per-peer 去抖，同 peer 后续拨号成功自动发恢复通知）。`threshold` 仅磁盘/配额水位用；`channels` 名对应 notify.channels.* |
@@ -100,6 +131,9 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.feed_max` | int | `20` | `/api/notify/feed` 最大条目数（roadmap 11.7-⑦）：`<=0` 默认 20，上限 50 |
 | `notify.feed_token` | string | (空) | `/api/notify/feed` 可选访问令牌（roadmap 11.7-⑦）：空 = 公开可读（默认零回归）；非空 = GET /api/notify/feed 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401 空 body（防 token 枚举）。feed 会暴露审计信息——生产建议配置。token 不随 SIGHUP 重载（重启生效） |
 > 审计**默认落盘**：`RecordAudit` append JSON lines 到 `<默认卷根>/audit/audit.log`（合适位置自动选择，无需配置目录），重启后 `/api/audit` 可查历史；打开失败降级为仅内存（审计绝不阻断启动）。明文 JSON（审计行不含密钥/凭据）
+> 通用 span 审计（`pkg/audit`，云下载/转存/加密阶段耗时与字节）与上表并列：每任务独立 sink 文件（`<scopeID>.audit.log` 每行一行 JSON，权限 0600），随任务持久化（`CloudTask.audit`）；归档默认关（`audit.archive.*` 预留未接线，见上表）
+>
+> span sink 目录 = **用户私有缓存目录** `<UserCacheDir>/sproxy/audit`（Linux 通常 `~/.cache/sproxy/audit`），目录以 0700 创建、拒绝符号链接与非私有权限；取不到私有目录时**审计禁用并告警**（不回落共享 `/tmp`——共享路径可预测，同机他人可预置目录/软链读取或篡改审计）。
 | **分块上传** |  |  |  |
 | `chunk_size` | int64 | `4194304` (4 MiB) | 服务端推荐分块大小 |
 | `max_chunk_size` | int64 | `0` | 仅客户端配置，服务端忽略 |
@@ -129,10 +163,20 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].retention.audit_ttl` | duration | `0`（关闭） | 审计日志保留期（**仅默认卷生效**）：> 0 时按龄截断默认卷审计内存 + 落盘窗口（非默认卷配置 → 装配 Warn + 忽略）。`0`/缺省 = 关闭 |
 | `volumes[].retention.gc_interval` | duration | `0`（关闭） | 卷级保留期清理周期：> 0 且至少一个 TTL 非零时启动周期任务（与 `mirror_interval` 同构；取各启用卷最小间隔）。全 TTL 零而仅配 gc_interval → 配置校验拒绝（空转任务）。`0`/缺省 = 关闭周期 GC（可手动触发） |
 | `mirror_interval` | duration | `0`（关闭） | 卷镜像周期任务间隔：`> 0` 且任一卷配了 `mirror_to` 时启用（ticker + 停止通道，与 `versioning.gc_interval` 同构）；`0`/缺省 = 关闭（零回归） |
-| `index_save_interval` | duration | `5m` | 搜索索引快照周期保存间隔（roadmap 2.3 P0 持久化增强）：`> 0` 时周期落盘 `<meta>/index/<owner>.json`（重启载入免全量 WalkDir；关闭时再保存一次）；`0` = 关闭（快照不落盘，零回归） |
+| `index_save_interval` | duration | `5m` | 搜索索引快照**周期全量**保存间隔（roadmap 2.3 P0 持久化增强）：`> 0` 时周期落盘 `<meta>/index/<owner>.json`（重启载入免全量 WalkDir）；`0` = 关闭周期全量保存（零回归）。**注意**：与写后 debounce（固定 1s 只落变更 owner，崩溃窗口 ≤1s）独立——关闭本项不影响 debounce 落盘 |
 | `tier_policy.interval` | duration | `0`（关闭） | 冷热分层自动降级扫描间隔：`> 0` 时启用周期任务（ticker + 停止通道，与 `mirror_interval` 同构），把 hot 卷满足条件的文件迁移到 cold 卷；`0`/缺省 = 关闭（零回归） |
 | `tier_policy.max_age_hot` | duration | `0`（不限龄） | hot 卷文件最大存活时间：mtime 超过此值且 size ≥ `min_size_hot` 才降级。`0` = 不限龄（仅按大小降级） |
 | `tier_policy.min_size_hot` | size | `0`（不限大小） | hot 卷文件最小大小阈值：size 超过此值且 age ≥ `max_age_hot` 才降级。`0` = 不限大小（仅按龄降级）。**至少一个阈值非零**降级才可能发生 |
+| `volumes[].extra.encrypt` | bool | `false` | **卷根 at-rest 加密**（仅本地卷）：`true` = 落盘字节经 AES-256-GCM 分块加密（覆盖**文件内容**与**经 `storage.Root` 落盘的卷内元数据台账**——搜索索引快照、用户标签、校验和台账、云任务状态、分享与计量台账；加密卷上由**该卷**透明加密、封印区间写入恒拒，逐项见设计 §8.17 起；`meta/` 桶的 **sidecar** 记录密文哈希，保持明文），用户访问恒见**明文**——`/download`（含 Range）、`/download/chunk`、S3 网关 GET/HEAD/PUT/multipart、WebDAV、分享、整文件上传、分块上传（finalize 单遍加密落位）统一透明加解密；**块写**是随机定位写、与 GCM 不兼容 ⇒ 加密卷显式拒绝（替代路径：分块上传/整文件上传）。`encrypt=true` 但缺 `encrypt_key_file` → 启动 fail-closed。**卷内 `secrets/` 目录（含 per-owner 默认 secrets 桶 `<owner>/meta/secrets/`、显式声明的 secrets 卷、pikpak 主密钥）同样经 Root 加密落盘**；`?ciphertext=1` 可按需导出**存储原样密文**（此时 size/`Content-Range` 按密文坐标，且不回明文 checksum；备份/迁移/带外校验） |
+| `volumes[].type`（wrapper 类型，如 `secretdata`/`secrets`）+ `extra.source` | string | — | **封装卷**（通用封装机制）：声明占用某个已装配卷的根/子目录，并由注册的**封装处理器（wrapper）**提供变换后的访问（如 `secretdata` 加密）。封装后**源目录在源卷侧被封印**：任何直连写操作（建/写/删/改名/链接，含移入移出）恒拒（409），默认读按「不存在」处理（404）且父目录列举过滤；封装卷自身经服务器处理读写（不受封印影响）。**源可为本地卷或外部/远端卷**（`s3`/`baidupcs`/`pikpak`/`cluster`/`secretdata`…）：外部源卷的封印经 FS 级封印装饰器套在**装配处**（所有 `be.FS()` 调用者自动继承），封装卷自身取未封印特权视图。**owner 限定声明**（`<owner>/<bucket>/<sub>`）在源卷上的封印**足迹覆盖全部保留功能桶**（user/meta/cloud/archive/chunk/version/trash/backup 的同名子树全部封印）——封装卷的 sidecar/版本等写入落在这些桶，足迹与「封装卷可触达的键集合」同源。**enclosure 是内部装配机制，不是一种对外卷类型**：唯一声明形态是 **wrapper 类型 + `extra.source`**（`extra.wrapper` 缺省 = 卷类型本身）；用户面推荐写**嵌套语法**（wrapper 类型 + `extra.target: "<卷>/<子目录>"`，见 §3.8/Web UI 建卷表单），装配层翻译出上述声明词汇后走同一装配路径，**卷描述 Type 保持 wrapper 类型** ⇒ 协议（`SchemeOf`）/分类（wrapper）/API 回显全部按 wrapper 语义。**`volumes[].type: enclosure` 不是可写类型**：配置校验（`Config.Validate`）与建卷 API（`POST /api/volumes/user`）均 fail-closed 拒绝并提示改用 wrapper 类型 + source/target |
+| `volumes[].extra.source` | string | (空) | 封装源声明 `"<源卷名>:<子路径>"`（**子路径可空 = 整卷封装**：空子路径产生**整卷封印**——源卷内任意路径的直连读写被拒（写 409 / 读按 hidden 404，`source_read_mode: readable` 时为只读透视），封装卷经服务器处理照常读写；因整卷封印也覆盖服务端内部桶（meta/secrets 等），**整卷封装只应指向专用卷**）。**子路径为卷根相对**：客户端可达路径恒为 `<卷根>/<owner>/<bucket>/<rel>`，故要保护客户端可达区间须写 `"<源卷>:<owner>/user/<子路径>"`；封印按声明注入卷根，并在每个租户子根按等价翻译注入（首段等于该租户 owner 时剥去）。首段不得为保留功能桶名（user/meta/…）。源卷必须已装配（本地卷或另一个封装卷=嵌套；跨外部卷当前装配期显式拒绝）；同一 `<源卷>:<子路径>` 不得被两个封装卷声明、不得自封装/成环（嵌套深度上限 8）——违反均启动失败 |
+| `volumes[].extra.wrapper` | string | (空) | 封装处理器（wrapper）注册名。**冗余键：恒等于卷类型本身**——唯一声明形态是「wrapper 类型 + `extra.source`」（`type: secretdata` 的封装卷 wrapper 恒为 `secretdata`）。装配层翻译（`pkg/server.TranslateNestedDecl`）**不再书写该键**；显式写出时须与卷类型一致，否则启动失败（`ErrWrapperMismatch`，fail-closed：不允许「卷描述类型」与「实际处理层」分裂）。未注册 / 不匹配均 fail-closed。处理层只改字节，不承担封印与配额：封印由源卷注入、配额由装配层 `capacity.WrapBackend` 包装（封装卷链上最外层实现者即物理字节报告者 ⇒ 封装卷上限按**真实物理占用**判定，不受逻辑大小放大绕过） |
+| `volumes[].extra.source_read_mode` | string | `hidden` | 源卷侧读语义：`hidden`（默认，404 + 列举过滤）或 `readable`（**只读透视**：可读原始存储形态，便于卷迁移/带外核对；**写仍绝对禁止**） |
+| `volumes[].extra.allow_direct_url` | bool | `false` | 是否允许封装卷视图透传后端 302 直链。默认 `false`：**禁止客户端直连源存储**（直链会绕过服务器处理，读到密文/原始形态） |
+| `volumes[].extra.max_bytes` | size | `0` | 封装卷自身上限（`0` = 不设自身上限，**继承源卷池约束**）。封装卷容量池挂在有效源卷池之下（父链聚合、同一字节不双计） |
+| `volumes[].extra.encrypt_key_file` | string | (空) | at-rest 加密密钥文件路径（raw 32B 或 base64 32B）。`encrypt=true` 时必填（缺失启动失败）；与 `credential_store.master_key_file` 同语义，`openssl rand -base64 32` 生成 |
+| `volumes[].extra.cipher` | size | `64KiB` | at-rest 加密的分块大小（仅 `encrypt=true` 时生效；非法值 fail-closed）。预留给未来多算法选型——当前仅 `aes-256-gcm` 一种 |
+| `volumes[].extra.*` | object | (空) | 后端类型特有配置（外部后端构造器读取，如 baidupcs 的 `bduss`/`baidu_root`、s3 的 `endpoint`/`bucket`/`access_key`/`secret_key`）。**含凭据的键在 `GET /api/volumes` / `GET /api/volumes/user` 回显时被打码** |
 
 配置示例见 `config.example.yaml`。
 
@@ -211,6 +255,7 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 | `cloud_sync_threshold` | int | `20971520` (20 MiB) | 同步模式阈值（当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_downloader` | string | `http` | 云端下载器名称（当前仅内置 http 实现） |
 | `cloud_max_concurrent` | int | `3` | 最大并发下载数 |
+| `cloud_transfer_concurrency` | int | `3` | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
 | `cloud_max_batch_urls` | int | `100` | 批量/组下载单次最大 URL 数，超过服务端返回 400 |
 | `cloud_task_ttl` | duration | `24h` | 完成任务保留时间，过期自动清理 |
 | `cloud_failed_task_ttl` | duration | `1h` | 失败/取消任务保留时间 |
@@ -221,6 +266,56 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 | `cloud_download_allow_private` | bool | `false` | 允许下载私有 IP 地址（默认关闭，SSRF 防护） |
 | `cloud_download_exit_node` | string | (空) | 云端下载经 mesh 出口节点 ID（空=服务端本地直连）。非空时下载器 Transport.DialContext 指向「本地直连优先→失败回退经出口（hub 中继 RelayStream）」拨号；需 mesh.hub_url + mesh.access_key/secret（fail-closed） |
 | `cloud_archive_max_bytes` | int | `0` | 单次云归档允许的原始文件大小总和（0 = 不限制，仍受 `max_storage_bytes` 兜底） |
+
+### 可信卷（`trusted_volume`）
+
+外部卷上传/转存默认包**可信卷装饰器**：写侧为文件生成隐藏 `FileMeta` sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 功能桶 `<owner>/meta/<rel>.meta`），读侧（下载、云转存读回）按 `FileMeta` 逐分块校验，跨信任边界（外部网盘）静默损坏 fail-closed。**默认开启**；本地卷恒建 meta（`skip_verify` 只关读侧校验，不关 meta 生成；meta 桶对业务层结构性不可达）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `trusted_volume.staging_quota_bytes` | int | `0` | 本地 staging（外部卷上传/转存暂存）配额**独立根池**容量；`0` = 不限（仅记账）。**不再计入 `max_storage_bytes`**（2026-10-11 起：独立池避免慢速外卷上传抬高全局 usage 而误拒无关 owner）；如需防本地盘打满，请显式设置本项（建议按本地盘余量） |
+| `trusted_volume.skip_verify` | bool | `false` | `true` = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；meta 生成与 meta 桶隔离不受影响。**同时是 302 直链的前置**：见下 |
+
+**完整性承诺与两个「放宽」开关的边界（2026-10-11 第 7 轮对抗评审后收敛）**：
+
+- **sidecar 缺失**（旁路写/升级前存量）→ 放行但记 Debug（本路径不提供服务端校验，运维可区分）；
+  **sidecar 存在但损坏**（读失败/超解析上限/JSON 或校验失败）→ 下载**fail-closed 拒绝**
+  （此前静默直通：后端同时坏 sidecar + 数据时损坏内容会被下发）。
+- **`direct_link: true` 的明文外部卷**：仅当 `trusted_volume.skip_verify=true`（显式放弃服务端校验）
+  时才走 302 直链；默认校验开启时**强制服务端转发**并告警一次（302 让客户端直连后端、
+  绕过逐分块校验）。**出口卷（`type=egress`）例外**：其 302 指向出口节点自身，二次进入由
+  `egress_forward=1` 强制服务端转发，校验仍在服务端完成。
+| `trusted_volume.chunk_size` | ByteSize | `0` | 分块大小；`0` = 按文件大小自适应（1MiB~32MiB）；小于下界 1MiB 时钳到 1MiB（防百万分块 meta DoS） |
+| `trusted_volume.staging_quota_bytes` | ByteSize | `0` | 本地 staging（上传暂存）每-owner 配额上限；`0` = 不限制但记账。**独立记账**（与网盘 `owner_quotas` 分离）但挂在全局池之下——受 `max_storage_bytes` 约束（staging 实占本地盘，防打满）。所有外部卷写前预留/写后释放；s3 流式直传显式豁免、baidupcs 由 per-request 门卫包装记账 |
+
+### 卷状态缓存（`volume_state`）
+
+卷的 **list 目录视图**与 **checksum 派生值** 的统一缓存层（设计
+[2026-10-28-volume-state-maintenance](./designs/2026-10-28-volume-state-maintenance.md)）。
+**默认开启**（`disable: true` 才关闭）。语义契约（用户裁定 2026-10-28）：
+
+- **作用范围**：**所有存储卷**（含本地卷）。本地卷的对外 list 仍走搜索索引（后续片迁移），
+  但同步/镜像/备份等 `FS.ListDir` 消费方已享受缓存。
+- **读**：目录列举命中缓存（外部卷不再每次全量远端往返）；`Stat` 恒回源（checksum 安全判定
+  必须新鲜 —— 卷是真相源，缓存只加速）。
+- **写**：经卷视图的写（上传/删除/改名/跨卷移动/转存）**自动失效**对应目录，无需调用方登记。
+- **收敛**：本进程写由事件**写穿**（下一次读立即可见，含本地卷经 `storage.Root` 的内核写）。
+  **进程外**改动（运维直写盘/同根多实例/备份恢复/网盘 App 直改）**不会自动收敛**（默认永不过期，
+  用户裁定 2026-10-29）——需要可见时显式强制刷新：
+  - CLI：`sclient volume refresh [卷名]`（无参 = 全部卷）
+  - Web UI：工具栏「强制刷新」按钮（清缓存 + 重新列举）
+  - API：`POST /api/volumes/refresh[?volume=<卷>]`（无 `volume` = 全部卷）
+  需要时间兜底的部署可显式配 `ttl`（>0 过期）；负值 = 每次回源（调试/强一致）。
+- **落盘**：节点本地受管 staging 目录 `<storage_root>/meta/state/<卷>/…`（与容量账本
+  `<root>/meta/quota/<卷>` 同约定）；不进卷、不进网盘。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `volume_state.disable` | bool | `false` | 显式**关闭**卷状态缓存（默认 false = **启用**；强一致/调试时置 true） |
+| `volume_state.ttl` | duration | `0` | 缓存有效期；**`0` = 永不过期（默认）**，进程外改动只能靠 `sclient volume refresh` / Web UI「强制刷新」/ `POST /api/volumes/refresh` 感知；`>0` = 时间兜底；**负值 = 每次回源**（调试/强一致） |
+| `volume_state.search_remote` | bool | `false` | 允许对远端卷做递归搜索（默认关闭：递归列举 = 全量远端往返） |
+| `volume_state.max_bytes` | ByteSize | `256MiB` | 落盘 staging 上限；**`0` = 仅内存不落盘** |
+| `volume_state.persist_private` | bool | `false` | 允许**保密卷**（加密/私密外部卷）的元数据快照落节点磁盘；默认 false = 只内存（避免文件名/校验和明文落盘） |
 
 ### 文件同步（sync.*）
 
@@ -412,7 +507,7 @@ contexts:
 - **解析优先级**：`--context` > `--env`+`--user` > `current-context` > 旧 `SCLIENT_ENV` 映射。
 - **脚本化**：`sclient --env sg-prod --user alice upload big.bin`；环境变量 `SCLIENT_CONTEXT` / `SCLIENT_ENV` / `SCLIENT_USER` 同效。
 
-**迁移（零破坏）**：启动时检测到旧 `~/.config/sproxy/sclient.yaml`（或 `SCLIENT_ENV` 对应 `sclient.<env>.yaml`）且无 config.yaml → 自动导入为 context（名 = env 或 default），打印「已导入为 context <name>；旧文件保留可删」。
+**迁移（一次性）**：启动时检测到旧 `~/.config/sproxy/sclient.yaml` 且无 config.yaml → 自动导入为 context（名 = default 或 `--env` 指定），打印「已导入为 context <name>；旧文件保留可删」。迁移后**不再读取旧文件**。
 
 **上下文切换命令**：
 
@@ -429,24 +524,30 @@ sclient user list / user use <name>   # 切用户
 
 **凭据命令作用于当前 context**：`trust register [username]` 用当前 env 注册并**自动切到该用户**；`trust login [username]` / `trust renew` 作用于当前 context 的 env/user 段。
 
-## 客户端配置（sclient）
+## 客户端配置（sclient，统一 context 模型）
 
-sclient 的配置默认路径基于 XDG：
+**唯一配置文件 = config.yaml**（environments/users/contexts 三件套，context 模型单一
+事实源），默认路径基于 XDG：
 
 | 平台 | 路径 |
 |---|---|
-| Linux | `~/.config/sproxy/sclient.yaml` |
-| macOS | `~/Library/Application Support/sproxy/sclient.yaml` |
-| Windows | `%LOCALAPPDATA%/sproxy/sclient.yaml` |
+| Linux | `~/.config/sproxy/config.yaml` |
+| macOS | `~/Library/Application Support/sproxy/config.yaml` |
+| Windows | `%LOCALAPPDATA%/sproxy/config.yaml` |
 
-旧路径 `~/.sclient.yaml` 仍会被读取并提示迁移。`--config` flag 可覆盖默认路径。
+`--config` flag 可覆盖默认路径（指向任意 config.yaml）。旧平铺 `sclient.yaml` 只在
+**首次运行**（无 config.yaml 时）自动迁移一次；迁移后不再读取，旧文件保留可删。
+历史路径 `~/.sclient.yaml` 仅提示不再使用。
 
-环境变量前缀 `SCLIENT_`（例如 `SCLIENT_SERVER_URL=http://proxy:18083`）。
+**SCLIENT_ENV 仅作 `--env` 默认值**（覆盖 current-context 的 environment），不再选择
+配置文件路径（v1 曾按 `SCLIENT_ENV=prod → sclient.prod.yaml` 切换文件，已废除）。
 
-**多环境**：`SCLIENT_ENV` 环境变量选择 env 后缀配置文件（如 `SCLIENT_ENV=prod` →
-`~/.config/sproxy/sclient.prod.yaml`）。为空用默认 `sclient.yaml`，便于同一台机器维护
-prod/staging/dev 多套 hub/server/token 配置。通用参数优先级：**CLI flag > 环境变量 >
-配置文件 > 默认值**。
+**无 config.yaml 时**：需要 server_url/凭据的命令（上传/下载/trust/config 等）
+fail-closed 报错并指引 `sclient context set` 创建；本地命令（version/sealfile/
+genkey/identity 等）不受影响。
+
+**凭据写入唯一路径**：`trust login` / `trust renew` / `trust register` 回填
+config.yaml 的 user 段（不再有平铺形态）。
 
 完整字段：
 
@@ -629,7 +730,7 @@ owner 的配额（scopeFor 返回 nil）→ 不装配 staging 配额（兼容旧
 registration:
   disable: false        # false=允许注册（默认）；true=禁止注册（仅存量用户）
   force_totp: false     # true=TOTP 注册分支（sclient trust login 登录回填）；默认简单 AK/SK
-  session_ttl: 24h      # TOTP 登录（web）session SK 有效期（默认 24h，D3）
+  session_ttl: 7d       # TOTP 登录（web）session SK 有效期（默认 7 天）
   cli_ttl: 168h         # TOTP 登录（cli 回填）session SK 有效期（默认 7d，D3）
   login_fail_limit: 5   # per-AK 登录失败锁定阈值（U4，默认 5）
   login_fail_window: 15m # per-AK 锁定窗口（U4，默认 15m）
@@ -652,18 +753,27 @@ rate_limit:
 ### 客户端
 
 ```yaml
-# ~/.config/sproxy/sclient.yaml
-server_url: "https://proxy.example.com"
-access_key: "ak-meshA-3f8a..."
-access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
-check_checksum: true
-chunk_size: 8388608    # 8 MiB
+# ~/.config/sproxy/config.yaml（context 模型单一事实源）
+apiVersion: sclient/v1
+kind: Config
+current-context: default
+environments:
+  - name: default
+    server_url: "https://proxy.example.com"
+users:
+  - name: default
+    access_key: "ak-meshA-3f8a..."
+    access_key_secret: "0123...（64 hex，与服务端该 AK 对应的 SK 一致，见首启日志 / `sclient trust` 输出的 SK）"
+contexts:
+  - name: default
+    environment: default
+    user: default
 ```
 
 ## 百度网盘后端（BaiduPCS plugin）
 
 `sproxy baidupcs --bduss <BDUSS> [--binary /path/to/BaiduPCS-Go] [--root /baidu]`
-百度网盘存储后端自检。独立 module（pkg/baidupcs）引用外部 fork，二进制优先+库兜底。
+百度网盘存储后端自检。独立 module（pkg/volume/ext/baidupcs）引用外部 fork，二进制优先+库兜底。
 
 ## 外部卷容量纳管（C2-C4）
 
@@ -671,8 +781,14 @@ chunk_size: 8388608    # 8 MiB
 或 volumes[].vol_capacity；0 = 不限）——与本地卷（owner_quotas 物理资源）不同，外部卷不占
 本机磁盘，限额是「本系统授权占用外部卷的额度」。
 
-- **卷级计数记账**：外部卷写入累计（超限拒绝）、删除释放——`pkg/volume/capacity`（CapacityFS
-  装饰器包装 backend FS，counter 持久化 `<root>/<owner>/meta/volume/<name>.capacity.json`）。
+- **卷级计数记账（FS 层强制，2026-10-10）**：外部卷（配置卷 + 用户卷）在 **backend FS 层**统一包
+  `capacity.CapacityFS`——写入累计（超限 fail-closed 拒绝）、删除/覆盖/改名/服务端 Copy 释放。
+  因此**凡经 `be.FS()` 的写路径**（HTTP 上传、云转存、同步 push、备份、服务端 Copy·Move）
+  都被同一卷级计数器拦截，保证「**所有用户在该卷的占用之和 ≤ 卷限额**」（跨 owner 共享）。
+  - 配置卷：用 `PoolCounter` 复用该卷 `vol_capacity` 池（与路由排序/指标/对账同源）；
+  - 用户卷：用持久化 `VolumeCapacityCounter`（`<root>/<owner>/meta/volume/<name>.capacity`，
+    **非 .json**——避开 UserVolumeStore 的 `*.json` 扫描；重启 Load 续用）；
+  - 用户卷限额**从创建期即生效**（不再等重启 restore）。
 - **用量查询**：`GET /api/volumes/user`（用户卷）与 `GET /api/volumes`（系统盘）返回每卷
   `usage`（本系统已用）；backend 支持时另有卷总量（baidupcs 配额 / S3 bucket 用量，
   WebDAV 无标准 API 仅限额维度）。

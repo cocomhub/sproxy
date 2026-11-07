@@ -18,11 +18,3 @@ func jsonDecode(r *http.Request, v any) error {
 	_, _ = io.Copy(io.Discard, r.Body)
 	return nil
 }
-
-// writeJSON 写 JSON 响应。
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
-}

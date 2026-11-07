@@ -80,7 +80,7 @@ func TestOperatingRulesDocExistsAndReferenced(t *testing.T) {
 //  1. 硬规则列表编号从 1 连续到 N（无缺号、无重号、无越章节错位）；
 //  2. 必含关键条款锚点（R18 并发注册门禁、测试网络客户端隔离、本地先过后 push）；
 //  3. 不得出现已过时的表述（`hidden` 移除后「六类不进 changelog」已不成立）。
-func TestAgentsHardRulesStructure(t *testing.T) {
+func TestAgentsHardRulesStructure(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	// 纯文档解析（只读 md 文件，无共享可变状态）⇒ 直接并发。
 	t.Parallel()
 	root := moduleRoot(t)
@@ -154,7 +154,7 @@ func TestAgentsHardRulesStructure(t *testing.T) {
 		}
 	}
 	// 已移除的配置项不得再被呈现为「可配置」（`max_upload_bytes` 已于 roadmap P0 恢复可配，
-	// 见 pkg/server/config.go 的 MaxUploadBytes；此段仅保留对「已移除键」的历史防护——
+	// 见 pkg/server/config/config.go 的 MaxUploadBytes；此段仅保留对「已移除键」的历史防护——
 	// 现在该键合法，不再断言它不可配置）。
 	for _, f := range []string{"AGENTS.md", "CLAUDE.md", "docs/config.md", "docs/api.md"} {
 		b, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(f)))

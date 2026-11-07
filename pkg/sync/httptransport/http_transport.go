@@ -261,7 +261,7 @@ func (t *HTTPTransport) OpenRead(ctx context.Context, relPath string) (io.ReadCl
 //   - 实际 size>0：ChunkedUpload（确定性 upload_id + 断点续传 + 逐块校验）。
 //
 // 任何失败都会清理 spool。
-func (t *HTTPTransport) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (t *HTTPTransport) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

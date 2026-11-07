@@ -368,36 +368,34 @@ func (t *Tunnel) Serve(ctx context.Context, handler http.Handler) error {
 			}
 			return fmt.Errorf("tunnel: accept: %w", err)
 		}
-		go t.handleStream(stream, handler)
+		// 流式响应路径（大文件内存优化）：本地 handler 输出经 Pipe 流式加密回传，
+		// 避免整段缓冲。ctx 贯穿（停机取消中断流式 goroutine）。
+		go t.handleStreamStreaming(ctx, stream, handler)
 	}
 }
 
-// handleStream 处理一条隧道流。
-func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
+// handleStreamStreaming 是流式响应路径（2026-10-05 集群出口大视频内存修复）：
+// 本地 handler 输出经 io.Pipe 流式加密回传，避免整段缓冲（大文件/大 Range 持有侧
+// 内存放大）。复用 dispatchLocal 的 streamRecorder 模式（handler_client.go:139）。
+// ctx 贯穿（停机取消中断流式 goroutine）。
+func (t *Tunnel) handleStreamStreaming(ctx context.Context, stream mux.Stream, handler http.Handler) {
 	defer stream.CloseWrite()
 
 	reqMeta, err := t.readAndDecryptMeta(stream)
 	if err != nil {
-		// 审查 Minor #3（诊断）：数据面解密失败通常是密钥不匹配 / 版本不一致（C-1 修复
-		// 的同步发布协议变更）或恶意对端。静默 return 让客户端只得泛化 EOF，运维无法
-		// 定位升级后互通失败。加 Warn 记录错误供排查（不泄露密钥内容，仅错误信息）。
 		if t.key != nil {
 			slog.Warn("隧道请求元数据解密失败（可能密钥不匹配/版本不一致）", "error", err)
 		}
 		return
 	}
-
-	// 重放保护：当有密钥时检查 IAT/JTI
+	// 重放保护。
 	if t.key != nil && (reqMeta.IAT > 0 || reqMeta.JTI != "") {
 		if vErr := t.replayProtector.Validate(reqMeta.JTI, reqMeta.IAT); vErr != nil {
-			slog.Warn("mux 重放检测失败", "error", vErr, "jti", reqMeta.JTI)
-			// 写回错误响应，避免 dialer 侧 Do() 阻塞等待
 			errResp := bytes.NewBufferString(vErr.Error())
 			t.writeEncryptedResponse(stream, http.StatusTooEarly, make(http.Header), errResp)
 			return
 		}
 	}
-
 	var bodyReader io.ReadCloser
 	encKey := t.encryptionKey()
 	if encKey != nil {
@@ -410,8 +408,10 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 	} else {
 		bodyReader = &noopCloseReader{Reader: stream}
 	}
-
-	localReq, err := http.NewRequest(reqMeta.Method, reqMeta.URL, bodyReader)
+	// **ctx 贯穿（评审 I3 修复）**：用 NewRequestWithContext(ctx) 而非 http.NewRequest
+	// （Background ctx）——本地 handler 因此感知隧道 ctx，连接/停机断开时 handler 被取消，
+	// 与 dispatchLocal（handler_client.go:197）一致。
+	localReq, err := http.NewRequestWithContext(ctx, reqMeta.Method, reqMeta.URL, bodyReader)
 	if err != nil {
 		return
 	}
@@ -419,14 +419,75 @@ func (t *Tunnel) handleStream(stream mux.Stream, handler http.Handler) {
 		localReq.Header.Set(k, v)
 	}
 
-	buf := new(bytes.Buffer)
-	code := http.StatusOK
-	hdrs := make(http.Header)
-	rw := &bufferedResponseWriter{buf: buf, code: &code, hdrs: &hdrs}
-	handler.ServeHTTP(rw, localReq)
+	// Pipe：本地 handler 写 body，流式加密 goroutine 读（镜像 dispatchLocal:139-199）。
+	bodyPr, bodyPw := io.Pipe()
+	sr := newStreamRecorder(bodyPw)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer bodyPr.Close()
+		select {
+		case <-sr.metaReady:
+		case <-ctx.Done():
+			return
+		}
+		sr.mu.Lock()
+		code := sr.statusCode
+		hdrs := sr.sentHeader.Clone()
+		sr.mu.Unlock()
+		t.writeEncryptedStream(stream, encKey, responseJSON(code, hdrs), bodyPr)
+	}()
+	t.serveLocalStreaming(ctx, sr, handler, localReq, bodyPw, reqMeta.URL)
 	bodyReader.Close()
+	<-done
+}
 
-	t.writeEncryptedResponse(stream, code, hdrs, buf)
+// responseJSON 构造流式响应元数据（与 handler_client.go dispatchLocal 同构）。
+func responseJSON(code int, hdrs http.Header) []byte {
+	respMetaJSON, _ := json.Marshal(Response{
+		Proto:         "HTTP/1.1",
+		Status:        code,
+		Headers:       hdrs,
+		ContentLength: -1,
+	})
+	return respMetaJSON
+}
+
+// serveLocalStreaming 同步运行本地 handler（流式路径；defer 兜底 panic/管道关闭）。
+func (t *Tunnel) serveLocalStreaming(ctx context.Context, sr *streamRecorder, handler http.Handler, localReq *http.Request, bodyPw *io.PipeWriter, url string) {
+	func() {
+		defer func() {
+			sr.once.Do(func() { close(sr.metaReady) })
+			_ = bodyPw.Close()
+			if rec := recover(); rec != nil {
+				slog.Warn("隧道本地 handler panic（流式响应）", "panic", rec, "url", url)
+			}
+		}()
+		handler.ServeHTTP(sr, localReq)
+	}()
+}
+
+// writeEncryptedStream 写响应元数据帧 + 流式加密 body（handleStreamStreaming 用）。
+func (t *Tunnel) writeEncryptedStream(stream mux.Stream, encKey []byte, respMetaJSON []byte, body io.Reader) {
+	var metaBytes []byte
+	if encKey != nil {
+		metaBytes, _ = Encrypt(encKey, respMetaJSON, []byte(AADMeta))
+	} else {
+		metaBytes = respMetaJSON
+	}
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(metaBytes)))
+	if err := writeFull(stream, lb[:]); err != nil {
+		return
+	}
+	if err := writeFull(stream, metaBytes); err != nil {
+		return
+	}
+	if encKey != nil {
+		_, _ = EncryptStream(encKey, body, stream, []byte(AADStream))
+	} else {
+		_, _ = iostream.CopyFull(stream, body)
+	}
 }
 
 // readAndDecryptMeta 从流中读取请求元数据。
@@ -523,32 +584,41 @@ const streamBodyBufSize = 65536 // 64 KB 预读缓冲
 
 func (b *streamBody) Read(p []byte) (int, error) {
 	if b.key != nil {
-		if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
-			if b.rdBuf == nil {
-				b.rdBuf = make([]byte, streamBodyBufSize)
-			}
-			b.initOnce.Do(func() {
-				b.pr, b.pw = io.Pipe()
-				go func() {
-					_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
-					b.pw.CloseWithError(err)
-				}()
-			})
-			n, err := b.pr.Read(b.rdBuf)
-			if err != nil && err != io.EOF {
-				return 0, err
-			}
-			b.rdBuf = b.rdBuf[:n]
-			b.rdOff = 0
-			if n == 0 {
-				return 0, io.EOF
-			}
-		}
-		n := copy(p, b.rdBuf[b.rdOff:])
-		b.rdOff += n
-		return n, nil
+		return b.readEncrypted(p)
 	}
+	return b.readPlain(p)
+}
 
+// readEncrypted 解密读路径：经 io.Pipe 从 DecryptStream 均匀取解密字节并按 64 KB 预读。
+func (b *streamBody) readEncrypted(p []byte) (int, error) {
+	if len(b.rdBuf) == 0 || b.rdOff >= len(b.rdBuf) {
+		if b.rdBuf == nil {
+			b.rdBuf = make([]byte, streamBodyBufSize)
+		}
+		b.initOnce.Do(func() {
+			b.pr, b.pw = io.Pipe()
+			go func() {
+				_, err := DecryptStream(b.key, b.stream, b.pw, []byte(AADStream))
+				b.pw.CloseWithError(err)
+			}()
+		})
+		n, err := b.pr.Read(b.rdBuf)
+		if err != nil && err != io.EOF {
+			return 0, err
+		}
+		b.rdBuf = b.rdBuf[:n]
+		b.rdOff = 0
+		if n == 0 {
+			return 0, io.EOF
+		}
+	}
+	n := copy(p, b.rdBuf[b.rdOff:])
+	b.rdOff += n
+	return n, nil
+}
+
+// readPlain 明文读路径：直接从流上读取并按 64 KB 预读缓冲。
+func (b *streamBody) readPlain(p []byte) (int, error) {
 	if b.rdOff >= len(b.rdBuf) {
 		if b.rdBuf == nil {
 			b.rdBuf = make([]byte, streamBodyBufSize)
@@ -563,7 +633,6 @@ func (b *streamBody) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 	}
-
 	n := copy(p, b.rdBuf[b.rdOff:])
 	b.rdOff += n
 	return n, nil

@@ -189,3 +189,54 @@
 - job 日志 **10.0 MB**（成功 run 曾 26 MB / flaky run 31 MB）；其中 span 行 18514（已无缩进），剩余 39868 行 WARN 来自 `pkg/server/auth.go` 的 package-level `slog.Warn`（每请求 1 条，不受 `RegisterRoutesOpts.Logger` 控制）——已列 scratchpad 跟进。
 
 **新掌握的第二种塌陷形态（重要，别再归因错）**：修掉写盘后仍会超时（job 104376379716）：1 MiB op 恒定 **7.278–7.327 s**、4 MiB **29.4 s**（与字节数成正比、方差 ±50 ms、只影响搬数据方向），客户端与 mock 均无磁盘写入 ⇒ 是 runner 级环境 I/O 塌陷；**缩小 payload 无法规避**（N 按 ~1s/op 自适应 ⇒ 塌陷时单个 count 被拉长 ~1000 倍，比例不变）。对策 = 单次 op 停滞守卫（>2 s 立即失败 + 可操作信息），见 `pkg/client/benchmark_test.go` 的 `benchStallErr`。
+
+<!-- 2026-10-30 23:40:00 server 治理切片系列终态 -->
+
+## server 治理切片系列（S1–S13，2026-10-30 完成） #refactor #server-scope #decision
+
+**终态**：`pkg/server` 非测试 42,568 → 32,849 行（−22.8%）；`Handlers` 直接字段 102 → 12（12 个值嵌入 `*Deps`）；新增 13 个 server 作用域包：
+`config`(3601) / `notify`(940) / `scheduler`(189) / `s3`(1413) / `dav`(465) / `ai`(700) / `share`(900) /
+`metrics`(1299) / `verify`(239) / `ops`(659) / `alerts`(449) / `archive`(200)。
+
+**PR**：#924/#926/#927/#928/#929/#930/#931/#932/#933/#934/#935/#936/#937（+ 文档 #938）。
+
+**新增门禁**：R6（`server_scope_gate_test.go`：切片不得反向 import `pkg/server`、Levels 必须登记）、R7（`handlers_deps_gate_test.go`：`Handlers` ≤12 直接字段且必须嵌入 `*Deps`）。
+
+**每片固定配方**（已验证 13 次）：`git mv` → 改包名 → 定义 `Deps`+`New` → 装配层 `<cap>_wiring.go` → `<cap>_alias.go` 迁移别名 → 注册 `internal/archcheck/layers.go`（Levels/Managed/ParentDomain）→ 同步按路径扫描门禁（R25/R38/R39/R40/R46/`legacy_state_usage.tsv`）→ 更新 `docs/architecture.md` + `AGENTS.md` 能力矩阵。
+
+**剩余三块（cloud 2.2k / volume 6.5k / files 3.9k）不再切分**（实测判据，已写入 `docs/architecture.md`）：
+cloud 有 ≈30 个装配依赖（配额预留/结算、卷路由、审计编排），叶子包只有 0–8 个；抽出后需在 `Deps` 复刻
+`Handlers` 能力面 ⇒ 耦合不降反升。它们是**装配核心**，前置是先重构「用户可见写策略（pkg/files）」
+与「卷容量/配额记账（pkg/volume/capacity）」的边界。尝试 cloud 时已确认还需联动 `files_phys.go`/
+`user_visible_io.go`/`archive.go`（前两者已在 S13 处理）。
+
+**坑**：`docs/architecture.md` 的 S9–S13 小节曾因 python 锚点含转义反引号而静默替换失败——文档更新后必须 `grep` 校验落地。
+
+<!-- 2026-10-31 01:20:00 覆盖率补强与门禁批次 -->
+
+## pkg/server 切片覆盖率基线（2026-10-31） #testing #coverage #decision
+
+**纪律（用户明示）**：补测试要「尽可能高」，不以 60% 为满足；每包用
+`go test ./pkg/server/<cap>/ -coverprofile=c.out && go tool cover -func=c.out` 找未覆盖函数逐项补齐；
+不可达分支必须在 PR 逐条说明原因。包内测试必须 `t.Parallel()`、纯标准库、只绑 127.0.0.1、
+禁止真实数据；不得为过门禁改生产代码（发现缺陷另开 PR）。
+
+| 包 | 基线 | 现状 | PR |
+|---|---:|---:|---|
+| scheduler | 95.0% | 95.0% | 原有 |
+| notify | 85.1% | 85.1% | 原有 |
+| config | 78.8% | 78.8% | 原有 |
+| ops | 78.6% | 78.6% | 原有 |
+| alerts | 69.0% | 69.0% | 原有 |
+| archive | 69.1% | 69.1% | 原有 |
+| **verify** | 5.9% | **67.6%** | #941 |
+| **metrics** | 12.6% | **96.3%** | #945 |
+| **s3** | 3.6% | **92.5%** | #946 |
+| ai / share / dav | 15.3 / 25.2 / 33.7 | 补强中 | 进行中 |
+
+**补测过程中发现的真实缺陷（均已修 + 变异验证）**：
+- `RecordAuditRotate` nil 接收者 panic（注释称 no-op）→ #947。
+- `s3ReadBody` 读失败回落客户端声明 `x-amz-content-sha256` ⇒ PUT 空 body 落 0 字节对象并 201 → #948。
+
+**门禁**：R49 测试注释悬空、R50 测试数量棘轮（基线 7123，只增不减）、R51 别名棘轮
+（7 文件/410 行）、R52 `Deps` 字段上限（≤12；实测 dav=9 / s3=10 / verify=8）。

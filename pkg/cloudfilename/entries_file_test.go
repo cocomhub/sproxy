@@ -13,53 +13,76 @@ import (
 func TestReadEntriesFromFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	write := func(name, content string) string {
-		t.Helper()
-		p := filepath.Join(dir, name)
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatalf("写 %s: %v", name, err)
-		}
-		return p
-	}
 
 	t.Run("普通两行", func(t *testing.T) {
-		entries, err := ReadEntriesFromFile(write("urls.txt", "https://example.com/a.zip\nhttps://example.com/b.zip\n"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 2 {
-			t.Fatalf("want 2 entries, got %d", len(entries))
-		}
-		if entries[0].URL != "https://example.com/a.zip" {
-			t.Fatalf("entry[0].URL = %q", entries[0].URL)
-		}
+		assertReadPlainTwoLines(t, dir)
 	})
-
 	t.Run("注释与空行被忽略", func(t *testing.T) {
-		entries, err := ReadEntriesFromFile(write("with-comments.txt", "# comment\n\nhttps://example.com/valid.zip\n  # another comment\n"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 1 || entries[0].URL != "https://example.com/valid.zip" {
-			t.Fatalf("want 1 有效条目, got %+v", entries)
-		}
+		assertReadCommentsIgnored(t, dir)
 	})
-
 	t.Run("空文件零条目", func(t *testing.T) {
-		entries, err := ReadEntriesFromFile(write("empty.txt", ""))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("want 0 entries, got %d", len(entries))
-		}
+		assertReadEmptyFileZeroEntries(t, dir)
 	})
-
 	t.Run("文件不存在报错", func(t *testing.T) {
-		if _, err := ReadEntriesFromFile(filepath.Join(dir, "nonexistent.txt")); err == nil {
-			t.Fatal("缺文件应报错")
-		}
+		assertReadMissingFileErrors(t, dir)
 	})
+}
+
+// assertReadPlainTwoLines 断言普通两行条目文件的解析结果。
+func assertReadPlainTwoLines(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := ReadEntriesFromFile(writeEntriesFile(t, dir, "urls.txt", "https://example.com/a.zip\nhttps://example.com/b.zip\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	if entries[0].URL != "https://example.com/a.zip" {
+		t.Fatalf("entry[0].URL = %q", entries[0].URL)
+	}
+}
+
+// assertReadCommentsIgnored 断言注释与空行被忽略。
+func assertReadCommentsIgnored(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := ReadEntriesFromFile(writeEntriesFile(t, dir, "with-comments.txt", "# comment\n\nhttps://example.com/valid.zip\n  # another comment\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].URL != "https://example.com/valid.zip" {
+		t.Fatalf("want 1 有效条目, got %+v", entries)
+	}
+}
+
+// assertReadEmptyFileZeroEntries 断言空文件解析为零条目。
+func assertReadEmptyFileZeroEntries(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := ReadEntriesFromFile(writeEntriesFile(t, dir, "empty.txt", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("want 0 entries, got %d", len(entries))
+	}
+}
+
+// assertReadMissingFileErrors 断言不存在的文件读取报错。
+func assertReadMissingFileErrors(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := ReadEntriesFromFile(filepath.Join(dir, "nonexistent.txt")); err == nil {
+		t.Fatal("缺文件应报错")
+	}
+}
+
+// writeEntriesFile 在 dir 下写入测试条目文件并返回路径。
+func writeEntriesFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatalf("写 %s: %v", name, err)
+	}
+	return p
 }
 
 // TestParseEntries 覆盖格式契约边界（自 cmd/sclient 原 TestReadEntriesFromFile 迁入并扩充：

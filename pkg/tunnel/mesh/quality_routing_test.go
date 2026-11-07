@@ -103,7 +103,7 @@ func TestQualityRouting_NeutralWhenNoHistory(t *testing.T) {
 
 // ---- 测试辅助 ----
 
-// fakeQualityMux 实现 muxQualitySource（测试注入质量源，避免起真 mux）。
+// fakeQualityMux 实现 qualityMetricsProvider（测试注入质量源，避免起真 mux）。
 type fakeQualityMux struct {
 	mm mux.Metrics
 }

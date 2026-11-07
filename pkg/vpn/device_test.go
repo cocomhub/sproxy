@@ -68,7 +68,7 @@ func TestTUNDevice_OpenFailClosed(t *testing.T) {
 	dev := NewTUNDevice(netip.MustParseAddr("100.64.0.5"))
 	// SetMTU 同属 fail-closed 面（无设备句柄时明确报错，不静默成功）：
 	// 变异：SetMTU 返回 nil → 红。
-	if mtuErr := dev.SetMTU(DefaultMTU); mtuErr == nil {
+	if dev.SetMTU(DefaultMTU) == nil {
 		t.Fatal("P1 平台实现 SetMTU 应返回错误（不做真设备功能）")
 	}
 	rc, err := dev.Open("sproxy0")

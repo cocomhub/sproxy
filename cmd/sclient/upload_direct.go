@@ -5,11 +5,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
@@ -36,7 +39,7 @@ func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *st
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			backend := args[0]
@@ -83,54 +86,26 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 		return fmt.Errorf("stat 文件: %w", err)
 	}
 	fileSize := st.Size()
+	// 内容摘要：complete 登记必需（2026-10-14 P0）——服务端无法在直传后廉价读取对象内容，
+	// 故由客户端声明 size + sha256，服务端据此记账（双账本）并写入 checksum 台账。
+	sha, shaErr := fileSHA256(localPath)
+	if shaErr != nil {
+		return fmt.Errorf("计算内容摘要: %w", shaErr)
+	}
 
 	// 隔离 transport（不共享默认客户端——测试铁律；netutil.IsolatedTransport 无全局状态）。
 	putClient := &http.Client{Transport: netutil.IsolatedTransport()}
 	defer putClient.CloseIdleConnections()
 
+	// PUT 5xx/网络失败自动重试（指数退避 + 每次重试前重新签发——presigned URL 有
+	// 有效期，过期需新签名）。
 	var putErr error
 	for attempt := 1; attempt <= directUploadMaxRetries; attempt++ {
-		putErr = nil
-		// 1. 签发 PUT 预签名 URL（每次重试重新签发——防 URL 过期）。
-		var presign struct {
-			URL string `json:"url"`
+		attemptErr, fatal := directUploadAttempt(ctx, svc, putClient, backend, localPath, rel, fileSize)
+		if fatal {
+			return attemptErr
 		}
-		if err := svc.DoJSON(ctx, "POST", "/api/backends/"+backend+"/presign?path="+rel+"&method=PUT", nil, &presign); err != nil {
-			return fmt.Errorf("签发预签名 URL: %w", err)
-		}
-		if presign.URL == "" {
-			return fmt.Errorf("服务端返回空预签名 URL")
-		}
-
-		// 2. 直传 S3（普通 HTTP PUT；预签名 URL 自带鉴权）。**每次重试用新文件句柄**
-		// （http.Transport 会 Close *os.File 请求体——重试必须重开，不能复用已关句柄）。
-		putFile, perr := os.Open(localPath)
-		if perr != nil {
-			return fmt.Errorf("重开文件: %w", perr)
-		}
-		putReq, perr := http.NewRequestWithContext(ctx, http.MethodPut, presign.URL, putFile)
-		if perr != nil {
-			putFile.Close()
-			return fmt.Errorf("构造 PUT 请求: %w", perr)
-		}
-		putReq.ContentLength = fileSize
-		putReq.Header.Set("Content-Type", "application/octet-stream")
-		putResp, perr := putClient.Do(putReq)
-		_ = putFile.Close() // 请求体已消费（成功或失败），句柄回收（幂等）
-		if perr == nil {
-			_, _ = io.Copy(io.Discard, putResp.Body)
-			putResp.Body.Close()
-			if putResp.StatusCode >= 300 {
-				if putResp.StatusCode >= 500 {
-					putErr = fmt.Errorf("直传失败 %d（可重试）", putResp.StatusCode)
-				} else {
-					b, _ := io.ReadAll(io.LimitReader(putResp.Body, 4096))
-					return fmt.Errorf("直传失败 %d: %s", putResp.StatusCode, string(b))
-				}
-			}
-		} else {
-			putErr = fmt.Errorf("直传 PUT: %w", perr)
-		}
+		putErr = attemptErr
 		if putErr != nil && attempt < directUploadMaxRetries {
 			select {
 			case <-ctx.Done():
@@ -145,11 +120,74 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 		return putErr
 	}
 
-	// 3. complete 登记（服务端确认对象存在）。
+	// 3. complete 登记（服务端校验存在性/size + 双账本记账 + 元数据/checksum 台账）。
 	var completeResp map[string]string
-	if err := svc.DoJSON(ctx, "POST", "/api/backends/"+backend+"/presign/complete?path="+rel, nil, &completeResp); err != nil {
+	completeURL := "/api/backends/" + backend + "/presign/complete?path=" + rel +
+		"&size=" + strconv.FormatInt(fileSize, 10) + "&sha256=" + sha
+	if err := svc.DoJSON(ctx, "POST", completeURL, nil, &completeResp); err != nil {
 		return fmt.Errorf("直传登记: %w", err)
 	}
 	fmt.Fprintf(ios.Out, "直传完成: %s → %s/%s\\n", localPath, backend, rel)
 	return nil
+}
+
+// fileSHA256 计算本地文件 SHA-256（小写十六进制）。直传登记用：服务端据 size+sha256
+// 记账并写入 checksum 台账（服务端不重算——重算需完整下载对象，成本不可接受）。
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// directUploadAttempt 一次直传尝试：签发 PUT 预签名 URL（每次重试重新签发——防 URL
+// 过期）→ 直传 S3（普通 HTTP PUT；预签名 URL 自带鉴权）→ 判定结果。
+// 返回 (err, fatal)：fatal=true 表示不可重试错误（签发失败/4xx），调用方立即返回；
+// fatal=false 且 err 非 nil 表示 5xx/网络失败（可重试）；两者皆 nil 表示成功。
+func directUploadAttempt(ctx context.Context, svc *client.FileClient, putClient *http.Client, backend, localPath, rel string, fileSize int64) (error, bool) {
+	// 1. 签发 PUT 预签名 URL（每次重试重新签发——防 URL 过期）。
+	var presign struct {
+		URL string `json:"url"`
+	}
+	if err := svc.DoJSON(ctx, "POST", "/api/backends/"+backend+"/presign?path="+rel+"&method=PUT", nil, &presign); err != nil {
+		return fmt.Errorf("签发预签名 URL: %w", err), true
+	}
+	if presign.URL == "" {
+		return fmt.Errorf("服务端返回空预签名 URL"), true
+	}
+
+	// 2. 直传 S3（普通 HTTP PUT；预签名 URL 自带鉴权）。**每次重试用新文件句柄**
+	// （http.Transport 会 Close *os.File 请求体——重试必须重开，不能复用已关句柄）。
+	putFile, perr := os.Open(localPath)
+	if perr != nil {
+		return fmt.Errorf("重开文件: %w", perr), true
+	}
+	putReq, perr := http.NewRequestWithContext(ctx, http.MethodPut, presign.URL, putFile)
+	if perr != nil {
+		putFile.Close()
+		return fmt.Errorf("构造 PUT 请求: %w", perr), true
+	}
+	putReq.ContentLength = fileSize
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putResp, perr := putClient.Do(putReq)
+	_ = putFile.Close() // 请求体已消费（成功或失败），句柄回收（幂等）
+	if perr != nil {
+		return fmt.Errorf("直传 PUT: %w", perr), false
+	}
+	_, _ = io.Copy(io.Discard, putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode >= 300 {
+		if putResp.StatusCode >= 500 {
+			return fmt.Errorf("直传失败 %d（可重试）", putResp.StatusCode), false
+		}
+		b, _ := io.ReadAll(io.LimitReader(putResp.Body, 4096))
+		return fmt.Errorf("直传失败 %d: %s", putResp.StatusCode, string(b)), true
+	}
+	return nil, false
 }

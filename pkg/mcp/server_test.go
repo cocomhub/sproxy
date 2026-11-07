@@ -56,6 +56,81 @@ func decodeResp(t *testing.T, line string) response {
 	return r
 }
 
+// mockDownload 处理 GET /download（命中则回 checksum 头与内容）。
+func mockDownload(w http.ResponseWriter, r *http.Request, files map[string]string) {
+	name := r.URL.Query().Get("filename")
+	content, ok := files[name]
+	if !ok {
+		http.Error(w, `{"success":false,"message":"file not found"}`, http.StatusNotFound)
+		return
+	}
+	sum := sha256.Sum256([]byte(content))
+	w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+	w.Header().Set("X-File-MTime", "0")
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(content))
+}
+
+// mockUpload 处理 POST /upload（校验 checksum 头、解析 multipart、收集上传）。
+func mockUpload(w http.ResponseWriter, r *http.Request, files, uploads map[string]string) {
+	if r.Header.Get("X-File-Checksum") == "" {
+		http.Error(w, `{"success":false,"message":"missing checksum"}`, http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	name := r.Header.Get("X-File-Path")
+	uploads[name] = string(data)
+	files[name] = string(data)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"success":true,"message":"ok","file_checksum":"` + sha256HexBytes(data) + `"}`))
+}
+
+// mockDelete 处理 POST /delete（匹配 checksum 后才删）。
+func mockDelete(w http.ResponseWriter, r *http.Request, files map[string]string) {
+	name := r.URL.Query().Get("filename")
+	wantCS := r.Header.Get("X-File-Checksum")
+	content, ok := files[name]
+	if !ok {
+		http.Error(w, `{"success":false,"message":"not found"}`, http.StatusNotFound)
+		return
+	}
+	if sha256HexBytes([]byte(content)) != wantCS {
+		http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
+		return
+	}
+	delete(files, name)
+	_, _ = w.Write([]byte(`{"success":true,"message":"deleted"}`))
+}
+
+// mockStat 处理 HEAD /api/files/stat（回 size/checksum/mtime 头）。
+func mockStat(w http.ResponseWriter, r *http.Request, files map[string]string) {
+	name := r.URL.Query().Get("filename")
+	content, ok := files[name]
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
+	w.Header().Set("X-File-Checksum", sha256HexBytes([]byte(content)))
+	w.Header().Set("X-File-MTime", "0")
+	w.WriteHeader(http.StatusOK)
+}
+
 // mockServer 是 sproxy 兼容的 HTTP mock（127.0.0.1 loopback），覆盖
 // read_file/write_file/delete 用到的 /download /upload /delete 端点。
 // files 预置文件名→内容；uploads 收集上传。
@@ -65,68 +140,13 @@ func mockServer(t *testing.T, files map[string]string) (*httptest.Server, *map[s
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/download":
-			name := r.URL.Query().Get("filename")
-			content, ok := files[name]
-			if !ok {
-				http.Error(w, `{"success":false,"message":"file not found"}`, http.StatusNotFound)
-				return
-			}
-			sum := sha256.Sum256([]byte(content))
-			w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
-			w.Header().Set("X-File-MTime", "0")
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(content))
+			mockDownload(w, r, files)
 		case "/upload":
-			if r.Header.Get("X-File-Checksum") == "" {
-				http.Error(w, `{"success":false,"message":"missing checksum"}`, http.StatusBadRequest)
-				return
-			}
-			if err := r.ParseMultipartForm(10 << 20); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			f, _, err := r.FormFile("file")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			defer f.Close()
-			data, err := io.ReadAll(f)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			name := r.Header.Get("X-File-Path")
-			(*uploads)[name] = string(data)
-			files[name] = string(data)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"success":true,"message":"ok","file_checksum":"` + sha256HexBytes(data) + `"}`))
+			mockUpload(w, r, files, *uploads)
 		case "/delete":
-			name := r.URL.Query().Get("filename")
-			wantCS := r.Header.Get("X-File-Checksum")
-			content, ok := files[name]
-			if !ok {
-				http.Error(w, `{"success":false,"message":"not found"}`, http.StatusNotFound)
-				return
-			}
-			if sha256HexBytes([]byte(content)) != wantCS {
-				http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
-				return
-			}
-			delete(files, name)
-			_, _ = w.Write([]byte(`{"success":true,"message":"deleted"}`))
+			mockDelete(w, r, files)
 		case "/api/files/stat":
-			name := r.URL.Query().Get("filename")
-			content, ok := files[name]
-			if !ok {
-				http.Error(w, "not found", http.StatusNotFound)
-				return
-			}
-			w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
-			w.Header().Set("X-File-Checksum", sha256HexBytes([]byte(content)))
-			w.Header().Set("X-File-MTime", "0")
-			w.WriteHeader(http.StatusOK)
+			mockStat(w, r, files)
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}

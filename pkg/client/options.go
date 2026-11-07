@@ -168,7 +168,7 @@ func WithInsecureTLS() Option {
 	return func(c *FileClient) {
 		transport := cloneOrNewTransport(c)
 		if transport.TLSClientConfig == nil {
-			transport.TLSClientConfig = &tls.Config{
+			transport.TLSClientConfig = &tls.Config{ // NOSONAR: S4830/S5527 — WithInsecureTLS 显式 opt-in（--insecure 自签开发），见函数注释
 				InsecureSkipVerify: true, //nolint:gosec
 			}
 		} else {
@@ -416,6 +416,16 @@ func WithCacheOptions(maxEntries int, ttl time.Duration) Option {
 		if ttl > 0 {
 			c.cacheTTL = ttl
 		}
+	}
+}
+
+// WithDownloadProxy 设置下载直连失败时的回退代理地址（如 "http://127.0.0.1:1080"）。
+// 空串（默认）关闭回退；传入 DefaultDownloadProxy 启用默认本地代理。
+// 仅在直连请求返回网络类错误（非 HTTP 状态码）时重发经代理；直连成功不用代理，
+// 隧道/xfer 分支不受影响。
+func WithDownloadProxy(proxyURL string) Option {
+	return func(c *FileClient) {
+		c.downloadProxy = proxyURL
 	}
 }
 

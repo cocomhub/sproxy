@@ -11,7 +11,6 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
-	"maps"
 	"strings"
 	"sync"
 )
@@ -105,7 +104,7 @@ func thumbnailTransform(ctx context.Context, src io.Reader, size int64, width in
 	if err := jpeg.Encode(&buf, dst, nil); err != nil {
 		return nil, 0, "", err
 	}
-	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
 }
 
 // watermarkTransform 叠加半透明点阵水印（分享图片防滥用，roadmap P2 分享权限细化
@@ -131,9 +130,18 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 		width = defaultThumbWidth
 	}
 	dst := scaleImage(img, width)
-	dstB := dst.Bounds()
+	drawWatermark(dst, seed)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, nil); err != nil {
+		return nil, 0, "", err
+	}
+	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), mimeJPEG, nil
+}
 
-	// 半透明深灰点阵（2x2 点，8px 间距，右下角 1/4 区域；seed 加伪随机相位）。
+// drawWatermark 在缩放图上叠加半透明深灰点阵水印（2x2 点，8px 间距，右下角
+// 1/4 区域；seed 加伪随机相位），无字体库依赖。
+func drawWatermark(dst *image.RGBA, seed string) {
+	dstB := dst.Bounds()
 	var h uint32
 	for _, c := range seed {
 		h = h*31 + uint32(c)
@@ -153,11 +161,6 @@ func watermarkTransform(ctx context.Context, src io.Reader, size int64, width in
 			}
 		}
 	}
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, nil); err != nil {
-		return nil, 0, "", err
-	}
-	return bytes.NewReader(buf.Bytes()), int64(buf.Len()), "image/jpeg", nil
 }
 
 // scaleImage 邻近采样缩放图片到指定宽度（等比）。thumbnailTransform 与
@@ -194,32 +197,6 @@ var errInvalidTransformImage = errTransform("invalid image")
 type errTransform string
 
 func (e errTransform) Error() string { return string(e) }
-
-// ---- 测试隔离辅助 ----
-
-// transformRegistrySnapshot 返回当前注册表快照（测试隔离恢复用）。
-func transformRegistrySnapshot() map[string]TransformFunc {
-	transformRegistry.mu.RLock()
-	defer transformRegistry.mu.RUnlock()
-	out := make(map[string]TransformFunc, len(transformRegistry.m))
-	maps.Copy(out, transformRegistry.m)
-	return out
-}
-
-// transformRegistryClear 清空注册表（测试隔离）。
-func transformRegistryClear() {
-	transformRegistry.mu.Lock()
-	defer transformRegistry.mu.Unlock()
-	transformRegistry.m = make(map[string]TransformFunc)
-}
-
-// transformRegistryRestore 恢复注册表快照（测试隔离）。
-func transformRegistryRestore(snapshot map[string]TransformFunc) {
-	transformRegistry.mu.Lock()
-	defer transformRegistry.mu.Unlock()
-	transformRegistry.m = make(map[string]TransformFunc, len(snapshot))
-	maps.Copy(transformRegistry.m, snapshot)
-}
 
 // ensurePNGImport 引用 image/png（内建装配用到；防 gofmt 删 import）。
 var _ = png.Decode

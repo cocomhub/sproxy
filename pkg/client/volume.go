@@ -196,6 +196,37 @@ func (c *FileClient) CopyVolume(ctx context.Context, fromVol, toVol, filename st
 	return nil
 }
 
+// CopyFile 复制文件（POST /api/volumes/copy，**源保留**）：fromVol/from → toVol/to。
+//
+// to 为空 = 同 rel（经典跨卷复制语义）；toVol 为空 = 与源同卷（**同卷复制**：卷支持时走
+// 底层 blob 直拷，不重新加解密）。force=true 时允许覆盖已存在目标（默认拒绝，绝不静默覆盖）。
+func (c *FileClient) CopyFile(ctx context.Context, fromVol, from, toVol, to string, force bool) error {
+	if from == "" {
+		return fmt.Errorf("源路径不能为空")
+	}
+	// 卷可省略：服务端按文件实际所在卷解析（volume.Router.Locate），目标卷默认同源卷。
+	// 空值**不发送**该参数——发送空串会被服务端当作「未提供」以外的语义。
+	q := url.Values{}
+	if fromVol != "" {
+		q.Set("from_volume", fromVol)
+	}
+	if toVol != "" {
+		q.Set("to_volume", toVol)
+	}
+	q.Set("filename", from)
+	if to != "" {
+		q.Set("to", to)
+	}
+	if force {
+		q.Set("force", "true")
+	}
+	var result UploadResult
+	if err := c.doJSON(ctx, "POST", "/api/volumes/copy?"+q.Encode(), nil, &result); err != nil {
+		return fmt.Errorf("复制失败: %w", err)
+	}
+	return nil
+}
+
 // RebalanceVolume 触发从 fromVol 到 toVol 的卷再平衡（POST /api/volumes/rebalance）。
 // 服务端逐文件迁移（按大小降序，直至 maxBytes 用尽或无可迁文件），异步语义返回
 // rebalanceVolumeResult（moved/bytes_moved/remaining）。
@@ -226,4 +257,30 @@ type RebalanceResult struct {
 	Moved      int    `json:"moved"`
 	BytesMoved int64  `json:"bytes_moved"`
 	Remaining  int64  `json:"remaining"`
+}
+
+// RefreshVolume 强制刷新卷缓存/索引（POST /api/volumes/refresh[?volume=<v>]，S5）。
+//
+// 语义（用户裁定 2026-10-29：缓存**默认永不过期**）：服务端卷状态缓存不会按时间自动过期，
+// **进程外**改动（运维直写盘、同根多实例、网盘 App 直改）只能通过本方法感知。
+//   - volName == "" ⇒ 清空**全部卷**缓存；
+//   - 指定卷 ⇒ 清空该卷（本地卷同样适用；secretdata 等外部卷还会重扫内存索引）。
+func (c *FileClient) RefreshVolume(ctx context.Context, volName string) error {
+	apiPath := "/api/volumes/refresh"
+	if volName != "" {
+		q := url.Values{}
+		q.Set("volume", volName)
+		apiPath += "?" + q.Encode()
+	}
+	var result struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+	}
+	if err := c.doJSON(ctx, "POST", apiPath, nil, &result); err != nil {
+		return fmt.Errorf("卷刷新失败: %w", err)
+	}
+	if !result.Success {
+		return fmt.Errorf("卷刷新失败: %s", result.Message)
+	}
+	return nil
 }

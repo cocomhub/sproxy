@@ -66,9 +66,9 @@ func NewSFTPFS(cfg ClientConfig) (*SFTPFS, error) {
 	sshCfg := &ssh.ClientConfig{
 		User: u.User.Username(),
 		Auth: auth,
-		// TODO: 后续支持 known_hosts 校验（安全增强项）；当前按配置信任主机（外部卷
-		// 由运维显式配置 URL，等同显式 trust-on-first-use——见 docs/config.md 风险说明）。
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // 运维显式配置的受信主机（TOFU 语义）
+		// known_hosts 校验为有意推迟的安全增强项（当前按配置信任主机；外部卷由运维
+		// 显式配置 URL，等同显式 trust-on-first-use——见 docs/config.md 风险说明）。
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // NOSONAR: S1135 — known_hosts 校验为有意推迟项（运维显式配置 URL，TOFU 语义）；实施属独立特性
 		Timeout:         timeout,
 	}
 	conn, err := ssh.Dial("tcp", host, sshCfg)
@@ -206,7 +206,7 @@ func (f *SFTPFS) OpenRead(ctx context.Context, relPath string) (io.ReadCloser, e
 
 // WriteFile 全量覆盖写入（先写临时文件再 rename，防半写状态）。
 // mtime 由服务端决定（SFTP 无标准 mtime 设置；需要时 backend 层可扩展）。
-func (f *SFTPFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *SFTPFS) WriteFile(ctx context.Context, key sync.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	abs := f.abs(relPath)
 	if err := f.ensureParentDirs(ctx, relPath); err != nil {
 		return err

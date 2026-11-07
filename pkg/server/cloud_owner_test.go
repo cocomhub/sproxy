@@ -40,19 +40,19 @@ func actorCloudMux(h *Handlers, actor string) *http.ServeMux {
 		}
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download", wrap(h.cloudCreateDownload))
-	mux.HandleFunc("POST /api/cloud/download/batch", wrap(h.cloudCreateBatchDownload))
-	mux.HandleFunc("GET /api/cloud/tasks", wrap(h.cloudListTasks))
-	mux.HandleFunc("GET /api/cloud/tasks/{id}", wrap(h.cloudGetTask))
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", wrap(h.cloudCancelTask))
-	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", wrap(h.cloudDeleteTask))
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", wrap(h.cloudResumeTask))
-	mux.HandleFunc("POST /api/cloud/groups", wrap(h.cloudCreateGroup))
-	mux.HandleFunc("GET /api/cloud/groups", wrap(h.cloudListGroups))
-	mux.HandleFunc("GET /api/cloud/groups/{id}", wrap(h.cloudGetGroup))
-	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", wrap(h.cloudCancelGroup))
-	mux.HandleFunc("DELETE /api/cloud/groups/{id}", wrap(h.cloudDeleteGroup))
-	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", wrap(h.cloudArchiveGroup))
+	mux.HandleFunc("POST /api/cloud/download", wrap(h.cloudTaskHandler(h.cloudTaskService().CreateDownload)))
+	mux.HandleFunc("POST /api/cloud/download/batch", wrap(h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload)))
+	mux.HandleFunc("GET /api/cloud/tasks", wrap(h.cloudTaskHandler(h.cloudTaskService().ListTasks)))
+	mux.HandleFunc("GET /api/cloud/tasks/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().GetTask)))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", wrap(h.cloudTaskHandler(h.cloudTaskService().CancelTask)))
+	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().DeleteTask)))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", wrap(h.cloudTaskHandler(h.cloudTaskService().ResumeTask)))
+	mux.HandleFunc("POST /api/cloud/groups", wrap(h.cloudTaskHandler(h.cloudTaskService().CreateGroup)))
+	mux.HandleFunc("GET /api/cloud/groups", wrap(h.cloudTaskHandler(h.cloudTaskService().ListGroups)))
+	mux.HandleFunc("GET /api/cloud/groups/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().GetGroup)))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", wrap(h.cloudTaskHandler(h.cloudTaskService().CancelGroup)))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", wrap(h.cloudTaskHandler(h.cloudTaskService().DeleteGroup)))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", wrap(h.cloudTaskHandler(h.cloudTaskService().ArchiveGroup)))
 	mux.HandleFunc("HEAD /api/files/stat", wrap(h.stat))
 	return mux
 }
@@ -73,7 +73,7 @@ func newOwnerCloudEnv(t *testing.T) *ownerCloudEnv {
 	// listTenantIDs；stat/download 的 kind=cloud_task 分支依赖 per-tenant 解析。
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: testLogger(), Config: cfg})
 	h.cloudMgr = mgr
 	env := &ownerCloudEnv{
 		h:   h,
@@ -93,7 +93,7 @@ func (e *ownerCloudEnv) do(t *testing.T, actor, method, path, body string) (int,
 	var req *http.Request
 	if body != "" {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 	} else {
 		req = httptest.NewRequest(method, path, nil)
 	}
@@ -383,7 +383,7 @@ func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 	}
 
 	mgr1, _ := newCloudTestManager(t, dir, sm, cfg)
-	group, err := mgr1.CreateGroup("g1", []cloudfilename.Entry{{URL: "https://example.com/o.zip", Filename: "o.zip"}}, "ak-A")
+	group, err := mgr1.CreateGroup("g1", []cloudfilename.Entry{{URL: "https://example.com/o.zip", Filename: "o.zip"}}, "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateGroup 失败: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
 
 	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按迁移后的 per-tenant key 写入校验和
 	content := []byte("checksum-scope-check")
-	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A")
+	task, err := env.mgr.CreateTask("url", "https://example.com/a.bin", "a.bin", int64(len(content)), "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 	defer srv.Close()
 	group, err := mgr.SubmitAndStartGroup("f3", []cloudfilename.Entry{
 		{URL: srv.URL, Filename: "f3.bin"},
-	}, "ak-A")
+	}, "ak-A", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("SubmitAndStartGroup: %v", err)
 	}

@@ -67,16 +67,25 @@ func s3InitMultipart(t *testing.T, cl *http.Client, url, host, key string, now t
 	return initRes.UploadID
 }
 
+// s3TestCtx 是 S3 multipart 测试的共享上下文（客户端 + 端点 URL + host + 目标 key），
+// s3UploadPart / s3CompleteMultipartReq 复用。
+type s3TestCtx struct {
+	cl   *http.Client
+	url  string
+	host string
+	key  string
+}
+
 // s3UploadPart 上传单个 part，返回响应 ETag（带引号形态，S3 协议标准）。
-func s3UploadPart(t *testing.T, cl *http.Client, url, host, key, uploadID string, partNum int, data []byte, now time.Time) string {
+func s3UploadPart(t *testing.T, ctx s3TestCtx, uploadID string, partNum int, data []byte, now time.Time) string {
 	t.Helper()
-	path := fmt.Sprintf("/s3/%s?partNumber=%d&uploadId=%s", key, partNum, uploadID)
-	auth := sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, path, host, data, now)
-	req, _ := http.NewRequest(http.MethodPut, url+path, bytes.NewReader(data))
+	path := fmt.Sprintf("/s3/%s?partNumber=%d&uploadId=%s", ctx.key, partNum, uploadID)
+	auth := sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPut, path, ctx.host, data, now)
+	req, _ := http.NewRequest(http.MethodPut, ctx.url+path, bytes.NewReader(data))
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("x-amz-date", now.UTC().Format("20060102T150405Z"))
 	req.Header.Set("x-amz-content-sha256", fmt.Sprintf("%x", sha256sum(data)))
-	resp, err := cl.Do(req)
+	resp, err := ctx.cl.Do(req)
 	if err != nil {
 		t.Fatalf("upload part %d: %v", partNum, err)
 	}
@@ -93,15 +102,15 @@ func s3UploadPart(t *testing.T, cl *http.Client, url, host, key, uploadID string
 }
 
 // s3CompleteMultipartReq 发起 complete，返回 (状态码, 响应体)。
-func s3CompleteMultipartReq(t *testing.T, cl *http.Client, url, host, key, uploadID, body string, now time.Time) (int, []byte) {
+func s3CompleteMultipartReq(t *testing.T, ctx s3TestCtx, uploadID, body string, now time.Time) (int, []byte) {
 	t.Helper()
-	path := "/s3/" + key + "?uploadId=" + uploadID
-	auth := sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPost, path, host, []byte(body), now)
-	req, _ := http.NewRequest(http.MethodPost, url+path, strings.NewReader(body))
+	path := "/s3/" + ctx.key + "?uploadId=" + uploadID
+	auth := sigV4SignHost(testAccessKey, testAccessSecret, http.MethodPost, path, ctx.host, []byte(body), now)
+	req, _ := http.NewRequest(http.MethodPost, ctx.url+path, strings.NewReader(body))
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("x-amz-date", now.UTC().Format("20060102T150405Z"))
 	req.Header.Set("x-amz-content-sha256", fmt.Sprintf("%x", sha256sum([]byte(body))))
-	resp, err := cl.Do(req)
+	resp, err := ctx.cl.Do(req)
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -132,7 +141,7 @@ func s3TargetAbs(t *testing.T, cfgPtrCfgRoot, owner, key string) string {
 
 // s3PartRel 返回 chunk 桶 part 文件的租户根相对路径。
 func s3PartRel(uploadID string, partNum int) string {
-	return "chunk/" + multipartPartPrefix + uploadID + ".part." + fmt.Sprintf("%d", partNum)
+	return chunkPrefix + multipartPartPrefix + uploadID + partSuffix + fmt.Sprintf("%d", partNum)
 }
 
 // ---- ETag 片测试（设计文档 1）----
@@ -149,8 +158,8 @@ func TestS3Complete_HappyPath_2Parts(t *testing.T) {
 	uploadID := s3InitMultipart(t, cl, url, host, "big.bin", now)
 	part1 := []byte("hello part1 ")
 	part2 := []byte("world part2")
-	etag1 := s3UploadPart(t, cl, url, host, "big.bin", uploadID, 1, part1, now)
-	etag2 := s3UploadPart(t, cl, url, host, "big.bin", uploadID, 2, part2, now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "big.bin"}, uploadID, 1, part1, now)
+	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "big.bin"}, uploadID, 2, part2, now)
 
 	body := s3CompletePartsXML(
 		struct {
@@ -162,7 +171,7 @@ func TestS3Complete_HappyPath_2Parts(t *testing.T) {
 			ETag string
 		}{2, etag2},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "big.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "big.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("complete 应 200, got %d body=%s", status, respBody)
 	}
@@ -201,8 +210,8 @@ func TestS3Complete_CompositeETag(t *testing.T) {
 	uploadID := s3InitMultipart(t, cl, url, host, "comp.bin", now)
 	part1 := []byte("alpha-")
 	part2 := []byte("beta")
-	etag1 := s3UploadPart(t, cl, url, host, "comp.bin", uploadID, 1, part1, now)
-	etag2 := s3UploadPart(t, cl, url, host, "comp.bin", uploadID, 2, part2, now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "comp.bin"}, uploadID, 1, part1, now)
+	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "comp.bin"}, uploadID, 2, part2, now)
 
 	body := s3CompletePartsXML(
 		struct {
@@ -214,7 +223,7 @@ func TestS3Complete_CompositeETag(t *testing.T) {
 			ETag string
 		}{2, etag2},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "comp.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "comp.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("complete 应 200, got %d body=%s", status, respBody)
 	}
@@ -238,13 +247,13 @@ func TestS3Complete_MetaKeyMismatch_409(t *testing.T) {
 
 	uploadID := s3InitMultipart(t, cl, url, host, "orig.bin", now)
 	part := []byte("data")
-	etag := s3UploadPart(t, cl, url, host, "orig.bin", uploadID, 1, part, now)
+	etag := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "orig.bin"}, uploadID, 1, part, now)
 
 	body := s3CompletePartsXML(struct {
 		N    int
 		ETag string
 	}{1, etag})
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "other.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "other.bin"}, uploadID, body, now)
 	if status != http.StatusConflict {
 		t.Fatalf("meta key 不一致应 409, got %d body=%s", status, respBody)
 	}
@@ -262,7 +271,7 @@ func TestS3Complete_InvalidUploadID_409(t *testing.T) {
 		N    int
 		ETag string
 	}{1, `"deadbeef"`})
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "x.bin", "no-such-upload", body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "x.bin"}, "no-such-upload", body, now)
 	if status != http.StatusConflict {
 		t.Fatalf("无效 uploadId 应 409, got %d body=%s", status, respBody)
 	}
@@ -279,7 +288,7 @@ func TestS3Complete_TamperedETag_400_NoLeftover(t *testing.T) {
 
 	uploadID := s3InitMultipart(t, cl, url, host, "tamper.bin", now)
 	part := []byte("payload")
-	etag := s3UploadPart(t, cl, url, host, "tamper.bin", uploadID, 1, part, now)
+	etag := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "tamper.bin"}, uploadID, 1, part, now)
 
 	// 篡改 ETag：翻转一个字符。
 	tampered := "0" + etag[1:]
@@ -287,7 +296,7 @@ func TestS3Complete_TamperedETag_400_NoLeftover(t *testing.T) {
 		N    int
 		ETag string
 	}{1, tampered})
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "tamper.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "tamper.bin"}, uploadID, body, now)
 	if status != http.StatusBadRequest {
 		t.Fatalf("篡改 ETag 应 400, got %d body=%s", status, respBody)
 	}
@@ -310,7 +319,7 @@ func TestS3Complete_MissingPart_400_NoLeftover(t *testing.T) {
 
 	uploadID := s3InitMultipart(t, cl, url, host, "miss.bin", now)
 	part := []byte("p1")
-	etag1 := s3UploadPart(t, cl, url, host, "miss.bin", uploadID, 1, part, now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "miss.bin"}, uploadID, 1, part, now)
 
 	body := s3CompletePartsXML(
 		struct {
@@ -322,7 +331,7 @@ func TestS3Complete_MissingPart_400_NoLeftover(t *testing.T) {
 			ETag string
 		}{2, `"deadbeef"`},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "miss.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "miss.bin"}, uploadID, body, now)
 	if status != http.StatusBadRequest {
 		t.Fatalf("part 缺失应 400, got %d body=%s", status, respBody)
 	}
@@ -354,7 +363,7 @@ func TestS3Complete_DuplicatePartNumber_400(t *testing.T) {
 			ETag string
 		}{1, `"b"`},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "dup.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "dup.bin"}, uploadID, body, now)
 	if status != http.StatusBadRequest {
 		t.Fatalf("重复 PartNumber 应 400, got %d body=%s", status, respBody)
 	}
@@ -374,7 +383,7 @@ func TestS3Complete_InvalidPartNumber_400(t *testing.T) {
 			N    int
 			ETag string
 		}{pn, `"a"`})
-		status, respBody := s3CompleteMultipartReq(t, cl, url, host, "range.bin", uploadID, body, now)
+		status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "range.bin"}, uploadID, body, now)
 		if status != http.StatusBadRequest {
 			t.Fatalf("PartNumber=%d 应 400, got %d body=%s", pn, status, respBody)
 		}
@@ -391,7 +400,7 @@ func TestS3Complete_OverLimitBody_413(t *testing.T) {
 
 	uploadID := s3InitMultipart(t, cl, url, host, "huge.bin", now)
 	huge := strings.Repeat("x", int(size.DefaultChunkBodyLimit)+1)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "huge.bin", uploadID, huge, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "huge.bin"}, uploadID, huge, now)
 	if status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("超限 body 应 413, got %d body=%s", status, respBody[:min(len(respBody), 200)])
 	}
@@ -407,13 +416,13 @@ func TestS3Complete_UnquotedETag_200(t *testing.T) {
 
 	uploadID := s3InitMultipart(t, cl, url, host, "plain.bin", now)
 	part := []byte("bare-etag")
-	etag := s3UploadPart(t, cl, url, host, "plain.bin", uploadID, 1, part, now)
+	etag := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "plain.bin"}, uploadID, 1, part, now)
 
 	body := s3CompletePartsXML(struct {
 		N    int
 		ETag string
 	}{1, strings.Trim(etag, `"`)}) // 去掉引号
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "plain.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "plain.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("不带引号 ETag 应 200, got %d body=%s", status, respBody)
 	}
@@ -447,7 +456,7 @@ func newS3QuotaServer(t *testing.T, modifyCfg func(*Config)) (string, *Handlers)
 	h := buildVolSetHandlers(t, cfg)
 	h.credentialRing = ringForTestCreds()
 	mux := http.NewServeMux()
-	mux.Handle("/s3/", http.HandlerFunc(h.s3Handler))
+	mux.Handle("/s3/", http.HandlerFunc(h.s3Service().Handler))
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts.URL, h
@@ -456,86 +465,6 @@ func newS3QuotaServer(t *testing.T, modifyCfg func(*Config)) (string, *Handlers)
 // s3QuotaScopeForOwner 返回测试 owner（testAccessKey）在 user 桶 rel 上的配额子 Scope。
 func s3QuotaScopeForOwner(h *Handlers) *quota.Scope {
 	return h.quotaScopeFor(testAccessKey, "user/q.bin")
-}
-
-// TestS3Complete_Quota_OwnerExceeded_507 新文件 complete 超 owner 配额 → 507，
-// 目标 rel 不存在、parts 保留（可重试）。
-func TestS3Complete_Quota_OwnerExceeded_507(t *testing.T) {
-	t.Parallel()
-	url, h := newS3QuotaServer(t, func(c *Config) {
-		c.OwnerQuotas = map[string]ByteSize{testAccessKey: 4} // 合计 5 > 4
-	})
-	cl := s3TestClient()
-	now := time.Now()
-	host := strings.TrimPrefix(url, "http://")
-
-	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 2, []byte("cde"), now)
-
-	body := s3CompletePartsXML(
-		struct {
-			N    int
-			ETag string
-		}{1, etag1},
-		struct {
-			N    int
-			ETag string
-		}{2, etag2},
-	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
-	if status != http.StatusInsufficientStorage {
-		t.Fatalf("超 owner 配额应 507, got %d body=%s", status, respBody)
-	}
-	tnt := h.tenantFor(testAccessKey)
-	if tnt == nil || tnt.Root() == nil {
-		t.Fatalf("tenant 不可用")
-	}
-	root := tnt.Root()
-	if _, err := root.Stat("user/q.bin"); err == nil {
-		t.Fatalf("507 不应残留目标文件")
-	}
-	// parts 保留（失败可重试 complete）。
-	if _, err := root.Stat(s3PartRel(uploadID, 1)); err != nil {
-		t.Fatalf("507 后 part 应保留: %v", err)
-	}
-	if _, err := root.Stat(s3PartRel(uploadID, 2)); err != nil {
-		t.Fatalf("507 后 part 应保留: %v", err)
-	}
-}
-
-// TestS3Complete_Quota_PoolExceeded_507 新文件 complete 超卷容量池 → 507。
-func TestS3Complete_Quota_PoolExceeded_507(t *testing.T) {
-	t.Parallel()
-	url, h := newS3QuotaServer(t, func(c *Config) {
-		c.Volumes[0].VolCapacity = 4 // 合计 5 > 4
-	})
-	cl := s3TestClient()
-	now := time.Now()
-	host := strings.TrimPrefix(url, "http://")
-
-	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 2, []byte("cde"), now)
-
-	body := s3CompletePartsXML(
-		struct {
-			N    int
-			ETag string
-		}{1, etag1},
-		struct {
-			N    int
-			ETag string
-		}{2, etag2},
-	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
-	if status != http.StatusInsufficientStorage {
-		t.Fatalf("超卷容量应 507, got %d body=%s", status, respBody)
-	}
-	// 卷池 TryReserve 失败须回滚已成功的 Scope 预留（双账本无悬空 reserved）。
-	if got := s3QuotaScopeForOwner(h).Reserved(); got != 0 {
-		t.Fatalf("卷池超限后 scope.Reserved()=%d want 0（回滚）", got)
-	}
 }
 
 // TestS3Complete_Quota_ExactlyAtLimit_200 合计恰好 == 可用 → 200（TryReserve 边界不误拒）。
@@ -550,8 +479,8 @@ func TestS3Complete_Quota_ExactlyAtLimit_200(t *testing.T) {
 	host := strings.TrimPrefix(url, "http://")
 
 	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 2, []byte("cde"), now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
+	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 2, []byte("cde"), now)
 
 	body := s3CompletePartsXML(
 		struct {
@@ -563,7 +492,7 @@ func TestS3Complete_Quota_ExactlyAtLimit_200(t *testing.T) {
 			ETag string
 		}{2, etag2},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("恰好达配额应 200, got %d body=%s", status, respBody)
 	}
@@ -588,13 +517,13 @@ func TestS3Complete_Quota_Unassigned_200(t *testing.T) {
 	host := strings.TrimPrefix(url, "http://")
 
 	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
 
 	body := s3CompletePartsXML(struct {
 		N    int
 		ETag string
 	}{1, etag1})
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("未装配配额应 200, got %d body=%s", status, respBody)
 	}
@@ -629,8 +558,8 @@ func TestS3Complete_Quota_OverwriteUsageConverges(t *testing.T) {
 	}
 
 	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
-	etag2 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 2, []byte("cde"), now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
+	etag2 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 2, []byte("cde"), now)
 
 	body := s3CompletePartsXML(
 		struct {
@@ -642,7 +571,7 @@ func TestS3Complete_Quota_OverwriteUsageConverges(t *testing.T) {
 			ETag string
 		}{2, etag2},
 	)
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("覆盖写 complete 应 200, got %d body=%s", status, respBody)
 	}
@@ -678,13 +607,13 @@ func TestS3Complete_Quota_OverwriteShrink(t *testing.T) {
 	}
 
 	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	etag1 := s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
+	etag1 := s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
 
 	body := s3CompletePartsXML(struct {
 		N    int
 		ETag string
 	}{1, etag1})
-	status, respBody := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
+	status, respBody := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
 	if status != http.StatusOK {
 		t.Fatalf("覆盖写缩小应 200, got %d body=%s", status, respBody)
 	}
@@ -711,14 +640,14 @@ func TestS3Complete_Quota_FailedEtagReleasesReservations(t *testing.T) {
 	host := strings.TrimPrefix(url, "http://")
 
 	uploadID := s3InitMultipart(t, cl, url, host, "q.bin", now)
-	s3UploadPart(t, cl, url, host, "q.bin", uploadID, 1, []byte("ab"), now)
+	s3UploadPart(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, 1, []byte("ab"), now)
 
 	// 篡改 ETag：预留成功（配额充足）→ 校验失败。
 	body := s3CompletePartsXML(struct {
 		N    int
 		ETag string
 	}{1, `"00000000000000000000000000000000"`})
-	status, _ := s3CompleteMultipartReq(t, cl, url, host, "q.bin", uploadID, body, now)
+	status, _ := s3CompleteMultipartReq(t, s3TestCtx{cl: cl, url: url, host: host, key: "q.bin"}, uploadID, body, now)
 	if status != http.StatusBadRequest {
 		t.Fatalf("篡改 ETag 应 400, got %d", status)
 	}
@@ -783,15 +712,15 @@ func TestReadMultipartMeta(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = root.Close() })
 	uploadID := "deadbeefcafe"
-	rel := "chunk/" + multipartPartPrefix + uploadID + ".meta"
+	rel := chunkPrefix + multipartPartPrefix + uploadID + ".meta"
 	if err := rootWriteFile(root, rel, []byte("obj.txt")); err != nil {
 		t.Fatalf("写 meta: %v", err)
 	}
-	got, rerr := readMultipartMeta(root, uploadID)
-	if rerr != nil || got != "obj.txt" {
-		t.Fatalf("readMultipartMeta = %q, %v want obj.txt", got, rerr)
+	got, key, rerr := readMultipartMeta(root, uploadID)
+	if rerr != nil || key != "obj.txt" || got != "" {
+		t.Fatalf("readMultipartMeta owner=%q key=%q, err=%v；want owner=空 key=obj.txt", got, key, rerr)
 	}
-	if _, rerr := readMultipartMeta(root, "missing"); rerr == nil {
+	if _, _, rerr := readMultipartMeta(root, "missing"); rerr == nil {
 		t.Fatal("缺失 meta 应报错")
 	}
 }

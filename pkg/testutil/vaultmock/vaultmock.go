@@ -136,6 +136,13 @@ func (s *Server) SetLookupSelfError(status int, msg string) {
 	s.lookupErr = msg
 }
 
+// vaultRequestBody 是 mock 请求体的结构化字段（encrypt/decrypt 共用）。
+type vaultRequestBody struct {
+	Plaintext  string `json:"plaintext"`
+	Ciphertext string `json:"ciphertext"`
+	Context    string `json:"context"`
+}
+
 // ServeHTTP 实现 mock Vault Transit 端点。记录请求；encrypt 回 ciphertext 镜像、
 // decrypt 按覆写/DecryptTo/镜像回 plaintext。token 不一致通过 t.Errorf 上报
 // （handler 运行在 httptest server goroutine，禁用 t.Fatalf）。
@@ -146,13 +153,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeVaultErrors(w, http.StatusBadRequest, "bad request body")
 		return
 	}
-	var req struct {
-		Plaintext  string `json:"plaintext"`
-		Ciphertext string `json:"ciphertext"`
-		Context    string `json:"context"`
-	}
-	// lookup-self 探活 POST 无 body；仅非空 body 需 JSON 解析。非 JSON 请求体：暴露测试请求
-	// 构造 bug（M-3），fail-closed 拒绝而非静默回空密文。
+	var req vaultRequestBody
+	// lookup-self 探活 POST 无 body；仅非空 body 需 JSON 解析。
 	if len(body) > 0 {
 		if uerr := json.Unmarshal(body, &req); uerr != nil {
 			s.t.Errorf("vaultmock: 请求体非法 JSON（测试请求构造 bug?）: %v", uerr)
@@ -167,14 +169,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.tokens = append(s.tokens, token)
 	s.contexts = append(s.contexts, req.Context)
-	switch op {
-	case "encrypt":
-		s.encryptCount++
-		s.plaintexts = append(s.plaintexts, req.Plaintext)
-	case "decrypt":
-		s.decryptCount++
-		s.ciphertexts = append(s.ciphertexts, req.Ciphertext)
-	}
+	s.recordCount(op, req.Plaintext, req.Ciphertext)
 	decryptTo := s.decryptTo
 	errStatus := s.errStatus
 	errBody := s.errBody
@@ -186,17 +181,51 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.t.Errorf("vaultmock: X-Vault-Token = %q, want %q", token, s.token)
 	}
 
+	s.dispatchVault(w, op, req, token, vaultOverrides{
+		decryptTo:    decryptTo,
+		errStatus:    errStatus,
+		errBody:      errBody,
+		lookupStatus: lookupStatus,
+		lookupErr:    lookupErr,
+	})
+}
+
+// recordCount 累加 encrypt/decrypt 请求计数与 payload 记录（须在持有 s.mu 时调用）。
+func (s *Server) recordCount(op, plaintext, ciphertext string) {
+	switch op {
+	case "encrypt":
+		s.encryptCount++
+		s.plaintexts = append(s.plaintexts, plaintext)
+	case "decrypt":
+		s.decryptCount++
+		s.ciphertexts = append(s.ciphertexts, ciphertext)
+	}
+}
+
+// vaultOverrides 是 decrypt/lookup-self 两个端点的响应覆写参数（打包为一组避免
+// dispatchVault 参数过多——S107）。任一字段零值表示该端点走默认行为。
+type vaultOverrides struct {
+	decryptTo    []byte // non-nil 时 decrypt 回写该明文（覆写优先）
+	errStatus    int    // 非 0 时 decrypt 返回错误
+	errBody      string
+	lookupStatus int // 非 0 时 lookup-self 返回错误
+	lookupErr    string
+}
+
+// dispatchVault 按 op 分派响应：encrypt 回 ciphertext 镜像、decrypt 按
+// 覆写/DecryptTo/镜像回 plaintext、lookup-self 按覆写/token 匹配回。
+func (s *Server) dispatchVault(w http.ResponseWriter, op string, req vaultRequestBody, token string, ov vaultOverrides) {
 	switch op {
 	case "encrypt":
 		// encrypt 镜像：ciphertext = "vault:v1:" + base64(明文)（自描述，decrypt 可往返）。
 		writeVaultData(w, http.StatusOK, map[string]string{"ciphertext": "vault:v1:" + req.Plaintext})
 	case "decrypt":
-		if errStatus != 0 {
-			writeVaultErrors(w, errStatus, errBody)
+		if ov.errStatus != 0 {
+			writeVaultErrors(w, ov.errStatus, ov.errBody)
 			return
 		}
-		if decryptTo != nil {
-			writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(decryptTo)})
+		if ov.decryptTo != nil {
+			writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(ov.decryptTo)})
 			return
 		}
 		pt, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(req.Ciphertext, "vault:v1:"))
@@ -207,8 +236,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeVaultData(w, http.StatusOK, map[string]string{"plaintext": base64.StdEncoding.EncodeToString(pt)})
 	case "lookup-self":
 		// token 自查端点（启动探活）：覆写优先；否则 token 匹配期望 → 200，不匹配 → 403。
-		if lookupStatus != 0 {
-			writeVaultErrors(w, lookupStatus, lookupErr)
+		if ov.lookupStatus != 0 {
+			writeVaultErrors(w, ov.lookupStatus, ov.lookupErr)
 			return
 		}
 		if s.token != "" && token != s.token {

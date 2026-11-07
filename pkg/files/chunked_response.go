@@ -33,6 +33,10 @@ type ChunkedInitRequest struct {
 	FileChecksum string `json:"file_checksum"`
 	FileModTime  int64  `json:"file_mod_time"`
 	Volume       string `json:"volume,omitempty"` // 显式目标卷（可选；缺省 auto 路由）
+	// MetaExtra 是首次初始化即携带的自定义元数据（A/B/C 档；与单次上传 X-File-Meta-Extra
+	// 头同语义，body 可装 24KiB JSON）。分块上传的产物在 complete 时随 .meta sidecar 落盘
+	// （避免「先传完再补录」的窗口——解析/校验失败在此 fail-closed 报错，客户端可重试）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
 }
 
 // ChunkedCompleteRequest 是分块上传合并完成请求体（POST /upload/complete）。
@@ -129,6 +133,22 @@ const (
 	errMsgUploadIDNotFound = "upload_id 不存在或已过期"
 	errMsgSaveFailed       = "保存文件失败"
 	errFmtFileExists       = "文件已存在，大小: %d"
+	errMsgInvalidDirPath   = "无效的目录路径"
+	errMsgSrcNotExist      = "源文件不存在"
+	errMsgDestExists       = "目标路径已存在"
+	errMsgFileChecksum     = "文件校验失败"
+	errMsgOpenFile         = "打开文件失败"
+	// errMsgChecksumMismatch 是上传 SHA-256 比对不一致响应文案（本地/外部卷共用，
+	// Sonar S1192 收敛：此前散落 "文件 SHA-256 校验失败" 3 处）。
+	errMsgChecksumMismatch = "文件 SHA-256 校验失败"
+	// errMsgStatFailed 是 stat 失败响应文案（Sonar S1192 收敛：此前散落 "stat 失败" 3 处）。
+	errMsgStatFailed    = "stat 失败"
+	errMsgDeleteFile    = "删除文件失败"
+	errMsgCreateSession = "创建上传会话失败"
+	errMsgReadChunk     = "读取分块失败"
+	errMsgAccessFile    = "访问文件失败"
+	errMsgDedupPersist  = "dedup 存储持久化失败"
+	errMsgRetryPersist  = "重试持久化失败"
 
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
@@ -136,4 +156,9 @@ const (
 	// 客户端据此自动转分块上传（roadmap 2.3 P0 大文件上限演进）。
 	headerAutoChunk        = "X-Auto-Chunked"
 	contentTypeOctetStream = "application/octet-stream"
+
+	// mimeJPEG 是缩略图/变换固定输出 MIME（内建 JPEG 变换）。
+	mimeJPEG = "image/jpeg"
+	// trashPrefix 是回收站文件在存储根下的前缀目录。
+	trashPrefix = "trash/"
 )

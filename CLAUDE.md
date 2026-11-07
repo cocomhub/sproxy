@@ -14,6 +14,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
+## 能力矩阵与收敛原则（**写代码前先查表**）
+
+> 目标：**不要重复实现已有能力**。新增需求先查本表；表里没有、但形态相近的，在**既有能力包**
+> 里加一个**可选能力接口**（+ `Assert*` 查询助手）并在相关实现补齐 —— **不要**在消费包里
+> 另造同形接口。判据：若两个包出现语义相同的接口/函数，就是重复实现 ✗。
+
+| 能力 | 提供方（唯一实现） | 关键 API | 约定 / 用法 |
+| --- | --- | --- | --- |
+| 文件系统读写（本地/外部/加密/远端统一） | `pkg/sync` | `FS`：`ListDir`/`Stat`/`OpenRead`/`WriteFile`/`Rename`/`Delete`/`MakeDir` | 卷层的 `volume.Volume.FS()` 就是这个接口；**换目的地只换 FS** |
+| 幂等写（目标存在即不覆盖） | `pkg/sync` | 可选 `WriteIfAbsent`（类型断言查询） | LocalFS / PrefixFS / StagingQuotaGateFS 已实现；归档/转存类写入首选 |
+| 区间随机读 | `pkg/sync` | 可选 `RangeReader.OpenRangeRead` + `AssertRangeReader` + `RangeReadAll` | 远端只传输所需区间；未实现 ⇒ `ErrUnsupported`（**不得**静默整文件下载 ✗） |
+| 递归枚举 | `pkg/sync` | `WalkEntries(ctx, fs, root, recursive, followSymlinks, filters)` | 取代手写 walk |
+| 卷侧容量预检 | `pkg/sync` | 可选 `ReserveSpace` | 转存前预检（fail-closed） |
+| 目录/对象扩展元数据 | `pkg/sync` | 可选 `MetaExtraUpdater` + `AssertMetaExtraUpdater` | 可信卷 sidecar |
+| 直传 URL（presign 类） | `pkg/sync` | 可选 `DirectURLProvider` + `AssertDirectURL` | |
+| 用户可见文件写/读（锁 + 双账本 + sidecar + 台账） | `pkg/files` | `Service.WriteTarget` / `WriteFile` / `OpenPath` / `StatPath` | **用户内容必须走这里**；不要直连 `storage.Root`/裸 FS ✗（R25/R26） |
+| 卷解析与归属 | `pkg/volume` + `registry` | `Volume.FS()`、`ResolveUserLocation`、`QuotaVolume`（`UserUsage`/`WaitStats`） | 外部/加密/封装卷都走同一层 |
+| 配额记账与等待 | `pkg/quota` | `Scope/Pool.WaitReserve`、`ProbeReserve`、`Pool.WaitStats` | 排队能力由 `pkg/waitq` 提供 |
+| 通用等待/排队 | `pkg/waitq` | `Queue.Acquire/AcquireUnder`、`Stats`、`Resource` 适配器 | 新排队场景复用；**禁止**再写 `sync.Cond` ✗（R36-b） |
+| 统一任务恢复（WAL 续跑） | `pkg/recovery` | `Coordinator.Register/RegisterLegacy/Run` | 长任务必须 `Open` 作用域；恢复只走协调器（R37） |
+| 审计（唯一提供方） | `pkg/audit` | `Service`/`Scope`/`Entry`/`Journal`；`ArchiveSealed`+`SegmentArchiver`；`QueryCold`/`OpenRange`；`OnSeal` | 归档与冷读均经 `pkg/sync.FS`；**不要**另造 sink/store 接口 ✗ |
+| 云下载/转存内核 | `pkg/transfer` + `pkg/cloud` | `Execute` / `writeUnique` / 预处理器选型 | 归档=转存+预处理，复用同一内核 |
+| HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
+
+### 收敛原则（必须遵守）
+
+1. **先查表**：动手前确认能力矩阵里是否已有同类实现；有则复用（含"少写一个适配层"）。
+2. **缺口的正确姿势 = 扩展能力包**：在 `pkg/sync` / `pkg/volume` / `pkg/files` 等**能力包**新增
+   **可选能力接口** + `Assert*` 查询助手，并在相关实现（LocalFS/PrefixFS/各卷 FS/装饰器）补齐；
+   消费方只做「查能力 → 用能力」。这样所有消费方共享一份实现 ✓。
+3. **消费包禁止定义与既有能力同形的接口**：曾出现 `audit.SegmentSink`（≈ `WriteIfAbsent`）与
+   `audit.SegmentStore`（≈ `FS.ListDir`+`RangeReader`）被新造后又删除 ✗ —— 这是反面教材。
+4. **同一语义只留一份实现**：解码/过滤/拷贝/等待/配额记账等，跨层共用；出现第二份就是缺陷。
+5. **"我加个适配层"的念头要停一下**：先问「这个能力能否上移到既有能力包？」，能则上移；
+   确实只能在装配层做的（需要多子系统装配态）才留在 `pkg/server`，并写明理由。
+6. **构造点收敛**：同一类对象（如冷段目录 FS）只保留**一个构造函数**，便于门禁白名单与替换
+   （例：`newColdArchiveFS`，`sync.NewLocalFS` 全仓仅此一处）。
+7. **门禁兜底**：新增直连点会被 R19（Transport）/R25（用户内容经 Root）/R26（`NewLocalFS` 白名单）
+   /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
+   确需例外时必须写明「为什么可以不经既有能力」。
+
 ## 协作与流程硬规则
 
 > **以 `AGENTS.md` 的「协作与流程硬规则」（第 1–17 条）为单一事实源**，本文不重复维护副本。
@@ -21,23 +62,62 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
 >   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
 >   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）；门禁**扫描全仓**并带覆盖探针。
+> - **全局能力可测试化策略（2026-10-05 用户明示）**：测试不得依赖全局可变状态凑并行——凡全局能力
+>   （注册表/共享 provider 等），生产代码提供三件套使其可测试化：内部类型 opt（参数化全局行为，
+>   如 `*downloader.Registry`）+ 内部全局变量（真实全局留生产）+ 可导出全局方法（`NewRegistry()`
+>   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
+>   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
+>   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
+> - **测试注入纪律（2026-10-07 用户明示，加强版）**：**绝对禁止测试依赖全局可变函数/变量做 seam
+>   替换**（`var removeX = os.Remove` 包级 seam + 测试 t.Cleanup 恢复，运行期替换/并发恢复即 data
+>   race，且影响其它读该 seam 的用例）。一切测试注入一律走**结构体内部私有变量，只能在创建时经
+>   构造函数/opts 注入**（`VideoChecker.indexer`、`CloudDownloadManager.removeFile`、
+>   `NewLocalOrExitDial(...localDial)`、`Handlers.removeMovedSource`）：运行期不可变 → 并发安全 →
+>   测试可 `t.Parallel()`。判断标准：测试里出现「替换包级 var + t.Cleanup 恢复」即违规，须改为构造
+>   注入实例字段（参考本分支 removeTaskFile/localDialFunc/removeMovedSource 改造）。
+> - **配置默认值纪律（2026-10-07 用户明示，加强版）**：**绝对禁止特化的默认配置行为**——bool
+>   配置字段**必须默认 false**、string 配置字段**必须默认空字符串**；一切配置必须有**安全可靠的
+>   默认行为**。需要「默认开启某能力」时**禁止 bool 默认 true**（默认 true 使「显式 false 关闭」
+>   与「未配置」语义混淆）——**直接反转语义**：flag 表达「关闭某能力」（`disable_xxx`/`no_xxx`，
+>   默认 false = 能力默认开启），或默认值本身即安全路径（如 `cloud_check_mem_bytes` 默认 512MiB
+>   非零保证配额治理默认生效——用户裁定 2026-10-07：0 处理成默认大小）。判断标准：新增 bool 默认
+>   true / string 默认非空 → 违反本条（参考本分支 `--integrity-must-pass` 默认 false：校验默认
+>   嵌入主链，must-pass 仅反转 damaged 阻断语义）。
+> - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
+>   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
+>   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。
 > - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
 >   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
 > - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
+> - **绝对禁止跳过检查直接 commit / push**（2026-10-02 用户明示）：严禁 `--no-verify`；pre-commit（增量轻量）
+>   与 pre-push（全量：fmt-all → lint-all → check-ci）必须真实跑通，日志落盘 `build/hooks/*.log`；
+>   **出现环境问题或脚本故障时直接修复环境/脚本，不得以「CI 会兜底」为由绕过**（绕过只是把失败推迟到 CI）。
+> - **PR 绝对禁止泄露真实数据（2026-10-05 用户明示）**：代码/配置/文档/commit 信息/PR body 一律
+>   禁止携带真实外部数据（真实分享 URL 含子路径 token、凭据/token、密钥/指纹、日志片段）；
+>   需真实数据验证时用**环境变量或 CLI flag 运行期传入**（默认留空/占位），禁止硬编码入库；
+>   合并前 `git grep` 扫描。详见 `AGENTS.md` 硬规则 21。
+> - **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
+>   代码/测试/注释/文档**绝对禁止**真实分享 URL/容器 id/分享 id/网盘文件 id、
+>   真实文件名/标题、真实 IP/域名/端口、凭据；一律 `EXAMPLE-*`/`REALSHAREID001`/`p5containerid`/
+>   纯占位中文/`example.com` 等通用假数据；提交前 `git grep` 扫描（`keepshare.org/p<id>`、
+>   `mypikpak.com/s/<id>`、真实标题/IP）。详见 `AGENTS.md` 硬规则 21b。
 
 ## 执行偏好
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
+- **文档维护与归档纪律（2026-10-06 用户明示，与根 AGENTS.md 对齐）**：功能完成后把实现/决策提炼更新到**权威文档**（现行事实源：`docs/` 根级文档、CLAUDE.md、代码本身）；有价值的探索/决策精简归档到 `docs/archive/`（按功能维度：做了什么/踩过什么坑/哪些判断仍有效），**不保留操作步骤等无效过时信息**（判断标准：归档应作「背景知识」复用，而非操作日志）。**历史规划文档（`docs/superpowers/plans/`）有价值内容提炼到权威文档后即移除，不保留**。
 
 ## 工程原则（必须遵守）
 
 1. **永不允许 lint 错误**：只要发现 lint 问题（任何模块，含改动前已存在的历史遗留），就必须修复，不得以"改动前就有"为由跳过。提交前全模块 lint（主 go.mod + 每个子 go.mod）必须 0 issues。
 2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
 3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
-4. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
+3b. **禁止无意义的标准库/内部函数薄封装（2026-10-05 用户明示）**：导出函数**不得**直接 `return` 不可导出的内部函数结果（`func HashX(b []byte) (string, error) { return hashX(b) }` 即为薄封装）——为改签名保留两个同名相近函数是重复实现，伤可维护性。每种能力只保留**一个导出真身**：同名内部函数直接改名导出（去掉恒 nil 的 error），变体收敛为单一实现（如 `Hash48Pair(blob, offA, offB)` 一次哈希取双窗口，供 chunk/meta/dir 命名复用）并删除内部同名。判断标准：导出函数体只有 `return internalFn(...)`（或 `..., nil`）→ 合并。注意与第 3 条区分：第 3 条指**跨包抽象过渡**（cmd→pkg 的委托包装），本条指**同包内**为签名改动保留双函数，两者都不允许「最终保留薄包装」。
+4. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段（如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config/config.go` 的 `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循上述约定。
+5. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
 5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（统一落在 `### Changed` 段；`release-please-config.json` 已移除这几类的 `hidden`，即 Conventional 类型全枚举）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
-6. **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；③ 多个语义独立的改动拆多条 commit；④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），不要只罗列 commit 标题；⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，别指望 PR body 能救回；⑥ 合并后**不补 amend**（见 AGENTS.md 硬规则 16）；⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（用户 2026-09-15 反馈：最近几批 PR 的合并信息过于单薄）。
+6. **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；③ 多个语义独立的改动拆多条 commit；④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），不要只罗列 commit 标题；⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，别指望 PR body 能救回；⑥ 合并后**不补 amend**（见 AGENTS.md 硬规则 16）；⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（用户 2026-09-15 反馈：最近几批 PR 的合并信息过于单薄）；⑧ **squash 合并信息格式（2026-10-02 用户明示，强制）**：title **必须包含 `(#PR号)`**；body **必须按功能修改维度总结**（能力 → 背景 → 改动要点 → 验证证据），**禁止**直接把所有 commit 的 subject/body 逐条拼接成 body。
 
 ## 常用命令
 
@@ -113,6 +193,8 @@ go test -coverprofile=cover.out ./internal/... ./pkg/... ./cmd/...
 | `./pkg/tunnel/xfer/ext/grpc` | gRPC 传输层子模块 |
 | `./pkg/tunnel/xfer/ext/webrtc` | WebRTC 传输层子模块 |
 | `./pkg/tunnel/hub/ext/kad` | Kademlia DHT 路由表扩展子模块 |
+| `./pkg/volume/ext/s3` | S3 存储卷扩展子模块 |
+| `./pkg/volume/ext/pikpak` | PikPak 网盘中转后端子模块 |
 
 构建/测试所有模块：`make build-all` / `make test-all`。单模块操作需 cd 进入目录。
 
@@ -322,6 +404,7 @@ type Conn interface {
 | `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
 | `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
+| `cloud_transfer_concurrency` | int | 3 | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
 | `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
 | `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
 | `cloud_download_timeout` / `cloud_download_idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |
@@ -722,3 +805,48 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 ### 字符串转义注意事项
 - Go 源文件中 `"\\"` 在 JSON/JS 编辑时需要双重转义。
 - `tools.edit` 的 `old_string` 必须精确匹配源文件内容。
+
+### Sonar 质量门禁清理 + CI 覆盖架构（2026-10-01 战役）
+> 完整踩坑记录见 `docs/archive/sonar-ci-experience.md`；以下为高频要点。
+- **NOSONAR 只认行尾**：`code // NOSONAR: 规则 — 理由` 必须写在被标记行末尾；「独立上一行」格式 SonarGo 不识别（#692/#698 白加、#704 修正后清零）。多行理由留前置注释。
+- **Sonar 专属规则 lint 查不到**：S8242（结构体 ctx 字段，S107 收敛必触发）、S8196/S8209 等 godre 规则 golangci-lint 0 issues 也漏——等价重构后必须 **Sonar 复扫验证**，不能只信本地 lint。
+- **覆盖率口径**：本地 cover-check 81.4% 是「根 module 语句覆盖」；Sonar 33.3% 是「全仓行覆盖」（分母含 15 子 module + 测试文件，一条语句跨 1~3 行）——两者差 2.4 倍**正常**，不可直接比较。Sonar 总体覆盖率对 Go 参考价值有限，价值在 issue 规则维度。
+- **go.work 下 `./...` 只测根 module**（实证 82 包、16 子 module 零命中）→ `make test-cover` 只覆盖根 → Sonar 把子 module 按 0% 稀释。聚合用 `make test-cover-all`（cd 进子 module + GOWORK=off + coverprofile 绝对路径 → 覆盖记录为 import path，与根同构）。
+- **等价重构「制造」低 new_coverage**（度量伪象非回归）：S107/S3776 拆方法行号全变，Go 行级覆盖不匹配新行 → Sonar 算成未覆盖新代码。重构 PR 应配套补关键分支测试。
+- **MinIO 挂 test job 是死配置**（s3 集成在子 module，根 `./...` 不跨）→ 迁 test-submodules + `S3_ENDPOINT` 首次实跑，暴露并发 `MakeBucket` TOCTOU（用 `BucketAlreadyOwnedByYou` 容忍修复）。
+- **fuzz 必须限时**（`-fuzztime=30s`）并放 chaos job（非常规类别），不进常规 test。
+
+### Sonar 覆盖率数字解读（33.3% vs 本地 81.4%）
+- Sonar `lines_to_cover`（139,523）**超过任何源码行统计**（非空非注释行 94k）：其行级机制把多行语句起止区间全计入 + ncloc 含测试文件（158k 测试行）。
+- `sonar.test.exclusions=**/*_test.go` 已配（测试文件不计分母）；`.pi/**` 已排除。
+- **提升 Sonar 覆盖率的正确路径 = 补低覆盖子 module 测试**（baidupcs 48.6%/s3 49.6%/sclient 主包 67.2%），不是调口径。
+
+### 双引擎排除纪律（lint + Sonar，2026-10-02 落地）
+> 规则见 AGENTS.md 硬规则 18；代码侧 .golangci.yml 已启用 containedctx（对齐 S8242）与 gocognit=15（对齐 S3776）。
+- **优先设计修复，禁止自动排除**：新告警先拆分/收编/方法化消除；只有**人工确认**设计特意保留才算（长期驻留循环 ctx、webdav.File 无 ctx 参数的存储 ctx、状态机编排）。3 处生产 gocognit（CloudDownloadChain.Run / doRequestPrepared / Config.Validate）已设计拆分而非排除。
+- **双标记格式（两引擎都认）**：golangci 只认**注释开头**的 `//nolint`（`// NOSONAR //nolint:gosec` 同注释无效）。正确：
+  ```go
+  //nolint:containedctx // S8242：单次操作作用域共享 ctx（设计保留）
+  ctx context.Context // NOSONAR: S8242 — 同理由
+  ```
+- **铁律**：排除必须成对（Sonar Sxxx + golangci linter 名），缺一即漂移；复杂度>15 先拆不排除。
+
+### Sonar 高频反模式速查（写代码直接避免，2026-10-05 沉淀）
+> 完整清单见根 `AGENTS.md`「Sonar 质量门禁常见反模式」；本文件记 sproxy 实测反复命中的：
+
+- **禁止 `max`/`min`/`cap`/`len` 作局部变量**（go:S978）——用 `mx`/`mn`/`n`（实测 config.go transferConcurrencyEffective 命中）。
+- **测试 err 不赋局部变量**（godre:S8193/S4144 族）：`if err := f(); err != nil { t.Fatalf }` 直写；测试断言与既有用例完全相同 → 合并/参数化，不复制。
+  **S8193 判据补充（2026-10-07 实测）**：变量声明后**只在条件里用一次**（`if x := f(); x != nil { return }` 且 x 在分支内不再用）→ 内联 `if f() != nil`；**若 x 在分支体内复用（如 `t.Fatalf("... %v", jerr)`）必须保留声明**——两处 `json.Decode` 分别处理（断言 Fatalf 保留 / WaitFor 闭包 return false 内联）。
+- **空函数必须括号内注释**（go:S1186）：`func() {}` 返回空闭包（no-op release 等）→ 在 `{}` **内部**写 `func() { /* 理由 */ }`——函数体外行注释 Sonar 不识别（2026-10-07 实测 acquireCheckMem 空 release 命中）。
+- **字符串字面量重复**（go:S1192）：同一字面量（如 Kind 注册键 `"archive/tar"`）≥3 处 → 提包级常量（`const TarKind = "archive/tar"`，Register/Kind 共用）。
+- **参数过多**（go:S107）：>7 参函数 → 相关参数归组 struct（本仓先例 srcMeta/finalizeRequest；ctx 保持首参——containedctx 纪律）。
+- **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
+- **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
+- **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
+- **测试复杂度可直接豁免（2026-10-05 用户明示）**：测试内 mock 路由 switch / 复杂断言等 S3776 **允许直接双标记豁免**（`//nolint:gocognit` 行首 + 行尾 `// NOSONAR: S3776`）——测试非生产逻辑，**不为解决而解决**、不做无谓重构（拆多函数伤可读性）。生产代码才须真正拆分。
+- **测试文件 issue 收紧（2026-10-05 用户裁定）**：Sonar 对 `*_test.go` 的分析只关心 bugs/vulnerabilities 与正确性（race、mock 契约、断言有效性）；**code smells（S3776/S8196/S978/S8193）在测试文件上直接忽略**——本仓实测测试文件 bugs/vuln 恒 0，正确性由 `-race`/archcheck/e2e 保障，Sonar 测试 code smells 无增量价值。
+- **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
+
+### PR title 纪律（2026-10-05 用户明示）
+- **title 只含功能维度**：`type(scope): 能力描述`——禁止携带「rebase / 审核 / sonar 修复 / 代码评审 / 第二轮」等**功能无关信息**（这些是过程，不是交付物）。squash 合并后 title 会成为 changelog 条目，只描述交付了什么能力。
+- 过程信息（rebase 复核、评审轮次、Sonar 清理）写进 body（背景段），不进 title。

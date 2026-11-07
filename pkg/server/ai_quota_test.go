@@ -34,7 +34,7 @@ func TestAIQuota_DailyReset(t *testing.T) {
 		Default: AILimit{DailyCalls: 2},
 	}, slog.Default())
 	_ = q.CheckAndCharge("ownerA", 1)
-	q.setDay("2000-01-02") // 注入不同日
+	q.SetDay("2000-01-02") // 注入不同日
 	if err := q.CheckAndCharge("ownerA", 1); err != nil {
 		t.Fatalf("跨天应清零: %v", err)
 	}

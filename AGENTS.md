@@ -14,6 +14,81 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 > 历史：早期版本曾包含 `/{host}/{filepath...}` HTTPS 透明转发与 `/bandwidth` 端点，已于重构移除，定位收敛为文件服务 + 隧道。
 
+## 能力矩阵与收敛原则（**写代码前先查表**）
+
+> 目标：**不要重复实现已有能力**。新增需求先查本表；表里没有、但形态相近的，在**既有能力包**
+> 里加一个**可选能力接口**（+ `Assert*` 查询助手）并在相关实现补齐 —— **不要**在消费包里
+> 另造同形接口。判据：若两个包出现语义相同的接口/函数，就是重复实现 ✗。
+
+| 能力 | 提供方（唯一实现） | 关键 API | 约定 / 用法 |
+| --- | --- | --- | --- |
+| 文件系统读写（本地/外部/加密/远端统一） | `pkg/sync` | `FS`：`ListDir`/`Stat`/`OpenRead`/`WriteFile`/`Rename`/`Delete`/`MakeDir` | 卷层的 `volume.Volume.FS()` 就是这个接口；**换目的地只换 FS** |
+| 幂等写（目标存在即不覆盖） | `pkg/sync` | 可选 `WriteIfAbsent`（类型断言查询） | LocalFS / PrefixFS / StagingQuotaGateFS 已实现；归档/转存类写入首选 |
+| 区间随机读 | `pkg/sync` | 可选 `RangeReader.OpenRangeRead` + `AssertRangeReader` + `RangeReadAll` | 远端只传输所需区间；未实现 ⇒ `ErrUnsupported`（**不得**静默整文件下载 ✗） |
+| 递归枚举 | `pkg/sync` | `WalkEntries(ctx, fs, root, recursive, followSymlinks, filters)` | 取代手写 walk |
+| 卷侧容量预检 | `pkg/sync` | 可选 `ReserveSpace` | 转存前预检（fail-closed） |
+| 目录/对象扩展元数据 | `pkg/sync` | 可选 `MetaExtraUpdater` + `AssertMetaExtraUpdater` | 可信卷 sidecar |
+| 直传 URL（presign 类） | `pkg/sync` | 可选 `DirectURLProvider` + `AssertDirectURL` | |
+| 用户可见文件写/读（锁 + 双账本 + sidecar + 台账） | `pkg/files` | `Service.WriteTarget` / `WriteFile` / `OpenPath` / `StatPath` | **用户内容必须走这里**；不要直连 `storage.Root`/裸 FS ✗（R25/R26） |
+| 卷解析与归属 | `pkg/volume` + `registry` | `Volume.FS()`、`ResolveUserLocation`、`QuotaVolume`（`UserUsage`/`WaitStats`） | 外部/加密/封装卷都走同一层 |
+| 配额记账与等待 | `pkg/quota` | `Scope/Pool.WaitReserve`、`ProbeReserve`、`Pool.WaitStats` | 排队能力由 `pkg/waitq` 提供 |
+| 通用等待/排队 | `pkg/waitq` | `Queue.Acquire/AcquireUnder`、`Stats`、`Resource` 适配器 | 新排队场景复用；**禁止**再写 `sync.Cond` ✗（R36-b） |
+| 统一任务恢复（WAL 续跑） | `pkg/recovery` | `Coordinator.Register/RegisterLegacy/Run` | 长任务必须 `Open` 作用域；恢复只走协调器（R37） |
+| 审计（唯一提供方） | `pkg/audit` | `Service`/`Scope`/`Entry`/`Journal`；`ArchiveSealed`+`SegmentArchiver`；`QueryCold`/`OpenRange`；`OnSeal` | 归档与冷读均经 `pkg/sync.FS`；**不要**另造 sink/store 接口 ✗ |
+| 云下载/转存内核 | `pkg/transfer` + `pkg/cloud` | `Execute` / `writeUnique` / 预处理器选型 | 归档=转存+预处理，复用同一内核 |
+| HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
+
+
+
+
+
+
+
+
+
+
+
+| 归档打包（tar 助手） | `pkg/server/archive` | `archive.AddFileToTar` / `DefaultMaxArchiveSize` | **server 作用域**；纯函数无装配状态，HTTP 面留在装配层 |
+| 跨 hub 中继转发（联邦数据面） | `pkg/server/federation` | `FederationForwarder` / `NewFederationForwarder` / `StatusError` / `DefaultRelayMaxHops` | **server 作用域**；只负责「向一个联邦对端转发一条拨号」+ 防环头；HTTP 解析/故障转移/回写留在装配层 `RelayStreamHandler` |
+| 跨进程文件锁原语 | `pkg/server/filelock` | `filelock.Lock` / `filelock.Unlock` | **server 作用域**；多进程 read-modify-write 同一共享文件的互斥（Unix flock），**非选主语义**（选主走 `pkg/leader`）；进程内互斥由调用方承担（flock 同进程可重入）；Windows 降级为空操作 |
+| JSON 响应写出（**唯一实现**） | `internal/httpjson` | `Send` / `SendOpt` / `SendErr` / `SendError` / `WriteBody` / `SetLogger` | **L0 横切**；装配根 `sendJSONResponse`、`pkg/files.Service.sendJSON`、`cloudtasks.writeJSON`、ratelimit 429、remotefs helper 均委托它；字节契约（成功无尾随换行 / 失败体带尾随换行）不得改；`SendErr` 用于「写失败必须被调用方感知」（信令 I5），`WriteBody` 用于预序列化字节（缓存命中）；裸写由 **R54 硬禁止**（`json_response_gate_test.go`，无基线表） |
+| 路由表数据化 + 双 mux 注册 | `pkg/server/router` | `router.Route[H]` / `router.Register` / `Class` | **server 作用域（L0）**；子包用 `Routes()` 声明自己的 URL 子路径（相对前缀）+ 两端分类，装配层经 `router.Register` 一次注册到 srvMux/localMux，并注入「分类 → 包装器」映射（`h.routeWrapper`）；**分类是装配层决定**，子包不能自选 wrapper；R38 静态解析字面量表。已下放：`cloudtasks` / `share` / `notify` / `ai` / `verify` |
+| 限流（滑动窗口 / per-IP 令牌桶 / 端点维度 / 并发闸 / 跨实例协调） | `pkg/server/ratelimit` | `RateLimiter` / `NewRateLimiter` / `Coordinator` / `NewCoordinator` / `NormalizeRemoteIP` | **server 作用域**；装配根经 `SetMetrics`/`SetClientIPFn`/`SetCoordinator` 注入依赖，路由挂载与 429 回包在装配层；协调计数文件 key 归一走 `internal/coordkey` |
+| 跨节点读写面（只读/写协议 + loopback listener） | `pkg/server/remotefs` | `Deps` / `NewReadHandler` / `NewWriteHandler` / `StartReadListener` / `StartWriteListener` | **server 作用域**；`Deps` 恒 8 字段（装配态经窄接口注入，不反向依赖装配根）；写面只做授权 + 调 `pkg/files` 域方法（checksum/改名/版本/配额/文件锁/卷路由留在领域层）；`StartRemote*Listener` 与 listener 类型别名留在装配层（`cmd/sproxy` 是独立 module） |
+| 封装卷（nested enclosure）翻译与运行期装配 | `pkg/server/enclosure` | `TranslateNestedVolume` / `TranslateNestedDecl` / `ParseNestedTarget` / `AttachEnclosureVolume` / `DetachEnclosureVolume` / `SealedAt` | **server 作用域**；**唯一职责是「用户面 `type: <wrapper>` + `extra.target: "<卷>/<子路径>"` → 装配词汇 `extra.source`」的翻译与装配编排**——翻译语义是用户面兼容面，**不改 schema**（持久化/回显保持原形态，翻译只在内存）；只接收显式参数（`*registry.Set`/logger/storage root），不持有 `*Handlers`，不反向 import `pkg/server`（R6）；封印注入/容量池继承/后端构造复用 `pkg/volume/enclosure` 单一实现 |
+| 阈值告警引擎（规则/状态机/水位） | `pkg/server/alerts` | `alerts.NewFromConfig` / `Engine.On*` / `AdoptNotifyChannels` | **server 作用域**；分发复用 `pkg/server/notify`；AI 建议挂点经 `pkg/server/ai` |
+| 用量统计（du / 存储分类） | `pkg/server/ops` | `WalkRoot` / `WalkFS` / `WalkUploadStats*` / `CategoriesFromBuckets` | **server 作用域**；纯遍历无装配状态，HTTP 面留在装配层 |
+| checksum 巡检（全仓一致性审计） | `pkg/server/verify` | `verify.New(Deps)` / `VerifyOnce` / `Report` | **server 作用域**；依赖经 `verify.Deps` 注入；摘要统一走 `checksum.File` |
+| 运行时指标注册表/渲染 | `pkg/server/metrics` | `Metrics` / `WriteMetric` / `WriteHistogram` / `RebalanceProgress` | **server 作用域**；`/metrics` HTTP 面与装配态渲染段留在装配层 |
+| 分享存储（进程内/StateStore） | `pkg/server/share` | `Store` / `StateBackedStore` / `StoreIface` | **server 作用域**；HTTP 面在装配层，经别名调用 |
+| AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |
+| 服务端 WebDAV 挂载面 | `pkg/server/dav` | `dav.New(Deps)` / `Service.Handler` | **server 作用域**；`MetaPolicy` 窄接口（sidecar 联动），不反向依赖装配层 |
+| S3 兼容网关（SigV4/对象/multipart） | `pkg/server/s3` | `s3.New(Deps)` / `Service.Handler` | **server 作用域**；依赖经 `s3.Deps` 注入（`MetaPolicy` 窄接口），不反向依赖装配层 |
+| 周期任务调度 | `pkg/server/scheduler` | `Scheduler.Register/Start/Stop`、`Task` | **server 作用域**（零 pkg/* 依赖，L0）；任务注册内容留在装配层 |
+| 通知中心（规则路由/去抖/重试/渠道/feed 渲染） | `pkg/server/notify` | `NotifyCenter.Dispatch` / `NewFromConfig` / `History` | **server 作用域**；只接受 `notify.Event`（装配层在 RecordAudit 做字段映射） |
+| 真实存储审查（逻辑 ↔ 物理落点） | `pkg/volume` + 各卷实现 | `StorageInspector`（`Trace` / `Explain`）+ `TreeInspector`（`TraceTree` 递归树）+ `AssertStorageInspector` | **布局事实只由卷提供**；只解 meta 不读内容、只读不修复；未实现 ⇒ 501/明确报错（**禁止空结果**） |
+| 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |
+| 凭据存储与主密钥解析 | `pkg/server/credentials` | `BootstrapServerCredentials` / `ResolveCredentialMasterKey` / `BestCredential` / `BestFirstCredential` | **server 作用域**；边界＝**快照 store（StateStore 后端/双读单写/静态加密包装）+ 主密钥与 Vault token 来源解析 + Ring 凭据选取**。启动编排（`bootstrapCredentials`/`SelfCredential`/凭据轮换循环）仍留装配层；不反向依赖 `pkg/server`（R6） |
+
+### 收敛原则（必须遵守）
+
+1. **先查表**：动手前确认能力矩阵里是否已有同类实现；有则复用（含"少写一个适配层"）。
+2. **缺口的正确姿势 = 扩展能力包**：在 `pkg/sync` / `pkg/volume` / `pkg/files` 等**能力包**新增
+   **可选能力接口** + `Assert*` 查询助手，并在相关实现（LocalFS/PrefixFS/各卷 FS/装饰器）补齐；
+   消费方只做「查能力 → 用能力」。这样所有消费方共享一份实现 ✓。
+3. **消费包禁止定义与既有能力同形的接口**：曾出现 `audit.SegmentSink`（≈ `WriteIfAbsent`）与
+   `audit.SegmentStore`（≈ `FS.ListDir`+`RangeReader`）被新造后又删除 ✗ —— 这是反面教材。
+4. **同一语义只留一份实现**：解码/过滤/拷贝/等待/配额记账等，跨层共用；出现第二份就是缺陷。
+5. **"我加个适配层"的念头要停一下**：先问「这个能力能否上移到既有能力包？」，能则上移；
+   确实只能在装配层做的（需要多子系统装配态）才留在 `pkg/server`，并写明理由。
+6. **构造点收敛**：同一类对象（如冷段目录 FS）只保留**一个构造函数**，便于门禁白名单与替换
+   （例：`newColdArchiveFS`，`sync.NewLocalFS` 全仓仅此一处）。
+7. **门禁兜底**：新增直连点会被 R19（Transport）/R25（用户内容经 Root）/R26（`NewLocalFS` 白名单）
+   /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
+   确需例外时必须写明「为什么可以不经既有能力」。
+8. **命名必须编码作用域**：`pkg/<x>` = 通用能力（server/client/tools 均可消费）；只在服务端有意义的进 `pkg/server/<x>`；只服务单个二进制的进 `cmd/<bin>/internal/<x>`。判据可执行：被 `cmd/sclient`/`cmd/sproxy-mcp` 可达才可留 `pkg/`（详见 `docs/architecture.md` §作用域分层，门禁 R6）。
+9. **装配层依赖必须分域**：`Handlers` 只允许嵌入 `deps.go` 里的 `*Deps` 分组（R7 门禁，直接字段 ≤ 12）；新增依赖加到对应分组，禁止再往 `Handlers` 本体加扁平字段。
+
 ## 执行偏好
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
@@ -42,10 +117,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
 6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
    `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
-   **绝对禁止 `git commit --no-verify`**（用户明示硬规则，2026-09-18）：pre-commit 已覆盖全部 go module
-   （make fmt-all：go fix + addlicense + gofmt + vet + lint-all）；绕过 hook 的行为会被 CI 的 Lint job
-   硬门禁（check-format + lint-all）拦截，且已在 master 造成 10 文件 go fix 残留（见
-   `docs/archive/gofix-before-pr.md`）。
+   **绝对禁止跳过检查直接 commit / push**（用户明示硬规则，2026-09-18 起、2026-10-02 扩展）：
+   - 严禁 `git commit --no-verify` 与 `git push --no-verify`：pre-commit 为增量轻量门禁（gofmt / SPDX /
+     go vet / golangci-lint / check-loopback，仅本次 commit 涉及文件），pre-push 为全量门禁
+     （fmt-all → lint-all → check-ci）；两者检查结果必须真实跑通，日志落盘 `build/hooks/*.log`
+     （失败后直接查看该日志定位，无需重跑）。
+   - **出现环境问题或脚本故障时直接修复环境/脚本，不得以「绕过后 CI 会兜底」为由跳过**——绕过只是把
+     失败推迟到 CI，并会在 master 留下未格式化/未 lint 残留（历史教训：10 文件 go fix 残留，
+     见 `docs/archive/gofix-before-pr.md`）。
 7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
 8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
 9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。
@@ -77,11 +156,27 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
        别指望 PR body 能救回它（squash 合并后 GitHub 只把 PR 标题带进提交，正文是分支 commit 的）；
     ⑥ 合并后**不补 amend**（见硬规则 16）；
     ⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（2026-09-15 用户反馈：最近几批 PR 的合并信息过于单薄）。
+    ⑧ **squash 合并信息格式（2026-10-02 用户明示，强制）**：
+       - **title 必须包含 `(#PR号)`**（如 `feat(secret): secret 加密卷（#723）`）；
+       - **body 必须按功能修改维度总结**（能力 → 背景 → 改动要点 → 验证证据），
+       - **禁止**直接把所有 commit 的 subject/body 逐条拼接成 body（那是「commit 列表」，不是「功能总结」）。
 13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
     无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
     ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
     `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
     历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
+    全局能力可测试化策略（2026-10-05 用户明示，长期有效）：测试**不得依赖全局可变状态**
+    （包级全局注册表/共享 provider 等）来凑并行——凡全局能力，生产代码提供三件套使其可测试化：
+      - **内部类型 opt**：把全局行为参数化（如 `*downloader.Registry` 等内部类型）；
+      - **内部全局变量**：真实全局（如 `downloader.DefaultRegistry`）保留给生产路径；
+      - **可导出全局方法**：提供取**本地实例**的构造器（`NewRegistry()`）与**按参注册**的入口
+        （`RegisterXxx(reg, cfg)`——注册目标经参数注入，生产传全局、测试传本地）；包内结构提供
+        内部方法直接接收内部类型变量控制全局行为。
+    效果：测试用本地实例注入，不触碰全局 → 可 `t.Parallel()`。**新测试默认先问「能否并行」，
+    不得默认登记串行**——只有真写共享全局/真实端口/进程外资源的才放弃 `t.Parallel()` 并登记
+    `serial_budgets.tsv`。教训（#734）：一次性登记 30+ 串行把棘轮基线顶到 1810，CI merge 树
+    （pull_request 合并 master 侧新增串行）因 master 侧未显式登记、slack 被吃光而红灯——
+    并行化 + 同步 master + 补登记后归位到 1781。
 14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
     notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
     逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
@@ -95,6 +190,56 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
     `transport connection broken: http: CloseIdleConnections called`（本仓已在 `pkg/client`(FileClient)、
     `pkg/testutil/syncmock`、`cmd/sclient` 多次实证）。做法：每测试自建 `&http.Client{Transport: &http.Transport{}}`
     （生产侧库默认也应为每实例独立连接池）。
+18. **双引擎排除纪律（lint + Sonar，用户明示 2026-10-02）**：golangci-lint 与 Sonar 是两套独立引擎，
+    「一处豁免、另一处误报/漏报」的漂移是质量债。规则：
+    ① **优先设计修复，禁止自动排除**：新告警（复杂度 S3776/gocognit=15、结构体 ctx S8242/containedctx 等）
+       先通过拆分/收编参数/状态机方法化等**设计手段**消除；只有**人工确认**「设计特意保留」（如长期驻留循环持有 ctx、
+       webdav.File 接口无 ctx 参数的存储请求 ctx、状态机编排）的场景才允许加排除标记。
+    ② **双标记格式（必须同时被两引擎认）**：golangci 的 `//nolint` 必须位于**注释开头**（同一注释内
+       `// NOSONAR //nolint:gosec` 无效——nolint 被忽略）；正确写法是**上一行 `//nolint:linter // 理由` + 被标记行行尾 `code // NOSONAR: Sxxx — 理由`**，
+       或同行 `code /*nolint:linter*/ // NOSONAR: Sxxx — 理由`（块注释 nolint 也认）。
+       理由与 NOSONAR 规则号必须成对（如 `//nolint:containedctx` + `// NOSONAR: S8242`），缺一即为漂移。
+    ③ **仅允许同类双排除**：排除必须同时覆盖 Sonar 规则号与 golangci linter 名，禁止只写一侧。
+    ④ **复杂度红线**：认知复杂度阈值 = 15（gocognit min-complexity 15，与 Sonar S3776 一致）；
+       新函数超限前必须拆 helper/早返回，禁止直接 nolint。
+    ⑤ 门禁对齐：`_test.go` 与 `tools/` 已在两引擎同时豁免（sonar.test.inclusions / sonar.exclusions ↔ .golangci exclusions），
+       这些目录不适用本规则。
+19. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段
+    （如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）
+    必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、
+    JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构
+    裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
+    时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config/config.go` 的
+    `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
+20. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
+    （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
+    行为在对应测试中显式断言（fake/mock 或真实链路）。维护时：
+    - 新增外部依赖 → 先在 `docs/external-dependencies.md` 按分类登记条目 + 补测试锁定
+      （TDD 红灯 → 实现 → 绿）；绝不允许「外部行为无锁、改了也不红」；
+    - 测试红时**先对照该文档**判断「外部行为变化（依赖变更）」还是「实现回归」，禁止静默改
+      实现适配未登记的依赖变化；
+    - 外部行为确实变化 → 更新 `docs/external-dependencies.md` + 适配实现（测试继续锁）；
+      实现回归 → 修实现，文档不动。
+    目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
+    416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
+21. **PR 绝对禁止泄露真实数据（2026-10-05 用户明示，强制）**：创建 PR 时，代码、配置、文档、
+    commit 信息与 **PR body** 一律禁止携带真实外部数据——真实分享 URL/链接（含子路径 token）、
+    账号凭据/token、密钥/指纹、真实日志片段等。需要真实数据验证的场景：**用环境变量或 CLI flag
+    在运行期传入**（默认值留空/占位），禁止硬编码入库。合并前用 `git grep` 扫描真实 URL/凭据
+    模式；CI/Sonar 不豁免，泄露即数据事故。教训（#734）：tool/pikpak-hybrid 三个诊断工具曾
+    硬编码真实分享 URL（含子路径 token）；URL 类真实数据按常见规范用 **CLI flag 运行期传入**
+    （`-share`，默认留空 + 强制校验），凭据/密钥类用环境变量。
+
+21b. **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
+    **绝对禁止**在 sproxy 代码/测试/注释/文档中出现任何真实信息——真实分享 URL/容器 id/
+    分享 id/网盘文件 id、真实番号（任何站点实际 code）、真实文件名/标题（含中文/日文真实内容）、
+    真实 IP/域名/端口、凭据/token/密钥。一律使用**通用假数据**：`EXAMPLE-*` 占位番号、
+    `REALSHAREID001`/`p5containerid` 占位分享 id、纯占位中文（无真实语义）、`example.com`/
+    `127.0.0.1` 等通用地址。提交前 `git grep` 扫描：
+    `keepshare.org/p<id>`、`mypikpak.com/s/<id>`、真实文件名/标题、真实 IP（凭据/分享 URL 模式见硬规则 21）；
+    命中即改假数据再提交（教训 2026-10-28：normalize/restore/urlresolver 测试曾留真实番号
+    与真实分享 id，全仓扫描后逐一占位化）。
+
 
 
 ## 常用命令
@@ -322,7 +467,7 @@ type Conn interface {
 ### 隧道
 - `POST /tunnel` — `tunnel.NewLocalHandler(nil, localMux)`，AES-256-GCM 加密的请求转发
 
-## 配置（`pkg/server/config.go`）
+## 配置（`pkg/server/config/`）
 
 ### 加载方式（viper，来自 `cmd/sproxy/root.go`）
 

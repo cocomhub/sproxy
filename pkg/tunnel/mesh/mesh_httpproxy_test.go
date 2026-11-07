@@ -53,7 +53,7 @@ func TestMeshHTTPProxy_Exit(t *testing.T) {
 	targetAddr := strings.TrimPrefix(target.URL, "http://")
 
 	logger := testMDNSLogger()
-	nodeCtx, nodeCancel := context.WithCancel(t.Context())
+	nodeCtx, nodeCancel := context.WithCancel(t.Context()) // NOSONAR: S8188 — nodeCancel 由 teardown 显式调用（76 行）
 	nodeErr := make(chan error, 1)
 	go func() {
 		nodeErr <- RunNode(nodeCtx, NodeConfig{

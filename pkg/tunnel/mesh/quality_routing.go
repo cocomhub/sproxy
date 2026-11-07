@@ -12,9 +12,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
 )
 
-// muxQualitySource 是质量数据源（由 mux 实例/聚合层实现）。
+// qualityMetricsProvider 是质量数据源（由 mux 实例/聚合层实现）。
 // 接口化而非直接依赖 mux.Mux：测试注入 fake、装配层可接聚合（跨 mux 汇总）。
-type muxQualitySource interface {
+type qualityMetricsProvider interface {
 	// QualityMetrics 返回该源的 mux 质量指标（重传等计数器）。
 	// 返回 nil 表示无数据（该源尚未有统计）。
 	QualityMetrics() *mux.Metrics
@@ -43,12 +43,12 @@ const qualityStaggerDelay = 100 * time.Millisecond
 // 包级全局（与 SmartPathRegistry 同构）——测试需 qualityRegistryClear 隔离。
 var qualityRegistry = struct {
 	mu sync.RWMutex
-	m  map[string]muxQualitySource
-}{m: make(map[string]muxQualitySource)}
+	m  map[string]qualityMetricsProvider
+}{m: make(map[string]qualityMetricsProvider)}
 
 // RegisterQualitySource 注册候选的质量源（候选 ID = Candidate.ID）。
 // 重复注册覆盖（更新质量数据源）；nil 源忽略（防御）。
-func RegisterQualitySource(candidateID string, src muxQualitySource) {
+func RegisterQualitySource(candidateID string, src qualityMetricsProvider) {
 	if src == nil {
 		return
 	}
@@ -68,7 +68,7 @@ func qualityRegistryDelete(candidateID string) {
 func qualityRegistryClear() {
 	qualityRegistry.mu.Lock()
 	defer qualityRegistry.mu.Unlock()
-	qualityRegistry.m = make(map[string]muxQualitySource)
+	qualityRegistry.m = make(map[string]qualityMetricsProvider)
 }
 
 // QualityOf 查询候选的历史质量快照。
@@ -128,7 +128,7 @@ func RegisterMuxQuality(candidateID string, m *mux.Mux) {
 	RegisterQualitySource(candidateID, &MuxQualitySource{m: m})
 }
 
-// MuxQualitySource 包装 *mux.Mux 实现 muxQualitySource（QualityMetrics 直读 mux 计数）。
+// MuxQualitySource 包装 *mux.Mux 实现 qualityMetricsProvider（QualityMetrics 直读 mux 计数）。
 // mux.Metrics() 返回 *mux.Metrics（含 FramesSent/Retransmits 等原子计数器）。
 type MuxQualitySource struct {
 	m *mux.Mux

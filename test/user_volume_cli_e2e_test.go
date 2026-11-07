@@ -11,8 +11,8 @@ package sproxy_test
 // 设计要点（CLI e2e 硬规则）：
 //   - 服务端是真实 sproxy 二进制（startCLIEnv → startSPROXYImpl）；
 //   - 客户端是真实 sclient 二进制（e2eBinPath）；
-//   - 配置隔离三件套（--config 指向不存在路径 + XDG_CACHE_HOME/XDG_CONFIG_HOME 隔离），
-//     防本机 ~/.config/sproxy/sclient.yaml 与 cd 状态污染；
+//   - 配置隔离（--config 指向临时 config.yaml + XDG_CACHE_HOME/XDG_CONFIG_HOME 隔离），
+//     防本机 ~/.config/sproxy/config.yaml 与 cd 状态污染；
 //   - 断言落在 CLI 命令**直接输出**（volume list 的卷名出现/消失——CLI 命令的 stdout
 //     是真实副作用，非模拟）。
 

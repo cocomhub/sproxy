@@ -6,6 +6,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -86,7 +88,7 @@ func TestSyncConflicts_ResolveManual(t *testing.T) {
 	t.Cleanup(func() { _ = idx.Close() })
 	h.SetConflictIndex(idx)
 	idx.Record(sync.ConflictRecord{
-		Path: "user/a.txt", Ours: []string{"o"}, Theirs: []string{"t"}, Timestamp: time.Now().UnixNano(),
+		Path: "a.txt", Ours: []string{"o"}, Theirs: []string{"t"}, Timestamp: time.Now().UnixNano(),
 	})
 	items := idx.List("")
 	if len(items) != 1 {
@@ -98,6 +100,74 @@ func TestSyncConflicts_ResolveManual(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("manual resolve = %d, want 200: %s", code, body)
 	}
+}
+
+// TestSyncConflicts_ResolveRelinksSidecar 回归（M1，第 7 轮 MAJOR）：冲突解决写回必须
+// 联动 sidecar——旧 sidecar 描述的是**带冲突标记**的内容，不重建会让后续下载/转存逐分块
+// 校验恒失配（fail-closed 固化不可读，幂等重传不自愈）。
+// 变异：去掉 writeConflictFile 里的 relinkConflictMeta 调用 → sidecar 仍描述 marker → 红。
+func TestSyncConflicts_ResolveRelinksSidecar(t *testing.T) {
+	t.Parallel()
+	srv := emptyRemote(t)
+	h, base := newSyncTestEnv(t, srv.URL, nil)
+	idx, err := syncmgr.NewConflictIndex(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewConflictIndex: %v", err)
+	}
+	t.Cleanup(func() { _ = idx.Close() })
+	h.SetConflictIndex(idx)
+
+	// 前置：写「带冲突标记」的文件（此时 sidecar 描述 marker 内容）。
+	marker := []byte("<<<<<<< ours/=======/theirs >>>>>>> marker")
+	if werr := h.writeConflictFile("a.txt", marker); werr != nil {
+		t.Fatalf("预置冲突文件: %v", werr)
+	}
+	if got := metaTotalSHA(t, h, "meta/a.txt.meta"); got != sha256hex(marker) {
+		t.Fatalf("前置：sidecar 应描述 marker 内容, got %s", got)
+	}
+	idx.Record(sync.ConflictRecord{
+		Path: "a.txt", Ours: []string{"o"}, Theirs: []string{"t"}, Timestamp: time.Now().UnixNano(),
+	})
+	items := idx.List("")
+	if len(items) != 1 {
+		t.Fatalf("预置失败: %d", len(items))
+	}
+	resolved := "resolved-content"
+	code, body := doSyncJSON(t, "POST", base+"/api/sync/conflicts/"+items[0].ID+"/resolve",
+		`{"choice":"manual","content":"`+resolved+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("manual resolve = %d, want 200: %s", code, body)
+	}
+	// 断言：主文件已是解析内容 + sidecar 已重建为其证据（否则下载路径按 marker 校验必失配）。
+	userRoot, _, _ := h.syncTenantRoot("")
+	if raw, rerr := os.ReadFile(filepath.Join(userRoot, "a.txt")); rerr != nil || string(raw) != resolved {
+		t.Fatalf("主文件应为解析内容: raw=%q err=%v", raw, rerr)
+	}
+	if got := metaTotalSHA(t, h, "meta/a.txt.meta"); got != sha256hex([]byte(resolved)) {
+		t.Fatalf("解决写回后 sidecar 必须描述新内容（M1）：got %s want %s",
+			got, sha256hex([]byte(resolved)))
+	}
+}
+
+// metaTotalSHA 读租户根下指定 sidecar 的 TotalSHA256（找不到/不可解析 → Fatal）。
+func metaTotalSHA(t *testing.T, h *Handlers, mrel string) string {
+	t.Helper()
+	userRoot, _, ok := h.syncTenantRoot("")
+	if !ok {
+		t.Fatal("租户不可用")
+	}
+	tenantRoot := filepath.Dir(userRoot)
+	raw, err := os.ReadFile(filepath.Join(tenantRoot, filepath.FromSlash(mrel)))
+	if err != nil {
+		t.Fatalf("读 sidecar %s: %v", mrel, err)
+	}
+	var fm struct {
+		TotalSHA256 string `json:"total_sha256"`
+	}
+	if uerr := json.Unmarshal(raw, &fm); uerr != nil {
+		t.Fatalf("解析 sidecar: %v", uerr)
+	}
+	return fm.TotalSHA256
 }
 
 // TestSyncConflicts_NotConfigured 未装配索引 → 400。

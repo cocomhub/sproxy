@@ -14,7 +14,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/slogutil"
 )
 
-// LocalAppendStore 是 AppendStore 的本地 append-only JSON lines 实现（审计/事件）。
+// LocalAppendStore 是 Appender 的本地 append-only JSON lines 实现（审计/事件）。
 //
 // 落盘：<root>/state/<key 目录>/<name>.json，O_APPEND|O_CREATE 单次 Write 追加一行
 // （对齐 pkg/server/audit_store.go 的 appendLine 语义：原子 append、不覆盖历史）。

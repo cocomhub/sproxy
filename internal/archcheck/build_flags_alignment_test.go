@@ -26,7 +26,7 @@ const alignReleaseURLKey = "github.com/cocomhub/buildinfo.ReleaseURL"
 //
 // 允许的差异（有意为之，不在此门禁断言内）：发布侧 `-w -s`（strip 符号瘦身），本地 `make build`
 // 保留符号便于调试/pprof。
-func TestBuildFlagsAlignedBetweenMakeAndGoReleaser(t *testing.T) {
+func TestBuildFlagsAlignedBetweenMakeAndGoReleaser(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	root := moduleRoot(t)
 
@@ -210,7 +210,7 @@ func alignTopLevelSection(src, key string) string {
 
 // alignGoReleaserBuilds 在 `builds:` 段内逐 build 解析 flags/ldflags 列表
 // （必须限域：archives/dockers_v2 也有 `- id:`，越界会把它们当成 build）。
-func alignGoReleaserBuilds(src string) []alignBuild {
+func alignGoReleaserBuilds(src string) []alignBuild { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	var builds []alignBuild
 	cur := -1
 	mode := ""

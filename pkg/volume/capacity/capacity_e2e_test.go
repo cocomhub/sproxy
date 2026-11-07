@@ -32,7 +32,7 @@ func (m *memFS) Stat(_ context.Context, p string) (*syncpkg.Entry, error) {
 func (m *memFS) OpenRead(_ context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader(strings.Repeat("x", int(m.files[p])))), nil
 }
-func (m *memFS) WriteFile(_ context.Context, p string, _ io.Reader, size int64, _ int64) error {
+func (m *memFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, _ io.Reader, size int64, _ int64) error {
 	m.files[p] = size
 	return nil
 }
@@ -48,11 +48,15 @@ func (m *memFS) MakeDir(context.Context, string) error { return nil }
 func TestCapacityFS_SyncEngine_ExceedsRejected(t *testing.T) {
 	t.Parallel()
 	inner := newMemFS()
-	c := NewCounter(50, "") // 限额 50 字节
+	led, lerr := OpenLedger(t.TempDir(), "test")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	c := NewLedgerCounter(led, 50) // 限额 50 字节
 	fs := Wrap(inner, c)
 
 	// 先写入 30 字节（占 60% 限额）。
-	if err := fs.WriteFile(context.Background(), "a.txt", nil, 30, 0); err != nil {
+	if err := fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "a.txt", nil, 30, 0); err != nil {
 		t.Fatalf("WriteFile(a.txt 30): %v", err)
 	}
 	// sync 引擎 push b.txt（40 字节 → 超限 70>50）。
@@ -66,7 +70,7 @@ func TestCapacityFS_SyncEngine_ExceedsRejected(t *testing.T) {
 	}
 	local := syncpkg.NewLocalFS(t.TempDir(), nil)
 	// 本地写入 b.txt 40 字节。
-	if err := local.WriteFile(context.Background(), "b.txt", strings.NewReader(strings.Repeat("y", 40)), 40, 0); err != nil {
+	if err := local.WriteFile(context.Background(), syncpkg.LogicalKey{}, "b.txt", strings.NewReader(strings.Repeat("y", 40)), 40, 0); err != nil {
 		t.Fatalf("local.WriteFile: %v", err)
 	}
 	if err := engine.Sync(context.Background(), local, fs, job); err != nil {

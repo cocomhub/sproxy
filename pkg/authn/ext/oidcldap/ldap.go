@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/go-ldap/ldap/v3"
 )
@@ -138,7 +139,7 @@ func (a *LDAPAuthenticator) handleLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	a.logger.Info("ldap: 登录成功", "ak", ak, "owner", owner)
-	sendJSON(w, map[string]any{"ok": true})
+	httpjson.Send(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // bindUser 执行 LDAP 绑定认证，返回 (owner, ak, error)。
@@ -201,11 +202,6 @@ func ldapAK(username string) string {
 // decodeJSONBody 解码 JSON 请求体（限长 1KB）。
 func decodeJSONBody(r *http.Request, v any) error {
 	return jsonDecode(r, v)
-}
-
-// sendJSON 写 JSON 响应。
-func sendJSON(w http.ResponseWriter, v any) {
-	writeJSON(w, v)
 }
 
 // _ 保持 base64 引用（LDAP 属性值可能 base64 编码）。

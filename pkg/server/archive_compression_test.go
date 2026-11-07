@@ -43,7 +43,7 @@ func archiveCompressionRoundTrip(t *testing.T, baseURL, comp string) (string, st
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive compression=%s = %d", comp, resp.StatusCode)
 	}
-	ct := resp.Header.Get("Content-Type")
+	ct := resp.Header.Get(headerContentType)
 	cd := resp.Header.Get("Content-Disposition")
 
 	algo, perr := compressx.Parse(comp)
@@ -82,7 +82,7 @@ func TestArchiveCompression_DefaultGzip(t *testing.T) {
 	if ct != "application/gzip" {
 		t.Fatalf("Content-Type = %q, want application/gzip", ct)
 	}
-	if !bytes.Contains([]byte(cd), []byte(".tar.gz")) {
+	if !bytes.Contains([]byte(cd), []byte(tarGZExt)) {
 		t.Fatalf("Content-Disposition = %q, want .tar.gz", cd)
 	}
 }

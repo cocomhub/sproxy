@@ -61,7 +61,7 @@ func makefileWebTestTarget(t *testing.T, root string) string {
 }
 
 // TestWebAssetsAllCoveredByWebTest 断言 web/static 下每个非 vendor 的 .js 都被 web-test 引用。
-func TestWebAssetsAllCoveredByWebTest(t *testing.T) {
+func TestWebAssetsAllCoveredByWebTest(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	root := moduleRoot(t)
 	target := makefileWebTestTarget(t, root)
 

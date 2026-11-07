@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,23 +23,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
-// buildSPROXYBin 构建 sproxy 二进制到临时目录，返回路径（与 startSPROXY 一致）。
+// buildSPROXYBin 返回共享的 sproxy 二进制路径（e2eBinPath 整包只 build 一次）。
 func buildSPROXYBin(t *testing.T) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-	binName := "sproxy"
-	if runtime.GOOS == "windows" {
-		binName += ".exe"
-	}
-	binPath := filepath.Join(tmpDir, binName)
-	_, currentFile, _, _ := runtime.Caller(0)
-	moduleRoot := filepath.Dir(filepath.Dir(currentFile))
-	buildCmd := exec.Command("go", "build", "-o", binPath, "./cmd/sproxy")
-	buildCmd.Dir = moduleRoot
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("build sproxy: %v\n%s", err, out)
-	}
-	return binPath
+	return e2eBinPath(t, "cmd/sproxy")
 }
 
 // freeLoopbackAddr 返回一个可用的 127.0.0.1 端口地址（监听后立即关闭）。

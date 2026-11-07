@@ -11,6 +11,7 @@ package files
 // 落盘 <缓存根>/<owner>.bin（gob）；损坏 → 忽略（幂等，下次 SaveAll 覆盖）。
 
 import (
+	"context"
 	"encoding/gob"
 	"errors"
 	"math"
@@ -206,13 +207,15 @@ func (s *Service) SemanticSearch(q SearchQuery, vec []float32, topk int) (Semant
 		return SemanticResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	owner := normalizeOwner(q.Owner)
-	csMap := s.checksumSnapshot(owner)
+	cs := s.checksumStoreReady(context.Background(), owner)
 	hits := s.vector.Search(owner, vec, topk)
 	results := make([]SemanticHit, 0, len(hits))
 	for _, h := range hits {
 		fi := FileInfo{Name: h.Rel, ModTime: h.Entry.Rev}
-		if cs, ok := csMap["user/"+h.Rel]; ok {
-			fi.Checksum = cs
+		if cs != nil {
+			if sum, ok := checksumGet(cs, "", "user/"+h.Rel); ok {
+				fi.Checksum = sum
+			}
 		}
 		results = append(results, SemanticHit{File: fi, Score: h.Score})
 	}
@@ -299,7 +302,7 @@ func (s *Service) keywordFallback(r *http.Request, q, owner string) SemanticResu
 	if s.rt.tenants == nil {
 		return SemanticResult{Results: nil, Mode: "keyword"}
 	}
-	res, err := s.Search(SearchQuery{Owner: owner, Query: q})
+	res, err := s.Search(r.Context(), SearchQuery{Owner: owner, Query: q})
 	if err != nil {
 		return SemanticResult{Results: nil, Mode: "keyword"}
 	}

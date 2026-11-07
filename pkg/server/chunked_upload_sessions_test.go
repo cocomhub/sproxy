@@ -86,7 +86,7 @@ func TestUploadSessions_ListAndAfterComplete(t *testing.T) {
 	chunk1CS := sha256hex(chunk1)
 	uploadChunk(t, url, uploadID, 1, chunk1CS, chunk1)
 	completeBody, _ := json.Marshal(map[string]string{"upload_id": uploadID})
-	cresp, err := http.Post(url+"/upload/complete", "application/json", bytes.NewReader(completeBody))
+	cresp, err := http.Post(url+"/upload/complete", contentTypeJSON, bytes.NewReader(completeBody))
 	if err != nil {
 		t.Fatalf("complete 请求失败: %v", err)
 	}

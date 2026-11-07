@@ -1,0 +1,7 @@
+# 门禁 R36-c：waitq.Resource **适配器登记表**（资源名 / label / 单位 / 超时 / MaxWaiters / 优先级）。
+# 设计 docs/designs/2026-10-19-waitq.md §8.3 R36-c：新增适配器必须登记，否则无法统一评估超时与队列上界。
+# 检测口径：非测试源码中出现 waitq.Resource 方法集特征签名 `TryAcquire(n int64) error` 的文件（pkg/waitq 自身除外）。
+# 格式（用 | 分隔，避免制表符转义问题）：<文件>|<适配器类型>|<资源名模式>|<label>|<单位>|<超时>|<MaxWaiters>|<优先级>
+pkg/quota/waitq_adapter.go|poolResource|quota:<节点路径>|quota|字节|h.quotaWaitTimeout（默认30s）|0（无界）|Normal
+pkg/quota/staging_tracker.go|stagingResource|staging:<节点路径>|staging|字节|stagingWaitTimeout（5s）|0（无界）|Normal
+pkg/storage/capacity/wait.go|capacityResource|capacity:<类别>|capacity|字节|capacity.DefaultWaitTimeout（30s）|0（无界）|Normal

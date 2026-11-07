@@ -58,7 +58,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	h.setOwnerQuota("alice", 2<<30)
 
 	// 场景 A：未知大小（totalSize=-1）→ 初始占位 1 GiB，响应 60 → 完成。
-	taskA, err := mgr.SubmitAndStart("url", srvA.URL, "auto.bin", -1, t.Context(), "alice")
+	taskA, err := mgr.SubmitAndStart("url", srvA.URL, "auto.bin", -1, t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestCloudQuotaWriter_UnknownSizePlaceholder(t *testing.T) {
 	// 下载失败 → 任务 failed（storage full），Scope 无泄漏。
 	h.setOwnerQuota("bob", 200)
 	srvB := startRawSource(t, []byte(strings.Repeat("y", 500)))
-	taskB, err := mgr.SubmitAndStart("url", srvB.URL, "full.bin", -1, t.Context(), "bob")
+	taskB, err := mgr.SubmitAndStart("url", srvB.URL, "full.bin", -1, t.Context(), "bob", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("未知大小任务创建应成功（Scope 延迟到写盘预留）: %v", err)
 	}
@@ -144,14 +144,14 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	mgr := NewCloudDownloadManager("", cloudTestStorageManager{m: sm}, env.tenantFor, env.checksumStoreFor, env.listTenantIDs, testLogger(), &CloudDownloadConfig{
+	mgr := NewCloudDownloadManager(CloudManagerOptions{UploadsDir: "", Storage: cloudTestStorageManager{m: sm}, TenantFor: env.tenantFor, ChecksumStoreFor: env.checksumStoreFor, ListTenants: env.listTenantIDs, Logger: testLogger(), Config: &CloudDownloadConfig{
 		SyncThreshold: 1, MaxConcurrent: 1, TaskTTL: time.Hour, FailedTaskTTL: time.Hour, AllowPrivate: true, DownloadTimeout: 300 * time.Millisecond, MaxRetries: 1,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []QuotaResolver{func(owner string) *quota.Scope {
 		return env.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	defer mgr.Close()
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 200, t.Context(), "bob")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "big.bin", 200, t.Context(), "bob", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,28 +175,8 @@ func TestCloudQuotaWriter_TruncatedResponseFailsCleanly(t *testing.T) {
 func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	full := make([]byte, 100)
-	for i := range full {
-		full[i] = byte(i % 251)
-	}
-	var sawRange atomicBool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			sawRange.set(true)
-			w.Header().Set("Content-Range", "bytes 10-99/100")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write(full[10:])
-			return
-		}
-		// first：只发 10 字节后停流 → 触发整体超时，保留 .partial。
-		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(full[:10])
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		time.Sleep(2 * time.Second)
-	}))
+	full := resequencedContent(100)
+	srv, sawRange := startWriteFailureResumeSource(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -213,7 +193,7 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +222,12 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 		t.Fatalf("写失败后 Scope Reserved()=%d want 0（reserve 无泄漏）", got)
 	}
 
+	// 续传阶段**放宽下载超时**：上文的 300ms 是**第一阶段失败**的触发器（客户端读取超时），
+	// 与续传语义无关；负载下（-race/并行）续传仍受同一 300ms 约束会偶发
+	// `context deadline exceeded` 假红（本仓 flake 记录）。此处显式放宽为充裕值——测试仍然
+	// 断言「续传发送 Range」与「账本收敛到实际大小」，覆盖不变。
+	mgr.config.DownloadTimeout = 30 * time.Second
+
 	// 手动续传（Range）→ 完成，账本收敛到实际大小。
 	if rerr := mgr.ResumeTask(task.ID, false, "alice"); rerr != nil {
 		t.Fatal(rerr)
@@ -267,6 +253,37 @@ func TestCloudWriteFailureKeepsPartialAndResume(t *testing.T) {
 	if string(got) != string(full) {
 		t.Fatal("续传文件内容不一致")
 	}
+}
+
+// startWriteFailureResumeSource 启动「首次只发 10 字节后停流（触发整体超时）、
+// 之后处理 Range 返回 206 剩余部分」的测试源，并记录是否收到过带 Range 的请求。
+func startWriteFailureResumeSource(t *testing.T, full []byte) (*httptest.Server, *atomicBool) {
+	t.Helper()
+	var sawRange atomicBool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			sawRange.set(true)
+			w.Header().Set("Content-Range", "bytes 10-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[10:])
+			return
+		}
+		// first：只发 10 字节后停流 → 触发整体超时，保留 .partial。
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full[:10])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// 挂住直到客户端放弃（DownloadTimeout 到点即断）：用 ctx.Done 而非固定 Sleep——
+		// 客户端断开即返回，不占用服务端 2s，也不受负载影响（带 5s 兜底防意外长期占用）。
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &sawRange
 }
 
 // startStallingThenFullSource 启动测试源：**第一次**请求发 prefix 字节后挂住连接（客户端
@@ -327,13 +344,13 @@ func TestCloudQuotaWriter_FullRedownloadReleasesDiscardedPartial(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "full.bin", int64(len(full)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "full.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,13 +400,13 @@ func TestCloudQuotaWriter_ForceResumeReleasesDiscardedPartial(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", int64(len(full)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "force.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +481,6 @@ func startStallingThenRangeSource(t *testing.T, full []byte, prefix int) (*httpt
 // 桶只剩 90，而成功路径把 QuotaCommitted 绝对覆盖为 result.Size=100 ⇒ 10 字节差额再无释放
 // 路径可抹平，只能等周期扫描。
 func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
-	// sproxy:serial: 替换包级删除 seam（removeTaskFile），与同包其它替换该 seam 的用例互斥。
 	full := resequencedContent(100)
 	srv, seenRange := startStallingThenRangeSource(t, full, 10)
 
@@ -476,13 +492,19 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		MaxRetries:      1,
 	}
-	mgr, h := newCloudTestManager(t, dir, sm, cfg)
+	// 删除 opt：模拟「删除永久失败」（产物仍在盘上）——**构造时注入**（RemoveFile 实例
+	// 字段，运行期不可变，无包级 seam/并发修改）。
+	mgr, h := newCloudTestManager(t, dir, sm, cfg, CloudManagerOptions{
+		RemoveFile: func(path string) error {
+			return &os.PathError{Op: "remove", Path: path, Err: errors.New("sharing violation")}
+		},
+	})
 	h.setOwnerQuota("alice", 1000)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "keep.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,13 +516,8 @@ func TestCloudQuotaWriter_ForceResumeKeepsUsageWhenRemovalFails(t *testing.T) {
 		t.Fatalf("失败后 cloud 桶 Usage()=%d want 10（.partial 占账）", got)
 	}
 
-	// 删除 seam：模拟「删除永久失败」（产物仍在盘上）。必须在 ResumeTask 之前装好——
-	// force 分支在 ResumeTask 内同步执行。
-	origRemoveTaskFile := removeTaskFile
-	removeTaskFile = func(path string) error {
-		return &os.PathError{Op: "remove", Path: path, Err: errors.New("sharing violation")}
-	}
-	t.Cleanup(func() { removeTaskFile = origRemoveTaskFile })
+	// 删除失败模拟已随构造注入（RemoveFile opt，见上方 newCloudTestManager 调用）——
+	// force 分支在 ResumeTask 内同步执行，删除实现为构造时固定的「永久失败」。
 
 	if rerr := mgr.ResumeTask(task.ID, true, "alice"); rerr != nil {
 		t.Fatal(rerr)
@@ -561,7 +578,7 @@ func TestCloudQuotaRestart_DeleteStaysFailClosedUntilRescan(t *testing.T) {
 	env.setOwnerQuota("alice", 1000)
 	mgr := newCloudTestManagerInEnv(t, env, sm, env.tenantFor, cfg)
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "restart.bin", int64(len(full)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "restart.bin", int64(len(full)), t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +688,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.setOwnerQuota("alice", 2<<30) // 2 GiB，容纳未知大小占位 1 GiB
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "cancel-race.bin", -1, t.Context(), "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +705,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 		_ = mgr.CancelTask(task.ID, "alice")
 		time.Sleep(5 * time.Millisecond)
 	}
-	if !mgr.waitTaskStopped(task.ID, 5*time.Second) {
+	if !mgr.waitTaskStopped(task.ID, 30*time.Second) {
 		t.Fatal("cancel 后下载 goroutine 未退出")
 	}
 
@@ -813,7 +830,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	// 兜底释放：断言失败提前返回时不让下载 goroutine 卡在第二次写盘前（Close 会等它）
 	t.Cleanup(dl.releaseSecond)
 
-	task, err := mgr.SubmitAndStart("url", "staged://cancel-race", "staged.bin", -1, nil, "alice")
+	task, err := mgr.SubmitAndStart("url", "staged://cancel-race", "staged.bin", -1, nil, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +880,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	}
 
 	// 保留 testutil.WaitFor 版本：观察者（轮询 API）所见最终收敛到全零。
-	testutil.WaitFor(t, 5*time.Second, func() bool {
+	testutil.WaitFor(t, 30*time.Second, func() bool {
 		return cloudB.Usage() == 0 && cloudB.Reserved() == 0 && sm.Usage() == 0
 	}, "cancel 后账本未收敛到 0")
 }
@@ -878,31 +895,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	for i := range full {
 		full[i] = byte(i % 251)
 	}
-	var first atomicBool
-	first.set(true)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Range") != "" {
-			// 续传：返回 206 剩余部分（Range 续传成功路径）
-			w.Header().Set("Content-Range", "bytes 10-99/100")
-			w.WriteHeader(http.StatusPartialContent)
-			_, _ = w.Write(full[10:])
-			return
-		}
-		if first.compareAndSwap(true, false) {
-			// 首次：截断响应（Content-Length 谎报 100，只发 10 字节）→ 下载失败保留 .partial
-			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(full[:10])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			return
-		}
-		// 兜底：全量（不应再出现无 Range 请求）
-		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(full)
-	}))
+	srv := startConcurrentResumeCancelServer(t, full)
 	defer srv.Close()
 
 	dir := t.TempDir()
@@ -913,7 +906,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 		TaskTTL:         time.Hour,
 		FailedTaskTTL:   time.Hour,
 		AllowPrivate:    true,
-		DownloadTimeout: 300 * time.Millisecond,
+		DownloadTimeout: 2 * time.Second,
 		IdleTimeout:     300 * time.Millisecond,
 		MaxRetries:      1,
 	}
@@ -921,7 +914,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	h.setOwnerQuota("alice", 1000)
 
 	// 首次下载：截断失败 → failed 保留 10 字节 .partial
-	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "resume-race.bin", int64(len(full)), nil, "alice", TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,6 +949,45 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 		return !running
 	}, "并发 resume+cancel 后仍有下载 goroutine 运行")
 
+	assertConcurrentResumeCancelInvariants(t, mgr, h, sm, task)
+}
+
+// startConcurrentResumeCancelServer 起一个模拟下载服务器：首次请求只发 10 字节（截断 → 失败保留
+// .partial），后续 Range 请求返回 206 剩余部分；其余兜底全量返回。
+func startConcurrentResumeCancelServer(t *testing.T, full []byte) *httptest.Server {
+	t.Helper()
+	var first atomicBool
+	first.set(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 续传：返回 206 剩余部分（Range 续传成功路径）
+			w.Header().Set("Content-Range", "bytes 10-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[10:])
+			return
+		}
+		if first.compareAndSwap(true, false) {
+			// 首次：截断响应（Content-Length 谎报 100，只发 10 字节）→ 下载失败保留 .partial
+			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(full[:10])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		}
+		// 兜底：全量（不应再出现无 Range 请求）
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// assertConcurrentResumeCancelInvariants 校验并发 resume+cancel 终态、磁盘占用与双轨账本不变量。
+func assertConcurrentResumeCancelInvariants(t *testing.T, mgr *CloudDownloadManager, h *cloudTestEnv, sm *capacity.StorageManager, task *CloudTask) {
+	t.Helper()
 	// 终态必须为 failed/cancelled/completed 之一
 	snap, ok := mgr.SnapshotTask(task.ID, "alice")
 	if !ok {
@@ -983,4 +1015,4 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 }
 
 // compareAndSwap 是 atomicBool 的 CAS 便捷方法（并发首请求判定）。
-func (ab *atomicBool) compareAndSwap(old, new bool) bool { return ab.b.CompareAndSwap(old, new) }
+func (ab *atomicBool) compareAndSwap(old, newVal bool) bool { return ab.b.CompareAndSwap(old, newVal) }

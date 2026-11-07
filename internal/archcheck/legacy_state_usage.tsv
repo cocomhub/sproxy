@@ -1,0 +1,16 @@
+# 旧派生状态实现的独立使用点数（R46 棘轮：只减不增；每行 file<TAB>max_total<TAB>reason）
+# 口径：.index.<写方法>( / ExternalList( / checksums.json|checksumRel 的出现次数；
+# 排除 pkg/files/mutation_index.go（事件驱动的新机制入口，不是旧实现）。
+# 降下计数后必须同步下行（棘轮锁定收益）；新增行/上调需在 reason 说明理由。
+pkg/checksum/state_adapter.go	5	checksum_ledger=5
+pkg/checksum/store.go	5	checksum_ledger=5
+pkg/files/checksum_rebuild.go	1	checksum_ledger=1：§15.1 步骤①+②（自愈读/一次性导入）仍需写台账；台账转只读后随写路径一并删除
+pkg/files/read.go	1	checksum_ledger=1
+pkg/files/search_index.go	1	index_api=1
+pkg/files/service.go	1	index_api=1
+pkg/server/du.go	1	checksum_ledger=1
+pkg/server/handlers.go	7	checksum_ledger=7
+pkg/server/verify/verify.go	1	checksum_ledger=1
+pkg/storage/capacity/manager.go	5	checksum_ledger=5
+pkg/server/ops/usage.go	4	checksum_ledger=4
+pkg/server/ops/stats.go	4	checksum_ledger=4

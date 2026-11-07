@@ -383,27 +383,9 @@ func (s *stream) Read(p []byte) (n int, err error) {
 		// 追加 pending，因此 dataCh 中遗留的帧在顺序上总是早于 pending 中的帧。
 		data, kind := s.tryPull()
 		if kind == pullNone {
-			select {
-			case d, ok := <-s.dataCh:
-				if !ok { // dataCh 从不关闭（见 closeChannels），仅防御
-					return 0, s.rejectedOrClosedErr()
-				}
-				data = d
-				if d == nil {
-					kind = pullEOF
-				} else {
-					kind = pullData
-				}
-			case <-s.done:
-				// P1-6：done 就绪但队列可能同时有数据（readLoop 先 pushData 再
-				// closeChannels，窗口内两分支同时就绪，Go select 随机选取）。必须
-				// 优先非阻塞清空**两条**队列，仅当确无数据才报关闭——否则已投递的数据帧
-				// 有 ~50% 概率被丢弃（I27 拨号结果帧读取在叶子"接受后立即关"场景的
-				// 可靠性依赖此行为）。
-				data, kind = s.tryPull()
-				if kind == pullNone {
-					return 0, s.rejectedOrClosedErr()
-				}
+			data, kind, err = s.waitForData()
+			if err != nil {
+				return 0, err
 			}
 		}
 		if kind == pullEOF {
@@ -420,6 +402,31 @@ func (s *stream) Read(p []byte) (n int, err error) {
 	s.buffered.Add(-int64(n))
 	s.mux.metrics.Streams.BytesRead.Add(int64(n))
 	return n, nil
+}
+
+// waitForData 阻塞等待新数据或关闭信号，返回数据帧与取帧结果。
+// dataCh 永不关闭（见 closeChannels），!ok 分支仅防御；done 就绪但队列可能同时
+// 有数据（readLoop 先 pushData 再 closeChannels，窗口内两分支同时就绪，Go select
+// 随机选取），必须优先非阻塞清空两条队列，仅当确无数据才报关闭——否则已投递的
+// 数据帧有 ~50% 概率被丢弃（I27 拨号结果帧读取在叶子"接受后立即关"场景的可靠性
+// 依赖此行为）。
+func (s *stream) waitForData() ([]byte, pullResult, error) {
+	select {
+	case d, ok := <-s.dataCh:
+		if !ok {
+			return nil, pullNone, s.rejectedOrClosedErr()
+		}
+		if d == nil {
+			return d, pullEOF, nil
+		}
+		return d, pullData, nil
+	case <-s.done:
+		data, kind := s.tryPull()
+		if kind == pullNone {
+			return nil, pullNone, s.rejectedOrClosedErr()
+		}
+		return data, kind, nil
+	}
 }
 
 // Write 将 p 写入流。返回 n = 实际投递给 writeLoop 的字节数（≤ len(p)）。

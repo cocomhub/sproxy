@@ -7,17 +7,20 @@ package checksum
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/cocomhub/sproxy/internal/savemerger"
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
-
-const chkStorePersistFailed = "checksum 存储持久化失败"
 
 // ChecksumStoreIface 定义 ChecksumStore 的业务接口，方便测试替身。
 type ChecksumStoreIface interface {
@@ -29,42 +32,285 @@ type ChecksumStoreIface interface {
 	GetAll() map[string]string
 }
 
-// ChecksumStore 在 uploads 目录下维护一个 .checksums.json 侧边文件，
-// 持久化每个文件的 SHA-256 摘要，供 upload/download/delete 操作复用。
-type ChecksumStore struct {
-	mu        sync.RWMutex
-	saveMu    sync.Mutex // 串行化 save 的 WriteFile + Rename，防止并发写 .tmp 在 Windows 上 Rename 失败
-	storePath string
-	checksums map[string]string // filename -> sha256 hex
-	logger    *slog.Logger
+// VolumeKeyedStore 是**可选扩展**：卷维度键读写（设计 §15.1.1）。
+//
+// 为什么单独成接口而不是塞进 `ChecksumStoreIface`：后者被多处测试替身实现，扩接口会强制
+// 所有替身补方法（噪音）；消费方按需断言本接口，未实现则回落无卷方法（零回归）。
+type VolumeKeyedStore interface {
+	GetInVolume(vol, filename string) (string, bool)
+	SetInVolume(vol, filename, checksum string)
+	DeleteInVolume(vol, filename string)
+	DeletePrefixInVolume(vol, prefix string)
+	RenameInVolume(vol, from, to string)
+	SnapshotInVolume(vol string) map[string]string
+	SnapshotLegacy() map[string]string
 }
 
-// NewChecksumStore 从指定的 storePath 创建 ChecksumStore（唯一构造入口）：
-// storePath = <tenant meta>/checksums.json（或测试的临时文件路径）。加载已有记录、
-// 清理上次进程崩溃残留的 .tmp 文件——存储路径由调用方显式指定。
-func NewChecksumStore(storePath string, logger *slog.Logger) *ChecksumStore {
+var _ VolumeKeyedStore = (*ChecksumStore)(nil)
+
+// Iterator 是**可选扩展**：分批遍历台账（**锁外回调**），用于校验类运维入口，
+// 避免 `GetAll()` 的全量 map 拷贝。实现先取键列表（O(N) 个键头），再逐批在锁内取值、
+// 锁外回调；并发删除的键自动跳过。
+type Iterator interface {
+	Iterate(batch int, fn func(key, checksum string) bool)
+}
+
+var _ Iterator = (*ChecksumStore)(nil)
+
+// LenCounter 是**可选扩展**：台账条目数（O(1) 判空用，避免 GetAll 全量拷贝）。
+type LenCounter interface{ Len() int }
+
+var _ LenCounter = (*ChecksumStore)(nil)
+
+// BatchWriter 是**可选扩展**：批量写（一次落盘/一次 Put）。rebuild 类全量回填用。
+type BatchWriter interface {
+	SetMany(entries map[string]string)
+}
+
+// VolumeBatchWriter 是**可选扩展**：按卷批量写（卷维度键，§15.1.1）。
+type VolumeBatchWriter interface {
+	SetManyInVolume(vol string, entries map[string]string)
+}
+
+var _ BatchWriter = (*ChecksumStore)(nil)
+var _ VolumeBatchWriter = (*ChecksumStore)(nil)
+
+// Flusher 是**可选扩展**：立即把写合并窗口内的改动落盘（未实现 ⇒ 调用方无需处理，
+// 定时器到期/Close 时仍会落盘）。
+type Flusher interface{ Flush() error }
+
+var _ Flusher = (*ChecksumStore)(nil)
+
+// Closer 是**可选扩展**：停止落盘合并定时器并做最终落盘（生命周期结束时调用）。
+type Closer interface{ Close() error }
+
+var _ Closer = (*ChecksumStore)(nil)
+
+// ChecksumStore 维护「文件名 → SHA-256」台账并落盘到**租户卷内的 `<meta>/checksums.json`**，
+// 供 upload/download/delete/rename 操作复用。
+//
+// **经 `storage.Root` 读写**：卷自己决定是否加密（使用方不理解加密态——非加密卷 = 普通读写；
+// 加密卷 = 卷内透明加解密），同时天然继承封印判定（封装卷占用区间写入恒拒）。
+// 此前是「绝对路径 + 裸 os I/O」：台账键是**用户可见相对路径**，在加密卷上明文落盘会让加密
+// 承诺落空，并绕过封印。
+type ChecksumStore struct {
+	mu        sync.RWMutex
+	saveMu    sync.Mutex // 串行化 save 的 tmp 写 + 原子替换（Windows 上并发 Rename 会抖动）
+	root      *storage.Root
+	rel       string            // 卷内相对路径（生产 = "meta/checksums.json"）
+	checksums map[string]string // filename -> sha256 hex
+	logger    *slog.Logger
+
+	// writeSnap 是落盘实现（构造注入，测试可计数）；merger 负责写合并（见 save_merger.go）。
+	writeSnap func(data []byte) error
+	merger    *savemerger.Merger
+}
+
+// volumeKeySep 是卷维度复合键的分隔符（NUL：卷名与 rel 都不含，无歧义）。
+const volumeKeySep = "\x00"
+
+// volumeKey 拼接卷维度键（`<vol>\x00<rel>`）。
+//
+// 为什么要卷维度（设计 2026-10-28-volume-state-maintenance §15.1.1）：旧台账键是**租户相对
+// rel**（`user/<rel>`），同一 owner 在多卷上的同名文件会互相覆盖 ⇒ list 显示的 checksum
+// 张冠李戴。新写入改用卷维度键；旧键保留为**只读兼容**（升级前的数据仍可读）。
+func volumeKey(vol, filename string) string { return vol + volumeKeySep + filename }
+
+// SetInVolume 以卷维度键记录 checksum（`<vol>\x00<rel>`）。
+func (cs *ChecksumStore) SetInVolume(vol, filename, checksum string) {
+	key := volumeKey(vol, filename)
+	cs.mu.Lock()
+	cs.checksums[key] = checksum
+	cs.mu.Unlock()
+	cs.persist("set_in_volume", key)
+}
+
+// DeletePrefixInVolume 删除该卷下以 prefix 开头的卷维度键（rmdir 子树清理用）。
+func (cs *ChecksumStore) DeletePrefixInVolume(vol, prefix string) {
+	full := volumeKey(vol, prefix)
+	cs.mu.Lock()
+	removed := 0
+	for k := range cs.checksums {
+		if strings.HasPrefix(k, full) {
+			delete(cs.checksums, k)
+			removed++
+		}
+	}
+	cs.mu.Unlock()
+	if removed > 0 {
+		cs.persist("delete_prefix_in_volume", vol, prefix, removed)
+	}
+}
+
+// SetManyInVolume 批量写卷维度键（一次落盘；rebuild 类全量回填用）。
+func (cs *ChecksumStore) SetManyInVolume(vol string, entries map[string]string) {
+	if len(entries) == 0 {
+		return
+	}
+	cs.mu.Lock()
+	for rel, sum := range entries {
+		cs.checksums[volumeKey(vol, rel)] = sum
+	}
+	cs.mu.Unlock()
+	cs.persist("set_many_in_volume", vol, len(entries))
+}
+
+// GetInVolume 读卷维度键；miss 时**回退旧无卷键**（迁移兼容：升级前的台账仍可读）。
+func (cs *ChecksumStore) GetInVolume(vol, filename string) (string, bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if v, ok := cs.checksums[volumeKey(vol, filename)]; ok {
+		return v, true
+	}
+	v, ok := cs.checksums[filename]
+	return v, ok
+}
+
+// DeleteInVolume 删除卷维度键（不动旧键——旧键可能被其它卷回退使用）。
+func (cs *ChecksumStore) DeleteInVolume(vol, filename string) {
+	key := volumeKey(vol, filename)
+	cs.mu.Lock()
+	if _, ok := cs.checksums[key]; !ok {
+		cs.mu.Unlock()
+		return
+	}
+	delete(cs.checksums, key)
+	cs.mu.Unlock()
+	cs.persist("delete_in_volume", key)
+}
+
+// RenameInVolume 同卷内重命名卷维度键。
+func (cs *ChecksumStore) RenameInVolume(vol, from, to string) {
+	fromKey, toKey := volumeKey(vol, from), volumeKey(vol, to)
+	cs.mu.Lock()
+	v, ok := cs.checksums[fromKey]
+	if !ok {
+		cs.mu.Unlock()
+		cs.logger.Warn("ChecksumStore.RenameInVolume: from 路径不存在，跳过", "volume", vol, "from", from, "to", to)
+		return
+	}
+	delete(cs.checksums, fromKey)
+	cs.checksums[toKey] = v
+	cs.mu.Unlock()
+	cs.persist("rename_in_volume", vol, from, to)
+}
+
+// SplitVolumeKey 把卷维度复合键拆成 `(vol, rel)`；不是卷维度键 → ok=false。
+func SplitVolumeKey(key string) (vol, rel string, ok bool) {
+	v, r, found := strings.Cut(key, volumeKeySep)
+	if !found {
+		return "", key, false
+	}
+	return v, r, true
+}
+
+// SnapshotLegacy 返回**旧无卷键**的快照（过滤卷维度复合键）——迁移兼容用：
+// 升级前写入的台账没有卷维度，读侧按「卷键优先 + 旧键兜底」合并。
+func (cs *ChecksumStore) SnapshotLegacy() map[string]string {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make(map[string]string, len(cs.checksums))
+	for k, v := range cs.checksums {
+		if !strings.Contains(k, volumeKeySep) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// SnapshotInVolume 返回该卷的 `rel → checksum` 快照（只含卷维度键，键为**裸 rel**）。
+func (cs *ChecksumStore) SnapshotInVolume(vol string) map[string]string {
+	prefix := vol + volumeKeySep
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make(map[string]string, len(cs.checksums))
+	for k, v := range cs.checksums {
+		if rel, ok := strings.CutPrefix(k, prefix); ok {
+			out[rel] = v
+		}
+	}
+	return out
+}
+
+// Iterate 分批遍历台账：先在锁内取键列表，再逐批锁内取值、**锁外**回调。
+// 回调返回 false 提前终止。并发删除的键跳过（一致性：遍历弱一致快照）。
+func (cs *ChecksumStore) Iterate(batch int, fn func(key, checksum string) bool) {
+	if batch <= 0 {
+		batch = 256
+	}
+	cs.mu.RLock()
+	keys := make([]string, 0, len(cs.checksums))
+	for k := range cs.checksums {
+		keys = append(keys, k)
+	}
+	cs.mu.RUnlock()
+
+	type kv struct{ k, v string }
+	page := make([]kv, 0, batch)
+	for i := 0; i < len(keys); i += batch {
+		end := min(i+batch, len(keys))
+		cs.mu.RLock()
+		page = page[:0]
+		for _, k := range keys[i:end] {
+			if v, ok := cs.checksums[k]; ok {
+				page = append(page, kv{k: k, v: v})
+			}
+		}
+		cs.mu.RUnlock()
+		for _, p := range page {
+			if !fn(p.k, p.v) {
+				return
+			}
+		}
+	}
+}
+
+// persist 落盘（失败重试一次并记日志；与 Set/Rename 的既有重试语义一致）。
+func (cs *ChecksumStore) persist(op string, args ...any) {
+	cs.merger.Mark(op, args...)
+}
+
+// Flush 立即落盘（有待持久化改动时）；供关键路径/测试显式同步。
+func (cs *ChecksumStore) Flush() error { return cs.merger.Flush() }
+
+// Close 停止合并定时器并做最终落盘（幂等）。关闭后的写仍更新内存但不再持久化。
+func (cs *ChecksumStore) Close() error { return cs.merger.Close() }
+
+// maxChecksumStoreBytes 是台账读取上界（防注入超大 JSON 的 OOM；每条 ~70B ⇒ 64MiB ≈ 90 万文件）。
+// 超限视为损坏/不可用 → 空台账 + Warn（与「不存在/解析失败」同语义：无校验能力 ≠ 文件损坏）。
+const maxChecksumStoreBytes = 64 << 20
+
+// NewChecksumStore 创建 ChecksumStore（唯一构造入口）：root = 租户**卷句柄**，
+// rel = 卷内相对路径（生产 "meta/checksums.json"）。加载已有记录、清理上次崩溃残留的 .tmp。
+// root 为 nil = 未装配：save 恒返回错误（不静默丢写），读为空台账。
+func NewChecksumStore(root *storage.Root, rel string, logger *slog.Logger) *ChecksumStore {
 	cs := &ChecksumStore{
-		storePath: storePath,
+		root:      root,
+		rel:       rel,
 		checksums: make(map[string]string),
 		logger:    slogutil.Default(logger),
 	}
-
-	// 启动时清理上次崩溃残留的 tmp 文件（不影响最终 .checksums.json）
-	tmpResidue := storePath + ".tmp"
-	if _, err := os.Stat(tmpResidue); err == nil {
-		if rmErr := os.Remove(tmpResidue); rmErr != nil {
-			cs.logger.Warn("清理 checksum tmp 残留失败", "path", tmpResidue, "error", rmErr)
-		} else {
-			cs.logger.Info("已清理 checksum tmp 残留", "path", tmpResidue)
-		}
+	cs.writeSnap = cs.writeSnapshotToRoot
+	cs.merger = savemerger.New(savemerger.DefaultDebounce, cs.logger, func(uint64) error { return cs.save() })
+	if root == nil {
+		cs.logger.Warn("checksum 台账未装配卷句柄，将只读空台账且不可持久化")
+		return cs
 	}
 
-	data, err := os.ReadFile(storePath)
+	// 启动时清理上次崩溃残留的 tmp 文件（不影响最终 checksums.json）。
+	tmpRel := rel + ".tmp"
+	if rmErr := root.Remove(tmpRel); rmErr == nil {
+		cs.logger.Info("已清理 checksum tmp 残留", "path", tmpRel)
+	} else if !errors.Is(rmErr, os.ErrNotExist) {
+		cs.logger.Warn("清理 checksum tmp 残留失败", "path", tmpRel, "error", rmErr)
+	}
+
+	data, err := readRootFileBounded(root, rel, maxChecksumStoreBytes)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			cs.logger.Warn("读取 checksum 存储文件失败", "path", storePath, "error", err)
+		if errors.Is(err, os.ErrNotExist) {
+			cs.logger.Info("checksum 存储文件不存在，将使用空存储", "path", rel)
 		} else {
-			cs.logger.Info("checksum 存储文件不存在，将使用空存储", "path", storePath)
+			cs.logger.Warn("读取 checksum 存储文件失败", "path", rel, "error", err)
 		}
 		return cs
 	}
@@ -74,10 +320,27 @@ func NewChecksumStore(storePath string, logger *slog.Logger) *ChecksumStore {
 	}
 
 	if err := json.Unmarshal(data, &cs.checksums); err != nil {
-		cs.logger.Warn("解析 checksum 存储文件失败，将使用空存储", "path", storePath, "error", err)
+		cs.logger.Warn("解析 checksum 存储文件失败，将使用空存储", "path", rel, "error", err)
 		cs.checksums = make(map[string]string)
 	}
 	return cs
+}
+
+// readRootFileBounded 经卷句柄读取文件（卷决定是否解密）+ 上界保护。
+func readRootFileBounded(root *storage.Root, rel string, max int64) ([]byte, error) {
+	rc, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(io.LimitReader(rc, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("checksum 台账超出上界（%d 字节）: %s", max, rel)
+	}
+	return data, nil
 }
 
 // Get 查询指定文件的 checksum。
@@ -94,12 +357,20 @@ func (cs *ChecksumStore) Set(filename, checksum string) {
 	cs.checksums[filename] = checksum
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "set", "file_name", filename, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "set", "file_name", filename, "error", retryErr)
-		}
+	cs.persist("set", "file_name", filename)
+}
+
+// SetMany 批量写入 checksum 记录（一次性导入/重建用）。落盘与其他写方法一样经 debounce 合并，
+// 连续 Set 不再逐条全量重写 JSON。空 map 为空操作。
+func (cs *ChecksumStore) SetMany(entries map[string]string) {
+	if len(entries) == 0 {
+		return
 	}
+	cs.mu.Lock()
+	maps.Copy(cs.checksums, entries)
+	cs.mu.Unlock()
+
+	cs.persist("set_many", "count", len(entries))
 }
 
 // Delete 删除指定文件的 checksum 记录并持久化。
@@ -108,12 +379,7 @@ func (cs *ChecksumStore) Delete(filename string) {
 	delete(cs.checksums, filename)
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "delete", "file_name", filename, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "delete", "file_name", filename, "error", retryErr)
-		}
-	}
+	cs.persist("delete", "file_name", filename)
 }
 
 // Rename 将一条 checksum 记录从 from 路径迁移到 to 路径并持久化。
@@ -131,12 +397,7 @@ func (cs *ChecksumStore) Rename(from, to string) {
 	cs.checksums[to] = v
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "rename", "from", from, "to", to, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "rename", "from", from, "to", to, "error", retryErr)
-		}
-	}
+	cs.persist("rename", "from", from, "to", to)
 }
 
 // DeletePrefix 删除指定前缀的所有 checksum 记录（用于目录删除）。
@@ -149,12 +410,14 @@ func (cs *ChecksumStore) DeletePrefix(prefix string) {
 	}
 	cs.mu.Unlock()
 
-	if err := cs.save(); err != nil {
-		cs.logger.Error(chkStorePersistFailed, "op", "deletePrefix", "prefix", prefix, "error", err)
-		if retryErr := cs.save(); retryErr != nil {
-			cs.logger.Error("重试持久化失败", "op", "deletePrefix", "prefix", prefix, "error", retryErr)
-		}
-	}
+	cs.persist("delete_prefix", prefix)
+}
+
+// Len 返回台账条目数（O(1)；用于「是否需要自愈重建」的判空，避免 GetAll 全量拷贝）。
+func (cs *ChecksumStore) Len() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return len(cs.checksums)
 }
 
 // GetAll 返回全部 checksum 记录的副本（filename -> sha256）。
@@ -182,17 +445,54 @@ func (cs *ChecksumStore) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := cs.storePath + ".tmp"
-	// 兜底清理：Rename 成功后 tmp 已不在原位，os.Remove 会无声失败；Rename 失败时则真正清除残留。
-	defer os.Remove(tmp)
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, cs.storePath); err != nil {
-		cs.logger.Warn("原子重命名失败，回退到直接写入", "error", err)
-		if writeErr := os.WriteFile(cs.storePath, data, 0644); writeErr != nil {
-			return fmt.Errorf("回退写入失败: %w", writeErr)
+	if cs.root != nil {
+		if dir := filepath.ToSlash(filepath.Dir(cs.rel)); dir != "." && dir != "" {
+			if err := cs.root.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
 		}
 	}
+	if err := cs.writeSnap(data); err != nil {
+		return err
+	}
 	return nil
+}
+
+// writeSnapshotToRoot 是默认落盘实现：经卷句柄写 tmp（卷决定是否加密）+ 原子替换。
+func (cs *ChecksumStore) writeSnapshotToRoot(data []byte) error {
+	if cs.root == nil {
+		return errors.New("checksum 台账未装配卷句柄（root 为 nil）")
+	}
+	tmpRel := cs.rel + ".tmp"
+	w, werr := cs.root.OpenFileEncrypted(tmpRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if werr != nil {
+		return werr
+	}
+	if _, cerr := w.Write(data); cerr != nil {
+		_ = w.Close()
+		_ = cs.root.Remove(tmpRel)
+		return cerr
+	}
+	if cerr := w.Close(); cerr != nil {
+		_ = cs.root.Remove(tmpRel)
+		return cerr
+	}
+	if rerr := cs.root.AtomicRename(tmpRel, cs.rel); rerr != nil {
+		_ = cs.root.Remove(tmpRel)
+		return rerr
+	}
+	return nil
+}
+
+// File 计算 root 上 rel 的**用户可见**（解密后）SHA-256 摘要。
+//
+// 语义：加密卷算明文摘要（raw Open 会算密文摘要——校验/冲突检测对明文内容失去意义）；
+// 非加密卷与明文一致。是 pkg/server.FileChecksumRoot 与巡检/分享等消费方的单一实现。
+func File(root *storage.Root, rel string) (string, error) {
+	f, err := root.OpenDecrypted(rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	return Reader(f)
 }

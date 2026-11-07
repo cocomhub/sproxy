@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +43,11 @@ func init() {
 //	stallchild —— 先派生一个 stall 子进程并打印其 pid，然后自己也永久阻塞（验证「整棵树被终止」）
 //
 // 除 late 外，各模式都在 `t.Parallel()` **之前**打印 banner：让「首个字节」尽早出现，从而进入
-// 稳态窗口（否则会被 startup 窗口掩盖，用例失去判别力）。
+// 稳态窗口（否则会被 startup 窗口掩盖，用例失去判别力）。唯独 **stallchild 不打 banner**：它的
+// `grandchild-pid=` 必须成为**首行输出**——`child.Start()` 派生子进程的耗时落在 startup 窗口
+// （-startup 5s，无输出不扣限），grandchild-pid 一出现才结束 startup 进入稳态，随后 300ms
+// 零增长才判停滞、收割整棵树。否则 banner 先出、spawn 耗时可能打满 -limit(300ms)，看门狗在
+// grandchild-pid 打印前就判停滞杀树——即「未能解析后代 pid」的 flaky（2 核负载机被触发）。
 //
 // t.Parallel()：本用例在 helper 二进制里是唯一被选中运行的用例（-test.run 精确匹配），
 // 并行组会立即释放，因此「永久阻塞」不会卡住任何东西；而在常规 `go test` 中它直接 Skip。
@@ -52,7 +57,7 @@ func TestHelperProcess(t *testing.T) {
 		t.Parallel()
 		t.Skip("仅作为 benchwatch 的被监视子进程运行（-benchwatch-helper=<mode>）")
 	}
-	if mode != "late" {
+	if mode != "late" && mode != "stallchild" {
 		fmt.Printf("helper: pid=%d mode=%s\n", os.Getpid(), mode)
 	}
 	t.Parallel()
@@ -95,8 +100,24 @@ func TestHelperProcess(t *testing.T) {
 		// 「后代是否被收割」这一单一变量而刻意断开）。
 		child := exec.Command(os.Args[0], "-test.run=TestHelperProcess", "-test.timeout=30s",
 			"-benchwatch-helper=stall")
-		if err := child.Start(); err != nil {
-			fmt.Printf("helper: 派生 stall 子进程失败: %v\n", err)
+		// Start() 在慢机器（Windows 本地加载 go test 二进制）可能超过看门狗的 -limit 窗口
+		// （本用例 300ms）：启动期间持续输出 tick 刷新「零增长」窗口，避免看门狗在
+		// grandchild-pid 打印前误判停滞提前杀整棵树（flaky 根因：输出里解析不到后代 pid）。
+		ticker := time.NewTicker(100 * time.Millisecond)
+		started := make(chan error, 1)
+		go func() { started <- child.Start() }()
+		var startErr error
+		for running := true; running; {
+			select {
+			case startErr = <-started:
+				running = false
+			case <-ticker.C:
+				fmt.Println("helper: 派生子进程中…")
+			}
+		}
+		ticker.Stop()
+		if startErr != nil {
+			fmt.Printf("helper: 派生 stall 子进程失败: %v\n", startErr)
 			os.Exit(9)
 		}
 		fmt.Printf("helper: grandchild-pid=%d\n", child.Process.Pid)
@@ -131,6 +152,26 @@ func emitTicks(label string, interval, duration time.Duration) {
 // helperArgs 返回「以本测试二进制作为被监视命令」的 argv，模式经 -benchwatch-helper 传入。
 func helperArgs(mode string) []string {
 	return []string{os.Args[0], "-test.run=TestHelperProcess", "-test.timeout=30s", "-benchwatch-helper=" + mode}
+}
+
+// syncBuf 线程安全捕获缓冲：exec 拷贝 goroutine（经 lockedWriter 写）与测试读取
+// out.String() 并发——bytes.Buffer 非安全，CI（多核）-race 抓到读写竞态（本地单核
+// 节奏不现）。Write 与 String 两端同锁，与 lockedWriter 叠加后仍正确串行化。
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // runGuarded 在守护下调用 run()：看门狗若失效（例如变异后不再检测停滞），run() 会一直等待
@@ -172,7 +213,7 @@ func waitUntilGone(pid int, timeout time.Duration) bool {
 func TestRun_TotalDurationTimeout(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "1s", "-poll", "50ms", "-grace", "20ms", "-tail", "5", "-max-duration", "1s", "-log", logPath, "--"},
 		helperArgs("slow")...)
 
@@ -196,7 +237,7 @@ func TestRun_TotalDurationTimeout(t *testing.T) {
 func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "300ms", "-poll", "50ms", "-grace", "20ms", "-tail", "5", "-log", logPath, "--"},
 		helperArgs("stall")...)
 
@@ -231,13 +272,16 @@ func TestRun_StalledCommandIsReportedAndKilled(t *testing.T) {
 // TestRun_SilentStartupIsNotKilled 钉住**双窗口**语义：首个字节之前用 -startup（编译/冷缓存期
 // 无输出是正常的），已开始输出后才用 -limit。
 //
-// 判别力前提：静默期（2s）必须**长于 limit（1.5s）**且短于 startup（5s）——否则「去掉 startup
+// 判别力前提：静默期（2s）必须**长于 limit（1.5s）**且短于 startup——否则「去掉 startup
 // 窗口」这个变异测不出来（实测过：静默期短于 limit 时该变异仍绿）。
+// startup 取 8s 而非 5s：并行 8 + -race 全量下 helper 子进程启动可被拖至 >5s（进程 spawn +
+// Go 运行时初始化），首字节晚于 startup 窗口会被误判卡死（rc=66 flaky，2026-10-05 实测）；
+// 2s 静默 < 8s 的判别力不受影响。
 func TestRun_SilentStartupIsNotKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
-	args := append([]string{"-startup", "5s", "-limit", "1500ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
+	var out, errBuf syncBuf
+	args := append([]string{"-startup", "8s", "-limit", "1500ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("late")...)
 
 	rc := runGuarded(t, args, &out, &errBuf, 30*time.Second)
@@ -253,7 +297,7 @@ func TestRun_SilentStartupIsNotKilled(t *testing.T) {
 func TestRun_LiveCommandIsNotKilled(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "2s", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("live")...)
 
@@ -280,7 +324,7 @@ func TestRun_LiveCommandIsNotKilled(t *testing.T) {
 func TestRun_PropagatesChildExitCode(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "5s", "-poll", "50ms", "-log", logPath, "--"}, helperArgs("exit7")...)
 
 	rc := runGuarded(t, args, &out, &errBuf, 30*time.Second)
@@ -306,7 +350,7 @@ func TestRun_PropagatesChildExitCode(t *testing.T) {
 func TestRun_StallKillsDescendants(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "300ms", "-poll", "50ms", "-grace", "20ms", "-log", logPath, "--"},
 		helperArgs("stallchild")...)
 
@@ -353,7 +397,7 @@ func grandchildPID(t *testing.T, output string) int {
 func TestRun_PassesEnvAssignmentsToChild(t *testing.T) {
 	t.Parallel()
 	logPath := filepath.Join(t.TempDir(), "output.txt")
-	var out, errBuf bytes.Buffer
+	var out, errBuf syncBuf
 	args := append([]string{"-startup", "5s", "-limit", "5s", "-poll", "50ms", "-log", logPath, "--", "BENCHWATCH_ENV_PROBE=ok"},
 		helperArgs("envcheck")...)
 
@@ -378,7 +422,7 @@ func TestRun_RejectsMissingCommandOrLog(t *testing.T) {
 		{"startup 小于 limit", []string{"-startup", "1s", "-limit", "2s", "-log", filepath.Join(tmp, "o.txt"), "--", os.Args[0]}, "不得小于"},
 	}
 	for _, tc := range cases {
-		var out, errBuf bytes.Buffer
+		var out, errBuf syncBuf
 		rc := run(tc.args, &out, &errBuf)
 		if rc != usageExitCode {
 			t.Errorf("%s: 期望退出码 %d，实际 %d", tc.name, usageExitCode, rc)

@@ -7,21 +7,16 @@ package sync
 //
 //   - EncryptedFS 实现 sync.FS 全接口，转发底层 FS 的目录/元数据操作，
 //     对 WriteFile 流式 AES-256-GCM 分块加密、OpenRead 流式解密（透明）。
-//   - 密文格式：[magic][chunkSize] + 逐块 [4B len][nonce|ct|tag]（同 pkg/files
-//     cipher 格式但自含——sync 不能 import files 防环）。
+//   - 密文格式：[magic][chunkSize] + 逐块 [4B len][nonce|ct|tag]；**帧格式的唯一实现
+//     在 pkg/cipherstream**（与归档 cipher、客户端 E2EE 共用，仅魔数不同做域分隔）。
 //
 // 纯标准库（crypto/aes + cipher + rand + hmac），不引第三方。
 
 import (
-	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/binary"
-	"fmt"
 	"io"
-	"sync"
+
+	"github.com/cocomhub/sproxy/pkg/cipherstream"
 )
 
 // encMagic 是加密流魔数头。
@@ -72,7 +67,7 @@ func (e *EncryptedFS) OpenRead(ctx context.Context, path string) (io.ReadCloser,
 // 密文大小（= pipe 实际字节，无明文 size 可用）。密文大小 = 明文 + 每块 ~28B 开销
 // （nonce 12 + tag 16）。此差异由调用方按 opaque 处理（Stat 返回密文大小，diff 层
 // 若按 size 比对需理解该卷是加密卷——见 NewEncryptedFS 文档）。
-func (e *EncryptedFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (e *EncryptedFS) WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
@@ -97,7 +92,7 @@ func (e *EncryptedFS) WriteFile(ctx context.Context, path string, r io.Reader, s
 		}
 		errCh <- nil
 	}()
-	err := e.inner.WriteFile(ctx, path, pr, size, mtime)
+	err := e.inner.WriteFile(ctx, key, path, pr, size, mtime)
 	// 等待加密 goroutine 完成（收集其错误；WriteFile 失败时 CloseWithError 已传播）。
 	encErr := <-errCh
 	if err == nil {
@@ -121,134 +116,21 @@ func (e *EncryptedFS) MakeDir(ctx context.Context, path string) error {
 // 编译期断言。
 var _ FS = (*EncryptedFS)(nil)
 
-// encWriter 分块加密 writer。
-type encWriter struct {
-	gcm   cipher.AEAD
-	w     io.Writer
-	buf   bytes.Buffer
-	chunk int
+// newEncWriter 构造分块加密 writer。
+//
+// 帧格式唯一实现在 pkg/cipherstream（与归档 cipher、客户端 E2EE 共用）；本包只固定
+// **加密卷的魔数**（域分隔：同一份密文不会被其它域误读）。
+func newEncWriter(key []byte, w io.Writer) (io.WriteCloser, error) {
+	return cipherstream.NewWriter(key, w, cipherstream.Config{
+		Magic: encMagic, ChunkSize: 64 << 10, Label: "encrypted",
+	})
 }
 
-func newEncWriter(key []byte, w io.Writer) (*encWriter, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("encrypted: 密钥必须 32B")
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(encMagic); err != nil {
-		return nil, err
-	}
-	var sz [4]byte
-	binary.BigEndian.PutUint32(sz[:], 64<<10)
-	if _, err := w.Write(sz[:]); err != nil {
-		return nil, err
-	}
-	return &encWriter{gcm: gcm, w: w, chunk: 64 << 10}, nil
-}
-
-func (w *encWriter) Write(p []byte) (int, error) {
-	w.buf.Write(p)
-	for w.buf.Len() >= w.chunk {
-		chunk := make([]byte, w.chunk)
-		if _, err := io.ReadFull(&w.buf, chunk); err != nil {
-			return 0, err
-		}
-		if err := w.encryptChunk(chunk); err != nil {
-			return 0, err
-		}
-	}
-	return len(p), nil
-}
-
-func (w *encWriter) encryptChunk(plain []byte) error {
-	nonce := make([]byte, w.gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
-	ct := w.gcm.Seal(nil, nonce, plain, nil)
-	out := make([]byte, 4+len(nonce)+len(ct))
-	binary.BigEndian.PutUint32(out[:4], uint32(len(nonce)+len(ct)))
-	copy(out[4:], nonce)
-	copy(out[4+len(nonce):], ct)
-	_, err := w.w.Write(out)
-	return err
-}
-
-func (w *encWriter) Close() error {
-	if w.buf.Len() > 0 {
-		if err := w.encryptChunk(w.buf.Bytes()); err != nil {
-			return err
-		}
-		w.buf.Reset()
-	}
-	return nil
-}
-
-// encReader 分块解密 reader。
-type encReader struct {
-	gcm     cipher.AEAD
-	r       io.Reader
-	pending []byte
-}
-
-func newEncReader(key []byte, r io.Reader) (*encReader, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("encrypted: 密钥必须 32B")
-	}
-	head := make([]byte, len(encMagic)+4)
-	if _, err := io.ReadFull(r, head); err != nil {
-		return nil, fmt.Errorf("encrypted: 非加密格式: %w", err)
-	}
-	if !bytes.Equal(head[:len(encMagic)], encMagic) {
-		return nil, fmt.Errorf("encrypted: 非加密卷格式")
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	return &encReader{gcm: gcm, r: r}, nil
-}
-
-func (r *encReader) Read(p []byte) (int, error) {
-	if len(r.pending) == 0 {
-		var ln [4]byte
-		if _, err := io.ReadFull(r.r, ln[:]); err != nil {
-			if err == io.EOF {
-				return 0, io.EOF
-			}
-			return 0, err
-		}
-		blen := binary.BigEndian.Uint32(ln[:])
-		if blen > 1<<20 {
-			return 0, fmt.Errorf("encrypted: 块长度异常 %d", blen)
-		}
-		enc := make([]byte, blen)
-		if _, err := io.ReadFull(r.r, enc); err != nil {
-			return 0, err
-		}
-		ns := r.gcm.NonceSize()
-		if len(enc) < ns {
-			return 0, fmt.Errorf("encrypted: 块过短")
-		}
-		plain, err := r.gcm.Open(nil, enc[:ns], enc[ns:], nil)
-		if err != nil {
-			return 0, fmt.Errorf("encrypted: 解密失败（密钥错或密文篡改）: %w", err)
-		}
-		r.pending = plain
-	}
-	n := copy(p, r.pending)
-	r.pending = r.pending[n:]
-	return n, nil
+// newEncReader 构造分块解密 reader（兼容历史密文；块大小以头部声明为准）。
+func newEncReader(key []byte, r io.Reader) (io.Reader, error) {
+	return cipherstream.NewReader(key, r, cipherstream.Config{
+		Magic: encMagic, ChunkSize: 64 << 10, Label: "encrypted",
+	})
 }
 
 // encReadCloser 组合解密 reader + 底层 closer。
@@ -260,4 +142,11 @@ type encReadCloser struct {
 func (e *encReadCloser) Read(p []byte) (int, error) { return e.r.Read(p) }
 func (e *encReadCloser) Close() error               { return e.c.Close() }
 
-var _ = sync.Mutex{}
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只需名字时避免外部卷
+// 逐条补精确 size 的高成本路径（见 NameLister）。
+func (e *EncryptedFS) ListDirNames(ctx context.Context, path string) ([]Entry, error) {
+	if nl, ok := AssertNameLister(e.inner); ok {
+		return nl.ListDirNames(ctx, path)
+	}
+	return e.inner.ListDir(ctx, path)
+}

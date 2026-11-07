@@ -6,6 +6,8 @@ package size
 import (
 	"math"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
 )
 
 func TestParseSize(t *testing.T) {
@@ -94,5 +96,31 @@ func TestParseSizeOverflow(t *testing.T) {
 	}
 	if got, err := ParseSize("9223372036854775807B"); err != nil || got != math.MaxInt64 {
 		t.Fatalf("MaxInt64B 应解析为 MaxInt64: got=%d err=%v", got, err)
+	}
+}
+
+// TestParseSize_MatchesSizex 锁「唯一实现」契约：本包 ParseSize 必须与
+// pkg/units/sizex.ParseSize 逐值一致（含错误分支）。
+//
+// 背景：两者曾是逐字相同的两份实现，分叉风险真实存在（一处支持小数、另一处不支持等）。
+// 现在本包委托 sizex；本测试防止未来有人「为了改一个边界」又在本地复制一份逻辑。
+func TestParseSize_MatchesSizex(t *testing.T) {
+	t.Parallel()
+	corpus := []string{
+		"0", "1", "1024", "5368709120",
+		"1B", "1KB", "1K", "1KiB", "1Ki",
+		"1MB", "1MiB", "1GB", "1GiB", "1TB", "1TiB",
+		"1.5GiB", "0.5GB", "2.25MiB",
+		"1 KiB", "  4 GiB  ",
+		"", "-1", "1e6", "abc", "1XB", "GiB",
+		"9999999999999999999999",
+	}
+	for _, in := range corpus {
+		gotN, gotErr := ParseSize(in)
+		wantN, wantErr := sizex.ParseSize(in)
+		if gotN != wantN || (gotErr == nil) != (wantErr == nil) {
+			t.Fatalf("ParseSize(%q) = (%d, %v), sizex = (%d, %v) —— 两份实现已分叉",
+				in, gotN, gotErr, wantN, wantErr)
+		}
 	}
 }

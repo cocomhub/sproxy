@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -130,7 +132,10 @@ func isLoopbackHost(host string) bool {
 }
 
 // Factory 抽象客户端创建，生产/测试可替换。
-type Factory interface {
+//
+// 「Factory」是 New* 单方法接口的规范工厂模式名（Go 生态惯例），
+// 改名将波及 100+ 调用点且无质量收益；-er 约定面向动词型方法名，此处保留角色名词。
+type Factory interface { // NOSONAR: S8196 — 「Factory」是规范工厂模式名（Go 生态惯例），-er 约定面向动词型方法名
 	// NewClient 从 cobra 命令和配置创建 *client.FileClient。
 	NewClient(cmd *cobra.Command) (*client.FileClient, error)
 }
@@ -141,9 +146,16 @@ type CfgBinder interface {
 	Unmarshal(obj any) error
 }
 
-// factory 是生产实现，封装配置加载 + flag 覆盖 + 客户端构造。
+// errConfigNotFound 是「未找到配置文件」哨兵：统一 context 配置后，任何需要
+// server_url/凭据的命令在无 config.yaml 时 fail-closed 报错并指引创建（不再静默
+// 回落旧平铺或默认值——v1 双源分裂的根治）。定义在 clientfactory（工厂 fail-closed
+// 判定处），cmd/sclient 复用同一哨兵。
+var ErrConfigNotFound = errors.New("未找到配置文件 config.yaml：请先运行 `sclient context set <name> --env-name <e> --user-name <u>` 创建上下文（或用 --config 指定配置文件路径）")
+
+// factory 是生产实现，封装 context 模型配置 + flag 覆盖 + 客户端构造。
 // resolvedFn 是延迟获取 context 解析结果的函数（config.yaml 解析成功时非 nil）；
-// 非 nil → 从 Resolved 构建（新 context 模型）；nil → 回落旧平铺 cfgProvider 路径。
+// 统一 context 后不再有平铺回落——resolvedFn 返回 nil 时 fail-closed 报错
+// （无 config.yaml / 解析失败都不静默用默认值，v1 双源分裂的根治）。
 type factory struct {
 	cfgFile     string
 	cfgProvider func() CfgBinder
@@ -184,6 +196,7 @@ func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
 		cfg.NodeID = env.NodeID
 		cfg.XferCAFile = env.CAFile
 		cfg.XferInsecure = env.Insecure
+		cfg.PeerFingerprints = append(cfg.PeerFingerprints, env.PeerFingerprints...)
 		if env.Timeout > 0 {
 			cfg.Timeout = env.Timeout
 		}
@@ -210,24 +223,18 @@ func ResolvedToClientConfig(r *contextcfg.Resolved) *client.Config {
 	return cfg
 }
 
-// NewClient 从配置加载和 flag 覆盖创建 *client.FileClient。
-// 双模式：resolvedFn 非 nil（context 模型解析成功）→ 从 Resolved 构建；
-// nil → 回落旧平铺 cfgProvider 路径（既有用户/测试零破坏）。
+// NewClient 从 context 模型配置加载和 flag 覆盖创建 *client.FileClient。
+// 统一 context 后：resolvedFn 非 nil（config.yaml 解析成功）→ 从 Resolved 构建；
+// nil（无配置/损坏/引用缺失）→ fail-closed 报错指引创建，不静默回落默认值。
 func (f *factory) NewClient(cmd *cobra.Command) (*client.FileClient, error) {
-	if f.resolvedFn != nil {
-		if r := f.resolvedFn(); r != nil {
-			return f.newClientFromResolved(cmd, r)
-		}
+	if f.resolvedFn == nil {
+		return nil, fmt.Errorf("配置未初始化（无 context 解析器）")
 	}
-	p := f.cfgProvider()
-	if p == nil {
-		return nil, fmt.Errorf("配置未初始化")
+	r := f.resolvedFn()
+	if r == nil {
+		return nil, ErrConfigNotFound
 	}
-	cfg, err := client.LoadFromProvider(p)
-	if err != nil {
-		return nil, fmt.Errorf("加载配置失败: %w", err)
-	}
-	return f.buildClient(cmd, cfg)
+	return f.newClientFromResolved(cmd, r)
 }
 
 // newClientFromResolved 从 context 解析结果构建客户端（env+user 合成视图 + flag 覆盖）。
@@ -252,8 +259,55 @@ func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.F
 	xferName, xferFlagErr := cmd.Flags().GetString("xfer")
 	xferEnabled := xferFlagErr == nil && xferName != ""
 
+	// 公共选项（认证/隧道/分块/卷/TLS/网格参数；xfer 专属选项单独装配）。
+	opts, oErr := buildBaseOptions(cmd, cfg, xferEnabled)
+	if oErr != nil {
+		return nil, oErr
+	}
+	xferOpts, xErr := xferOptions(cmd, cfg, xferEnabled, xferName)
+	if xErr != nil {
+		return nil, xErr
+	}
+	opts = append(opts, xferOpts...)
+
+	fc := client.NewFileClient(serverURL, opts...)
+	if err := fc.InitError(); err != nil {
+		return fc, fmt.Errorf("初始化客户端失败: %w", err)
+	}
+	return fc, nil
+}
+
+// buildBaseOptions 装配非 xfer 的公共客户端选项：认证与传输（authAndTunnelOptions）、
+// 直连面 TLS（tlsClientOptions）、网格参数与 mTLS 客户端证书（meshAndCertOptions）。
+func buildBaseOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) ([]client.Option, error) {
+	opts := authAndTunnelOptions(cmd, cfg, xferEnabled)
+	tlsOpts, tErr := tlsClientOptions(cmd, cfg, xferEnabled)
+	if tErr != nil {
+		return nil, tErr
+	}
+	opts = append(opts, tlsOpts...)
+	meshOpts, mErr := meshAndCertOptions(cmd, cfg)
+	if mErr != nil {
+		return nil, mErr
+	}
+	opts = append(opts, meshOpts...)
+	return opts, nil
+}
+
+// authAndTunnelOptions 装配认证与传输选项：access-key 驱动加密隧道、分块尺寸、
+// SproxySig AK/SK、卷上下文与 SK 条目 ID。
+func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) []client.Option {
 	opts := []client.Option{
 		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
+	}
+	// 下载回退代理：flag --download-proxy > 配置 download_proxy > 默认关闭（空=不回退）。
+	// 弱网直连失败时经本地代理（如 127.0.0.1:1080）重发，见 WithDownloadProxy。
+	proxyURL := cfg.DownloadProxy
+	if flag, _ := cmd.Flags().GetString("download-proxy"); flag != "" {
+		proxyURL = flag
+	}
+	if proxyURL != "" {
+		opts = append(opts, client.WithDownloadProxy(proxyURL))
 	}
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
 		// 有 AK/SK 且未显式 --server：走 access-key 驱动的加密隧道（WithTunnel 内部
@@ -271,11 +325,11 @@ func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.F
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
 		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
 	}
-	// 卷上下文（多卷服务端）：CLI --volume flag 优先，回落配置 volume；两者皆空 = auto（零变化）。
-	volFlag, _ := cmd.Flags().GetString("volume")
-	switch {
-	case volFlag != "":
-		opts = append(opts, client.WithVolume(volFlag))
+	// 卷上下文（多卷服务端）：**路径内 URI / 当前工作目录所在卷**（命令层解析后经 volumectx 上下文
+	// 传入；用户口径 2026-10-14 移除 `--volume` flag）优先，回落配置 volume；皆空 = auto（零变化）。
+	switch vol, ok := volumectx.From(cmd.Context()); {
+	case ok:
+		opts = append(opts, client.WithVolume(vol))
 	case cfg.Volume != "":
 		opts = append(opts, client.WithVolume(cfg.Volume))
 	}
@@ -290,16 +344,21 @@ func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.F
 		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
 		opts = append(opts, client.WithTunnel(ak, sk))
 	}
-	// 直连面安全 flag（--ca-file / --insecure）：HTTP 直连（含 trust login 无凭据链路、
-	// mesh status 等经 svc 的 HTTP 面）TLS 校验装配。**仅非 xfer 隧道模式生效**——
-	// xfer 模式（tcp+tls/tcp/ws）的 TLS 由各自传输装配（buildXferClientTLSConfig），
-	// 非 TLS 传输（tcp/ws）不装配任何 TLS 配置（防干扰，见
-	// TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected）。
-	//   - --ca-file <PEM> → WithCAFile（严格校验 RootCAs，fail-closed）；
-	//   - --insecure     → WithInsecureTLS（跳过校验，**仅限 loopback hub**——与 xfer
-	//     面语义一致；远程 hub 必须用 --ca-file，fail-closed）；
-	//   - 两者互斥（对齐 buildXferClientTLSConfig 的 M-3 语义）；
-	//   - 均未指定 → 系统根池严格校验（服务端自签证书时握手报 x509，用户需显式配置）。
+	return opts
+}
+
+// tlsClientOptions 装配直连面安全选项（--ca-file / --insecure）：HTTP 直连（含 trust
+// login 无凭据链路、mesh status 等经 svc 的 HTTP 面）TLS 校验。**仅非 xfer 隧道模式
+// 生效**——xfer 模式（tcp+tls/tcp/ws）的 TLS 由各自传输装配（buildXferClientTLSConfig），
+// 非 TLS 传输（tcp/ws）不装配任何 TLS 配置（防干扰，见
+// TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected）。
+//   - --ca-file <PEM> → WithCAFile（严格校验 RootCAs，fail-closed）；
+//   - --insecure     → WithInsecureTLS（跳过校验，**仅限 loopback hub**——与 xfer
+//     面语义一致；远程 hub 必须用 --ca-file，fail-closed）；
+//   - 两者互斥（对齐 buildXferClientTLSConfig 的 M-3 语义）；
+//   - 均未指定 → 系统根池严格校验（服务端自签证书时握手报 x509，用户需显式配置）。
+func tlsClientOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) ([]client.Option, error) {
+	var opts []client.Option
 	if !xferEnabled {
 		caFile, _ := cmd.Flags().GetString("ca-file")
 		if caFile == "" {
@@ -317,9 +376,14 @@ func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.F
 			opts = append(opts, client.WithInsecureTLS())
 		}
 	}
+	return opts, nil
+}
 
-	// 通用 mesh 参数（hub_url/node_id）：供 mesh connect / relay start / p2p 等命令
-	// 在各自 --hub/--node-id 未显式指定时作为配置回落（P2-配置）。
+// meshAndCertOptions 装配通用 mesh 参数（hub_url/node_id）、双向 mTLS 客户端证书与
+// 传输回退选项（供 mesh connect / relay start / p2p 等命令在各自 --hub/--node-id 未
+// 显式指定时作为配置回落，P2-配置）。
+func meshAndCertOptions(cmd *cobra.Command, cfg *client.Config) ([]client.Option, error) {
+	var opts []client.Option
 	if cfg.HubURL != "" {
 		opts = append(opts, client.WithMeshHubURL(cfg.HubURL))
 	}
@@ -336,106 +400,133 @@ func (f *factory) buildClient(cmd *cobra.Command, cfg *client.Config) (*client.F
 	} else if clientKey, _ := cmd.Flags().GetString("client-key"); clientKey != "" {
 		return nil, fmt.Errorf("--client-key 需要配合 --client-cert 使用")
 	}
-
 	if allowFallback, _ := cmd.Flags().GetBool("allow-transport-fallback"); allowFallback {
 		opts = append(opts, client.WithTransportFallback())
 	} else if cfg.AllowTransportFallback {
 		opts = append(opts, client.WithTransportFallback())
 	}
+	return opts, nil
+}
 
-	if xferEnabled {
-		hub := ""
-		if h, err := cmd.Flags().GetString("hub"); err == nil {
-			hub = h
-		}
-		if hub == "" {
-			hub = cfg.HubURL
-		}
-		if hub == "" {
-			return nil, fmt.Errorf("xfer 隧道模式需要 --hub 或配置 hub_url")
-		}
-		// P1 身份 pinning：仅 xfer 隧道模式消费本端身份与对端指纹（懒加载——非隧道命令
-		// 不加载身份，身份文件损坏不导致 upload/download 等命令全部不可用）。
-		// 错误信息给出恢复路径。
-		var id *tunnel.Identity
-		if loadedID, lErr := LoadIdentityOptional(); lErr != nil {
-			return nil, fmt.Errorf("加载本端身份失败（可用 sclient identity generate --force 重新生成，或删除身份文件）: %w", lErr)
-		} else {
-			id = loadedID
-		}
-		if id != nil {
-			opts = append(opts, client.WithIdentity(id))
-		}
+// xferOptions 装配 xfer 隧道模式（--xfer <name>）选项：hub 解析、P1 身份 pinning 加载、
+// 隧道密钥派生与 tcp+tls 客户端 TLS 配置。非 xfer 模式且配置了 peer_fingerprints 时
+// fail-closed 报错（配置了 pin 却静默跳过 = fail-open，必须报错并给出恢复路径）。
+func xferOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool, xferName string) ([]client.Option, error) {
+	if !xferEnabled {
 		if len(cfg.PeerFingerprints) > 0 {
-			opts = append(opts, client.WithPeerFingerprints(cfg.PeerFingerprints))
+			return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或运行 `sclient config set peer_fingerprints \"\"` 临时清除（fail-closed）")
 		}
-
-		// 隧道加密密钥：access-key 驱动（SK 派生），使 mux 握手执行（key 为 nil 时不握手，
-		// pinning 不生效）。
-		// fail-closed：配置了身份/peer_fingerprints 但缺 access_key_secret 时，握手不执行、
-		// pinning 静默不生效 = 安全机制被无声绕过，必须报错而非仅 Warn。
-		if cfg.AccessKeySecret == "" && (id != nil || len(cfg.PeerFingerprints) > 0) {
-			return nil, fmt.Errorf("xfer 隧道配置了身份或 peer_fingerprints 时必须配置 access_key_secret（ECDH 握手与身份 pinning 依赖隧道密钥；fail-closed）")
-		}
-		xferKey := ""
-		if cfg.AccessKeySecret != "" {
-			mesh := accesskey.ParseMesh(cfg.AccessKey)
-			k, kErr := tunnel.DeriveTunnelKey(cfg.AccessKeySecret, mesh)
-			if kErr != nil {
-				return nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)
-			}
-			xferKey = hex.EncodeToString(k)
-		}
-		// 阶段5 PR-4：tcp+tls 传输装配客户端 TLS 配置（--ca-file / --insecure /
-		// 配置 xfer_ca_file / xfer_insecure；CLI flag 优先于配置）。非 TLS 传输
-		// （ws/tcp）不装配。
-		// ca-file 与 insecure 均未指定时用系统根池严格校验——服务端自签证书（auto_tls）
-		// 握手报 x509 unknown-authority，用户需显式 --ca-file 或 --insecure（fail-closed，
-		// 不静默降级；对齐 hub/federation 的 peer TLS 前例）。
-		if xferName == "tcp+tls" {
-			// 审查 M-2：tcp+tls 的 hub 必须是裸 host:port（不能是 ws:// 前缀的 URL——
-			// hub_url 配置回落可能带 scheme/path）。提前校验，避免 --insecure 的
-			// SplitHostPort 误拒 loopback、或非 insecure 路径在 DialTLS 处报难以理解的错误。
-			if _, _, hErr := net.SplitHostPort(hub); hErr != nil {
-				return nil, fmt.Errorf("tcp+tls 传输的 hub 地址应为 host:port（不要带 ws:// 等 scheme 前缀），当前 %q: %v；请用 --hub 显式指定或改配 hub_url", hub, hErr)
-			}
-			caFile, _ := cmd.Flags().GetString("ca-file")
-			if caFile == "" {
-				caFile = cfg.XferCAFile
-			}
-			insecureFlag, _ := cmd.Flags().GetBool("insecure")
-			// 审查 M-3：互斥/来源错误信息区分 flag 与配置，降低排查成本。
-			insecureSrc := "flag --insecure"
-			insecure := insecureFlag
-			if cfg.XferInsecure {
-				insecure = true
-				if !insecureFlag {
-					insecureSrc = "配置 xfer_insecure: true"
-				}
-			}
-			// 审查 I-1 约束：builtin.SetDefaultTLSConfig 是 internal/tcp 包级全局，进程内
-			// 仅支持"单 tcp+tls TLS 配置"。当前 sclient CLI 单进程单命令单 NewClient 满足；
-			// **禁止**同进程多 CA/多角色的 tcp+tls 客户端（会静默互相覆盖）。mesh node 等
-			// 未来同进程 Listen+Dial 并存场景需改用显式注入（tcp.DialTLS/ListenTLS），勿沿用
-			// 全局默认。测试依赖"最后一次装配生效"（见 factory_tls_integration_test.go）。
-			tlsCfg, tErr := buildXferClientTLSConfig(caFile, insecure, insecureSrc, hub)
-			if tErr != nil {
-				return nil, tErr
-			}
-			builtin.SetDefaultTLSConfig(tlsCfg)
-		}
-		opts = append(opts, client.WithXfer(xferName, hub, xferKey))
-	} else if len(cfg.PeerFingerprints) > 0 {
-		// fail-closed：非 xfer 命令配置了 peer_fingerprints 但当前命令不走 xfer 握手，
-		// pinning 无法生效；配置了 pin 却静默跳过 = fail-open，必须报错并给出恢复路径。
-		return nil, fmt.Errorf("已配置 peer_fingerprints 但当前命令不走 xfer 隧道（--xfer），身份指纹 pinning 无法生效；请使用 `sclient tunnel --xfer <name>`，或运行 `sclient config set peer_fingerprints \"\"` 临时清除（fail-closed）")
+		return nil, nil
 	}
-
-	fc := client.NewFileClient(serverURL, opts...)
-	if err := fc.InitError(); err != nil {
-		return fc, fmt.Errorf("初始化客户端失败: %w", err)
+	hub, err := resolveXferHub(cmd, cfg)
+	if err != nil {
+		return nil, err
 	}
-	return fc, nil
+	id, err := loadXferIdentity()
+	if err != nil {
+		return nil, err
+	}
+	xferKey, opts, err := xferKeyAndOptions(cfg, id)
+	if err != nil {
+		return nil, err
+	}
+	if xferName == "tcp+tls" {
+		if err := applyXferTCPTLSOptions(cmd, cfg, hub); err != nil {
+			return nil, err
+		}
+	}
+	opts = append(opts, client.WithXfer(xferName, hub, xferKey))
+	return opts, nil
+}
+
+// resolveXferHub 解析 xfer 隧道模式的 hub 地址：--hub flag 优先，回落配置 hub_url。
+func resolveXferHub(cmd *cobra.Command, cfg *client.Config) (string, error) {
+	hub := ""
+	if h, err := cmd.Flags().GetString("hub"); err == nil {
+		hub = h
+	}
+	if hub == "" {
+		hub = cfg.HubURL
+	}
+	if hub == "" {
+		return "", fmt.Errorf("xfer 隧道模式需要 --hub 或配置 hub_url")
+	}
+	return hub, nil
+}
+
+// loadXferIdentity 加载本端长时身份（P1 身份 pinning；懒加载——非隧道命令不加载，
+// 身份文件损坏不导致 upload/download 等命令全部不可用）。错误信息给出恢复路径。
+func loadXferIdentity() (*tunnel.Identity, error) {
+	id, err := LoadIdentityOptional()
+	if err != nil {
+		return nil, fmt.Errorf("加载本端身份失败（可用 sclient identity generate --force 重新生成，或删除身份文件）: %w", err)
+	}
+	return id, nil
+}
+
+// xferKeyAndOptions 派生 xfer 隧道密钥并装配身份/对端指纹选项。
+// 隧道加密密钥：access-key 驱动（SK 派生），使 mux 握手执行（key 为 nil 时不握手，
+// pinning 不生效）。fail-closed：配置了身份/peer_fingerprints 但缺 access_key_secret
+// 时，握手不执行、pinning 静默不生效 = 安全机制被无声绕过，必须报错而非仅 Warn。
+func xferKeyAndOptions(cfg *client.Config, id *tunnel.Identity) (string, []client.Option, error) {
+	var opts []client.Option
+	if id != nil {
+		opts = append(opts, client.WithIdentity(id))
+	}
+	if len(cfg.PeerFingerprints) > 0 {
+		opts = append(opts, client.WithPeerFingerprints(cfg.PeerFingerprints))
+	}
+	if cfg.AccessKeySecret == "" && (id != nil || len(cfg.PeerFingerprints) > 0) {
+		return "", nil, fmt.Errorf("xfer 隧道配置了身份或 peer_fingerprints 时必须配置 access_key_secret（ECDH 握手与身份 pinning 依赖隧道密钥；fail-closed）")
+	}
+	if cfg.AccessKeySecret != "" {
+		mesh := accesskey.ParseMesh(cfg.AccessKey)
+		k, kErr := tunnel.DeriveTunnelKey(cfg.AccessKeySecret, mesh)
+		if kErr != nil {
+			return "", nil, fmt.Errorf("派生 xfer 隧道密钥失败: %w", kErr)
+		}
+		return hex.EncodeToString(k), opts, nil
+	}
+	return "", opts, nil
+}
+
+// applyXferTCPTLSOptions 装配 tcp+tls 传输的客户端 TLS 配置（--ca-file / --insecure /
+// 配置 xfer_ca_file / xfer_insecure；CLI flag 优先于配置）并写入 builtin 全局。
+// 非 TLS 传输（ws/tcp）不装配。ca-file 与 insecure 均未指定时用系统根池严格校验——
+// 服务端自签证书（auto_tls）握手报 x509 unknown-authority，用户需显式 --ca-file 或
+// --insecure（fail-closed，不静默降级；对齐 hub/federation 的 peer TLS 前例）。
+func applyXferTCPTLSOptions(cmd *cobra.Command, cfg *client.Config, hub string) error {
+	// 审查 M-2：tcp+tls 的 hub 必须是裸 host:port（不能是 ws:// 前缀的 URL——hub_url
+	// 配置回落可能带 scheme/path）。提前校验，避免 --insecure 的 SplitHostPort 误拒
+	// loopback、或非 insecure 路径在 DialTLS 处报难以理解的错误。
+	if _, _, hErr := net.SplitHostPort(hub); hErr != nil {
+		return fmt.Errorf("tcp+tls 传输的 hub 地址应为 host:port（不要带 ws:// 等 scheme 前缀），当前 %q: %v；请用 --hub 显式指定或改配 hub_url", hub, hErr)
+	}
+	caFile, _ := cmd.Flags().GetString("ca-file")
+	if caFile == "" {
+		caFile = cfg.XferCAFile
+	}
+	insecureFlag, _ := cmd.Flags().GetBool("insecure")
+	// 审查 M-3：互斥/来源错误信息区分 flag 与配置，降低排查成本。
+	insecureSrc := "flag --insecure"
+	insecure := insecureFlag
+	if cfg.XferInsecure {
+		insecure = true
+		if !insecureFlag {
+			insecureSrc = "配置 xfer_insecure: true"
+		}
+	}
+	// 审查 I-1 约束：builtin.SetDefaultTLSConfig 是 internal/tcp 包级全局，进程内仅支持
+	// "单 tcp+tls TLS 配置"。当前 sclient CLI 单进程单命令单 NewClient 满足；**禁止**同进程
+	// 多 CA/多角色的 tcp+tls 客户端（会静默互相覆盖）。mesh node 等未来同进程 Listen+Dial
+	// 并存场景需改用显式注入（tcp.DialTLS/ListenTLS），勿沿用全局默认。测试依赖"最后一次
+	// 装配生效"（见 factory_tls_integration_test.go）。
+	tlsCfg, tErr := buildXferClientTLSConfig(caFile, insecure, insecureSrc, hub)
+	if tErr != nil {
+		return tErr
+	}
+	builtin.SetDefaultTLSConfig(tlsCfg)
+	return nil
 }
 
 // serverFlagNotSet 报告 --server flag 是否未显式指定（隧道模式仅对默认服务器生效）。

@@ -9,6 +9,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
@@ -58,7 +60,7 @@ func uploadAs(t *testing.T, mux *http.ServeMux, filename string, body []byte) (i
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -81,7 +83,7 @@ func uploadAsPath(t *testing.T, mux *http.ServeMux, remotePath string, body []by
 	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/upload", &buf)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	req.Header.Set("X-File-Path", remotePath)
 	rr := httptest.NewRecorder()
@@ -224,7 +226,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 
-	task, err := mgr.SubmitAndStart("url", srv.URL, "cloud.bin", int64(len(content)), t.Context(), "alice")
+	task, err := mgr.SubmitAndStart("url", srv.URL, "cloud.bin", int64(len(content)), t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,11 +259,11 @@ func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 	mgr, h := newCloudTestManager(t, dir, sm, cfg)
 	h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 10}
 
-	_, err := mgr.SubmitAndStart("url", "https://example.com/big.bin", "big.bin", 20, t.Context(), "alice")
+	_, err := mgr.SubmitAndStart("url", "https://example.com/big.bin", "big.bin", 20, t.Context(), "alice", cloud.TaskParams{Save: true})
 	if err == nil {
 		t.Fatal("超租户上限应返回错误")
 	}
-	if !isStorageFull(err) {
+	if !cloudtasks.IsStorageFull(err) {
 		t.Fatalf("应返回 storage full 错误（可映射 507）, got %v", err)
 	}
 	// 回滚：全局账本不应残留预留（CreateTask 失败时已回滚）。
@@ -282,18 +284,18 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	// 装配 cloudMgr + storageMgr（cloudArchiveTask 依赖任务快照与配额对账）
 	sm := capacity.NewStorageManager(root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件（新布局 <root>/alice/cloud/<id>/<file>）
-	task, err := mgr.CreateTask("url", "https://example.com/q.zip", "q.zip", 100, "alice")
+	task, err := mgr.CreateTask("url", "https://example.com/q.zip", "q.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -310,12 +312,12 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	post := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		rr := httptest.NewRecorder()
 		aliceMux.ServeHTTP(rr, req)
 		return rr
@@ -352,18 +354,18 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
 	env.h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(env.root, cloudStorageManager{m: sm}, env.h.tenantFor, env.h.checksumStoreFor, env.h.listTenantIDs, testLogger(), &cloud.CloudDownloadConfig{
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: env.root, Storage: cloudStorageManager{m: sm}, TenantFor: env.h.tenantFor, ChecksumStoreFor: env.h.checksumStoreFor, ListTenants: env.h.listTenantIDs, Logger: testLogger(), Config: &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
 		TaskTTL:       24 * time.Hour,
 		FailedTaskTTL: 1 * time.Hour,
-	}, func(owner string) *quota.Scope {
+	}, QuotaFor: []cloud.QuotaResolver{func(owner string) *quota.Scope {
 		return env.h.quotaBucketFor(owner, "cloud")
-	})
+	}}})
 	env.h.cloudMgr = mgr
 
 	// 创建已完成云任务 + 落盘文件
-	task, err := mgr.CreateTask("url", "https://example.com/del.zip", "del.zip", 100, "alice")
+	task, err := mgr.CreateTask("url", "https://example.com/del.zip", "del.zip", 100, "alice", cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -380,10 +382,10 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 	aliceMux := env.mux["alice"]
 	aliceMux.HandleFunc("POST /api/cloud/tasks/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		env.h.cloudArchiveTask(w, r)
+		env.h.archiveTaskHandler()(w, r)
 	})
 	req := httptest.NewRequest("POST", "/api/cloud/tasks/"+task.ID+"/archive", strings.NewReader(`{"archive_name":"del.tar.gz"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	rr := httptest.NewRecorder()
 	aliceMux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -442,7 +444,7 @@ func TestVersionQuota_CommitAndRelease(t *testing.T) {
 	}
 
 	// 保存版本（覆盖前备份）
-	vid, err := env.h.fileService().SaveVersion("f.txt", tnt, "alice")
+	vid, err := env.h.fileService().SaveVersion(context.Background(), "f.txt", tnt, "alice")
 	if err != nil {
 		t.Fatalf("saveVersion: %v", err)
 	}
@@ -497,7 +499,7 @@ func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 	fileChecksum := sha256Hex(content)
 	uploadID := "quota-chunk-1"
 
-	code, resp := env.initAs(t, "alice", uploadID, "f.bin", int64(len(content)), 64, 1, fileChecksum)
+	code, resp := env.initAs(t, "alice", chunkedInitReq{uploadID: uploadID, filename: "f.bin", totalSize: int64(len(content)), chunkSize: 64, totalChunks: 1, checksum: fileChecksum})
 	if code != http.StatusOK {
 		t.Fatalf("init 应 200, got %d: %v", code, resp)
 	}
@@ -708,25 +710,12 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 
 	// TryReserve(60) 成功 → 子 Scope Reserved 60（预留尚未 Commit）。子 Scope 已挂到 user 桶
 	// 之下（http route 分层），其保留沿父链聚合——user/租户 Reserved 亦为 60。随后尝试
-	// TryReserve(100)（60+100=160 > 子目录上限 100）→ 被该子 Scope 上限拦住（写路径即 507），
-	// 失败时父链回滚自身累加（仍只保留第一次的 60）。
-	res60, err60 := subScope.TryReserve(60)
-	if err60 != nil {
-		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err60)
-	}
-	if _, err := subScope.TryReserve(100); err == nil {
-		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
-	} else if !errors.Is(err, quota.ErrStorageFull) {
-		t.Fatalf("应返回 capacity.ErrStorageFull（可映射 507）, got %v", err)
-	}
-	if got := subScope.Reserved(); got != 60 {
-		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)
-	}
-	res60.Release() // 归还 60，维持后续 HTTP 上传可用额度（与写路径正常 Commit/Release 对应）
+	// TryReserve(100)（60+100=160 > 子目录上限 100）→ 被该子 Scope 上限拦住（写路径即 507）。
+	assertPathScopeSubScopeReserve(t, subScope)
 
 	// 同租户其他路径：未配置 bucket_limits 的子目录→沿段树回落 user 桶（http route 式最长
 	// 前缀命中；不再建任意子 Scope，也不会返回 nil——写路径对未配置子目录按 user 桶归集）。
-	if sc := env.h.quotaBucketFor("alice", "user/other/sub"); sc == nil {
+	if env.h.quotaBucketFor("alice", "user/other/sub") == nil {
 		t.Fatalf("未配置 bucket_limits 的子目录路径应回落 user 桶（http route 最长前缀），而非 nil")
 	}
 
@@ -749,6 +738,30 @@ func TestQuota_BucketLimits_PathScope(t *testing.T) {
 	// （超子目录上限 100 之内；父链聚合逐级检查自动生效）。注意 remotePath 为相对 user
 	// 桶协议路径（videos/hd/a.txt）——UserRel 会补 "user/" 前缀映射到磁盘 user/videos/hd/a.txt。
 	umux := actorUploadDeleteMux(env.h, "alice")
+	assertPathScopeHTTPWrites(t, env, umux)
+}
+
+// assertPathScopeSubScopeReserve 验证子目录子 Scope 的 TryReserve 上限拦截与释放语义。
+func assertPathScopeSubScopeReserve(t *testing.T, subScope *quota.Scope) {
+	t.Helper()
+	res60, err60 := subScope.TryReserve(60)
+	if err60 != nil {
+		t.Fatalf("子目录 TryReserve(60) 应成功: %v", err60)
+	}
+	if _, err := subScope.TryReserve(100); err == nil {
+		t.Fatal("子目录 TryReserve(100) 应被上限拦住（60+100=160>100）")
+	} else if !errors.Is(err, quota.ErrStorageFull) {
+		t.Fatalf("应返回 capacity.ErrStorageFull（可映射 507）, got %v", err)
+	}
+	if got := subScope.Reserved(); got != 60 {
+		t.Fatalf("超限预留失败后子目录 Reserved()=%d want 60（仅第一次保留）", got)
+	}
+	res60.Release() // 归还 60，维持后续 HTTP 上传可用额度（与写路径正常 Commit/Release 对应）
+}
+
+// assertPathScopeHTTPWrites 验证写路径接入子目录子 Scope 的配额归集与 507 拦截。
+func assertPathScopeHTTPWrites(t *testing.T, env *ownerDownloadEnv, umux *http.ServeMux) {
+	t.Helper()
 	if code, resp := uploadAsPath(t, umux, "videos/hd/a.txt", []byte(strings.Repeat("a", 40))); code != http.StatusOK {
 		t.Fatalf("子目录 40 字节应 200, got %d: %s", code, resp)
 	}

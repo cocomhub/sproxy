@@ -40,57 +40,68 @@ const benchPayloadSize = 64 << 10
 func BenchmarkXferThroughput(b *testing.B) {
 	for _, h := range benchHarnesses {
 		b.Run(h.Name, func(b *testing.B) {
-			ctx := context.Background()
-			ln, err := h.Listen(ctx, "127.0.0.1:0")
-			if err != nil {
-				b.Fatalf("Listen: %v", err)
-			}
-			defer ln.Close()
-			addr := listenerAddr(ln)
-
-			acceptCh := make(chan xfer.Conn, 1)
-			go func() {
-				if c, aerr := ln.Accept(ctx); aerr == nil {
-					acceptCh <- c
-				}
-			}()
-			clientConn, err := h.Dial(ctx, addr)
-			if err != nil {
-				b.Fatalf("Dial: %v", err)
-			}
-			defer clientConn.Close()
-			serverConn := <-acceptCh
-			if serverConn == nil {
-				b.Fatal("accept 失败")
-			}
-			defer serverConn.Close()
-
-			payload := make([]byte, benchPayloadSize)
-			// 对端泵：Receive 循环（丢弃内容）。
-			stop := make(chan struct{})
-			go func() {
-				for {
-					select {
-					case <-stop:
-						return
-					default:
-						if _, rerr := serverConn.Receive(ctx); rerr != nil {
-							return
-						}
-					}
-				}
-			}()
-
-			b.SetBytes(benchPayloadSize)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if serr := clientConn.Send(ctx, payload); serr != nil {
-					b.Fatalf("Send: %v", serr)
-				}
-			}
-			b.StopTimer()
-			close(stop)
+			runBenchOnce(b, h)
 		})
+	}
+}
+
+// runBenchOnce 跑单个传输的子基准（建链 + 双向吞吐）。
+func runBenchOnce(b *testing.B, h Harness) {
+	b.Helper()
+	ctx := context.Background()
+	ln, err := h.Listen(ctx, "127.0.0.1:0")
+	if err != nil {
+		b.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+	addr := listenerAddr(ln)
+
+	acceptCh := make(chan xfer.Conn, 1)
+	go acceptBenchConn(ln, ctx, acceptCh)
+	clientConn, derr := h.Dial(ctx, addr)
+	if derr != nil {
+		b.Fatalf("Dial: %v", derr)
+	}
+	defer clientConn.Close()
+	serverConn := <-acceptCh
+	if serverConn == nil {
+		b.Fatal("accept 失败")
+	}
+	defer serverConn.Close()
+
+	payload := make([]byte, benchPayloadSize)
+	stop := make(chan struct{})
+	go pumpBenchReceive(serverConn, ctx, stop)
+
+	b.SetBytes(benchPayloadSize)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if serr := clientConn.Send(ctx, payload); serr != nil {
+			b.Fatalf("Send: %v", serr)
+		}
+	}
+	b.StopTimer()
+	close(stop)
+}
+
+// acceptBenchConn 异步 accept 并回传连接（回传 nil 表示 accept 失败）。
+func acceptBenchConn(ln xfer.Listener, ctx context.Context, ch chan<- xfer.Conn) {
+	if c, aerr := ln.Accept(ctx); aerr == nil {
+		ch <- c
+	}
+}
+
+// pumpBenchReceive 对端 Receive 泵：循环接收丢弃，直到 stop 或接收出错。
+func pumpBenchReceive(c xfer.Conn, ctx context.Context, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+			if _, rerr := c.Receive(ctx); rerr != nil {
+				return
+			}
+		}
 	}
 }
 

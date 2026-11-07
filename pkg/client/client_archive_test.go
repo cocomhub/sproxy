@@ -17,10 +17,10 @@ import (
 	"time"
 )
 
-func TestClientArchive_SingleFile(t *testing.T) {
-	t.Parallel()
-
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newClientArchiveSingleFileHandler 返回 /api/archive 的 mock handler：
+// 校验请求体为 {"files":["test.txt"]} 并返回单文件 gzip+tar 归档流。
+func newClientArchiveSingleFileHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/api/archive" {
 			http.Error(w, "unexpected request", http.StatusNotFound)
 			return
@@ -53,17 +53,12 @@ func TestClientArchive_SingleFile(t *testing.T) {
 		tw.Write([]byte("data"))
 		tw.Close()
 		gw.Close()
-	}))
-	defer mock.Close()
-
-	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	dst := filepath.Join(t.TempDir(), "out.tar.gz")
-
-	err := c.Archive(t.Context(), []string{"test.txt"}, dst)
-	if err != nil {
-		t.Fatalf("Archive() = %v", err)
 	}
+}
 
+// assertClientArchiveSingleFile 解包验证归档内容：唯一 entry 为 test.txt，内容为 "data"。
+func assertClientArchiveSingleFile(t *testing.T, dst string) {
+	t.Helper()
 	fi, err := os.Stat(dst)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +97,23 @@ func TestClientArchive_SingleFile(t *testing.T) {
 	if _, err := tr.Next(); err != io.EOF {
 		t.Error("expected EOF after single entry")
 	}
+}
+
+func TestClientArchive_SingleFile(t *testing.T) {
+	t.Parallel()
+
+	mock := httptest.NewServer(newClientArchiveSingleFileHandler())
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	dst := filepath.Join(t.TempDir(), "out.tar.gz")
+
+	err := c.Archive(t.Context(), []string{"test.txt"}, dst)
+	if err != nil {
+		t.Fatalf("Archive() = %v", err)
+	}
+
+	assertClientArchiveSingleFile(t, dst)
 }
 
 func TestClientArchiveDir(t *testing.T) {

@@ -77,3 +77,11 @@ func (c *FileClient) PeerFingerprints() []string {
 //
 // urlPath 是相对路径，如 "/upload" 或 "/download?filename=test.txt"。
 // 隧道模式下 URL 保持相对路径，由服务端隧道 handler 本地路由；
+
+// credentialsSnapshot 返回凭据快照（AK/SK/ID）——并发安全（RenewAccessKey 热替换下
+// 签名点读一致快照，避免读到 SK/ID 不匹配的半更新状态）。
+func (c *FileClient) credentialsSnapshot() (ak, sk, id string) {
+	c.credentialsMu.RLock()
+	defer c.credentialsMu.RUnlock()
+	return c.accessKey, c.accessKeySecret, c.accessKeyID
+}

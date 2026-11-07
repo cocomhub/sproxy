@@ -4,13 +4,18 @@
 package meshconn
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpproxy"
 	"github.com/spf13/cobra"
 )
 
@@ -226,12 +231,7 @@ func TestSelectRoute_CIDRNotMatchDomain(t *testing.T) {
 // TestFromFlags_RouteParse：合法/非法格式/CIDR/空组用例（fail-closed，启动即报错）。
 func TestFromFlags_RouteParse(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name  string
-		route string
-		want  []RouteRule
-		err   bool
-	}{
+	cases := []routeParseCase{
 		{
 			name:  "domain",
 			route: ".example.com=node-a,node-b",
@@ -276,30 +276,50 @@ func TestFromFlags_RouteParse(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cmd := newTestCmd()
-			if err := cmd.Flags().Set("route", tc.route); err != nil {
-				t.Fatalf("set route: %v", err)
-			}
-			conn := &Conn{}
-			err := conn.FromFlags(cmd, nil)
-			if tc.err {
-				if err == nil {
-					t.Fatalf("%s: 应 fail-closed 报错, got nil", tc.name)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("%s: FromFlags: %v", tc.name, err)
-			}
-			if len(conn.Routes) != len(tc.want) {
-				t.Fatalf("%s: Routes = %+v, want %+v", tc.name, conn.Routes, tc.want)
-			}
-			r := conn.Routes[0]
-			w := tc.want[0]
-			if r.Kind != w.Kind || r.Pattern != w.Pattern || len(r.Group) != len(w.Group) || r.Group[0] != w.Group[0] {
-				t.Fatalf("%s: rule = %+v, want %+v", tc.name, r, w)
-			}
+			checkFromFlagsRouteParse(t, tc)
 		})
+	}
+}
+
+// routeParseCase 是 --route 解析用例：want 为合法输入期望的规则数组，err 表示应 fail-closed。
+type routeParseCase struct {
+	name  string
+	route string
+	want  []RouteRule
+	err   bool
+}
+
+// checkFromFlagsRouteParse 断言单个 --route 解析用例：非法 fail-closed，合法校验规则内容。
+func checkFromFlagsRouteParse(t *testing.T, tc routeParseCase) {
+	t.Helper()
+	cmd := newTestCmd()
+	if err := cmd.Flags().Set("route", tc.route); err != nil {
+		t.Fatalf("set route: %v", err)
+	}
+	conn := &Conn{}
+	err := conn.FromFlags(cmd, nil)
+	if tc.err {
+		if err == nil {
+			t.Fatalf("%s: 应 fail-closed 报错, got nil", tc.name)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("%s: FromFlags: %v", tc.name, err)
+	}
+	assertRouteRulesEqual(t, tc, conn.Routes)
+}
+
+// assertRouteRulesEqual 断言 FromFlags 解析出的路由规则与期望一致。
+func assertRouteRulesEqual(t *testing.T, tc routeParseCase, routes []RouteRule) {
+	t.Helper()
+	if len(routes) != len(tc.want) {
+		t.Fatalf("%s: Routes = %+v, want %+v", tc.name, routes, tc.want)
+	}
+	r := routes[0]
+	w := tc.want[0]
+	if r.Kind != w.Kind || r.Pattern != w.Pattern || len(r.Group) != len(w.Group) || r.Group[0] != w.Group[0] {
+		t.Fatalf("%s: rule = %+v, want %+v", tc.name, r, w)
 	}
 }
 
@@ -493,5 +513,184 @@ func TestFromFlags_ExitOnlyAutoExclusive(t *testing.T) {
 	conn := &Conn{}
 	if err := conn.FromFlags(cmd, nil); err == nil {
 		t.Fatalf("--exit-only 与 --exit-auto 应互斥报错")
+	}
+}
+
+// TestFromFlags_ExitOnlyWithExitGroup 验证 --exit-only + --exit-group 组合合法
+// （组内 failover 也是有效出口——修复前误报"需要 --exit/--exit-auto"）。
+func TestFromFlags_ExitOnlyWithExitGroup(t *testing.T) {
+	t.Parallel()
+	cmd := newTestCmd()
+	cmd.Flags().Set("exit-group", "sg-t,sg2-t")
+	cmd.Flags().Set("exit-only", "true")
+	c := &Conn{}
+	if err := c.FromFlags(cmd, nil); err != nil {
+		t.Fatalf("--exit-group + --exit-only 应合法: %v", err)
+	}
+	if c.ExitOnly != true {
+		t.Fatal("ExitOnly 未装配")
+	}
+	if len(c.ExitGroup) != 2 || c.ExitGroup[0] != "sg-t" || c.ExitGroup[1] != "sg2-t" {
+		t.Fatalf("ExitGroup 装配错误: %v", c.ExitGroup)
+	}
+}
+
+// TestSmartFallbackDial_E2EPreserved 验证 smart fallback 保留 E2E：
+// --e2e 配置时 fallback 闭包存在（编译期保证），且 E2EOpts 解析出 E2E 配置
+// （禁静默降级明文——错误盐/指纹不匹配场景不能悄悄明文转发）。
+func TestSmartFallbackDial_E2EPreserved(t *testing.T) {
+	t.Parallel()
+	c := &Conn{E2E: true, E2EPeerFP: []string{"sha256:" + strings.Repeat("00", 32)}}
+	fb := smartFallbackDial(c)
+	if fb == nil {
+		t.Fatal("fallback 不应为 nil")
+	}
+	// E2E 配置解析：E2EPeerFP 非空 → 返回 E2E 选项（非 nil）。
+	opts, err := c.E2EOpts()
+	if err != nil {
+		t.Fatalf("E2EOpts: %v", err)
+	}
+	if opts == nil || !opts.Enabled {
+		t.Fatal("--e2e + peer-fp 应解析出启用的 E2E 选项")
+	}
+	if len(opts.PeerFingerprints) != 1 {
+		t.Fatalf("PeerFingerprints 应保留: %v", opts.PeerFingerprints)
+	}
+}
+
+// TestSmartFallbackDial_NoE2E_FallbackNil 验证无 E2E 时 fallback 仍可用（零回归）。
+func TestSmartFallbackDial_NoE2E_FallbackNil(t *testing.T) {
+	t.Parallel()
+	c := &Conn{E2E: false}
+	fb := smartFallbackDial(c)
+	if fb == nil {
+		t.Fatal("无 E2E 时 fallback 也应非 nil（降级固定顺序）")
+	}
+}
+
+// TestParseUpstreamProxy 验证 --upstream-proxy 解析（URL/认证/host）。
+func TestParseUpstreamProxy(t *testing.T) {
+	t.Parallel()
+	// 合法：带认证
+	up, err := parseUpstreamProxy("http://cg:pass@61.153.100.229:40086")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if up.Host != "61.153.100.229:40086" || up.User != "cg" || up.Pass != "pass" {
+		t.Fatalf("解析错误: %+v", up)
+	}
+	// 无认证
+	up2, err := parseUpstreamProxy("http://127.0.0.1:40086")
+	if err != nil {
+		t.Fatalf("parse no-auth: %v", err)
+	}
+	if up2.User != "" || up2.Pass != "" {
+		t.Fatalf("无认证应解析为空: %+v", up2)
+	}
+	// https:// 拒绝（fail-closed）
+	if _, err := parseUpstreamProxy("https://61.153.100.229:40086"); err == nil {
+		t.Fatal("https:// 上游应拒绝")
+	}
+	// 缺 host 拒绝
+	if _, err := parseUpstreamProxy("http://"); err == nil {
+		t.Fatal("缺 host 应拒绝")
+	}
+}
+
+// TestUpstreamConnect_Tunnel 验证经上游代理 CONNECT 建隧道（本地起 mock 上游）。
+func TestUpstreamConnect_Tunnel(t *testing.T) {
+	t.Parallel()
+	// mock 上游：监听 127.0.0.1，收到 CONNECT 后 200 并回显。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		req, rerr := http.ReadRequest(br)
+		if rerr != nil {
+			return
+		}
+		// 校验认证头
+		if req.Header.Get("Proxy-Authorization") == "" {
+			_ = c.Close()
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		// 回显 4 字节（生产手动解析状态行，不会把隧道数据当 body 消费）
+		_, _ = c.Write([]byte("tun1"))
+	}()
+	up := &upstreamProxy{Host: ln.Addr().String(), User: "cg", Pass: "pass"}
+	conn, err := upstreamConnect(context.Background(), up, "example.com:443")
+	if err != nil {
+		t.Fatalf("upstreamConnect: %v", err)
+	}
+	defer conn.Close()
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("读隧道数据: %v", err)
+	}
+	if string(buf) != "tun1" {
+		t.Fatalf("隧道数据异常: %q", buf)
+	}
+}
+
+// TestUpstreamConnect_AuthRequired 验证无认证被上游拒绝 → 报错（fail-closed）。
+func TestUpstreamConnect_AuthRequired(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		_, _ = http.ReadRequest(br)
+		_, _ = c.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"))
+	}()
+	up := &upstreamProxy{Host: ln.Addr().String()} // 无认证
+	if _, err := upstreamConnect(context.Background(), up, "example.com:443"); err == nil {
+		t.Fatal("上游 407 应报错")
+	}
+}
+
+// TestAutoDial_RouteFallback_LocalDirect 验证本地直连路径补 "direct" 路由
+// （非 RouteInfoer 连接 → withRoute "direct"；已带路由的 mesh 连接保留）。
+func TestAutoDial_RouteFallback_LocalDirect(t *testing.T) {
+	t.Parallel()
+	// 模拟 base：返回裸 conn（本地直连）
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+	// 用 withRoute 验证非 RouteInfoer 包装
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	routed := withRoute(raw, "direct")
+	if ri, ok := routed.(httpproxy.RouteInfoer); !ok {
+		t.Fatal("withRoute 应返回 RouteInfoer")
+	} else if ri.Route() != "direct" {
+		t.Fatalf("direct 路由: %q", ri.Route())
 	}
 }

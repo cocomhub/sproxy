@@ -96,7 +96,7 @@ func testServerCfg(t *testing.T, mutate func(cfg *server.Config)) (string, *serv
 
 // testServerCfgWithHandlers 同 testServerCfg，但额外返回 *server.Handlers：供需要经**导出接缝**
 // 注入子系统（如 syncmgr.Manager，与 cmd/sproxy 同款装配）的用例使用。
-func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (string, *server.Handlers, *server.Config, func()) {
+func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config), optMut ...func(*server.RegisterRoutesOpts)) (string, *server.Handlers, *server.Config, func()) {
 	t.Helper()
 
 	tmpDir := t.TempDir()
@@ -116,7 +116,7 @@ func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (s
 	cfgPtr.Store(cfg)
 
 	mux := http.NewServeMux()
-	h := server.RegisterRoutes(t.Context(), server.RegisterRoutesOpts{
+	opts := server.RegisterRoutesOpts{
 		Mux:     mux,
 		CfgPtr:  &cfgPtr,
 		Version: "e2e-test",
@@ -126,7 +126,11 @@ func testServerCfgWithHandlers(t *testing.T, mutate func(cfg *server.Config)) (s
 		// 干扰语义断言——注入高阈值瞬态（与 server 包测试同法）。
 		TotpRateLimit:  1000000,
 		LoginRateLimit: 1000000,
-	})
+	}
+	for _, m := range optMut {
+		m(&opts)
+	}
+	h := server.RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
 	return ts.URL, h, cfg, func() {
@@ -318,4 +322,53 @@ func waitTextVisible(t *testing.T, page playwright.Page, sel, want string, timeo
 		last = txt
 		return err == nil && strings.Contains(txt, want)
 	}, func() string { return "文本应出现，最后观测: " + last })
+}
+
+// testServerAdmin 与 testServer 相同，但无认证回环兜底的 Principal 角色为 **admin**。
+// 用途：审计读面是 admin-only（M1-11），审计面板类 e2e（导出/筛选）必须以管理员身份跑，
+// 否则 GET /api/audit 返回 403、面板不渲染（这正是 M1-11 后既有 UI e2e 变红的原因）。
+func testServerAdmin(t *testing.T) (string, *server.Config, func()) {
+	t.Helper()
+	url, _, cfg, cleanup := testServerCfgWithHandlers(t, nil, func(o *server.RegisterRoutesOpts) {
+		o.InsecureLoopbackRole = "admin"
+	})
+	return url, cfg, cleanup
+}
+
+// seedUploadWithMeta 上传带 X-File-Meta-Extra 头的文件（与 seedUploadMultipart 同路径，
+// 仅多一个 meta 头；raw JSON 即可，服务端 parseMetaExtraHeader 两解 base64/raw）。
+func seedUploadWithMeta(t *testing.T, baseURL, filename string, content []byte, metaJSON string) (int, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, werr := fw.Write(content); werr != nil {
+		t.Fatalf("write file body: %v", werr)
+	}
+	if cerr := mw.Close(); cerr != nil {
+		t.Fatalf("close multipart: %v", cerr)
+	}
+	sum := sha256.Sum256(content)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/upload", &buf)
+	if err != nil {
+		t.Fatalf("build upload request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+	if metaJSON != "" {
+		req.Header.Set("X-File-Meta-Extra", metaJSON)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("seed upload request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read upload response: %v", err)
+	}
+	return resp.StatusCode, string(body)
 }

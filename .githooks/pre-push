@@ -1,0 +1,170 @@
+#!/bin/sh
+set -e
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# pre-push：push 前静态门禁（2026-10-05 用户明示改版）
+#
+# 只跑廉价静态检查：① 工作区一致性（未提交/已暂存/未跟踪 + 工作区 == 将推送的提交）；
+# ② make check-format（addlicense + gofix + gofmt 后无残留 diff）。
+#
+# 2026-10-14 加固（用户要求 + 事故复盘）：
+#   - **按 sha 语义判定推送对**：原实现按 `local_ref` 名过滤（只认 refs/heads/*），而
+#     `git push origin HEAD:refs/heads/x` 时钩子收到的 local_ref 是字面 "HEAD" ⇒ 整段
+#     门禁被当作「非分支推送」**静默跳过**。本轮「提交进索引旧版本」事故正是从这里溜过
+#     （本地 lint 绿、CI Lint 红）。
+#   - **一致性检查用 `git status --porcelain`**（未暂存 + 已暂存 + 未跟踪全覆盖；原实现只看
+#     `git diff` + untracked ⇒ 「已 add 未 commit」漏检）。
+#   - **逐文件核对工作区 == 将推送提交**（`git diff <sha> -- <file>`），防 skip-worktree /
+#     assume-unchanged / 部分暂存造成的静默分裂。
+#   - 一致性检查**先于**「无 go 变更跳过」早退：纯文档/配置变更同样会犯这个错。
+#
+# 全量 lint（make lint-all）与测试/构建（make check-ci / test-e2e / build-all）移交
+# CI（.github/workflows/ci.yml 的 Lint / Test / E2E job）在干净环境执行——此前
+# pre-push 长跑 3-6 分钟导致：a) SSH 传输 idle 被远端关闭（Connection to github.com
+# closed by remote host，push 反复失败）；b) 并行 worktree 各自 golangci 抢全局缓存锁
+# （push 阻塞）。静态检查秒级，规避两类问题且不丢门禁（CI 全量覆盖）。
+#
+# 本地 pre-commit 仍做**增量** vet/lint（涉及文件）；pre-push 保留静态层兜格式污染；
+# 全量可靠交给 CI。绝对禁止 `--no-verify` 绕过（绕过只是把失败推迟到 CI，不豁免）。
+#
+# 输出落盘：build/hooks/pre-push.log（check-format 失败时直接查看该日志定位）。
+# 旧版全量脚本（fmt-all → lint-all → check-ci）备份于 build/hooks/pre-push.full.bak。
+#
+# 触发：任何**内容推送**（按 sha 判定，含 HEAD 形态）都跑；tag 推送 / 删除远端 ref / 无 stdin 跳过。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# pre-push 的 stdin 为：<local ref> <local sha> <remote ref> <remote sha>，一行一推送。
+# 收集推送对：分支推送记录 local/remote sha；tag/删除跳过。
+BRANCH_PUSH=0
+PUSH_PAIRS=""
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  local_ref=$(echo "$line" | awk '{print $1}')
+  local_sha=$(echo "$line" | awk '{print $2}')
+  remote_sha=$(echo "$line" | awk '{print $4}')
+  # 2026-10-14 修复：按 sha 语义判定（不按 ref 名）——`git push origin HEAD:refs/heads/x`
+  # 时 local_ref 是字面 "HEAD"，旧实现据此把它当「非分支推送」跳过全部门禁。
+  case "$local_sha" in
+    0000000000000000000000000000000000000000) : ;;  # 删除远端 ref，无内容可查
+    *)
+      case "$local_ref" in
+        refs/tags/*) : ;;                              # tag 推送（内容已由分支推送覆盖）
+        *) BRANCH_PUSH=1; PUSH_PAIRS="$PUSH_PAIRS $local_sha|$remote_sha" ;;
+      esac
+      ;;
+  esac
+done
+
+if [ "$BRANCH_PUSH" -ne 1 ]; then
+  echo "=== pre-push：本次仅 tag/删除/非分支推送，跳过全量门禁 ==="
+  exit 0
+fi
+
+echo "=== pre-push 检查（分支推送）==="
+TOPLEVEL=$(git rev-parse --show-toplevel)
+cd "$TOPLEVEL"
+
+# golangci-lint 缓存隔离：与 pre-commit 一致，防止并行 worktree 各自 lint 时抢
+# 全局缓存锁（"parallel golangci-lint is running" 误拦主仓 push，2026-09-29 同型修复）。
+export GOLANGCI_LINT_CACHE="$TOPLEVEL/.cache/golangci"
+
+# 日志落盘：build/hooks/<hook>.log（build/ 为 git 忽略产物目录，与 coverage 同级）
+LOG_DIR="$TOPLEVEL/build/hooks"
+LOG_FILE="$LOG_DIR/pre-push.log"
+mkdir -p "$LOG_DIR"
+: > "$LOG_FILE"
+# say：实时显示 + 落盘
+say() { printf '%s\n' "$*" | tee -a "$LOG_FILE"; }
+
+say ""
+say "=== pre-push 检查（分支推送）==="
+say "日志位置: $LOG_FILE"
+say ""
+
+# 0. 工作区一致性（**最先跑**，与是否涉及 go 变更无关）。
+say "[0/2] 工作区一致性检查（未提交/已暂存/未跟踪 + 工作区 == 将推送的提交）..."
+dirty=$(git status --porcelain 2>/dev/null || true)
+if [ -n "$dirty" ]; then
+  say "✗ 工作区不干净：push 前必须先把改动纳入提交（或 stash）——否则提交记录的可能是索引里的旧版本"
+  printf '%s
+' "$dirty" | head -20 | while IFS= read -r l; do say "    $l"; done
+  say "  常见根因：gofmt/goimports/go fix/check-format 改完文件后**未重新 git add** ⇒"
+  say "  提交进的是索引旧版本 ⇒ 本地 lint 绿而 CI 红（2026-10-14 实证事故）"
+  say "  处置：git add <file> && git commit（提交失败即原样重来，禁止 amend 已推送提交）"
+  exit 1
+fi
+for pair in $PUSH_PAIRS; do
+  lsha="${pair%%|*}"
+  rsha="${pair##*|}"
+  if [ "$rsha" = "0000000000000000000000000000000000000000" ]; then
+    if git rev-parse --verify origin/master >/dev/null 2>&1; then
+      base=$(git merge-base origin/master "$lsha" 2>/dev/null || echo "")
+      [ -n "$base" ] || base=$(git rev-parse origin/master)
+    else
+      base=""
+    fi
+  else
+    base="$rsha"
+  fi
+  [ -n "$base" ] || continue
+  for f in $(git diff --name-only "$base".."$lsha" -- 2>/dev/null || true); do
+    if ! git diff --quiet "$lsha" -- "$f" 2>/dev/null; then
+      say "✗ 工作区与将推送的提交不一致：$f（工作区版本未进入提交）"
+      say "  处置：git add \"$f\" && git commit（失败即原样重来）"
+      exit 1
+    fi
+  done
+done
+say "工作区干净且与将推送的提交一致"
+
+# 判定本次 push 是否涉及 go 文件变更（对齐 pre-commit：无 go 变更跳过全量）。
+# 每个推送对分别判定；全部无 go 变更才跳过。
+HAS_GO=0
+for pair in $PUSH_PAIRS; do
+  local_sha="${pair%%|*}"
+  remote_sha="${pair##*|}"
+  if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+    # 新分支：base = merge-base(origin/master, local)；无 origin/master 引用则保守全量
+    if git rev-parse --verify origin/master >/dev/null 2>&1; then
+      base=$(git merge-base origin/master "$local_sha" 2>/dev/null || echo "")
+      [ -n "$base" ] || base=$(git rev-parse origin/master)
+    else
+      base=""
+    fi
+    if [ -n "$base" ]; then
+      if [ -n "$(git diff --name-only "$base".."$local_sha" -- '*.go' 2>/dev/null)" ]; then
+        HAS_GO=1
+      fi
+    else
+      say "（新分支且无法确定 base——保守跑全量）"
+      HAS_GO=1
+    fi
+  else
+    if [ -n "$(git diff --name-only "$remote_sha".."$local_sha" -- '*.go' 2>/dev/null)" ]; then
+      HAS_GO=1
+    fi
+  fi
+done
+
+if [ "$HAS_GO" -ne 1 ]; then
+  say "（本次 push 无 go 文件变更，跳过全量门禁——与 pre-commit 一致）"
+  say "=== pre-push 通过（无 go 变更） ==="
+  say "（日志: $LOG_FILE）"
+  exit 0
+fi
+
+# 1. make check-format（验证 HEAD 格式化干净：go fix + addlicense + gofmt 后无残留）。
+#    与 CI check-format job 对齐：fmt-all 是修改型，check-format 是验证型（git diff 必须空）。
+#    全量 lint/test 交给 CI（见文件头注释），此处仅保留秒级静态格式门禁。
+say "[1/2] make check-format（go fix + addlicense + gofmt 后无未提交改动）..."
+if ! make_out=$(make check-format 2>&1); then
+  say "✗ make check-format 失败（格式化有残留，请 commit 后重新 push）"
+  say "$make_out"
+  exit 1
+fi
+say "make check-format 通过"
+
+say ""
+say "=== pre-push 通过（工作区干净 + check-format 静态门禁） ==="
+say "（全量 lint/test 由 CI 执行：.github/workflows/ci.yml Lint/Test/E2E job）"
+say "（日志: $LOG_FILE）"

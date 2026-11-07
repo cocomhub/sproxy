@@ -67,22 +67,30 @@ func CopyWithCtx(ctx context.Context, dst io.Writer, src io.Reader) (int64, erro
 			return total, ctx.Err()
 		default:
 		}
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := dst.Write(buf[:nr])
-			total += int64(nw)
-			if ew != nil {
-				return total, ew
-			}
-			if nr != nw {
-				return total, io.ErrShortWrite
-			}
-		}
-		if er != nil {
-			if er == io.EOF {
+		n, err := copyOnce(dst, src, buf)
+		total += n
+		if err != nil {
+			if err == io.EOF {
 				return total, nil
 			}
-			return total, er
+			return total, err
 		}
 	}
+}
+
+// copyOnce 拷贝一批（一次 src.Read + 一次 dst.Write），返回已写字节数与迭代结果。
+// 写错误优先于读错误（与 io.Copy 一致）；EOF 表示源已读完（字节数含本批已写）。
+func copyOnce(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+	nr, er := src.Read(buf)
+	if nr > 0 {
+		nw, ew := dst.Write(buf[:nr])
+		if ew != nil {
+			return int64(nw), ew
+		}
+		if nr != nw {
+			return int64(nw), io.ErrShortWrite
+		}
+		return int64(nw), er
+	}
+	return 0, er
 }

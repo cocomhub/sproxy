@@ -198,7 +198,7 @@ func (p *Provider) IsOIDCEnabled() bool { return p.oidc != nil }
 func (p *Provider) IsLDAPEnabled() bool { return p.ldap != nil }
 
 // validateURL 校验 http(s) 且带 host（OIDC issuer 与回调共用）。
-func validateURL(s string, what string) error {
+func validateURL(s, what string) error {
 	u, err := url.Parse(s)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("oidcldap: %s %q 非法（应为 http(s)://host[:port]）", what, s)

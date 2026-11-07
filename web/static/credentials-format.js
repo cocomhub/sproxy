@@ -10,11 +10,11 @@
 
 // credentialsTableHtml(data) → 凭据列表表格（AK/owner/SK 数/存活 SK + 删除按钮）。
 function credentialsTableHtml(data) {
-  var list = (data && data.ak) || [];
+  const list = data?.ak || [];
   if (list.length === 0) {
     return '<div class="empty-msg">暂无凭据</div>';
   }
-  var rows = list.map(function (k) {
+  const rows = list.map(function (k) {
     return '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-family:monospace;">' + escHtml(k.ak) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(k.owner) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' + (k.sk_count || 0) +
@@ -47,15 +47,15 @@ function credentialsPanelHtml(data) {
 
 // credAddBody(ak, owner, role) → POST /api/credentials 请求体（role 空归一 user）。
 function credAddBody(ak, owner, role) {
-  var body = { ak: ak, owner: owner };
+  const body = { ak: ak, owner: owner };
   if (role && role !== 'user') body.role = role;
   return body;
 }
 
 function escHtml(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 if (typeof module !== 'undefined' && module.exports) {

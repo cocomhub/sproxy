@@ -7,10 +7,9 @@ package files
 // `pkg/server/upload_handler.go` 整族迁入（接收者由 *Handlers 改为 *Service，方法体只换
 // 接收者与限定名）。批量的写面族见 rename.go / delete.go；目录族见 dirs.go。
 //
-// 留在装配层（pkg/server/upload_handler.go）的部分：`atomicRenameRoot` 与 `copyWithContext`
-// ——它们在 pkg/server 侧另有消费者（跨卷 move：volumes_api.go），且本包已有语义等价的
-// 本地实现（atomicRenameRoot 在 service.go、copyWithContext 在本文件），故按「跨族共享的
-// 纯函数」处置：装配层保留一份，本包持等价实现。
+// 跨族共享的纯函数 `atomicRenameRoot` 留在装配层（委托 `storage.Root.AtomicRename`）；
+// `copyWithContext` 已收敛为 `internal/iocopy.CopyWithContext`（此前 pkg/files 与
+// pkg/server 各有一份逐字相同的实现）。
 
 import (
 	"context"
@@ -29,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/iocopy"
 	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -36,15 +36,6 @@ import (
 // hashPool 复用 SHA-256 hash 对象，减少每次上传的分配。
 var hashPool = sync.Pool{
 	New: func() any { return sha256.New() },
-}
-
-// copyBufPool 复用以 copyWithContext 为主的 32 KiB 拷贝缓冲（上传原子写等写面路径
-// 共用）。缓冲仅在本函数栈内使用，归还前无残留引用。
-var copyBufPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 32*1024)
-		return &b
-	},
 }
 
 // headerVolume 是上传成功响应头：落盘目标卷名（多卷路由断言/客户端定位用；单卷向后兼容）。
@@ -127,6 +118,14 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		remotePathStr = handler.Filename
 	}
 
+	// 随上传写入 .meta sidecar 的自定义元数据（方案①：X-File-Meta-Extra 头，base64(JSON)）。
+	// 校验失败 → 400（fail-closed：不合法不落盘，宁缺毋滥）。
+	metaExtra, merr := parseMetaExtraHeader(r.Header.Get(headerFileMetaExtra))
+	if merr != nil {
+		s.sendJSON(w, UploadResponse{Success: false, Message: "meta-extra 无效: " + merr.Error()}, http.StatusBadRequest)
+		return
+	}
+
 	res, err := s.WriteFile(r.Context(), WriteFileInput{
 		Owner:            s.rt.actorOf(r),
 		RemotePath:       remotePathStr,
@@ -134,6 +133,7 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 		ExpectedChecksum: expectedChecksum,
 		ClientSize:       handler.Size,
 		Mtime:            parseMTimeHeader(r),
+		MetaExtra:        metaExtra,
 	}, file)
 	if err != nil {
 		if he, ok := errors.AsType[*HTTPError](err); ok {
@@ -152,6 +152,10 @@ func (s *Service) Upload(w http.ResponseWriter, r *http.Request) {
 	s.sendJSON(w, UploadResponse{Success: true, Message: res.Message, Checksum: res.Checksum}, http.StatusOK)
 	if s.rt.metricsRecorder() != nil {
 		s.rt.metricsRecorder().RecordUpload(handler.Size)
+		// 计量报告 owner 维度（roadmap 11.10-⑩ 片 2）：成功上传按请求主体记 per-owner 字节。
+		if owner := s.rt.actorOf(r); owner != "" {
+			s.rt.metricsRecorder().RecordUploadForOwner(owner, handler.Size)
+		}
 		// 卷 IO 指标（成功，带落盘卷名）。
 		ioOK = true
 		s.rt.metricsRecorder().RecordVolumeIO(res.VolumeName, "upload", time.Since(start), true)
@@ -192,7 +196,7 @@ func writeFileAtomicallyRoot(ctx context.Context, root *storage.Root, rel string
 	hash.Reset()
 	defer hashPool.Put(hash)
 	mw := io.MultiWriter(tmpFile, hash)
-	written, err = copyWithContext(mw, src, ctx)
+	written, err = iocopy.CopyWithContext(ctx, mw, src)
 	if err != nil {
 		tmpFile.Close()
 		return "", written, fmt.Errorf("写入临时文件失败: %w", err)
@@ -205,47 +209,4 @@ func writeFileAtomicallyRoot(ctx context.Context, root *storage.Root, rel string
 		return checksum, written, fmt.Errorf("重命名临时文件失败: %w", err)
 	}
 	return checksum, written, nil
-}
-
-// copyWithContext 是 context-aware 的 io.Copy，每次 Read/Write 前检查 ctx.Done()。
-//
-// 本函数自 pkg/server/upload_handler.go **原样下沉**（函数体逐字未改）：它不含 Handlers
-// 私有状态，属纯计算（按接缝判据不进接缝）。pkg/server 侧的同名实现另有消费者
-// （跨卷 move：volumes_api.go 与 share.go），故两侧各留一份，等价性由
-// `pkg/server/helper_impl_drift_test.go` 的源码级断言守卫。
-//
-// 拷贝缓冲从 copyBufPool 复用（32 KiB），不再每次调用重新分配。
-func copyWithContext(w io.Writer, r io.Reader, ctx context.Context) (int64, error) {
-	var total int64
-	bufp, _ := copyBufPool.Get().(*[]byte) //nolint:errcheck // pool 无错误返回，断言防御
-	buf := make([]byte, 32*1024)
-	if bufp != nil {
-		buf = *bufp
-	}
-	defer func() {
-		if bufp != nil {
-			copyBufPool.Put(bufp)
-		}
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return total, ctx.Err()
-		default:
-		}
-		n, err := r.Read(buf)
-		if n > 0 {
-			nn, werr := w.Write(buf[:n])
-			total += int64(nn)
-			if werr != nil {
-				return total, werr
-			}
-		}
-		if err == io.EOF {
-			return total, nil
-		}
-		if err != nil {
-			return total, err
-		}
-	}
 }

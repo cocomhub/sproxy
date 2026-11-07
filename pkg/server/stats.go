@@ -5,236 +5,20 @@ package server
 
 import (
 	"net/http"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/ops"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 )
 
-// DiskUsageStats 磁盘使用统计。
-type DiskUsageStats struct {
-	StorageRoot string `json:"storage_root"`
-	TotalFiles  int    `json:"total_files"`
-	TotalSize   int64  `json:"total_size"`
-}
-
-// RequestCounts 请求计数统计。
-type RequestCounts struct {
-	Total     int64 `json:"total"`
-	Status2xx int64 `json:"2xx"`
-	Status4xx int64 `json:"4xx"`
-	Status5xx int64 `json:"5xx"`
-}
-
-// StatsResponse 是 GET /api/stats 的响应体。
-type StatsResponse struct {
-	DiskUsage       DiskUsageStats `json:"disk_usage"`
-	RequestCounts   RequestCounts  `json:"request_counts"`
-	ActiveConns     int64          `json:"active_connections"`
-	FilesUploaded   int64          `json:"files_uploaded"`
-	FilesDownloaded int64          `json:"files_downloaded"`
-	FilesDeleted    int64          `json:"files_deleted"`
-	BytesUploaded   int64          `json:"bytes_uploaded"`
-	BytesDownloaded int64          `json:"bytes_downloaded"`
-
-	// 存储空间统计
-	MaxStorageBytes  int64      `json:"max_storage_bytes"`
-	StorageUsage     int64      `json:"storage_usage"`
-	StorageUserFiles int64      `json:"storage_user_files"`
-	StorageChunked   int64      `json:"storage_chunked"`
-	StorageVersions  int64      `json:"storage_versions"`
-	StorageCloud     int64      `json:"storage_cloud"`
-	ScannedAt        *time.Time `json:"scanned_at"`
-
-	// 磁盘统计
-	DiskTotal int64 `json:"disk_total"`
-	DiskFree  int64 `json:"disk_free"`
-	DiskUsed  int64 `json:"disk_used"`
-
-	// 配额水位（roadmap P2 配额预警残余）：认证用户 → 本租户使用量/上限/水位。
-	Quota QuotaStatus `json:"quota"`
-}
-
-// QuotaStatus 是 per-owner 配额水位（admin 空 owner = 全局聚合）。
-type QuotaStatus struct {
-	Usage     int64 `json:"usage"`
-	MaxBytes  int64 `json:"max_bytes"`
-	Watermark int   `json:"watermark"` // 百分比 0-100；MaxBytes<=0（不限）= 0
-}
-
-// quotaStatusOf 计算配额水位（nil scope 或 MaxBytes<=0 = 不限 → watermark 0）。
-func quotaStatusOf(scope *quota.Scope) QuotaStatus {
-	if scope == nil {
-		return QuotaStatus{}
-	}
-	usage := scope.Usage()
-	maxB := scope.MaxBytes()
-	wm := 0
-	if maxB > 0 {
-		wm = int(usage * 100 / maxB)
-	}
-	return QuotaStatus{Usage: usage, MaxBytes: maxB, Watermark: wm}
-}
-
-// isStorageBucket 判断是否为新布局功能桶名（user/cloud/archive/chunk/version/meta）。
-func isStorageBucket(bucket string) bool {
-	switch bucket {
-	case "user", "cloud", "archive", "chunk", "version", "meta":
-		return true
-	}
-	return false
-}
-
-// statsBucketOf 返回统计遍历路径的桶段：兼容两种遍历根——
-//   - 租户根相对路径（user/f.txt、version/doc/v1）：首段即功能桶名；
-//   - 存储根相对路径（alice/user/f.txt）：第 2 段为功能桶名（复用 capacity.StorageBucketOf）。
-//
-// 已知功能桶名优先按首段识别（租户根遍历），否则回退 capacity.StorageBucketOf；未知返回 ""。
-func statsBucketOf(rel string) string {
-	if before, _, ok := strings.Cut(rel, "/"); ok {
-		if isStorageBucket(before) {
-			return before
-		}
-	} else if isStorageBucket(rel) {
-		return rel
-	}
-	return capacity.StorageBucketOf(rel)
-}
-
-// walkUploadStats 遍历 root 统计用户文件数与总大小。
-// 新布局桶语义（storage.Root）：只统计 user/ 桶内的文件；跳过其它功能桶（cloud/archive/
-// chunk/version/meta）、遗留 .__ 魔法目录、.checksums.json 与 LAYOUT_VERSION。
-// 旧布局平铺文件（无桶结构）按用户文件计入。
-func (h *Handlers) walkUploadStats(root string) (totalFiles int, totalSize int64) {
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		relSlash := filepath.ToSlash(rel)
-		if d.IsDir() {
-			// 跳过遗留 .__ 魔法目录（P5 后旧布局不再产生）与用户不可见内部目录。
-			if strings.HasPrefix(d.Name(), ".__") {
-				return filepath.SkipDir
-			}
-			// 新布局功能桶目录（非 user）在目录层直接跳过。
-			if b := statsBucketOf(relSlash); isStorageBucket(b) && b != "user" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == "checksums.json" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
-			return nil
-		}
-		b := statsBucketOf(relSlash)
-		switch {
-		case b == "user":
-			// 用户桶文件计入。
-		case isStorageBucket(b):
-			// 其它功能桶（cloud/archive/chunk/version/meta）不计入用户文件数/大小。
-			return nil
-		case d.Name() == "LAYOUT_VERSION":
-			// 存储根/租户根的布局版本标记（storage.OpenRoot 写入）不计入。
-			return nil
-		default:
-			// 旧布局平铺用户文件计入。
-		}
-		totalFiles++
-		totalSize += info.Size()
-		return nil
-	})
-	return totalFiles, totalSize
-}
-
-// walkUploadStatsByCategory 遍历 root 按新布局桶前缀分类统计用户文件与分类用量
-// （chunked/versions/cloud）。user/→userFiles、cloud/+archive/→cloud、chunk/→chunked、
-// version/→versions；meta/ 与遗留 .__ 魔法目录跳过。无桶结构的旧布局平铺文件按
-// 用户文件计入。
-func (h *Handlers) walkUploadStatsByCategory(root string) (userFiles, chunked, versions, cloud int64) {
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			h.logger.Warn("stats: WalkDir 遍历错误，跳过", "path", path, "error", err)
-			return nil
-		}
-		if d.IsDir() {
-			// 遗留 .__ 魔法目录与 meta 桶不计入配额（对齐 pkg/storage/capacity 扫描）。
-			if strings.HasPrefix(d.Name(), ".__") {
-				return filepath.SkipDir
-			}
-			rel, relErr := filepath.Rel(root, path)
-			if relErr == nil && statsBucketOf(filepath.ToSlash(rel)) == "meta" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == "checksums.json" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			h.logger.Warn("stats: 获取文件信息失败，跳过", "path", path, "error", err)
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		size := info.Size()
-		switch bucket := statsBucketOf(rel); bucket {
-		case "user":
-			userFiles += size
-		case "cloud", "archive":
-			cloud += size
-		case "chunk":
-			chunked += size
-		case "version":
-			versions += size
-		case "meta":
-			// 目录层已 SkipDir，兜底跳过
-		default:
-			// 无桶结构的旧布局平铺文件按用户文件计入（.__ 魔法目录已在目录层跳过）。
-			userFiles += size
-		}
-		return nil
-	})
-	return userFiles, chunked, versions, cloud
-}
-
-// statsCategoriesFromBuckets 把 UsageByBucket 的 path→bytes 映射聚合为 stats 分类字节数。
-// 路径末段即桶名：user/chunk/version 单列，cloud+archive 并入 storage_cloud，meta 忽略。
-func statsCategoriesFromBuckets(buckets map[string]int64) (userFiles, cloud, chunked, versions int64) {
-	for path, size := range buckets {
-		bucket := path
-		if i := strings.LastIndexByte(path, '/'); i >= 0 {
-			bucket = path[i+1:]
-		}
-		switch bucket {
-		case "user":
-			userFiles += size
-		case "cloud", "archive":
-			cloud += size
-		case "chunk":
-			chunked += size
-		case "version":
-			versions += size
-		}
-	}
-	return userFiles, cloud, chunked, versions
-}
+type (
+	DiskUsageStats = ops.DiskUsageStats
+	RequestCounts  = ops.RequestCounts
+	StatsResponse  = ops.StatsResponse
+	QuotaStatus    = ops.QuotaStatus
+)
 
 // statsRootFor 返回 stats 遍历的根目录：认证用户 → 租户根（<默认卷根>/<owner>/）；
 // admin（空 owner）→ 存储根（<默认卷根>/）。globalRoot 未装配时回退
@@ -276,6 +60,11 @@ func (h *Handlers) statsRootFor(owner string) string {
 // 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计 user 桶用户文件，跳过内部桶）。
 // 存储分类用量：认证用户（owner 非空）→ 本租户 quota Scope 的 Usage()/UsageByBucket()
 // （防跨租户泄露）；空 owner（admin）→ GlobalPool.Usage() + UsageByBucket() 聚合
+
+// statsHandler 处理 GET /api/stats。
+// 文件数/总大小通过轻量 WalkDir 遍历获取（仅统计 user 桶用户文件，跳过内部桶）。
+// 存储分类用量：认证用户（owner 非空）→ 本租户 quota Scope 的 Usage()/UsageByBucket()
+// （防跨租户泄露）；空 owner（admin）→ GlobalPool.Usage() + UsageByBucket() 聚合
 // （运维指标）。未装配 quota/globalPool 时回退磁盘遍历分类（旧测试/旧装配兼容）。
 func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := h.cfgPtr.Load()
@@ -283,7 +72,7 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 
 	owner := ActorFrom(r.Context())
 	root := h.statsRootFor(owner)
-	totalFiles, totalSize := h.walkUploadStats(root)
+	totalFiles, totalSize := ops.WalkUploadStats(root, h.logger)
 
 	resp := StatsResponse{
 		DiskUsage: DiskUsageStats{
@@ -293,61 +82,23 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	if h.storageMgr != nil {
-		if scannedAt := h.storageMgr.LastScanTime(); scannedAt == nil {
-			sendJSONResponse(w, map[string]any{
-				"success": false, "message": "存储统计尚未完成首次扫描，请稍后重试",
-			}, http.StatusServiceUnavailable)
-			return
-		} else {
-			resp.ScannedAt = scannedAt
-		}
+	if scannedAt, ok := h.statsScannedAt(); !ok {
+		sendJSONResponse(w, map[string]any{
+			"success": false, "message": "存储统计尚未完成首次扫描，请稍后重试",
+		}, http.StatusServiceUnavailable)
+		return
+	} else if scannedAt != nil {
+		resp.ScannedAt = scannedAt
 	}
 
 	if owner != "" {
-		// 认证用户：分类用量与总用量按本租户 quota Scope 归集（防跨租户泄露）。
-		if scope := h.quotaFor(owner); scope != nil {
-			uf, cl, ch, ve := statsCategoriesFromBuckets(scope.UsageByBucket())
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = scope.Usage()
-			resp.Quota = quotaStatusOf(scope)
-		} else {
-			// 未装配 quota：回退磁盘遍历分类。
-			uf, ch, ve, cl := h.walkUploadStatsByCategory(root)
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = uf + cl + ch + ve
-		}
+		// 认证用户：分类用量与总用量按 owner 租户 quota Scope 归集（防跨租户泄露）。
+		h.fillOwnerStatsUsage(&resp, owner, root)
 	} else {
-		// admin：全局聚合（globalPool 权威；storageMgr 回退）。
-		if h.globalPool != nil {
-			uf, cl, ch, ve := statsCategoriesFromBuckets(h.globalPool.UsageByBucket())
-			resp.StorageUserFiles = uf
-			resp.StorageCloud = cl
-			resp.StorageChunked = ch
-			resp.StorageVersions = ve
-			resp.StorageUsage = h.globalPool.Usage()
-		} else if h.storageMgr != nil {
-			usageByCat := h.storageMgr.UsageByCategory()
-			resp.StorageUserFiles = usageByCat[capacity.CategoryUserFiles]
-			resp.StorageChunked = usageByCat[capacity.CategoryChunked]
-			resp.StorageVersions = usageByCat[capacity.CategoryVersions]
-			resp.StorageCloud = usageByCat[capacity.CategoryCloud]
-			resp.StorageUsage = h.storageMgr.Usage()
-		}
+		// admin：全局聚合（quota 权威；storageMgr 回退）。
+		h.fillAdminStatsUsage(&resp)
 	}
-
-	// MaxStorageBytes 与 ScannedAt：优先 globalPool（P4 权威），回退 storageMgr。
-	if h.globalPool != nil {
-		resp.MaxStorageBytes = h.globalPool.MaxBytes()
-	} else if h.storageMgr != nil {
-		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
-	}
+	h.fillMaxBytes(&resp)
 
 	if m != nil {
 		resp.ActiveConns = m.ActiveConnections.Load()
@@ -376,4 +127,67 @@ func (h *Handlers) statsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)
+}
+
+// statsScannedAt 返回最近一次存储扫描时间与可用标记（storageMgr 未装配 → 可用但无时间）。
+func (h *Handlers) statsScannedAt() (*time.Time, bool) {
+	if h.storageMgr == nil {
+		return nil, true
+	}
+	scannedAt := h.storageMgr.LastScanTime()
+	if scannedAt == nil {
+		return nil, false
+	}
+	return scannedAt, true
+}
+
+// fillOwnerStatsUsage 填充认证用户的分类/总量用量（quota Scope 权威；未装配回退磁盘遍历分类）。
+func (h *Handlers) fillOwnerStatsUsage(resp *StatsResponse, owner, root string) {
+	if scope := h.quotaFor(owner); scope != nil {
+		uf, cl, ch, ve := ops.CategoriesFromBuckets(scope.UsageByBucket())
+		resp.StorageUserFiles = uf
+		resp.StorageCloud = cl
+		resp.StorageChunked = ch
+		resp.StorageVersions = ve
+		resp.StorageUsage = scope.Usage()
+		resp.Quota = ops.QuotaStatusOf(scope)
+		return
+	}
+	// 未装配 quota：回退磁盘遍历分类。
+	uf, ch, ve, cl := ops.WalkUploadStatsByCategory(root, h.logger)
+	resp.StorageUserFiles = uf
+	resp.StorageCloud = cl
+	resp.StorageChunked = ch
+	resp.StorageVersions = ve
+	resp.StorageUsage = uf + cl + ch + ve
+}
+
+// fillAdminStatsUsage 填充 admin 的全局聚合分类用量（globalPool 权威；storageMgr 回退）。
+func (h *Handlers) fillAdminStatsUsage(resp *StatsResponse) {
+	if h.globalPool != nil {
+		uf, cl, ch, ve := ops.CategoriesFromBuckets(h.globalPool.UsageByBucket())
+		resp.StorageUserFiles = uf
+		resp.StorageCloud = cl
+		resp.StorageChunked = ch
+		resp.StorageVersions = ve
+		resp.StorageUsage = h.globalPool.Usage()
+		return
+	}
+	if h.storageMgr != nil {
+		usageByCat := h.storageMgr.UsageByCategory()
+		resp.StorageUserFiles = usageByCat[capacity.CategoryUserFiles]
+		resp.StorageChunked = usageByCat[capacity.CategoryChunked]
+		resp.StorageVersions = usageByCat[capacity.CategoryVersions]
+		resp.StorageCloud = usageByCat[capacity.CategoryCloud]
+		resp.StorageUsage = h.storageMgr.Usage()
+	}
+}
+
+// fillMaxBytes 填充存储上限（优先 globalPool，回退 storageMgr）。
+func (h *Handlers) fillMaxBytes(resp *StatsResponse) {
+	if h.globalPool != nil {
+		resp.MaxStorageBytes = h.globalPool.MaxBytes()
+	} else if h.storageMgr != nil {
+		resp.MaxStorageBytes = h.storageMgr.MaxBytes()
+	}
 }

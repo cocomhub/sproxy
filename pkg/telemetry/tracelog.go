@@ -30,7 +30,7 @@ type contextHandler struct {
 // （幂等判断，见 WithContextHandler）。
 type contextHandlerMarker interface{ isContextHandler() }
 
-func (h *contextHandler) isContextHandler() {}
+func (h *contextHandler) isContextHandler() { /* 标记接口方法：无行为 */ }
 
 func (h *contextHandler) Enabled(ctx context.Context, l slog.Level) bool {
 	return h.inner.Enabled(ctx, l)

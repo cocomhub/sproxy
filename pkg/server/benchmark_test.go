@@ -144,7 +144,7 @@ func newUploadRequest(baseURL, filename string, body []byte, headers map[string]
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -208,7 +208,7 @@ func benchUploadOp(client *http.Client, baseURL, filename string, body []byte, h
 // postJSONBench 发 JSON 请求并解码响应（失败即 Fatal）。接受 testing.TB，benchmark 同样可用。
 func postJSONBench(tb testing.TB, client *http.Client, url string, reqBody []byte, out any) int {
 	tb.Helper()
-	resp, err := client.Post(url, "application/json", bytes.NewReader(reqBody))
+	resp, err := client.Post(url, contentTypeJSON, bytes.NewReader(reqBody))
 	if err != nil {
 		tb.Fatalf("POST %s: %v", url, err)
 	}
@@ -333,35 +333,8 @@ func TestBenchServerWithChunkedAllowsLoopbackFlow(t *testing.T) {
 			status, initResp)
 	}
 
-	for i := range totalChunks {
-		part := payload[i*chunkSize : (i+1)*chunkSize]
-
-		var buf bytes.Buffer
-		mw := multipart.NewWriter(&buf)
-		_ = mw.WriteField("upload_id", uploadID)
-		_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", i))
-		_ = mw.WriteField("chunk_checksum", sha256hex(part))
-		fw, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", i))
-		if err != nil {
-			t.Fatalf("CreateFormFile: %v", err)
-		}
-		if _, err = fw.Write(part); err != nil {
-			t.Fatalf("写 chunk: %v", err)
-		}
-		if err = mw.Close(); err != nil {
-			t.Fatalf("关闭 multipart: %v", err)
-		}
-
-		resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-		if err != nil {
-			t.Fatalf("POST /upload/chunk #%d: %v", i, err)
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("分块夹具的 /upload/chunk #%d 未成功（status=%d）", i, resp.StatusCode)
-		}
-	}
+	// 逐块上传。
+	uploadBenchChunks(t, client, url, uploadID, payload, chunkSize, totalChunks)
 
 	completeResp := files.ChunkCompleteResponse{}
 	completeJSON := mustJSON(t, map[string]string{"upload_id": uploadID})
@@ -370,6 +343,51 @@ func TestBenchServerWithChunkedAllowsLoopbackFlow(t *testing.T) {
 	}
 
 	// 端到端：合并后的文件必须能原样下载。
+	assertBenchChunkedDownload(t, client, url, filename, payload)
+}
+
+// uploadBenchChunk 上传单块 /upload/chunk 并断言 200。
+func uploadBenchChunk(t *testing.T, client *http.Client, url, uploadID string, i int, part []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("upload_id", uploadID)
+	_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", i))
+	_ = mw.WriteField("chunk_checksum", sha256hex(part))
+	fw, err := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", i))
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	if _, err = fw.Write(part); err != nil {
+		t.Fatalf("写 chunk: %v", err)
+	}
+	if err = mw.Close(); err != nil {
+		t.Fatalf("关闭 multipart: %v", err)
+	}
+
+	resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("POST /upload/chunk #%d: %v", i, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("分块夹具的 /upload/chunk #%d 未成功（status=%d）", i, resp.StatusCode)
+	}
+}
+
+// uploadBenchChunks 逐块上传全部 /upload/chunk。
+func uploadBenchChunks(t *testing.T, client *http.Client, url, uploadID string, payload []byte, chunkSize, totalChunks int) {
+	t.Helper()
+	for i := range totalChunks {
+		part := payload[i*chunkSize : (i+1)*chunkSize]
+		uploadBenchChunk(t, client, url, uploadID, i, part)
+	}
+}
+
+// assertBenchChunkedDownload 下载合并产物并断言与 payload 逐字节一致。
+func assertBenchChunkedDownload(t *testing.T, client *http.Client, url, filename string, payload []byte) {
+	t.Helper()
 	resp, err := client.Get(url + "/download?filename=" + filename)
 	if err != nil {
 		t.Fatalf("GET /download: %v", err)
@@ -529,27 +547,7 @@ func BenchmarkChunkedUpload(b *testing.B) {
 		for ci := range totalChunks {
 			start := ci * int(chunkSize)
 			end := min(start+int(chunkSize), fileSize)
-			chunkData := fileData[start:end]
-			chunkCS := sha256hex(chunkData)
-
-			var buf bytes.Buffer
-			mw := multipart.NewWriter(&buf)
-			_ = mw.WriteField("upload_id", uploadID)
-			_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", ci))
-			_ = mw.WriteField("chunk_checksum", chunkCS)
-			part, _ := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", ci))
-			_, _ = part.Write(chunkData)
-			_ = mw.Close()
-
-			resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
-			if err != nil {
-				b.Fatalf("chunk #%d/%d: %v", i, ci, err)
-			}
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				b.Fatalf("chunk #%d/%d 失败: status=%d", i, ci, resp.StatusCode)
-			}
+			helperBenchmarkChunkedUpload_uploadChunk(b, client, url, uploadID, i, ci, fileData[start:end])
 		}
 
 		// ---- Complete ----
@@ -558,5 +556,30 @@ func BenchmarkChunkedUpload(b *testing.B) {
 		if status := postJSONBench(b, client, url+"/upload/complete", completeBody, &completeResp); status != http.StatusOK || !completeResp.Success {
 			b.Fatalf("complete #%d 失败: status=%d, resp=%+v", i, status, completeResp)
 		}
+	}
+}
+
+// helperBenchmarkChunkedUpload_uploadChunk 上传单个分块并校验响应状态码。
+func helperBenchmarkChunkedUpload_uploadChunk(b *testing.B, client *http.Client, url, uploadID string, outer, ci int, chunkData []byte) {
+	b.Helper()
+	chunkCS := sha256hex(chunkData)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("upload_id", uploadID)
+	_ = mw.WriteField("chunk_index", fmt.Sprintf("%d", ci))
+	_ = mw.WriteField("chunk_checksum", chunkCS)
+	part, _ := mw.CreateFormFile("chunk", fmt.Sprintf("%05d.chunk", ci))
+	_, _ = part.Write(chunkData)
+	_ = mw.Close()
+
+	resp, err := client.Post(url+"/upload/chunk", mw.FormDataContentType(), &buf)
+	if err != nil {
+		b.Fatalf("chunk #%d/%d: %v", outer, ci, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b.Fatalf("chunk #%d/%d 失败: status=%d", outer, ci, resp.StatusCode)
 	}
 }

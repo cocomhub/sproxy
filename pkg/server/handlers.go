@@ -17,249 +17,40 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/accesskey"
-	"github.com/cocomhub/sproxy/pkg/authn"
 	"github.com/cocomhub/sproxy/pkg/checksum"
-	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
-	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/server/alerts"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
+	"github.com/cocomhub/sproxy/pkg/server/share"
+	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage"
-	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
-	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
-	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // Handlers 持有所有 HTTP handler 的依赖。
 type Handlers struct {
-	cfgPtr        *atomic.Pointer[Config]
-	version       string
-	buildAt       string
-	tunnelHandler http.Handler
-	// localHandler 是隧道内层本地文件 API handler（localMux + 中间件链，不含外层
-	// 帧解密/密钥检查）。供 xfer listener（阶段 5 工作项 1）直接路由解密后的隧道
-	// 请求；与 tunnelHandler（传统 POST /tunnel 外层帧解密器）互补。
-	localHandler http.Handler
-	logger       *slog.Logger
-	metrics      *Metrics
-	// xferMetrics 是传输层扩展指标提供者（RegisterRoutesOpts.XferMetrics；nil = 不输出）。
-	xferMetrics XferMetricsProvider
-	// rebalanceProg 是卷再平衡迁移进度状态（roadmap 3.3 P1 残余：#440 后补）。
-	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
-	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。
-	rebalanceProg *rebalanceProgress
-	// externalHealth 是外部卷健康探测缓存（roadmap 3.3 P1 后端健康探针）：
-	// map[卷名]{state, at}，30s TTL 内复用上次探测结果（惰性：列表触发，无后台 goroutine）。
-	// healthMu 串行化读写（列表并发安全）。nil = 未装配探针（零回归）。
-	externalHealth map[string]externalHealthEntry
-	healthMu       sync.Mutex
-	shareStore     *ShareStore
-	routeTable     *hub.MeshRouteTable
-	// dht 是节点发现表（nil = 不启用 DHT 候选，既有行为）。/api/hub/nodes 把 DHT
-	// 候选节点合并进发现列表（路由表权威 + DHT 候选，去重）。由 cmd/sproxy 装配
-	// Kademlia 时经 SetDHT 注入（hub.dht: kad）。
-	dht hub.DHT
-	// fedClient 是 hub 联邦节点表同步客户端（nil = 不启用联邦候选）。/api/hub/nodes
-	// 把联邦候选节点合并进发现列表（路由表权威 + DHT + 联邦候选，去重）。由
-	// cmd/sproxy 装配 hub.federation 时经 SetFederationClient 注入。
-	fedClient *hub.FederationClient
-	// relayStream 是 /api/relay/stream 处理器（RegisterRoutes 创建）。SetFederationClient
-	// 注入联邦客户端时联动装配其跨 hub 转发器（路由表未命中 → 联邦转发）。
-	relayStream *RelayStreamHandler
-	// hubID 是本 hub 身份（config hub.node_id），跨 hub 转发防环路径记录用。
-	hubID        string
-	signalBroker *SignalBroker
-	hubPersist   *hub.Persister // hub 状态持久化器（配置 hub.persist_file 时注入；nil = 不持久化）
-	handler      http.Handler
-	// auditLogger 是操作审计专用 logger：固定 JSON 格式（不随 log_format 切换）、
-	// 与业务 logger 独立，保证审计行可机器检索。RegisterRoutes 初始化；测试可经
-	// RegisterRoutesOpts.AuditLogger 注入 buffer 捕获。
-	auditLogger *slog.Logger
-	// meshRuntimeInfo 是跨节点面/角色的**运行态**提供者（装配层注入，见 mesh_status.go）。
-	// nil = 未注入（视图只反映配置态）。
-	meshRuntimeInfo func() MeshRuntimeInfo
-
-	// auditRing 是有界内存环形审计缓冲（cfg.Audit.BufferSize，默认 2048；0=关闭）。
-	// RegisterRoutes 按 cfg 装配（BufferSize>0 时创建）；RecordAudit 在 TS 填充后
-	// 挂钩 Add，所有审计录入点自动进 ring。nil = 关闭（GET /api/audit 返回空表）。
-	auditRing *AuditRing
-	// auditStore 是审计落盘存储（默认启用，<默认卷根>/audit/audit.log；打开失败降级 nil = 仅内存）。
-	// 启用时 RecordAudit 同时 append 落盘（JSON lines），重启载入历史；/api/audit
-	// 查询优先走 auditStore（全量），未装配时回落 ring。
-	auditStore *AuditStore
-	// notifyCenter 是通知中心（roadmap P0；cfg.Notify.Enabled 时由 RegisterRoutes
-	// 装配）。RecordAudit 末尾 dispatch（异步 goroutine，绝不阻塞审计/业务）。
-	// nil = 未启用（零回归）。
-	notifyCenter *NotifyCenter
-	// aiInsight 是 AI 文件洞察（roadmap 11.9-⑤；cfg 装配，nil = 未启用零回归）。
-	aiInsight *AIInsight
-	// aiPrivacy 是 AI 派生数据隐私（roadmap 11.9-⑧；cfg 装配，nil = 未启用零回归）。
-	aiPrivacy *AIPrivacy
-	// nodeRegistry 是集群节点注册表（roadmap 11.11 方案 A-⑤；nil = 单节点零回归）。
-	nodeRegistry *NodeRegistry
-	// alertEngine 是阈值告警引擎（roadmap P1；cfg.Alerts.Enabled 时由 RegisterRoutes
-	// 装配 + Start 轮询）。卷 degraded / 登录锁定 / 同步失败挂点；nil = 未启用零回归。
-	alertEngine    *AlertEngine
-	cloudMgr       *cloud.CloudDownloadManager
-	syncMgr        *syncmgr.Manager       // 文件同步任务管理器（nil = 未配置 sync，相关路由返回 400）
-	conflictIndex  *syncmgr.ConflictIndex // 冲突索引（merge3 冲突 API 数据源；nil = 未装配，相关路由 400）
-	storageMgr     *capacity.StorageManager
-	uploadingFiles sync.Map      // map[string]string — filename → uploadID，追踪正在上传的文件名
-	uploadingStop  chan struct{} // 关闭后通知 uploadingFiles 定期清理 goroutine 退出（兼容旧装配路径）
-	// scheduler 是统一任务调度器（roadmap 11.10-H2）：uploading 清理 / version-gc /
-	// trash-gc / share-cleanup 四个周期任务统一注册（RegisterRoutes 装配；
-	// nil = 未装配的旧构造路径，Close 跳过）。
-	scheduler *Scheduler
-	// mirrorStop / mirrorWg 是卷镜像周期 goroutine 的停止信号与等待组
-	// （仅 cfg.MirrorInterval > 0 时挂载；与 versionGC 同构）。
-	mirrorStop chan struct{}
-	mirrorWg   sync.WaitGroup
-	// indexSaveStop / indexSaveWg 是搜索索引快照周期保存 goroutine 的停止信号与等待组
-	// （仅 cfg.IndexSaveInterval > 0 时挂载；与 mirror 同构）。
-	indexSaveStop chan struct{}
-	indexSaveWg   sync.WaitGroup
-	// tierStop / tierWg 是冷热分层自动降级周期 goroutine 的停止信号与等待组
-	// （仅 cfg.TierPolicy.Interval > 0 时挂载；与 mirror 同构）。
-	tierStop chan struct{}
-	tierWg   sync.WaitGroup
-	// retentionStop / retentionWg 是卷级保留期清理周期 goroutine 的停止信号与等待组
-	// （仅任一卷 volumes[].retention.gc_interval > 0 时挂载；与 mirror 同构，roadmap 11.7-⑨）。
-	retentionStop chan struct{}
-	retentionWg   sync.WaitGroup
-	// rotationStop / rotationWg 是凭据自动轮换周期 goroutine 的停止信号与等待组
-	// （仅 credentials.rotation.interval > 0 时挂载；与 versionGC 同构）。
-	rotationStop chan struct{}
-	rotationWg   sync.WaitGroup
-	// verifyBusy 是全仓 checksum 巡检的单飞防重入标记（roadmap 11.3-⑩）：
-	// 上一次巡检未结束时，新的触发直接跳过（Concurrent=true，不堆叠执行）。
-	// 与统一调度器（#574）的 CAS 语义同构；定时任务与手动端点共用同一入口。
-	verifyBusy atomic.Bool
-	// verifyHook 是测试注入的巡检执行钩子（生产恒 nil；并发用例阻塞制造重入窗口）。
-	verifyHook func()
-	closeOnce  sync.Once            // 防止 Close() 重复关闭 channel
-	noncePool  *sproxysig.NoncePool // SproxySig nonce 防重放池
-	// rateLimiter 是隧道内层 API handler 的全局限流器（RegisterRoutes 在
-	// cfg.RateLimit.Enabled 时创建并挂到 apiHandler）。PUT /api/config 经 configMu
-	// 保护调用 UpdateConfig 热更新（含 enabled/limit/window），无需重建 handler 链
-	// （xfer LocalHandler 已持有构造期引用）。nil = 启动未启用限流。
-	rateLimiter *RateLimiter
-	// signalPostRL 是信令 POST 专用限流器（独立实例，与文件传输隔离配额）。
-	// 热更新时与 rateLimiter 一起更新；nil = 启动未启用或未装配 RouteTable。
-	signalPostRL *RateLimiter
-	// tracer 是服务端请求路径的可选 telemetry.Tracer（RegisterRoutesOpts.Tracer
-	// 注入；nil = 不接通，保持自生成 id 的既有行为）。非 nil 时 requestLogMiddleware
-	// 为该请求建立真实 span（trace/span id 来自 tracer），ctx 携带 core.SpanContext，
-	// WithContextHandler 自动把 trace_id/span_id 注入日志。nil = 默认 no-op。
-	tracer telemetry.Tracer
-
-	// 多租户存储布局装配（任务 4，供 P2/P3 各 handler 迁移复用）。
-	// globalRoot 是 OpenRoot 后的全局存储根（含 LAYOUT_VERSION 校验）；
-	// globalPool 是全局配额池（cfg.MaxStorageBytes 兜底）。租户/checksum/配额均懒创建并缓存，
-	// tenantMu 串行化懒创建（无竞态）；P2 各 handler 逐个切换到 tenantOf/checksumStoreFor/quotaFor。
-	globalRoot     *storage.Root                      // 全局存储根（OpenRoot + LAYOUT_VERSION）
-	globalPool     *quota.Pool                        // 全局配额池（cfg.MaxStorageBytes 兜底）
-	tenants        *storage.TenantCache               // 按 owner 缓存租户（含 anonymous；懒创建）
-	checksumStores map[string]*checksum.ChecksumStore // 按 owner 缓存 per-tenant checksum 存储
-	uploadStores   map[string]*files.UploadStore      // 按 owner 缓存 per-tenant 分块上传存储（懒创建）
-	dedupStores    map[string]*files.DedupStore       // 按 owner 缓存 per-tenant 去重台账（懒创建）
-	quotaScopes    map[string]*quota.Scope            // 按 owner 缓存配额 Scope（globalPool.Scope 懒创建）
-	quotaBuckets   map[string]map[string]*quota.Scope // 按 owner 缓存功能桶配额子 Scope（user/cloud/archive/chunk/version）
-	// archiveUsage 按 owner 登记已确认占用的归档文件（archive 桶），供删除时释放 Scope
-	// （P5 审查重要 2：不依赖周期扫描自愈）。tenantMu 保护。
-	archiveUsage map[string]map[string]int64
-	tenantMu     sync.Mutex // 串行化 checksumStores/uploadStores/quotaScopes/quotaBuckets/archiveUsage 懒创建
-	// volSet 是装配后的卷集合（RegisterRoutes 装配；nil = 未装配卷功能的旧装配路径，如
-	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
-	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
-	volSet *registry.Set
-
-	// userVolumes 是用户自有卷 store（U3：per-owner volume meta 持久化；nil = 未装配，
-	// 相关 /api/volumes/user 路由返回 400）。
-	userVolumes *UserVolumeStore
-	// credentialRing 是 SproxySig 凭据权威表（AK→多 SK 条目，凭据 store 化后取代
-	// cfg.AccessKeys）。RegisterRoutes 装配：opts.CredentialRing 显式注入（测试/
-	// xfer 集成）优先；否则从 opts.CredentialStore 载入（见 bootstrapCredentials）。
-	// **U3 零凭据启动**——载入后仍空不再生成 anonymous，系统以零凭据等待注册：
-	// register 公开端点是唯一用户入口，首个经回环注册的用户原子授 admin。
-	// authMiddleware 只查本 ring、无 yaml 回退。
-	// credentialStore 是 credentialRing 关联的持久化 store（凭据变更后 Save；
-	// nil = 不持久化，纯内存场景）。持接口类型，可注入外部 storer 实现。
-	credentialRing  *accesskey.Ring
-	credentialStore accesskey.CredentialStorer
-	// authenticators 是认证面插件化链（DEC-C）：authMiddleware 遍历链，任一成功 →
-	// Principal 入 ctx 并放行。RegisterRoutes 装配：opts.Authenticators 显式注入
-	// （非 nil → replace 默认链，宿主全权掌控）优先；nil → 默认
-	// [RingAuthenticator{credentialRing}]。api_keys Bearer 是链前独立检查，不入链。
-	// 外部认证（OIDC/LDAP）子认证器经 opts.ExternalAuthHandlers 追加到链尾。
-	authenticators []Authenticator
-	// externalAuthRoutes 是外部认证登录面路由（OIDC/LDAP，roadmap 11.7-⑥）：装配层
-	// 注入的 ExternalAuthHandlers.Routes() 收集，注册时同时挂主 mux 与隧道内层
-	// localMux（浏览器隧道模式下登录页可达）。nil = 未配置（零回归：无外部端点）。
-	externalAuthRoutes []authn.ExternalAuthRoute
-	// allowInsecureLoopback 是无认证兜底开关（读取优先级：opts 注入 > cfg 配置）。
-	// 仅调试语义：ring 为空时放行 loopback 来源（见 handleNoCredentials）。
-	allowInsecureLoopback bool
-	// registerLimiter 是公开注册端点的独立限频器（复用 pkg/server.RateLimiter，
-	// per-IP 令牌桶 + 全局滑动窗口，5/min 封顶，D6/M1）。注册是唯一用户入口（U3）
-	// 且不经 authMiddleware——蓄意攻击者可任意 IP 洪泛，故逐 IP 限频 + 全局窗口
-	// 兜底。与文件传输/信令限流（rateLimiter/signalPostRL）隔离配额。nil = 启动未装配。
-	registerLimiter *RateLimiter
-	// totpNoncePool 是 TOTP 登录 nonce 池（POST /api/credentials/nonce 签发，
-	// 任务⑨ login 消费）：map[nonce]→{expiresAt, ip}，TTL 60s、单次使用（任何消费
-	// 即删）、绑定来源 IP、池上限 maxTotpNoncePool、插入/消费时惰性清理过期项（D5）。
-	//
-	// **不复用 sproxysig.NoncePool（M10）**：那是按 (ak, nonce) 去重的签名防重放池，
-	// 语义不同——登录 nonce 需单次消费（任一登录尝试即删，防同 nonce 爆破）、绑定
-	// 来源 IP、无 AK 前缀、池上限 4096。
-	totpNoncePool *totpNoncePool
-	// totpLimiter 是 TOTP 登录 + nonce 端点共用的独立限频器（10/min，D6/M1）。
-	// 公开端点的暴力破解防线，与 registerLimiter 隔离配额。
-	totpLimiter *RateLimiter
-	// loginFailTracker 是 per-AK TOTP 登录失败锁定表（U4）：map[ak]→
-	// {failCount, lockedUntil} + mutex。连续失败达 cfg.Registration.LoginFailLimit
-	// → 锁定 LoginFailWindow（锁定期内该 AK 登录一律 401，含正确动态码，不随 IP
-	// 变化失效）；登录成功清零。map 上限 1024 + 惰性清理（R2-N1）——插入时若已达
-	// 上限，先剪掉 lockedUntil 已过期的条目，仍满则按 map 迭代序淘汰任意一条
-	// （**无严格 LRU 语义**，只钳制无界增长），防 map 膨胀。空 AK 键跳过（不登记）。
-	// 登录失败计数语义（R2-N2）见 register_handler.go recordLoginFailure 注释。
-	loginFailTracker *loginFailTracker
-	// loginLimiter 是 POST /api/credentials/login 的独立限频器（10/min；与
-	// totpLimiter 语义同级，独立实例避免 nonce 签发与登录消费互相挤压配额，
-	// D6/M1）。公开端点，无 authMiddleware。
-	loginLimiter *RateLimiter
-	// totpPending 是 TOTP 注册 pending 表（两段式提交）：register 只生成 pending
-	// （AK + TOTP secret + owner + 过期时间），**不写 ring / 不落盘**；客户端用正确
-	// TOTP 动态码登录成功才提交（AddRegistration + persist）。
-	//   - 首 admin 单槽：无 admin 时 pending 表只允许一条（防并发 pending 抢 admin）；
-	//   - owner 幂等：同 owner 已有活跃 pending → 409（不产生第二个候选）；
-	//   - 绑定失败自动回收：TTL 过期 / 登录失败达阈值 → 删 pending（AK 可复用）；
-	//   - 纯内存态（重启即清，与 nonce 池同生命周期），TTL 默认 10 分钟。
-	totpPending *totpPendingTable
-
-	// filesSvc 是文件服务域实例（pkg/files）。经 fileService() 懒装配：文件服务域只
-	// 依赖 h 的窄能力（见 filesRuntime），构造时机不影响语义，而 *Handlers 有多条构造
-	// 路径（RegisterRoutes 正式装配、测试手工构造），懒装配让两条路径都无需改动。
-	filesSvc     *files.Service
-	filesOnce    sync.Once
-	eventsBus    *EventBus
-	eventBusOnce sync.Once
-
-	// bwBuckets 是带宽限速 per-owner 令牌桶缓存（rate_limit.bandwidth 启用时懒建）。
-	bwBuckets sync.Map
-
-	// bwCoordOnce / bwCoord 是带宽跨实例协调器（coord_backend=file）单例缓存。
-	bwCoordOnce sync.Once
-	bwCoord     *byteFileCoordinator
+	coreDeps
+	httpDeps
+	authDeps
+	filesDeps
+	volumeDeps
+	cloudDeps
+	shareDeps
+	hubDeps
+	clusterDeps
+	auditDeps
+	aiDeps
+	opsDeps
 }
 
 // SetFederationClient 注入 hub 联邦节点表同步客户端（nil 清除，恢复不合并联邦候选）。
@@ -293,7 +84,7 @@ func (h *Handlers) SetConflictIndex(idx *syncmgr.ConflictIndex) {
 // 直接使用会 401 unauthorized）。两者互补：`POST /tunnel` 路由用 `h.tunnelHandler`
 // 字段做外层帧解密，xfer 隧道用本方法拿明文入站 handler。
 // AlertEngine 返回阈值告警引擎（nil = 未启用；装配层只读）。
-func (h *Handlers) AlertEngine() *AlertEngine { return h.alertEngine }
+func (h *Handlers) AlertEngine() *alerts.Engine { return h.alertEngine }
 
 // AIInsight 返回 AI 文件洞察器（nil = 未启用；装配层只读）。
 func (h *Handlers) AIInsight() *AIInsight { return h.aiInsight }
@@ -306,6 +97,55 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 
 // SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
+
+// SetShareStore 注入分享存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
+// RegisterRoutes 已装配 *share.Store 本地形态；非 nil = 分享切 StateStore 后端
+// （share.StateBackedStore，逐 token key + Consume CAS，见 state_share.go））。
+func (h *Handlers) SetShareStore(s share.StoreIface) { h.shareStore = s }
+
+// Metrics 返回服务的运行时指标（/metrics 渲染 + 装配层统计 hook 注入；nil = 未装配）。
+func (h *Handlers) Metrics() *metrics.Metrics { return h.metrics }
+
+// SetStateStore 注入状态存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
+// checksum/dedup/share/索引保持原本地 JSON 落盘零回归；非 nil = 各 Store 适配器
+// 切 StateStore 后端——读旧 meta 回退 + 首写迁新路径的双读单写，见
+// state_ledger.go / state_share.go / pkg/files/state_index.go）。
+func (h *Handlers) SetStateStore(st state.StateStore) {
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	// 切换后端 ⇒ 关闭并丢弃缓存实例（旧实例的最后写入先落盘，避免跨后端串值）。
+	for _, cs := range h.checksumStores {
+		if c, ok := cs.(checksum.Closer); ok {
+			_ = c.Close()
+		}
+	}
+	clear(h.checksumStores)
+	// dedup 台账同样按后端形态缓存，切换后端必须丢弃（否则旧实例仍写旧后端）。
+	clear(h.dedupStores)
+	h.stateStore = st
+}
+
+// closeChecksumStores 关闭并清空缓存的 per-owner 校验台账实例（幂等；与 SetStateStore
+// 切换后端时的处置同源）。台账落盘由 debounce 合并器驱动，Close 会先做最终落盘再停定时器。
+func (h *Handlers) closeChecksumStores() {
+	h.tenantMu.Lock()
+	stores := make([]checksum.ChecksumStoreIface, 0, len(h.checksumStores))
+	for _, cs := range h.checksumStores {
+		stores = append(stores, cs)
+	}
+	clear(h.checksumStores)
+	h.tenantMu.Unlock()
+
+	for _, cs := range stores {
+		cl, ok := cs.(checksum.Closer)
+		if !ok {
+			continue
+		}
+		if err := cl.Close(); err != nil {
+			h.logger.Warn("关闭校验台账失败（最终落盘可能未完成）", "err", err)
+		}
+	}
+}
 
 // EventsBus 返回事件总线（懒建；装配层桥接用）。
 func (h *Handlers) EventsBus() *EventBus { return h.eventBus() }
@@ -328,6 +168,15 @@ func (h *Handlers) SetVectorStore(vs *files.VectorStore) {
 		svc.SetVectorStore(vs)
 	}
 }
+
+// SetAIEventConsumer 注入 AI 事件消费端（装配层调用；nil = 未启用；Close 时 Stop）。
+func (h *Handlers) SetAIEventConsumer(c *AIEventConsumer) { h.aiEventConsumer = c }
+
+// AIEventConsumer 返回装配的 AI 事件消费端（nil = 未启用）。
+func (h *Handlers) AIEventConsumer() *AIEventConsumer { return h.aiEventConsumer }
+
+// BackgroundContext 是服务端后台任务的根 ctx（事件消费端审计用；无请求侧 ctx 可用时）。
+func BackgroundContext() context.Context { return context.Background() }
 
 // InsightCacheDir 返回 AI 洞察缓存目录（<默认卷 meta>/insight；装配层构造缓存用）。
 func (h *Handlers) InsightCacheDir() string {
@@ -354,7 +203,30 @@ func (h *Handlers) LocalHandler() http.Handler {
 //   - 其余能力都是接口方法：每次调用读 h 的实时字段/懒建缓存（如 cfgPtr.Load()、
 //     volSet、quotaScopeFor），故配置与缓存的变化对领域包可见；
 //   - 计量条件注入：h.metrics 为 nil 时不加 WithMetrics（避免 typed-nil 接口）。
+//
+// fileServiceIfReady 返回已装配的 fileService（懒建**已触发**时才可用；测试直构造 h 未装配
+// tenants 时返回 nil——调用方回落内部实现，不 panic）。用 filesOnce 的原子 done 标志避免
+// 读 h.filesSvc 与 fileService 懒建写之间的 race。
+func (h *Handlers) fileServiceIfReady() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	if h.filesSvc != nil {
+		return h.filesSvc
+	}
+	if h.tenants == nil {
+		return nil
+	}
+	return h.fileServiceLocked()
+}
+
 func (h *Handlers) fileService() *files.Service {
+	h.filesMu.Lock()
+	defer h.filesMu.Unlock()
+	return h.fileServiceLocked()
+}
+
+// fileServiceLocked 调用方持 h.filesMu；懒装配（filesOnce 幂等）。
+func (h *Handlers) fileServiceLocked() *files.Service {
 	h.filesOnce.Do(func() {
 		rt := filesRuntime{h: h}
 		opts := []files.Option{
@@ -362,9 +234,15 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithActor(rt),
 			files.WithVolumes(rt),
 			files.WithQuota(rt),
+			files.WithQuotaWait(func() time.Duration { return h.quotaWaitTimeout }),
 			files.WithChecksumLedger(rt),
 			files.WithDownloadPaths(rt),
 			files.WithFileLocks(rt),
+			// F1：外部卷对象的硬删接缝（外部卷无 *storage.Root，其对象此前无用户可见删除入口）。
+			files.WithExternalOps(externalVolumeOps{h: h}),
+			// 卷类型分类（决策 3：去领域侧硬编码 wrapper 名单）——分类事实源在
+			// registry.CategoryOf，经 filesVolumeSet 转发注入。
+			files.WithVolumeTypeClassifier(filesVolumeSet{Set: h.volSet, sinkHost: h}),
 			files.WithChunkedUploads(rt),
 			files.WithVersioning(rt),
 			files.WithDedup(rt),
@@ -373,9 +251,19 @@ func (h *Handlers) fileService() *files.Service {
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
 			files.WithBandwidthLimiter(rt),
 		}
+		// meta 恒生成（用户裁定：只关校验不关 meta）——fileMetaPolicy 恒装配。
+		// skipFileMetaAssembly 是测试隔离开关（AGENTS.md 7b：测试注入走结构体内部私有
+		// 变量；存量语义测试用 newAssemblyTestHandlers 置 true 跳过 meta 装配，避免
+		// 配额/统计/账本断言被 sidecar 字节干扰；生产恒 false 装配 meta 策略）。
+		if !h.skipFileMetaAssembly {
+			opts = append(opts, files.WithFileMeta(filesMetaPolicy{h: h}))
+		}
 		if h.metrics != nil {
 			opts = append(opts, files.WithMetrics(h.metrics))
 		}
+		// 卷自报物理足迹（配额模型 v3：只按物理占用记账；secretdata 的 parity/meta pad 无法由
+		// 逻辑长度推出 ⇒ 必须由卷实测）。未装配外部卷 ⇒ 无该能力 ⇒ 写内核回落既有折算。
+		opts = append(opts, files.WithPhysFootprinter(filesPhysFootprinter{h: h}))
 		// 唯一必需项（TenantResolver）由 *storage.TenantCache 直接满足——它绑定默认卷根，
 		// 与 pkg/server 的 tenantFor 同一实例（单一租户缓存），无需适配类型。
 		svc, err := files.New(h.tenants, opts...)
@@ -384,11 +272,15 @@ func (h *Handlers) fileService() *files.Service {
 			panic("files.New 装配失败: " + err.Error())
 		}
 		h.filesSvc = svc
+		// V3：本地卷结构性变异 → 搜索索引自动维护（唯一接线点，见
+		// volume_mutation_wiring.go）。放在 Once 内直接用局部 svc，避免递归调用
+		// fileService()（sync.Once 自锁）。
+		h.wireLocalVolumeMutations(svc)
 	})
 	return h.filesSvc
 }
 
-// anonymousOwner 是未认证请求的默认租户名（结构与其他租户完全同构）。
+// filesMu 保护 filesSvc 懒装配（fileService 写 vs fileServiceIfReady 读）。
 // 单源在 pkg/storage：租户名是存储布局契约（<root>/<owner>/…），各包必须同值。
 const anonymousOwner = storage.AnonymousOwner
 
@@ -432,11 +324,22 @@ func (h *Handlers) listTenantIDs() []string {
 // checksumStoreFor 返回 owner 的 per-tenant checksum 存储（懒创建，缓存到 map）。
 // storePath = <tenant meta>/checksums.json；获取不到租户（非法 owner / 根不可用）返回 nil。
 // P5 后不再有全局 checksum store——所有读写侧均经本方法取 per-tenant 实例。
-func (h *Handlers) checksumStoreFor(owner string) *checksum.ChecksumStore {
+// checksumRel 是校验和台账在**租户卷内**的相对路径（<租户根>/meta/checksums.json）。
+// 台账经租户**卷句柄**读写：卷自己决定是否加密（使用方不理解加密态），并天然继承封印判定。
+const checksumRel = "meta/checksums.json"
+
+// stateStore 非 nil（集群模式装配）时返回 StateStore 适配器（读旧 meta 回退 + 首写迁
+// StateStore 新路径，双读单写零回归，见 state_ledger.go）。
+func (h *Handlers) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	owner = normalizeOwner(owner)
 	// 先取租户（内部锁 tenantMu，懒创建租户根 + meta 目录）。
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
+		return nil
+	}
+	root := tnt.Root()
+	if root == nil {
+		h.logger.Warn("租户卷句柄不可用", "owner", owner)
 		return nil
 	}
 	h.tenantMu.Lock()
@@ -444,12 +347,14 @@ func (h *Handlers) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	if cs, ok := h.checksumStores[owner]; ok {
 		return cs
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
-		return nil
+	var cs checksum.ChecksumStoreIface
+	if h.stateStore != nil {
+		// **必须缓存**：每次新建 = 每次首读都从 StateStore 全量拉回 + 反序列化（O(全库) KV 读），
+		// 且写合并器随实例丢弃而失效。
+		cs = checksum.NewStateBackedChecksumStore(h.stateStore, "checksum/"+owner+"/all", root, checksumRel, h.logger)
+	} else {
+		cs = checksum.NewChecksumStore(root, checksumRel, h.logger)
 	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), h.logger)
 	h.checksumStores[owner] = cs
 	return cs
 }
@@ -498,7 +403,7 @@ func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 	// P5：quota 未装配（globalPool nil）时，分块上传走 storageMgr 回退预留，
 	// 需把 storageMgr 注入 store 供会话删除/过期释放（scope 预留路径无需）。
 	if h.storageMgr != nil {
-		us.SetStorageMgr(filesStorageManager{h.storageMgr})
+		us.SetStorageMgr(filesStorageManager{m: h.storageMgr, waitTimeout: h.quotaWaitTimeout})
 	}
 	h.uploadStores[owner] = us
 	return us
@@ -507,6 +412,8 @@ func (h *Handlers) uploadStoreFor(owner string) *files.UploadStore {
 // dedupStoreFor 返回 owner 的 per-tenant 去重台账（懒创建，缓存到 map，与 checksumStoreFor 同构）。
 // 台账路径 = <tenant meta>/dedup.json；dedup 未启用或获取不到租户返回 nil。
 // 缓存复用同一实例：台账内存态增量保存回磁盘，避免高频上传每次磁盘 Load（#424 残余优化）。
+// stateStore 非 nil（集群模式装配）时返回 StateStore 后端（读旧 meta 回退 + 首写迁新路径，
+// 双读单写零回归，见 state_ledger.go）。
 func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if !h.cfgPtr.Load().Dedup.Enabled {
 		return nil
@@ -514,6 +421,11 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	owner = normalizeOwner(owner)
 	tnt := h.tenantFor(owner)
 	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	metaAbs, ok := tnt.Root().Abs("meta")
+	if !ok {
+		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
 		return nil
 	}
 	h.tenantMu.Lock()
@@ -524,12 +436,18 @@ func (h *Handlers) dedupStoreFor(owner string) *files.DedupStore {
 	if ds, ok := h.dedupStores[owner]; ok {
 		return ds
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		h.logger.Warn("派生租户 meta 路径失败", "owner", owner)
-		return nil
+	var ds *files.DedupStore
+	if h.stateStore != nil {
+		// **必须缓存**（与 checksumStoreFor 同构）：每次新建 = 每次首读从 StateStore 全量拉回 +
+		// 反序列化（O(全库) KV 读），且后续写入落在随后被丢弃的实例上。
+		ds = files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger, &files.DedupStateOptions{
+			St:         h.stateStore,
+			Key:        "dedup/" + owner + "/all",
+			LegacyPath: filepath.Join(metaAbs, fileNameDedup),
+		})
+	} else {
+		ds = files.NewDedupStore(filepath.Join(metaAbs, fileNameDedup), h.logger)
 	}
-	ds := files.NewDedupStore(filepath.Join(metaAbs, "dedup.json"), h.logger)
 	h.dedupStores[owner] = ds
 	return ds
 }
@@ -558,7 +476,7 @@ func (h *Handlers) uploadVolumeRootsFor(owner string) map[string]string {
 
 // quotaBucketNames 是参与配额归集的功能桶名（对应租户根下的物理桶；meta 桶的配额
 // 参与归集与否由任务 3 的扫描开启决定，此处先装配其子 Scope 供 reconciliation 使用）。
-var quotaBucketNames = []string{"user", "cloud", "archive", "chunk", "version", "meta"}
+var quotaBucketNames = storage.QuotaBucketNames()
 
 // ensureTenantQuotaLocked 确保 owner 的租户配额 Scope、功能桶子 Scope 与 bucket_limits
 // 路径子 Scope 已创建（调用方须持 tenantMu）。首次访问按 owner 在 globalPool 下挂载
@@ -585,18 +503,59 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 	var bucketLimits map[string]int64
 	if cfg := h.cfgPtr.Load(); cfg != nil {
 		quotaBytes = cfg.OwnerQuotaFor(owner)
-		if cfg.BucketLimits != nil {
-			bucketLimits = make(map[string]int64, len(cfg.BucketLimits))
-			for k, v := range cfg.BucketLimits {
-				bucketLimits[k] = int64(v)
-			}
-		}
+		bucketLimits = quotaBucketLimitsFromCfg(cfg)
 	}
 	s := h.globalPool.Scope("/tenant/"+owner, quotaBytes)
+	if s == nil {
+		// **超售 ⇒ fail-closed**（独立复审 B-P2-4 根因修复 + 用户裁定启用 I1 强制）：Σ 租户配额
+		// 超过全局上限 ⇒ 分配被 I1 原子拒绝。**不能**返回 nil（那会让写路径**静默无配额**）⇒
+		// 返回**拒写配额树**（任何非零预留失败 ⇒ 写被 507 拒绝）。**不缓存**：管理员调大全局上限
+		// 后下一个请求自动恢复。
+		h.logger.Error("tenant quota allocation refused by I1 (Σ owner quotas exceed global limit); "+
+			"writes for this owner will be rejected until the global limit is raised",
+			"owner", owner, "owner_quota_bytes", quotaBytes)
+		return h.deniedTenantQuota()
+	}
 	buckets := make(map[string]*quota.Scope, len(quotaBucketNames)+len(bucketLimits))
 	for _, b := range quotaBucketNames {
 		buckets[b] = s.Mount(b, 0)
 	}
+	mountBucketLimitScopes(buckets, bucketLimits)
+	h.quotaScopes[owner] = s
+	h.quotaBuckets[owner] = buckets
+	return s, buckets
+}
+
+// deniedTenantQuota 返回**拒写**的租户配额树：全局上限 1 字节 ⇒ 任何 >1 字节的预留必失败
+// （超售导致租户配额无法分配时的 fail-closed 载体；见 ensureTenantQuotaLocked）。
+// 所有节点上限传 0（不限制）⇒ 建树本身永不因 I1 失败（可安全作为兜底）。
+func (h *Handlers) deniedTenantQuota() (*quota.Scope, map[string]*quota.Scope) {
+	pool := quota.NewPool(1)
+	s := pool.Scope("/tenant/_denied", 0)
+	buckets := make(map[string]*quota.Scope, len(quotaBucketNames))
+	for _, b := range quotaBucketNames {
+		buckets[b] = s.Mount(b, 0)
+	}
+	return s, buckets
+}
+
+// quotaBucketLimitsFromCfg 复制 bucket_limits 配置到 int64 map（装配期硬配置，懒建后
+// 缓存不重建 → SIGHUP 后修改不生效，重启进程）。
+func quotaBucketLimitsFromCfg(cfg *Config) map[string]int64 {
+	if cfg == nil || cfg.BucketLimits == nil {
+		return nil
+	}
+	bucketLimits := make(map[string]int64, len(cfg.BucketLimits))
+	for k, v := range cfg.BucketLimits {
+		bucketLimits[k] = int64(v)
+	}
+	return bucketLimits
+}
+
+// mountBucketLimitScopes 按 bucket_limits 配置建精确路径子 Scope（http route 式嵌套）。
+// 子目录 Scope 沿父链聚合到功能桶 → 租户 → 全局，对子 Scope 记一笔账即自动逐级检查
+// 所有层级上限；quotaBuckets map 保留配置键 → Scope 引用（供配置校验/测试/旧调用）。
+func mountBucketLimitScopes(buckets map[string]*quota.Scope, bucketLimits map[string]int64) {
 	for path, limit := range bucketLimits {
 		// BucketLimits 分层装配：键如 "user/videos/hd"，拆段逐级挂到功能桶（user）children
 		// 之下（http route 式嵌套 Scope）。子目录 Scope 沿父链聚合到 user 桶 → 租户 → 全局，
@@ -613,9 +572,6 @@ func (h *Handlers) ensureTenantQuotaLocked(owner string) (*quota.Scope, map[stri
 		}
 		buckets[path] = rootSc.EnsureScope(segs[1:], limit)
 	}
-	h.quotaScopes[owner] = s
-	h.quotaBuckets[owner] = buckets
-	return s, buckets
 }
 
 // quotaFor 返回 owner 的 per-tenant 配额 Scope（懒创建，缓存到 map）。路径为
@@ -656,6 +612,25 @@ func (h *Handlers) quotaBucketFor(owner, bucket string) *quota.Scope {
 	return rootSc.Resolve(segs[1:])
 }
 
+// ownerQuotaScope 返回 owner 的**根配额 Scope**（该 owner 全部用量的聚合点）。
+//
+// **为何需要它（而不是 `quotaScopeFor(owner, "")`）**：`quotaScopeFor` 首行
+// `segs := strings.Split(rel, "/")` ⇒ `rel == ""` 时 `segs[0] == ""` ⇒ **恒返回 nil** ✗
+// ⇒ 调用方会静默拿到「无配额」✗（`rel == ""` 的调用点全仓仅一处：配额预警读取器 ✓）。
+//
+// **为何根 Scope 的 Usage 就是「该 owner 的用量」**（2026-10-16 核实 ✓）：
+// `type Scope struct{ pool *Pool }`，而 `Mount`/`EnsureScope` 经 `newScope` 创建**子 Pool**
+// （`parent: p`，各自持有 `committed`/`maxBytes` ✓）⇒ `Scope.Usage()` 返回 **`p.committed`
+// = 该节点自己的**用量 ✓（**不是**全局池用量 ✗）；且 `commitUp` 沿 `parent` 链逐层累计 ⇒
+// **根节点 committed = 该 owner 全子树用量** ✓、`MaxBytes()` = 该 owner 的配额上限 ✓。
+func (h *Handlers) ownerQuotaScope(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	root, _ := h.ensureTenantQuotaLocked(owner)
+	return root
+}
+
 // quotaScopeFor 按文件实际相对路径（rel，含功能桶前缀，如 "user/dir/f.txt"）解析最长前缀
 // 配额子 Scope（http route 式）：rel 首段 = 功能桶根，沿其 children 段树逐级下探；最长前缀
 // 命中（如 rel="user/videos/hd/a.mkv" 且装配了 "user/videos/hd" → 返回该子 Scope）；
@@ -681,6 +656,76 @@ func (h *Handlers) quotaScopeFor(owner, rel string) *quota.Scope {
 		return rootSc // 功能桶根内的文件（user/a.txt）
 	}
 	return rootSc.Resolve(segs[1:])
+}
+
+// stagingQuotaScope 返回 owner 的**独立 staging 配额 Scope**（用户裁定 2026-10-10）：
+// 本地上传暂存**独立记账**（不与网盘 owner_quotas 混用）——外部卷 WriteFile 先预留本地
+// 字节、写后释放，防本地磁盘被 staging 占满。上限 = trusted_volume.staging_quota_bytes
+// （0/缺省 = 不限制但记账，预留/释放对称不误伤）。
+//
+// **M5 修复（2026-10-11，第 7 轮对抗评审）**：本 Scope 现挂**独立根池** `h.stagingPool`
+// （容量 = `staging_quota_bytes`），不再挂 `globalPool` 之下。原因：挂父链会让慢速外部卷
+// 上传（长期占本地暂存）抬高 `max_storage_bytes` 的全局 usage，从而**误拒无关 owner 的
+// 正常写**（跨租户干扰）；「staging 占物理盘」的保护改由运维显式配置 `staging_quota_bytes`
+// 承担（建议按本地盘余量设置）。globalPool 未装配时仍返回 nil（无配额能力零回归）。
+// 懒建缓存（tenantMu 保护），装配期硬配置不重建。
+func (h *Handlers) stagingQuotaScope(owner string) *quota.Scope {
+	owner = normalizeOwner(owner)
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.globalPool == nil {
+		return nil
+	}
+	if h.stagingScopes == nil {
+		h.stagingScopes = make(map[string]*quota.Scope)
+	}
+	if sc, ok := h.stagingScopes[owner]; ok {
+		return sc
+	}
+	if h.stagingPool == nil {
+		// 独立根池：容量 = staging_quota_bytes（0 = 不设上限，仅记账；根池无父链，
+		// 不牵连 max_storage_bytes 的全局账本——M5 修复）。
+		var poolMax int64
+		if cfg := h.cfgPtr.Load(); cfg != nil {
+			poolMax = int64(cfg.TrustedVolume.StagingQuotaBytes)
+		}
+		h.stagingPool = quota.NewPool(poolMax)
+	}
+	var limit int64
+	if cfg := h.cfgPtr.Load(); cfg != nil {
+		limit = int64(cfg.TrustedVolume.StagingQuotaBytes)
+	}
+	sc := h.stagingPool.Scope("/staging/"+owner, limit)
+	h.stagingScopes[owner] = sc
+	return sc
+}
+
+// stagingQuotaTrackerFor 返回 owner 的 staging 配额钩子（独立 Scope 适配——
+// ReserveUsage = TryReserve + Commit；不足排队等待（quota.StagingTracker：sync.Cond +
+// ctx/超时）；ReleaseUsage = ReleaseUsage + 广播。无 globalPool → nil（零回归）。
+// StagingQuotaTrackerFor 导出版（供装配层把同一 per-owner staging tracker 注入
+// 非 HTTP 写入口，如 baidupcs sync push——P1：此前误用 owner user 桶 Scope）。
+func (h *Handlers) StagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	return h.stagingQuotaTrackerFor(owner)
+}
+
+func (h *Handlers) stagingQuotaTrackerFor(owner string) syncpkg.StagingQuotaTracker {
+	sc := h.stagingQuotaScope(owner)
+	if sc == nil {
+		return nil
+	}
+	// 按 owner 复用同一 tracker（含 cond）——跨请求 ReleaseUsage 广播才能唤醒等待者。
+	h.tenantMu.Lock()
+	defer h.tenantMu.Unlock()
+	if h.stagingTrackers == nil {
+		h.stagingTrackers = make(map[string]*quota.StagingTracker)
+	}
+	if t, ok := h.stagingTrackers[owner]; ok {
+		return t
+	}
+	t := quota.NewStagingTracker(sc)
+	h.stagingTrackers[owner] = t
+	return t
 }
 
 // bwBucketFor 返回 owner 的带宽令牌桶（懒建缓存；限速关闭/无速率时 nil = 不限速）。

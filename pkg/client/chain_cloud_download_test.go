@@ -14,7 +14,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -428,7 +430,7 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 		t.Fatal("expected CloudDownloadChain")
 	}
 	cdc.SetClient(NewFileClient(ts.URL))
-	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second})
+	cdc.SetOptions(chainOptions{pollInterval: 100 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true})
 
 	var phases []string
 	err = runner.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {
@@ -449,28 +451,23 @@ func TestCloudDownloadChain_ResumeAndRun(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	archiveDir := filepath.Join(dir, archiveDirName)
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	mux := http.NewServeMux()
-	var taskIDCounter atomic.Int64
-
-	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryBatchHandler 返回 POST /api/cloud/download/batch 的 mock handler：
+// 每次创建两个递增 ID 的 pending 任务（供存储满重试计数）。
+func storageFullRetryBatchHandler(taskIDCounter *atomic.Int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		tasks := []CloudTask{
 			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
 			{ID: fmt.Sprintf("task-%d", taskIDCounter.Add(1)), Status: "pending"},
 		}
 		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
-		// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed
+// storageFullRetryTasksHandler 返回 GET /api/cloud/tasks/ 的 mock handler：
+// 初始任务 (task-1, task-2) 返回 storage full，后续 retry 任务返回 completed。
+func storageFullRetryTasksHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		if taskID == "task-1" || taskID == "task-2" {
 			json.NewEncoder(w).Encode(CloudTask{
 				ID:     taskID,
@@ -484,11 +481,15 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 				Status: "completed",
 			})
 		}
-	})
+	}
+}
 
-	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryArchiveHandler 返回 POST /api/cloud/archive 的 mock handler：
+// 写入固定归档内容并返回带 checksum 的成功结果。
+func storageFullRetryArchiveHandler(archiveDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		archivePath := filepath.Join(archiveDir, "retry-archive.tar.gz")
-		os.WriteFile(archivePath, []byte("archive-content"), 0644)
+		os.WriteFile(archivePath, []byte("archive-content"), 0644) // NOSONAR: S2083 — mock 镜像生产 archive 路由；archivePath 由测试自控请求构造
 		sum := sha256.Sum256([]byte("archive-content"))
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
@@ -497,22 +498,27 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 			Size:     15,
 			Checksum: hex.EncodeToString(sum[:]),
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+// storageFullRetryStatHandler 返回 HEAD /api/files/stat 的 mock handler：
+// 确保归档文件存在并回填元信息头。
+func storageFullRetryStatHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
-		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755)    // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
+		if _, err := os.Stat(archiveFile); err != nil { // NOSONAR: S6549 + S2083 — mock 镜像生产 stat 路由；archiveFile 测试自控
+			os.WriteFile(archiveFile, []byte("archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
-		info, err := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile) // NOSONAR: S6549 — mock 镜像生产 stat 路由；archiveFile 测试自控
 		if err != nil {
 			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -522,27 +528,55 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+	}
+}
+
+// storageFullRetryChunkHandler 返回 GET /download/chunk 的 mock handler：
+// 直接回写归档文件内容。
+func storageFullRetryChunkHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Write(data)
-	})
-	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+	}
+}
+
+// storageFullRetryDeleteHandler 返回 DELETE /api/cloud/tasks/ 的 mock handler。
+func storageFullRetryDeleteHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"success": true})
-	})
+	}
+}
+
+func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	var taskIDCounter atomic.Int64
+	mux.HandleFunc("POST /api/cloud/download/batch", storageFullRetryBatchHandler(&taskIDCounter))
+	mux.HandleFunc("GET /api/cloud/tasks/", storageFullRetryTasksHandler())
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
 
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
 	if err != nil {
@@ -552,6 +586,7 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	chain.backoffFn = func(int) time.Duration { return 10 * time.Millisecond }
 
 	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	t.Logf("taskIDs after run: %v", chain.TaskIDs)
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
@@ -561,6 +596,83 @@ func TestCloudDownloadChain_StorageFullRetry(t *testing.T) {
 	// 验证发生了存储超限重试（总任务数 > 初始 URL 数）
 	if taskIDCounter.Load() <= 2 {
 		t.Errorf("expected retry to create more tasks (range 3-8), got %d total", taskIDCounter.Load())
+	}
+}
+
+// TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts M5 回归：
+// storage-full 重试重提交必须透传三参（transfer/save/download_local），否则
+// 转存任务重试后被当纯下载（save=false 语义丢失）。
+func TestCloudDownloadChain_StorageFullRetry_PassesTransferOpts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var batchBodies []map[string]any
+	var taskIDCounter atomic.Int64
+	baseBatch := storageFullRetryBatchHandler(&taskIDCounter) // task-1,task-2（被 tasks handler 标 storage-full，触发重试）
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		batchBodies = append(batchBodies, body)
+		mu.Unlock()
+		baseBatch(w, r)
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", storageFullRetryTasksHandler())
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
+
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "retry-archive", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain failed: %v", err)
+	}
+	chain.Transfer = &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
+	sv := false
+	chain.Save = &sv
+	chain.IntegrityMustPass = true
+	// DownloadLocal 继承 opts.downloadLocal=true（默认下载本地）→ body 带 download_local=true
+	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
+
+	err = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.Phase() != PhaseCompleted {
+		t.Errorf("expected phase=completed, got %s", chain.Phase())
+	}
+	mu.Lock()
+	gotBodies := append([]map[string]any(nil), batchBodies...)
+	mu.Unlock()
+	if len(gotBodies) < 2 {
+		t.Fatalf("应有 ≥2 次 batch 提交（初始 + storage-full 重试），实际 %d: %v", len(gotBodies), gotBodies)
+	}
+	// 每次提交都带三参（含重试那次）——M5 透传。
+	for i, body := range gotBodies {
+		if body["transfer"] == nil {
+			t.Fatalf("第 %d 次提交缺 transfer（M5 重试透传），body=%v", i, body)
+		}
+		if body["save"] == nil {
+			t.Fatalf("第 %d 次提交缺 save（M5 重试透传），body=%v", i, body)
+		}
+		if body["download_local"] == nil {
+			t.Fatalf("第 %d 次提交缺 download_local（M5 重试透传），body=%v", i, body)
+		}
+		// 任务5：integrity_must_pass 与三参同源透传（初始 + storage-full 重试都带）。
+		if body["integrity_must_pass"] == nil {
+			t.Fatalf("第 %d 次提交缺 integrity_must_pass（M5 重试透传），body=%v", i, body)
+		}
 	}
 }
 
@@ -596,7 +708,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(CloudTask{
-			ID:     strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/"),
+			ID:     strings.TrimPrefix(r.URL.Path, apiCloudTasksBase),
 			Status: "completed",
 		})
 	})
@@ -611,7 +723,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 			return
 		}
 		archivePath := filepath.Join(archiveDir, req.ArchiveName+".tar.gz")
-		os.WriteFile(archivePath, []byte("archive-content"), 0644)
+		os.WriteFile(archivePath, []byte("archive-content"), 0644) // NOSONAR: S2083 — mock 镜像生产 archive 路由；archivePath 由测试自控请求构造
 		sum := sha256.Sum256([]byte("archive-content"))
 		json.NewEncoder(w).Encode(CloudArchiveResult{
 			Success:  true,
@@ -624,18 +736,18 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
-		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("archive-content"), 0644)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755)    // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
+		if _, err := os.Stat(archiveFile); err != nil { // NOSONAR: S6549 + S2083 — mock 镜像生产 stat 路由；archiveFile 测试自控
+			os.WriteFile(archiveFile, []byte("archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := sha256.Sum256(data)
-		info, err := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile) // NOSONAR: S6549 — mock 镜像生产 stat 路由；archiveFile 测试自控
 		if err != nil {
 			t.Log("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -649,7 +761,7 @@ func newMockCloudServer(t *testing.T) (*httptest.Server, string) {
 
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Log("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -676,7 +788,7 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 	var deleteCount atomic.Int64
 	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		n := deleteCount.Add(1)
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		// 第一个任务删除失败，第二个成功
 		if n == 1 || taskID == "task-fail" {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -692,8 +804,9 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 
 	client := NewFileClient(ts.URL)
 	chain := &CloudDownloadChain{
-		client:  client,
-		TaskIDs: []string{"task-fail", "task-ok"},
+		client:        client,
+		LocalVerified: true,
+		TaskIDs:       []string{"task-fail", "task-ok"},
 	}
 
 	err := chain.cleanupRemote(t.Context())
@@ -702,6 +815,136 @@ func TestCloudDownloadChain_CleanupRemote_PartialError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "task-fail") {
 		t.Errorf("expected error mentioning task-fail, got: %v", err)
+	}
+}
+
+// TestCloudDownloadChain_DownloadToLocal_SetsLocalVerified 验证：downloadToLocal 成功后
+// LocalVerified 置 true（作为 cleanupRemote「校验通过才删云端」的前置判据）。
+func TestCloudDownloadChain_DownloadToLocal_SetsLocalVerified(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("archive-content")
+	if err := os.WriteFile(filepath.Join(archiveDir, "x.tar.gz"), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(content)))
+		w.Header().Set("X-File-Checksum", hex.EncodeToString(sum[:]))
+		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", time.Now().UnixNano()))
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{client: client, LocalDir: dir, ArchiveName: "x.tar.gz"}
+	if err := chain.downloadToLocal(t.Context()); err != nil {
+		t.Fatalf("downloadToLocal: %v", err)
+	}
+	if !chain.LocalVerified {
+		t.Fatal("expected LocalVerified=true after successful download")
+	}
+}
+
+// TestCloudDownloadChain_DownloadToLocal_FailureKeepsUnverified 验证：downloadToLocal 失败时
+// LocalVerified 保持 false（不得误置 true，避免后续 cleanupRemote 误删云端）。
+func TestCloudDownloadChain_DownloadToLocal_FailureKeepsUnverified(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	mux := http.NewServeMux()
+	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{client: client, LocalDir: dir, ArchiveName: "x.tar.gz"}
+	if err := chain.downloadToLocal(t.Context()); err == nil {
+		t.Fatal("expected download error")
+	}
+	if chain.LocalVerified {
+		t.Fatal("expected LocalVerified=false after failed download")
+	}
+}
+
+// TestCloudDownloadChain_CleanupRemote_SkipsWhenNotVerified 验证：LocalVerified=false 时
+// cleanupRemote 返回错误且**不调用** DeleteCloudTask（确保未校验不删云端）。
+func TestCloudDownloadChain_CleanupRemote_SkipsWhenNotVerified(t *testing.T) {
+	t.Parallel()
+	var deleteCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		deleteCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:  client,
+		TaskIDs: []string{"task-1", "task-2"},
+	}
+	err := chain.cleanupRemote(t.Context())
+	if err == nil {
+		t.Fatal("expected error when LocalVerified=false")
+	}
+	if !errors.Is(err, ErrLocalNotVerified) {
+		t.Errorf("expected ErrLocalNotVerified, got %v", err)
+	}
+	if deleteCount.Load() != 0 {
+		t.Errorf("expected DeleteCloudTask not called, got %d calls", deleteCount.Load())
+	}
+}
+
+// TestCloudDownloadChain_CleanupRemote_DeletesWhenVerified 验证：LocalVerified=true 时
+// cleanupRemote 逐个删除云端任务。
+func TestCloudDownloadChain_CleanupRemote_DeletesWhenVerified(t *testing.T) {
+	t.Parallel()
+	var deleted []string
+	var mu sync.Mutex
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		deleted = append(deleted, strings.TrimPrefix(r.URL.Path, apiCloudTasksBase))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"success": true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	chain := &CloudDownloadChain{
+		client:        client,
+		LocalVerified: true,
+		TaskIDs:       []string{"task-1", "task-2"},
+	}
+	if err := chain.cleanupRemote(t.Context()); err != nil {
+		t.Fatalf("cleanupRemote: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 2 {
+		t.Fatalf("expected 2 deletes, got %d: %v", len(deleted), deleted)
+	}
+	have := func(id string) bool {
+		return slices.Contains(deleted, id)
+	}
+	if !have("task-1") || !have("task-2") {
+		t.Errorf("expected task-1/task-2 deleted, got %v", deleted)
 	}
 }
 
@@ -733,7 +976,7 @@ func TestCloudDownloadChain_DownloadToLocal_KindArchive(t *testing.T) {
 	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
 		lastChunkQuery = r.URL.RawQuery
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -910,7 +1153,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 		json.NewEncoder(w).Encode(task)
 	})
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		json.NewEncoder(w).Encode(CloudTask{
 			ID:     taskID,
 			Status: "failed",
@@ -922,7 +1165,7 @@ func TestCloudDownloadChain_StorageFullRetryAllRetriesExhausted(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/file1"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -964,14 +1207,14 @@ func TestCloudDownloadChain_StorageFullRetry_ResubmitFailsNotSilent(t *testing.T
 		}})
 	})
 	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
 		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/f1"})
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
 	client := NewFileClient(ts.URL)
-	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second}
+	opts := chainOptions{pollInterval: 50 * time.Millisecond, timeout: 5 * time.Second, downloadLocal: true}
 	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1", "http://example.com/f2"}, "archive", dir, opts)
 	if err != nil {
 		t.Fatalf("NewCloudDownloadChain failed: %v", err)
@@ -1021,5 +1264,172 @@ func TestCloudDownloadChain_WaitCancelled(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "取消") {
 		t.Errorf("expected error mentioning cancel, got: %v", err)
+	}
+}
+
+// TestSetOptions_BridgesTransferSaveDownloadLocal C1 回归：SetOptions 必须把
+// transfer/save/downloadLocal 从 chainOptions 桥接到 Chain 持久化字段
+// （此前遗漏导致 CLI 旗标空转——转存功能从 CLI 不可达）。
+func TestSetOptions_BridgesTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{}
+	tr := &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"}
+	save := false
+	cdc.SetOptions(chainOptions{
+		downloadLocal: true,
+		transfer:      tr,
+		save:          &save,
+	})
+	if cdc.Transfer == nil || cdc.Transfer.Volume != "vault" {
+		t.Fatalf("SetOptions 未桥接 transfer: %+v", cdc.Transfer)
+	}
+	if cdc.Save == nil || *cdc.Save != false {
+		t.Fatalf("SetOptions 未桥接 save: %+v", cdc.Save)
+	}
+	if !cdc.DownloadLocal {
+		t.Fatal("SetOptions 未桥接 downloadLocal")
+	}
+}
+
+// TestState_PersistsTransferSaveDownloadLocal m3 回归：State() 持久化三字段，
+// resume 后不丢转存参数。
+func TestState_PersistsTransferSaveDownloadLocal(t *testing.T) {
+	t.Parallel()
+	cdc := &CloudDownloadChain{
+		Transfer:      &TransferSpec{Volume: "vault", Path: "pikpak/x.mp4"},
+		Save:          new(false),
+		DownloadLocal: false,
+	}
+	st := cdc.State()
+	if st["transfer"] == nil || st["save"] == nil || st["download_local"] == nil {
+		t.Fatalf("State() 未持久化 transfer/save/download_local: %v", st)
+	}
+	// 恢复往返
+	cdc2 := &CloudDownloadChain{}
+	if err := cdc2.Restore(st); err != nil {
+		t.Fatal(err)
+	}
+	if cdc2.Transfer == nil || cdc2.Transfer.Volume != "vault" {
+		t.Fatalf("Restore 未恢复 transfer: %+v", cdc2.Transfer)
+	}
+	if cdc2.Save == nil || *cdc2.Save != false {
+		t.Fatalf("Restore 未恢复 save: %+v", cdc2.Save)
+	}
+	if cdc2.DownloadLocal != false {
+		t.Fatalf("Restore 未恢复 download_local: %v", cdc2.DownloadLocal)
+	}
+}
+
+// TestCloudDownloadChain_NoDownloadLocal_SkipsArchive H1b 回归：DownloadLocal=false
+// （只转存/只保留，不拉取本地）链式在 waiting 完成后直接完成，跳过
+// archive/download/cleaning——否则仍拉取本地，正交性破坏。
+//
+//go:fix inline
+func TestCloudDownloadChain_NoDownloadLocal_SkipsArchive(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"tasks": []CloudTask{{ID: "task-1", Status: "pending"}}})
+	})
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(CloudTask{ID: "task-1", Status: "completed"})
+	})
+	// 若错误进入 archive/download，应被测试拦截（archive 端点若被调用 → 记录）
+	archiveCalled := false
+	mux.HandleFunc("POST /api/cloud/archive", func(w http.ResponseWriter, r *http.Request) {
+		archiveCalled = true
+		json.NewEncoder(w).Encode(CloudArchiveResult{Success: true})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := defaultChainOptions()
+	opts.downloadLocal = false // 只转存/只保留，不拉取本地
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/f1.bin"}, "archive", t.TempDir(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	reportFn := func(ctx context.Context, info ProgressInfo) { phases = append(phases, info.Phase) }
+	if err := chain.Run(t.Context(), reportFn); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if chain.CurrentPhase != PhaseCompleted {
+		t.Fatalf("应直接 completed，got %s", chain.CurrentPhase)
+	}
+	if chain.LocalPath != "" {
+		t.Fatal("DownloadLocal=false 不应下载本地（LocalPath 空）")
+	}
+	if archiveCalled {
+		t.Fatal("DownloadLocal=false 不应进入 archive（跳过拉取本地）")
+	}
+}
+
+// TestCloudDownloadChain_StorageFullRetry_DamagedNotDoubleCount R6-I1 回归：
+// storage-full 重试轮次后 Damaged 计数不重复累计（每轮归零）。
+// 模拟：首轮一任务 completed+damaged + 一任务 storage-full；重试轮后 Damaged 仍为 1。
+func TestCloudDownloadChain_StorageFullRetry_DamagedNotDoubleCount(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var batchBodies int
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/download/batch", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		batchBodies++
+		mu.Unlock()
+		tasks := []CloudTask{
+			{ID: "dmg-1", Status: "pending"},
+			{ID: "sf-1", Status: "pending"},
+		}
+		json.NewEncoder(w).Encode(map[string]any{"tasks": tasks})
+	})
+	// task 轮询：dmg-1 → completed+damaged；sf-1 → storage-full（首轮）→ completed（重试轮）
+	var pollCount atomic.Int32
+	mux.HandleFunc("GET /api/cloud/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		taskID := strings.TrimPrefix(r.URL.Path, apiCloudTasksBase)
+		if taskID == "dmg-1" {
+			json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", IntegrityStatus: "damaged", URL: "http://example.com/d"})
+			return
+		}
+		if taskID == "sf-1" {
+			if pollCount.Add(1) <= 1 {
+				json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "failed", Error: "storage full", URL: "http://example.com/sf"})
+				return
+			}
+			json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", URL: "http://example.com/sf"})
+			return
+		}
+		json.NewEncoder(w).Encode(CloudTask{ID: taskID, Status: "completed", URL: "http://example.com/x"})
+	})
+	mux.HandleFunc("POST /api/cloud/archive", storageFullRetryArchiveHandler(archiveDir))
+	mux.HandleFunc("HEAD /api/files/stat", storageFullRetryStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", storageFullRetryChunkHandler(t, dir))
+	mux.HandleFunc("DELETE /api/cloud/tasks/", storageFullRetryDeleteHandler())
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	opts := chainOptions{pollInterval: 20 * time.Millisecond, timeout: 10 * time.Second, downloadLocal: true}
+	chain, err := NewCloudDownloadChain(client, []string{"http://example.com/d", "http://example.com/sf"}, "ra", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadChain: %v", err)
+	}
+	chain.backoffFn = func(int) time.Duration { return 5 * time.Millisecond }
+	_ = chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {})
+	// storage-full 重试发生（batch 提交 ≥2 轮）
+	mu.Lock()
+	rounds := batchBodies
+	mu.Unlock()
+	if rounds < 2 {
+		t.Fatalf("应触发 storage-full 重试（≥2 轮 batch），实际 %d", rounds)
+	}
+	if chain.Damaged != 1 {
+		t.Fatalf("R6-I1: Damaged 应 1（不跨轮重复累计），实际 %d", chain.Damaged)
 	}
 }

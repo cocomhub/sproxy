@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/server/share"
 )
 
 // t6bVolCfg 构造 T6b 多卷配置。mainACLExcludeOwner 为 true 时 main 卷用 allow 白名单排除 owner
@@ -69,7 +70,7 @@ func t6bMux(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("GET /api/files/search", wrap(h.searchFiles))
 	mux.HandleFunc("POST /api/archive", wrap(h.archiveHandler))
 	mux.HandleFunc("GET /api/archive-dir", wrap(h.archiveDirHandler))
-	mux.HandleFunc("POST /api/share", wrap(h.createShareHandler))
+	mux.HandleFunc("POST /api/shares", wrap(h.createShareHandler))
 	mux.HandleFunc("GET /s/{token}", h.accessShareHandler)
 	mux.HandleFunc("GET /api/versions", wrap(h.listVersionsHandler))
 	mux.HandleFunc("POST /api/versions/restore", wrap(h.restoreVersionHandler))
@@ -96,7 +97,7 @@ func t6bServer(t *testing.T, actor string, cfg *Config) (string, *Handlers, []st
 func t6bPostBatch(t *testing.T, baseURL, path string, body any) (int, files.BatchResponse) {
 	t.Helper()
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(data))
+	resp, err := http.Post(baseURL+path, contentTypeJSON, bytes.NewReader(data))
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -356,7 +357,7 @@ func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
 	cfg, dirs := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	ts := httptest.NewServer(t6bMux(h, "alice"))
 	t.Cleanup(ts.Close)
@@ -391,7 +392,7 @@ func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
 func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	ts := httptest.NewServer(t6bMux(h, "alice"))
 	t.Cleanup(ts.Close)
@@ -418,7 +419,7 @@ func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
 func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	h := buildVolSetHandlers(t, cfg)
-	h.shareStore = NewShareStore(testLogger())
+	h.shareStore = share.NewStore(testLogger())
 	t.Cleanup(h.shareStore.Stop)
 	seedVolumeFile(t, dirs[0], "bob", "user/legacy.txt", []byte("MAIN-SECRET"))
 	ts := httptest.NewServer(t6bMux(h, "bob"))
@@ -428,16 +429,16 @@ func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
 }
 
 // t6bCreateShare 创建分享并断言期望状态，返回响应。
-func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) ShareCreateResponse {
+func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) share.CreateResponse {
 	t.Helper()
 	body := fmt.Sprintf(`{"filename":%q,"ttl":"1h"}`, filename)
-	resp, err := http.Post(baseURL+"/api/share", "application/json", strings.NewReader(body))
+	resp, err := http.Post(baseURL+"/api/shares", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("create share: %v", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	var out ShareCreateResponse
+	var out share.CreateResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("decode share resp %q: %v", string(raw), err)
 	}
@@ -480,7 +481,7 @@ func TestT6b_Mkdir_WritesToViewVolumeWhenDefaultExcluded(t *testing.T) {
 // t6bPostForm 以空 body POST 到 URL，返回状态与 body。
 func t6bPostForm(t *testing.T, baseURL, path string) (int, string) {
 	t.Helper()
-	resp, err := http.Post(baseURL+path, "application/json", nil)
+	resp, err := http.Post(baseURL+path, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -506,10 +507,11 @@ func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
 		t.Fatalf("disk.txt X-Volume=%q want disk2", hdr.Get("X-Volume"))
 	}
 
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(`{"files":["disk.txt"]}`))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(`{"files":["disk.txt"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive status=%d", resp.StatusCode)
 	}
@@ -535,10 +537,11 @@ func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
 	}
 
 	reqBody := `{"files":["legacy.txt","visible.txt"]}`
-	resp, err := http.Post(url+"/api/archive", "application/json", strings.NewReader(reqBody))
+	resp, err := http.Post(url+"/api/archive", contentTypeJSON, strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive status=%d（流式 200）", resp.StatusCode)
 	}
@@ -576,6 +579,7 @@ func TestT6b_ArchiveDir_LocatesDisk2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("archive-dir status=%d", resp.StatusCode)
 	}
@@ -617,7 +621,7 @@ func uploadIntoDir(t *testing.T, baseURL, filename string, body []byte) (int, ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set(headerFileChecksum, sha256hex(body))
 	req.Header.Set("X-File-Path", filename)
 	resp, err := testHTTPClient(t).Do(req)
@@ -670,7 +674,7 @@ func TestT6b_OrphanVersion_RestoreAfterFileDeleted(t *testing.T) {
 	// restore 从 disk2 版本恢复文件回 disk2。
 	verID := listed.Versions[0].VersionID
 	restoreURL := fmt.Sprintf("%s/api/versions/restore?filename=f.txt&version_id=%d", url, verID)
-	resp, err := http.Post(restoreURL, "application/json", nil)
+	resp, err := http.Post(restoreURL, contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

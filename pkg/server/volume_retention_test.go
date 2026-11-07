@@ -13,6 +13,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
+	"github.com/cocomhub/sproxy/pkg/server/share"
+
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/quota"
@@ -32,7 +37,7 @@ import (
 
 // retentionTestHandlers 构造带 volSet + 可选 shareStore/auditStore 的 Handlers
 // （卷级保留清理执行器测试环境）。
-func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, audit *AuditStore) *Handlers {
+func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, auditJ *audit.FileJournal) *Handlers {
 	t.Helper()
 	vs, err := assembleVolumes(cfg, testLogger())
 	if err != nil {
@@ -49,16 +54,16 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, audit *Au
 		globalPool:     nil,
 		volSet:         vs,
 		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
-		checksumStores: make(map[string]*checksum.ChecksumStore),
+		checksumStores: make(map[string]checksum.ChecksumStoreIface),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
-		shareStore:     NewShareStore(testLogger()),
+		shareStore:     share.NewStore(testLogger()),
 	}
 	if shareDir != "" {
-		h.shareStore.EnablePersist(shareDir)
+		h.shareStore.EnablePersist(testRootAt(t, shareDir), "")
 	}
-	h.auditStore = audit
+	h.auditJournal = auditJ
 	t.Cleanup(func() { _ = h.Close() })
 	return h
 }
@@ -67,12 +72,27 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, audit *Au
 // 起算——直接改内存对象 + 落盘，模拟「创建于过去但 ExpiresAt 未到」的兜底场景）。
 func seedRetentionShare(t *testing.T, h *Handlers, filename string, createdAgo time.Duration, ttl time.Duration) string {
 	t.Helper()
-	link, err := h.shareStore.Create(filename, "alice", "user/"+filename, "ak-1", ttl, 0, false, false, "")
+	link, err := h.shareStore.Create(share.Spec{Filename: filename, TenantID: "alice", Rel: "user/" + filename, Owner: "ak-1", TTL: ttl, MaxDownloads: 0, OneTime: false, ReadOnly: false, WatermarkSeed: ""})
 	if err != nil {
 		t.Fatalf("Create share: %v", err)
 	}
 	link.CreatedAt = time.Now().Add(-createdAgo)
-	h.shareStore.persistWrite(link)
+	// 测试侧直接落盘旧 meta 文件（persistWrite 是 *share.Store 内部方法；此处用新实例
+	// 构造等价落盘——测试只依赖「旧文件存在」）。
+	if ps, ok := h.shareStore.(*share.Store); ok {
+		ps.PersistWrite(link)
+	} else if ss, ok := h.shareStore.(*share.StateBackedStore); ok && ss.LegacyRoot() != nil {
+		if rel := ss.LegacyRelPath(link.Token); rel != "" {
+			if data, merr := json.Marshal(link.ToPersist()); merr == nil {
+				if werr := ss.LegacyRoot().MkdirAll(ss.LegacyRel(), 0o755); werr == nil {
+					if w, werr := rootfs.WriteUserVisible(ss.LegacyRoot(), rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); werr == nil {
+						_, _ = w.Write(data)
+						_ = w.Close()
+					}
+				}
+			}
+		}
+	}
 	return link.Token
 }
 
@@ -237,14 +257,17 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	}
 
 	// 审计 store：3 行，其中 1 行超 2h 窗口。
-	auditSt, err := NewAuditStore(filepath.Join(auditDir, "audit.log"), testLogger())
+	auditSt, err := audit.NewFileJournal(audit.FileJournalConfig{
+		Dir: auditDir, Layout: audit.LayoutGlobal, GlobalName: "audit.log",
+		SyncMode: audit.SyncNone, Logger: testLogger(),
+	})
 	if err != nil {
-		t.Fatalf("NewAuditStore: %v", err)
+		t.Fatalf("audit.NewFileJournal: %v", err)
 	}
 	now := time.Now()
-	_ = auditSt.Append(AuditEvent{Action: "old", TS: now.Add(-3 * time.Hour)})
-	_ = auditSt.Append(AuditEvent{Action: "keep1", TS: now.Add(-time.Hour)})
-	_ = auditSt.Append(AuditEvent{Action: "keep2", TS: now.Add(-30 * time.Minute)})
+	_ = auditSt.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "old", TS: now.Add(-3 * time.Hour)})
+	_ = auditSt.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "keep1", TS: now.Add(-time.Hour)})
+	_ = auditSt.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "keep2", TS: now.Add(-30 * time.Minute)})
 
 	h := retentionTestHandlers(t, cfg, "", auditSt)
 	tntMain := h.tenantFor("alice")
@@ -262,7 +285,7 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	// 分享：默认卷 anonymous/meta/share 持久化；一条 CreatedAt 超 ShareTTL（兜底删）、
 	// 一条未超（保留）。
 	shareDir := filepath.Join(dirs[0], "anonymous", "meta", "share")
-	h.shareStore.EnablePersist(shareDir)
+	h.shareStore.EnablePersist(testRootAt(t, dirs[0]), "anonymous/meta/share")
 	seedRetentionShare(t, h, "old.txt", 3*time.Hour, 2*time.Hour)      // CreatedAt 3h ago > 1h TTL → 删
 	seedRetentionShare(t, h, "fresh.txt", 30*time.Minute, 2*time.Hour) // CreatedAt 30m ago < 1h TTL → 保留
 
@@ -280,6 +303,12 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	h.volumeRetentionPassFor("main")
 	h.volumeRetentionPassFor("disk2")
 
+	assertRetentionPassGCResults(t, h, tntMain, disk2Tnt, shareDir, auditSt, filepath.Join(auditDir, "audit.log"))
+}
+
+// assertRetentionPassGCResults 断言 GC 后版本/分享/审计清理结果与落盘日志行数。
+func assertRetentionPassGCResults(t *testing.T, h *Handlers, tntMain, disk2Tnt *storage.Tenant, shareDir string, auditSt *audit.FileJournal, auditLogPath string) {
+	t.Helper()
 	if got := countVersionEntries(t, tntMain, "f.txt"); got != 1 {
 		t.Fatalf("GC 后 f.txt 版本数=%d want 1（过期已清）", got)
 	}
@@ -292,11 +321,11 @@ func TestVolumeRetention_Pass_ExpiredCleanup(t *testing.T) {
 	if got := len(h.shareStore.List("")); got != 1 {
 		t.Fatalf("GC 后分享内存条数=%d want 1（仅 fresh 保留）", got)
 	}
-	if got := auditSt.Len(); got != 2 {
+	if got := len(mustAuditEntries(t, auditSt)); got != 2 {
 		t.Fatalf("审计按龄清理后 Len()=%d want 2（窗口内保留）", got)
 	}
 	// 落盘审计日志同步重写：行数 == 保留数。
-	data, rerr := os.ReadFile(filepath.Join(auditDir, "audit.log"))
+	data, rerr := os.ReadFile(auditLogPath)
 	if rerr != nil {
 		t.Fatalf("读审计日志: %v", rerr)
 	}
@@ -350,4 +379,14 @@ func TestVolumeRetention_Disabled_HTTPRegister(t *testing.T) {
 	ts := httptest.NewServer(h.Handler())
 	ts.Close()
 	_ = h.Close()
+}
+
+// mustAuditEntries 读取全部审计条目（替代旧 AuditStore.Len 的计数断言）。
+func mustAuditEntries(t *testing.T, j *audit.FileJournal) []audit.Entry {
+	t.Helper()
+	es, err := j.Read(audit.EntryFilter{})
+	if err != nil {
+		t.Fatalf("audit Read: %v", err)
+	}
+	return es
 }

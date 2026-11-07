@@ -30,7 +30,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/coordkey"
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/server/filelock"
 )
 
 // byteFileCoordinator 是按 owner 字节预算的跨进程协调后端。
@@ -41,28 +43,51 @@ type byteFileCoordinator struct {
 	window time.Duration
 	dir    string
 	logger *slog.Logger
+	// now 是可注入时钟（默认 time.Now）。测试用它把「窗口过期」从墙钟依赖变成确定性推进——
+	// 此前 `WindowRefill` 依赖「两次调用间隔 < 2s」，在满载 CI runner 上会偶发超窗
+	// （报 "within window should be rejected"）。
+	now func() time.Time
 }
 
 // newByteFileCoordinator 创建带宽字节预算协调后端。quota<=0 → 不限额（Consume 恒放行，
 // 行为退化为纯内存 token 桶）；dir 为计数文件根目录（storage 根，bandwidth/ 子目录），
 // 必须非空。
-func newByteFileCoordinator(quota int64, window time.Duration, dir string, logger *slog.Logger) *byteFileCoordinator {
+// byteCoordOption 是构造期选项（只允许在创建时注入；运行期不可变 ⇒ 并发安全）。
+type byteCoordOption func(*byteFileCoordinator)
+
+// withByteCoordClock 注入可测时钟。仅供测试使用：把「窗口过期」从墙钟依赖改为确定性推进。
+func withByteCoordClock(fn func() time.Time) byteCoordOption {
+	return func(c *byteFileCoordinator) {
+		if fn != nil {
+			c.now = fn
+		}
+	}
+}
+
+func newByteFileCoordinator(quota int64, window time.Duration, dir string, logger *slog.Logger, opts ...byteCoordOption) *byteFileCoordinator {
 	if quota <= 0 {
 		quota = 1 << 60 // 近似不限额（1 EiB）
 	}
 	if window <= 0 {
 		window = time.Second
 	}
-	return &byteFileCoordinator{
+	c := &byteFileCoordinator{
 		quota:  quota,
 		window: window,
 		dir:    dir,
 		logger: slogutil.Default(logger),
+		now:    time.Now,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
+	}
+	return c
 }
 
 // Consume 尝试在协调后端消耗 n 字节配额：窗口内累计 + n ≤ quota 则累加并返回 true；
-// 超限返回 false（调用方等待重试）。key 为 owner（经 sanitizeKey 归一为安全文件名）。
+// 超限返回 false（调用方等待重试）。key 为 owner（经 coordkey.Sanitize 归一为安全文件名）。
 func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 	if n <= 0 {
 		return true
@@ -75,8 +100,8 @@ func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 		c.logger.Warn("bandwidth coord dir create failed, allowing", "key", key, "error", err)
 		return true
 	}
-	path := filepath.Join(sub, sanitizeKey(key))
-	now := time.Now()
+	path := filepath.Join(sub, coordkey.Sanitize(key))
+	now := c.now()
 	start := now.UnixNano()
 
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
@@ -86,11 +111,11 @@ func (c *byteFileCoordinator) Consume(key string, n int64) bool {
 	}
 	defer f.Close()
 
-	if err := lockFile(f); err != nil {
+	if err := filelock.Lock(f); err != nil {
 		c.logger.Warn("bandwidth coord file lock failed, allowing", "key", key, "error", err)
 		return true
 	}
-	defer func() { _ = unlockFile(f) }()
+	defer func() { _ = filelock.Unlock(f) }()
 
 	// 读窗口起点与累计字节（文件两行：首行起点，次行累计）。
 	var windowStart int64

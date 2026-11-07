@@ -30,7 +30,7 @@ func TestAtomicRename_MissingSourceKeepsDestination(t *testing.T) {
 		t.Fatalf("准备目标文件: %v", werr)
 	}
 
-	if rerr := rt.AtomicRename("missing.txt", "dst.txt"); rerr == nil {
+	if rt.AtomicRename("missing.txt", "dst.txt") == nil {
 		t.Fatal("源不存在时 AtomicRename 必须报错")
 	}
 

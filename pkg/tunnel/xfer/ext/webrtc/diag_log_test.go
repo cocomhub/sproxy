@@ -79,89 +79,60 @@ func TestSetVerbose_GloballyEnabled(t *testing.T) {
 	}
 }
 
-// TestRoundTrip_HostOnly_StateCallbacksRegistered 验证 host-only 内网模式下往返正常，
-// 并断言打洞诊断回调（logICEEvent/logPCStateEvent/logCandidateEvents）确实被触发。
-func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
-	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
-	env := webrtctest.New(t)
-	defer env.Close()
-	SetHostOnly(true)
-	t.Cleanup(func() { SetHostOnly(false) })
+// webrtcDiagResult 是 TestRoundTrip_HostOnly_StateCallbacksRegistered 双 goroutine 的结果载体。
+type webrtcDiagResult struct {
+	err  error
+	data []byte
+}
 
-	// 捕获 slog 输出，验证状态回调被触发（Debug 级起全捕获）。
-	// 用互斥保护的缓冲：pion 内部 goroutine 可能异步写日志（如 state=closed）。
-	logBuf := &lockedBuffer{}
-	prevDefault := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prevDefault) })
-
-	signal := NewSignal()
-	payload := []byte("hello webrtc diagnostics")
-
-	type result struct {
-		err  error
-		data []byte
+// diagRoundTripListenThread 监听侧 goroutine：读到后写回，等拨号侧读完再收尾。
+func diagRoundTripListenThread(signal *Signal, dialDone <-chan struct{}, listenRes chan<- webrtcDiagResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+	conn, err := Listen(signal)
+	if err != nil {
+		listenRes <- webrtcDiagResult{err: err}
+		return
 	}
-	dialRes := make(chan result, 1)
-	listenRes := make(chan result, 1)
-	dialDone := make(chan struct{})
+	defer conn.Close()
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		listenRes <- webrtcDiagResult{err: err}
+		return
+	}
+	if _, err := conn.Write(buf[:n]); err != nil {
+		listenRes <- webrtcDiagResult{err: err}
+		return
+	}
+	listenRes <- webrtcDiagResult{data: buf[:n]}
+	<-dialDone
+}
 
-	// 等待两个 goroutine 完全结束（含 conn.Close 触发的 state=closed 日志写入），
-	// 避免读 logBuf 时后台连接 goroutine 仍在写造成数据竞争。
-	var wg sync.WaitGroup
-	wg.Add(2)
+// diagRoundTripDialThread 拨号侧 goroutine：写 payload → 读回显 → 通知监听侧收工。
+func diagRoundTripDialThread(signal *Signal, payload []byte, dialDone chan<- struct{}, dialRes chan<- webrtcDiagResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+	conn, err := Dial(signal)
+	if err != nil {
+		dialRes <- webrtcDiagResult{err: err}
+		return
+	}
+	defer conn.Close()
+	if _, werr := conn.Write(payload); werr != nil {
+		dialRes <- webrtcDiagResult{err: werr}
+		return
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		dialRes <- webrtcDiagResult{err: err}
+		return
+	}
+	dialRes <- webrtcDiagResult{data: buf[:n]}
+	close(dialDone)
+}
 
-	// Listen goroutine：读到后写回，等 dial 完成再关闭（避免提前 Close 打断 SCTP）。
-	go func() {
-		defer wg.Done()
-		conn, err := Listen(signal)
-		if err != nil {
-			listenRes <- result{err: err}
-			return
-		}
-		defer conn.Close()
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
-		if err != nil {
-			listenRes <- result{err: err}
-			return
-		}
-		if _, err := conn.Write(buf[:n]); err != nil {
-			listenRes <- result{err: err}
-			return
-		}
-		listenRes <- result{data: buf[:n]}
-		<-dialDone
-	}()
-
-	// Dial goroutine。
-	go func() {
-		defer wg.Done()
-		conn, err := Dial(signal)
-		if err != nil {
-			dialRes <- result{err: err}
-			return
-		}
-		defer conn.Close()
-		if _, werr := conn.Write(payload); werr != nil {
-			dialRes <- result{err: werr}
-			return
-		}
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
-		if err != nil {
-			dialRes <- result{err: err}
-			return
-		}
-		dialRes <- result{data: buf[:n]}
-		close(dialDone)
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// 两个 goroutine 都成功且数据一致才算过。收集错误而不是直接 t.Fatalf，
-	// 确保 wg.Wait() 让两个 goroutine 完全退出后再读 logBuf / 结束测试。
+// diagRoundTripCollect 收集两个 goroutine 的结果，任一失败即返回包装后的错误。
+func diagRoundTripCollect(dialRes, listenRes <-chan webrtcDiagResult, payload []byte, ctx context.Context) error {
 	okDial, okListen := false, false
 	var roundtripErr error
 	for !okDial || !okListen {
@@ -191,13 +162,12 @@ func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
 			break
 		}
 	}
-	wg.Wait()
-	if roundtripErr != nil {
-		t.Fatalf("roundtrip 失败: %v", roundtripErr)
-	}
+	return roundtripErr
+}
 
-	// 断言诊断日志确实被触发（host-only 下 ICE 状态流转 + 候选收集必然发生）。
-	logs := logBuf.String()
+// diagRoundTripAssertLogs 断言三条诊断日志都出现在捕获输出中。
+func diagRoundTripAssertLogs(t *testing.T, logs string) {
+	t.Helper()
 	for _, want := range []string{
 		"webrtc: ICE 状态变化",
 		"webrtc: 连接状态变化",
@@ -207,4 +177,54 @@ func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
 			t.Errorf("诊断日志缺失 %q；捕获输出:\n%s", want, logs)
 		}
 	}
+}
+
+// TestRoundTrip_HostOnly_StateCallbacksRegistered 验证 host-only 内网模式下往返正常，
+// 并断言打洞诊断回调（logICEEvent/logPCStateEvent/logCandidateEvents）确实被触发。
+func TestRoundTrip_HostOnly_StateCallbacksRegistered(t *testing.T) {
+	// loopback 收敛 + 禁用 mDNS，避免 Windows 测试弹防火墙授权框。
+	env := webrtctest.New(t)
+	defer env.Close()
+	SetHostOnly(true)
+	t.Cleanup(func() { SetHostOnly(false) })
+
+	// 捕获 slog 输出，验证状态回调被触发（Debug 级起全捕获）。
+	// 用互斥保护的缓冲：pion 内部 goroutine 可能异步写日志（如 state=closed）。
+	logBuf := &lockedBuffer{}
+	prevDefault := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevDefault) })
+
+	signal := NewSignal()
+	payload := []byte("hello webrtc diagnostics")
+
+	dialRes := make(chan webrtcDiagResult, 1)
+	listenRes := make(chan webrtcDiagResult, 1)
+	dialDone := make(chan struct{})
+
+	// 等待两个 goroutine 完全结束（含 conn.Close 触发的 state=closed 日志写入），
+	// 避免读 logBuf 时后台连接 goroutine 仍在写造成数据竞争。
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Listen goroutine：读到后写回，等 dial 完成再关闭（避免提前 Close 打断 SCTP）。
+	go diagRoundTripListenThread(signal, dialDone, listenRes, &wg)
+
+	// Dial goroutine。
+	go diagRoundTripDialThread(signal, payload, dialDone, dialRes, &wg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// 两个 goroutine 都成功且数据一致才算过。收集错误而不是直接 t.Fatalf，
+	// 确保 wg.Wait() 让两个 goroutine 完全退出后再读 logBuf / 结束测试。
+	roundtripErr := diagRoundTripCollect(dialRes, listenRes, payload, ctx)
+	wg.Wait()
+	if roundtripErr != nil {
+		t.Fatalf("roundtrip 失败: %v", roundtripErr)
+	}
+
+	// 断言诊断日志确实被触发（host-only 下 ICE 状态流转 + 候选收集必然发生）。
+	logs := logBuf.String()
+	diagRoundTripAssertLogs(t, logs)
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cloud"
 )
 
 // writeCloudArchive 在 <storageRoot>/<tenant>/archive/ 下写入名为 name 的归档文件。
@@ -394,7 +396,7 @@ func TestDownloadCloudTask_Kind(t *testing.T) {
 	t.Cleanup(func() { ts.Close(); _ = h.Close() })
 
 	// 创建属于 testAccessKey 的任务并写入云端文件（按 owner 落 <root>/<tenant>/cloud/<taskID>/）
-	task, err := h.cloudMgr.CreateTask("url", "http://example.com/file", "file.txt", 10, testAccessKey)
+	task, err := h.cloudMgr.CreateTask("url", "http://example.com/file", "file.txt", 10, testAccessKey, cloud.TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

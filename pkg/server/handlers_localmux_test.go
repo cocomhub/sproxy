@@ -17,9 +17,9 @@ import (
 
 // localMuxPatterns 记录隧道内层 localMux 上必须可达的全部路由（method + pattern）。
 // 该清单是「浏览器隧道模式下每个用户面操作可达」的账本。背景：真实浏览器回归
-// 曾暴露 POST /api/share 404——createShareHandler 只挂在 srvMux（主面），localMux
+// 曾暴露 POST /api/shares 404——createShareHandler 只挂在 srvMux（主面），localMux
 // （隧道内层）缺注册，sclient.share.create 在隧道模式下 100% 失败。修复 = handlers.go
-// 把 POST /api/share 与 hub nodes/stats/remove 同步补进 localMux。本测试即为这类
+// 把 POST /api/shares 与 hub nodes/stats/remove 同步补进 localMux。本测试即为这类
 // 缺失的永久护栏。signal/relay 为 mesh 内部通道（不经隧道），不列入。
 var localMuxPatterns = []struct{ method, pattern string }{
 	{"POST", "/upload"},
@@ -46,7 +46,9 @@ var localMuxPatterns = []struct{ method, pattern string }{
 	// 卷备份/导出：隧道内层可达（浏览器隧道模式下用户面操作）
 	{"GET", "/api/volumes/export"},
 	{"POST", "/api/volumes/import"},
-	{"POST", "/api/share"},
+	// 备份（roadmap 12.2-3 P2）：隧道内层可达（浏览器隧道模式下用户面操作）
+	{"POST", "/api/backup"},
+	{"POST", "/api/shares"},
 	{"GET", "/api/shares"},
 	{"DELETE", "/api/shares/{token}"},
 	{"GET", "/api/stats"},
@@ -173,7 +175,7 @@ func TestHandlers_LocalHandler(t *testing.T) {
 // TestLocalMuxCoversAllTunnelRoutes 断言账本每条路由在接入层 mux 上都已注册。
 // 由于 localMux 与 srvMux 共享同一批 handler 且 pattern 完全一致，两者任一缺失
 // （authMiddleware 版或裸版）都意味着一端业务不可达：srvMux 有而 localMux 缺 =
-// 隧道内 404（本次 POST /api/share 的现场）；localMux 有而 srvMux 缺 = 直连面
+// 隧道内 404（本次 POST /api/shares 的现场）；localMux 有而 srvMux 缺 = 直连面
 // 404（不常见但同类损伤）。断言以 405 为判据覆盖两案——单一 mux 上该 pattern 的
 // 注册（无论包不包 authMiddleware）都会被 405 探测到。
 func TestLocalMuxCoversAllTunnelRoutes(t *testing.T) {

@@ -59,7 +59,7 @@ func TestDeriveRemoteStaticKey_KnownAnswer(t *testing.T) {
 // 成立，故改断言 panic（见任务报告）。
 func TestDeriveRemoteStaticKey_EmptyFingerprintPanics(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("空指纹必须 panic（fail-closed），不得返回 nil 静默降级为明文模式")
 		}
 	}()

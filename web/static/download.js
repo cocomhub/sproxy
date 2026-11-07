@@ -10,6 +10,156 @@
 //
 // 隔离原则（与 upload.js 一致）：纯函数不碰 DOM/全局，Node 可 require 直测；
 // createDownloadManager({store, transport}) 注入式（测试传内存 mock）。
+
+// ---- 纯函数（模块级）----
+// 下列函数均不捕获工厂闭包（仅参数/全局），置于模块级供工厂与导出复用（S7721）。
+
+// download 分块请求路径（encodeURIComponent 完整 filename；offset/length 数值）。
+function chunkUrlFor(filename, offset, length, volume) {
+  const q = 'filename=' + encodeURIComponent(filename) + '&offset=' + offset + '&length=' + length + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+  return '/download/chunk?' + q;
+}
+
+// 块数：totalBytes/chunkSize 向上取整。非法输入 → 0。
+function chunkCount(totalBytes, chunkSize) {
+  const t = Number(totalBytes);
+  const c = Number(chunkSize);
+  if (!Number.isFinite(t) || t < 0) return 0;
+  if (!Number.isFinite(c) || c <= 0) return 0;
+  return Math.ceil(t / c);
+}
+
+// 全量索引 [0, totalChunks)。非法/负/NaN → []。
+function allChunkIndices(totalChunks) {
+  const n = Math.floor(Number(totalChunks));
+  if (!Number.isFinite(n) || n < 0) return [];
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(i);
+  return out;
+}
+
+// 缺失块列表：bitmap falsy/缺位视为未下载。
+function missingChunkList(bitmap, expectedTotal) {
+  const n = Math.floor(Number(expectedTotal));
+  if (!Number.isFinite(n) || n < 0) return [];
+  const bm = Array.isArray(bitmap) ? bitmap : [];
+  const out = [];
+  for (let i = 0; i < n; i++) if (!bm[i]) out.push(i);
+  return out;
+}
+
+// 大小写兼容的响应头取值（flat map 或数组值）。
+function headerValue(headers, key) {
+  if (!headers || !key) return '';
+  const direct = headers[key] || headers[key.toLowerCase()] || headers[key.toUpperCase()];
+  if (Array.isArray(direct)) return direct[0] || '';
+  if (direct === undefined || direct === null) return '';
+  return String(direct);
+}
+
+// stat 响应（{headers}）归一为 {size, mtime, checksum}。
+function serverMetaFromStat(res) {
+  const h = res?.headers ? res.headers : {};
+  const sizeN = Number(headerValue(h, 'X-File-Size'));
+  return {
+    size: Number.isFinite(sizeN) && sizeN > 0 ? sizeN : 0,
+    mtime: headerValue(h, 'X-File-MTime'),
+    checksum: headerValue(h, 'X-File-Checksum'),
+  };
+}
+
+// 恢复校验：size 必须匹配；双方都有 mtime → 比 mtime；缺一侧 mtime → 比 checksum
+// （有则比，无则视为匹配——无法比对不拒绝续传）；双缺 → true。
+function metaMatches(stored, server) {
+  const a = stored || {};
+  const b = server || {};
+  const an = Number(a.size);
+  if (Number.isFinite(an) && an > 0 && an !== Number(b.size)) return false;
+  const sm = a.mtime || '';
+  const bm = b.mtime || '';
+  if (sm && bm) return sm === bm;
+  if (!sm && !bm) return true;
+  const ac = a.checksum ? a.checksum.toLowerCase() : '';
+  const bc = b.checksum ? String(b.checksum).toLowerCase() : '';
+  if (ac || bc) return ac === bc;
+  return true;
+}
+
+// FNV-1a 32 生成稳定 item id（下载唯一性；无需加密强度）。
+function idFor(filename) {
+  let h = 2166136261;
+  const s = String(filename);
+  // codePointAt 需按码点长度推进（代理对时 i 前进 2，逐 UTF-16 码元语义与旧 charCodeAt 一致）。
+  for (let i = 0; i < s.length; ) {
+    const cp = s.codePointAt(i);
+    h ^= cp;
+    h = Math.imul(h, 16777619);
+    i += cp > 0xFFFF ? 2 : 1;
+  }
+  return 'dl-' + (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function parseHooks(hooks) {
+  const h = (hooks && typeof hooks === 'object') ? hooks : {};
+  return {
+    volume: typeof h.volume === 'string' ? h.volume : '',
+    onProgress: typeof h.onProgress === 'function' ? h.onProgress : null,
+    onVerify: typeof h.onVerify === 'function' ? h.onVerify : null,
+    onComplete: typeof h.onComplete === 'function' ? h.onComplete : null,
+    onMismatch: typeof h.onMismatch === 'function' ? h.onMismatch : null,
+    onError: typeof h.onError === 'function' ? h.onError : null,
+  };
+}
+
+function metaFromStat(stat) {
+  return {
+    mtimeNano: stat?.mtime || '',
+    checksum: stat?.checksum || '',
+  };
+}
+function copyMeta(item) {
+  const m = item?.meta || {};
+  return { ...m, mtimeNano: m.mtimeNano !== undefined ? m.mtimeNano : '', checksum: m.checksum || '' };
+}
+
+// 传输层/存储不可用时的无操作后端（纯函数，供 defaultStore 兜底）。
+function downloadNoopStore() {
+  return {
+    loadItems() { return []; }, upsertItem() {}, removeItem() {},
+    saveChunk() {}, loadChunk() { return Promise.resolve(null); },
+    listChunkCount() { return Promise.resolve(0); },
+    deleteChunkRange() { return Promise.reject(new Error('store unavailable')); },
+  };
+}
+function defaultTransport() {
+  if (typeof sclientTransport !== 'undefined' && sclientTransport.coreRequest) return sclientTransport;
+  return { coreRequest: null };
+}
+
+// abort 判定（暂停/取消中断由 pause/cancel 写状态，失败路径据此短路）。
+function isAbort(err) { return !!(err && (err.code === 'E_ABORT' || err.name === 'AbortError')); }
+
+function bitmapReady(bitmap, totalChunks) {
+  if (totalChunks === 0) return true;
+  for (let i = 0; i < totalChunks; i++) if (!bitmap[i]) return false;
+  return true;
+}
+function sliceToLen(arr, n) {
+  const out = new Array(n).fill(0);
+  if (Array.isArray(arr)) for (let i = 0; i < Math.min(arr.length, n); i++) out[i] = arr[i] ? 1 : 0;
+  return out;
+}
+
+// statResolve：HEAD /api/files/stat → {size, mtime, checksum}；失败回落空 meta。
+// volume 可选：外部/加密卷上 stat 必须带行卷（?volume= 原子定位，否则多卷同名 rel 歧义）。
+function statResolve(transport, filename, volume) {
+  return Promise.resolve().then(function () {
+    if (!transport || typeof transport.coreRequest !== 'function') throw new Error('传输层不可用');
+    const q = 'filename=' + encodeURIComponent(filename) + (volume ? '&volume=' + encodeURIComponent(volume) : '');
+    return transport.coreRequest('HEAD', '/api/files/stat?' + q, {});
+  }).then(serverMetaFromStat).catch(function () { return { size: 0, mtime: '', checksum: '' }; });
+}
+
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory();
@@ -25,11 +175,6 @@
 
   // ---- 纯函数 ----
 
-  // download 分块请求路径（encodeURIComponent 完整 filename；offset/length 数值）。
-  function chunkUrlFor(filename, offset, length) {
-    return '/download/chunk?filename=' + encodeURIComponent(filename) + '&offset=' + offset + '&length=' + length;
-  }
-
   // 分块大小协商（对齐 sclient/api/files.js calcChunkSize）。
   function calcChunkSize(fileSize) {
     let cs = BASE;
@@ -37,122 +182,12 @@
     return Math.min(cs, MAX);
   }
 
-  // 块数：totalBytes/chunkSize 向上取整。非法输入 → 0。
-  function chunkCount(totalBytes, chunkSize) {
-    const t = Number(totalBytes);
-    const c = Number(chunkSize);
-    if (!isFinite(t) || t < 0) return 0;
-    if (!isFinite(c) || c <= 0) return 0;
-    return Math.ceil(t / c);
-  }
-
-  // 全量索引 [0, totalChunks)。非法/负/NaN → []。
-  function allChunkIndices(totalChunks) {
-    const n = Math.floor(Number(totalChunks));
-    if (!isFinite(n) || n < 0) return [];
-    const out = [];
-    for (let i = 0; i < n; i++) out.push(i);
-    return out;
-  }
-
-  // 缺失块列表：bitmap falsy/缺位视为未下载。
-  function missingChunkList(bitmap, expectedTotal) {
-    const n = Math.floor(Number(expectedTotal));
-    if (!isFinite(n) || n < 0) return [];
-    const bm = Array.isArray(bitmap) ? bitmap : [];
-    const out = [];
-    for (let i = 0; i < n; i++) if (!bm[i]) out.push(i);
-    return out;
-  }
-
-  // 大小写兼容的响应头取值（flat map 或数组值）。
-  function headerValue(headers, key) {
-    if (!headers || !key) return '';
-    const direct = headers[key] || headers[key.toLowerCase()] || headers[key.toUpperCase()];
-    if (Array.isArray(direct)) return direct[0] || '';
-    if (direct === undefined || direct === null) return '';
-    return String(direct);
-  }
-
-  // stat 响应（{headers}）归一为 {size, mtime, checksum}。
-  function serverMetaFromStat(res) {
-    const h = (res && res.headers) ? res.headers : {};
-    const sizeN = Number(headerValue(h, 'X-File-Size'));
-    return {
-      size: isFinite(sizeN) && sizeN > 0 ? sizeN : 0,
-      mtime: headerValue(h, 'X-File-MTime'),
-      checksum: headerValue(h, 'X-File-Checksum'),
-    };
-  }
-
-  // 恢复校验：size 必须匹配；双方都有 mtime → 比 mtime；缺一侧 mtime → 比 checksum
-  // （有则比，无则视为匹配——无法比对不拒绝续传）；双缺 → true。
-  function metaMatches(stored, server) {
-    const a = stored || {};
-    const b = server || {};
-    const an = Number(a.size);
-    if (isFinite(an) && an > 0 && an !== Number(b.size)) return false;
-    const sm = a.mtime || '';
-    const bm = b.mtime || '';
-    if (sm && bm) return sm === bm;
-    if (!sm && !bm) return true;
-    const ac = a.checksum ? a.checksum.toLowerCase() : '';
-    const bc = b.checksum ? String(b.checksum).toLowerCase() : '';
-    if (ac || bc) return ac === bc;
-    return true;
-  }
-
-  // FNV-1a 32 生成稳定 item id（下载唯一性；无需加密强度）。
-  function idFor(filename) {
-    let h = 2166136261;
-    const s = String(filename);
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return 'dl-' + (h >>> 0).toString(16).padStart(8, '0');
-  }
-
-  function parseHooks(hooks) {
-    const h = (hooks && typeof hooks === 'object') ? hooks : {};
-    return {
-      onProgress: typeof h.onProgress === 'function' ? h.onProgress : null,
-      onVerify: typeof h.onVerify === 'function' ? h.onVerify : null,
-      onComplete: typeof h.onComplete === 'function' ? h.onComplete : null,
-      onMismatch: typeof h.onMismatch === 'function' ? h.onMismatch : null,
-      onError: typeof h.onError === 'function' ? h.onError : null,
-    };
-  }
-
-  function metaFromStat(stat) {
-    return {
-      mtimeNano: (stat && stat.mtime) || '',
-      checksum: (stat && stat.checksum) || '',
-    };
-  }
-  function copyMeta(item) {
-    const m = (item && item.meta) || {};
-    return Object.assign({}, m, { mtimeNano: m.mtimeNano !== undefined ? m.mtimeNano : '', checksum: m.checksum || '' });
-  }
-
   let _defaultStore = null;
   function defaultStore() {
     if (!_defaultStore && typeof transferStore !== 'undefined' && transferStore.createTransferStore) {
       _defaultStore = transferStore.createTransferStore({});
     }
-    return _defaultStore || noopStore();
-  }
-  function noopStore() {
-    return {
-      loadItems() { return []; }, upsertItem() {}, removeItem() {},
-      saveChunk() {}, loadChunk() { return Promise.resolve(null); },
-      listChunkCount() { return Promise.resolve(0); },
-      deleteChunkRange() { return Promise.reject(new Error('store unavailable')); },
-    };
-  }
-  function defaultTransport() {
-    if (typeof sclientTransport !== 'undefined' && sclientTransport.coreRequest) return sclientTransport;
-    return { coreRequest: null };
+    return _defaultStore || downloadNoopStore();
   }
 
   // createDownloadManager 是唯一入口；store/transport 可注入（测试用内存 mock）。
@@ -164,64 +199,62 @@
   }
 
   function Manager(store, transport) {
-    const self = this;
-    self._store = store;
-    self._transport = transport;
-    self._running = {}; // itemId → { aborter, state }（进行中会话）
+    this._store = store;
+    this._transport = transport;
+    this._running = {}; // itemId → { aborter, state }（进行中会话）
 
-    self.findItem = function (idOrItem) {
+    this.findItem = (idOrItem) => {
       const list = store.loadItems();
-      for (let i = 0; i < list.length; i++) {
-        const it = list[i];
+      for (const it of list) {
         if (it.id === idOrItem || it === idOrItem) return it;
       }
       return null;
     };
-    self.getItem = function (id) { return self.findItem(id); };
+    this.getItem = (id) => this.findItem(id);
 
-    function currentItem(item) {
-      return self.findItem(item.id) || item;
-    }
-    function persistItem(item, patch) {
+    const currentItem = (item) => this.findItem(item.id) || item;
+    const persistItem = (item, patch) => {
       const cur = currentItem(item);
-      const next = Object.assign({}, cur, patch);
+      const next = { ...cur, ...patch };
       // 每次写回统一补齐 meta 必备字段，防止存档漂移缺字段。
-      next.meta = Object.assign({}, copyMeta(cur), next.meta || {});
+      next.meta = { ...copyMeta(cur), ...next.meta };
       store.upsertItem(next);
       return next;
-    }
+    };
 
     // ---- 拉取泵（新建/恢复/强制共用）----
-    // run(item, filename, chunkSize, missing, hooks, force)：并发 PARALLEL 拉缺失块，
+    // run(item, filename, chunkSize, missing, hooks, force, vol)：并发 PARALLEL 拉缺失块，
     // 每块成功写 IDB + upsertItem 进度；全块就绪 → 合并 Blob → onVerify → onComplete →
     // 清块缓存 → completed。分块失败 → status failed 写回原因（保留已拉块供恢复）。
-    function run(item, filename, chunkSize, missing, hooks, force) {
-      const existing = self._running[item.id];
-      if (existing && existing.state === 'running') return Promise.reject(new Error('该下载已在处理中'));
+    // vol：显式卷（行卷优先；空 = auto）——chunk 请求带 ?volume=（外部/加密卷必需）。
+    const run = (item, filename, chunkSize, missing, hooks, force, vol) => {
+      const existing = this._running[item.id];
+      if (existing?.state === 'running') return Promise.reject(new Error('该下载已在处理中'));
       const aborter = new AbortController();
       const session = { aborter: aborter, state: 'running' };
-      self._running[item.id] = session;
+      this._running[item.id] = session;
 
       const total = Number(item.totalSize) > 0 ? Number(item.totalSize) : Number(item.total);
       const totalChunks = chunkCount(total, chunkSize);
       const bitmap = force ? new Array(totalChunks).fill(0)
-        : sliceToLen(item.meta && item.meta.chunksBitmap, totalChunks);
-      let loaded = force ? 0 : (Number(item.loaded) > 0 ? Number(item.loaded) : 0);
+        : sliceToLen(item.meta?.chunksBitmap, totalChunks);
+      let loaded;
+      if (force) loaded = 0;
+      else loaded = Math.max(0, Number(item.loaded) || 0);
       let lastChunkHeaders = null;
       let pending = missing.slice();
 
-      function persistRunning() {
+      const persistRunning = () => {
         const base = currentItem(item);
-        const next = Object.assign({}, base, {
+        const next = {
+          ...base,
           status: 'downloading',
           loaded: loaded,
-          meta: Object.assign(copyMeta(base), {
-            chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: bitmap.slice(),
-          }),
-        });
+          meta: { ...copyMeta(base), chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: bitmap.slice() },
+        };
         store.upsertItem(next);
         return next;
-      }
+      };
       persistRunning();
 
       function recordChunk(idx, data, recSize) {
@@ -230,9 +263,7 @@
         persistItem(item, {
           loaded: loaded,
           status: 'downloading',
-          meta: Object.assign(copyMeta(currentItem(item)), {
-            chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize: chunkSize, chunkIndex: idx,
-          }),
+          meta: { ...copyMeta(currentItem(item)), chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize: chunkSize, chunkIndex: idx },
         });
         if (typeof store.saveChunk === 'function') {
           store.saveChunk(item.id, idx, data, recSize).catch(function () { /* 尽力而为（块缓存可重写） */ });
@@ -259,14 +290,16 @@
         return Promise.resolve()
           .then(function () {
             if (!transport || typeof transport.coreRequest !== 'function') throw new Error('传输层不可用');
-            return transport.coreRequest('GET', chunkUrlFor(filename, start, len), { headers: {}, signal: controller.signal });
+            return transport.coreRequest('GET', chunkUrlFor(filename, start, len, vol), { headers: {}, signal: controller.signal });
           })
           .then(function (res) {
             if (stopped()) return; // abort/竞态后仍到达 → 不落块
-            if (!res || res.status !== 200) throw new Error('分块下载失败: HTTP ' + ((res && res.status) || '?'));
-            lastChunkHeaders = (res && res.headers) || null;
+            if (res?.status !== 200) throw new Error('分块下载失败: HTTP ' + (res?.status || '?'));
+            lastChunkHeaders = res?.headers || null;
             const raw = res.body;
-            const bytes = raw instanceof Uint8Array ? raw : new Uint8Array((raw && raw.byteLength) ? raw : 0);
+            let bytes;
+            if (raw instanceof Uint8Array) bytes = raw;
+            else bytes = new Uint8Array(raw?.byteLength ? raw : 0);
             // 服务端按 length 截断，实际返回可能短于 len（文件尾部/边界）——以实际字节为准。
             const block = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
             recordChunk(idx, block, bytes.byteLength);
@@ -295,59 +328,62 @@
         return Promise.all(gets);
       }
 
-      function isAbort(err) { return !!(err && (err.code === 'E_ABORT' || err.name === 'AbortError')); }
-
       // 完成/失败/中断统一收尾：清 _running 会话（pause/cancel 已删时幂等）。
-      function finish() {
+      const finish = () => {
         if (session.state !== 'paused' && session.state !== 'cancelled') session.state = 'finished';
-        if (self._running[item.id] === session) delete self._running[item.id];
+        if (this._running[item.id] === session) delete this._running[item.id];
+      };
+
+      // 全块就绪 → 合并 Blob → onVerify → onComplete。提取命名回调，降低 S2004 嵌套。
+      function mergeBlob(chunks) {
+        if (chunks.some((c) => !c)) throw new Error('部分分块缺失（缓存不完整），无法合并');
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      }
+
+      function verifyBlob(blob) {
+        if (!hooks.onVerify) return blob;
+        return Promise.resolve(hooks.onVerify(blob, headerValue(lastChunkHeaders, 'X-File-Checksum'))).then((ok) => {
+          if (ok === false) {
+            const err = new Error('下载内容校验失败');
+            err.skipComplete = true;
+            throw err;
+          }
+          return blob;
+        });
+      }
+
+      function clearChunksThenComplete(blob) {
+        // 取消竞态复查必须覆盖写回全链：deleteChunkRange（异步 IDB）完成后到
+        // persistItem/onComplete 之间仍有被 cancel（removeItem）穿插的窗口——若只复查
+        // 一次于开头（pump 后），cancel 落在该窗口会把已删 item 复活为 completed 并触发
+        // onComplete（R2）。故此处两层复查：deleteChunkRange 前复查一次 + 完成后、
+        // persistItem 前再复查一次，且 onComplete 发射前亦兜底复查。任一停下即静默中止。
+        if (stopped()) return;
+        return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
+          // deleteChunkRange 完成（IDB 异步落定）后、写回前二次复查——覆盖 cancel 落在
+          // delete 进行中的窗口：此时 item 已被 removeItem，恢复写 completed 属复活。
+          if (stopped()) return;
+          persistItem(item, {
+            status: 'completed',
+            loaded: total,
+            totalSize: total,
+            total: total,
+            meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
+          });
+          if (stopped()) return;
+          if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
+        });
+      }
+
+      function failDone(err) {
+        // 完成前失败（含 onVerify false / 缺块）：置 failed 写回错误原因，保留缓存供恢复。
+        if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态；跳过终态写回
+        persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: err?.message ? err.message : String(err) });
+        if (hooks.onError && !err.skipComplete) hooks.onError(err);
       }
 
       function assembleAndSave() {
-        return readAllChunks().then(function (chunks) {
-          if (chunks.some(function (c) { return !c; })) {
-            throw new Error('部分分块缺失（缓存不完整），无法合并');
-          }
-          return new Blob(chunks, { type: 'application/octet-stream' });
-        }).then(function (blob) {
-          if (hooks.onVerify) {
-            return Promise.resolve(hooks.onVerify(blob, headerValue(lastChunkHeaders, 'X-File-Checksum'))).then(function (ok) {
-              if (ok === false) {
-                const err = new Error('下载内容校验失败');
-                err.skipComplete = true;
-                throw err;
-              }
-              return blob;
-            });
-          }
-          return blob;
-        }).then(function (blob) {
-          // 取消竞态复查必须覆盖写回全链：deleteChunkRange（异步 IDB）完成后到
-          // persistItem/onComplete 之间仍有被 cancel（removeItem）穿插的窗口——若只复查
-          // 一次于开头（pump 后），cancel 落在该窗口会把已删 item 复活为 completed 并触发
-          // onComplete（R2）。故此处两层复查：deleteChunkRange 前复查一次 + 完成后、
-          // persistItem 前再复查一次，且 onComplete 发射前亦兜底复查。任一停下即静默中止。
-          if (stopped()) return;
-          return Promise.resolve(store.deleteChunkRange(item.id)).catch(function () { /* 清缓存失败不阻断 */ }).then(function () {
-            // deleteChunkRange 完成（IDB 异步落定）后、写回前二次复查——覆盖 cancel 落在
-            // delete 进行中的窗口：此时 item 已被 removeItem，恢复写 completed 属复活。
-            if (stopped()) return;
-            persistItem(item, {
-              status: 'completed',
-              loaded: total,
-              totalSize: total,
-              total: total,
-              meta: { chunksBitmap: bitmap.slice(), totalChunks: totalChunks, chunkSize },
-            });
-            if (stopped()) return;
-            if (hooks.onComplete) hooks.onComplete(blob, item.filename || filename);
-          });
-        }).catch(function (err) {
-          // 完成前失败（含 onVerify false / 缺块）：置 failed 写回错误原因，保留缓存供恢复。
-          if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态；跳过终态写回
-          persistItem(item, { status: 'failed', failedAt: Date.now(), lastError: (err && err.message) ? err.message : String(err) });
-          if (hooks.onError && !err.skipComplete) hooks.onError(err);
-        });
+        return readAllChunks().then(mergeBlob).then(verifyBlob).then(clearChunksThenComplete).catch(failDone);
       }
 
       return pump().then(function () {
@@ -358,10 +394,10 @@
       }).catch(function (err) {
         if (isAbort(err) || stopped()) return; // 暂停/取消已由 pause/cancel 写状态
         const it = currentItem(item);
-        if (it && !(err && err.skipComplete)) {
-          persistItem(it, { status: 'failed', failedAt: Date.now(), lastError: (err && err.message) ? err.message : String(err) });
+        if (it && !err?.skipComplete) {
+          persistItem(it, { status: 'failed', failedAt: Date.now(), lastError: err?.message ? err.message : String(err) });
         }
-        if (hooks.onError && !(err && err.skipComplete)) hooks.onError(err);
+        if (hooks.onError && !err?.skipComplete) hooks.onError(err);
         return undefined;
       }).then(function (r) {
         finish();
@@ -372,23 +408,14 @@
       });
     }
 
-    function bitmapReady(bitmap, totalChunks) {
-      if (totalChunks === 0) return true;
-      for (let i = 0; i < totalChunks; i++) if (!bitmap[i]) return false;
-      return true;
-    }
-    function sliceToLen(arr, n) {
-      const out = new Array(n).fill(0);
-      if (Array.isArray(arr)) for (let i = 0; i < Math.min(arr.length, n); i++) out[i] = arr[i] ? 1 : 0;
-      return out;
-    }
-
     // ---- 公开 API ----
 
     // startDownload(filename, stat, hooks)：新建下载 item → 全量分块拉取。stat 需
-    // {size, mtime?, checksum?}（来自 sc.files.stat 或文件行元信息）。
-    self.startDownload = function (filename, stat, hooks) {
+    // {size, mtime?, checksum?}（来自 sc.files.stat 或文件行元信息）。hooks.volume 可选：
+    // 行卷优先（外部/加密卷必需）——透传到 stat/chunk 请求。
+    this.startDownload = (filename, stat, hooks) => {
       const h = parseHooks(hooks);
+      const vol = h.volume || '';
       const total = Math.floor(Number((stat && (Number(stat.size) > 0 ? stat.size : stat.totalSize)) || 0));
       const chunkSize = calcChunkSize(total);
       const totalChunks = chunkCount(total, chunkSize);
@@ -400,37 +427,29 @@
         loaded: 0,
         total: total,
         totalSize: total,
-        meta: Object.assign(metaFromStat(stat), {
-          chunkSize: chunkSize, totalChunks: totalChunks,
-          chunksBitmap: new Array(totalChunks).fill(0),
-        }),
+        meta: { ...metaFromStat(stat), chunkSize: chunkSize, totalChunks: totalChunks, chunksBitmap: new Array(totalChunks).fill(0) },
       };
       store.upsertItem(item);
-      return run(item, filename, chunkSize, allChunkIndices(totalChunks), h, false);
+      return run(item, filename, chunkSize, allChunkIndices(totalChunks), h, false, vol);
     };
 
     // resumeDownload(idOrItem, hooks)：先 stat HEAD 比对 size/mtime/checksum；匹配只拉
     // 缺失块；不匹配 onMismatch（不改状态，供 UI 提示可强制重下）并返回 {mismatched:true}。
     // hooks.force=true → 跳过 stat 强制全量重拉并更新存档 meta 至最新。
-    self.resumeDownload = function (idOrItem, hooks) {
+    this.resumeDownload = (idOrItem, hooks) => {
       const h = parseHooks(hooks);
-      const item = self.findItem(idOrItem);
+      const item = this.findItem(idOrItem);
       if (!item) return Promise.reject(new Error('下载项不存在'));
       const filename = item.filename;
-      const chunkSize = (item.meta && item.meta.chunkSize) || calcChunkSize(Number(item.total) || 0);
+      const chunkSize = item.meta?.chunkSize || calcChunkSize(Number(item.total) || 0);
       const total = Math.floor(Number(item.totalSize) > 0 ? Number(item.totalSize) : Number(item.total));
-      const totalChunks = (item.meta && item.meta.totalChunks) || chunkCount(Math.max(0, total), chunkSize);
+      const totalChunks = item.meta?.totalChunks || chunkCount(Math.max(0, total), chunkSize);
 
       function continueResume(serverMeta) {
         // 更新存档 meta 为最新 stat（恢复后以最新 mtime/checksum 为准，供后续恢复比对）。
-        const meta = Object.assign(copyMeta(item), {
-          mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '',
-          checksum: serverMeta.checksum ? String(serverMeta.checksum) : '',
-          chunkSize: chunkSize,
-          totalChunks: totalChunks,
-        });
+        const meta = { ...copyMeta(item), volume: vol, mtimeNano: serverMeta.mtime ? String(serverMeta.mtime) : '', checksum: serverMeta.checksum ? String(serverMeta.checksum) : '', chunkSize: chunkSize, totalChunks: totalChunks };
         const force = h.force === true;
-        const bm = force ? new Array(totalChunks).fill(0) : sliceToLen(item.meta && item.meta.chunksBitmap, totalChunks);
+        const bm = force ? new Array(totalChunks).fill(0) : sliceToLen(item.meta?.chunksBitmap, totalChunks);
         meta.chunksBitmap = bm;
         // loaded 按 bitmap 重算（防止存档 loaded 与 bitmap 不一致，如重启后手改）。
         let l = 0;
@@ -439,22 +458,24 @@
         }
         const upd = persistItem(item, { loaded: l, totalSize: total, total: total, meta: meta });
         const missing = force ? allChunkIndices(totalChunks) : missingChunkList(bm, totalChunks);
-        return run(upd, filename, chunkSize, missing, h, force);
+        return run(upd, filename, chunkSize, missing, h, force, vol);
       }
 
       if (h.force) {
         // 强制重下：不 stat，按已有存档 meta 全量重拉。
         return continueResume({
-          mtime: (item.meta && item.meta.mtimeNano) || '',
-          checksum: (item.meta && item.meta.checksum) || '',
+          mtime: item.meta?.mtimeNano || '',
+          checksum: item.meta?.checksum || '',
         });
       }
       // stat HEAD 取 size/mtime/checksum；失败回落空 meta（无法比对时不拒绝续传）。
-      return statResolve(transport, filename).then(function (serverMeta) {
+      // volume：hooks.volume 透传（行卷优先；续传会话内同一卷）。
+      const vol = h.volume || item.meta?.volume || '';
+      return statResolve(transport, filename, vol).then(function (serverMeta) {
         const stored = {
           size: Number(item.total) || 0,
-          mtime: (item.meta && item.meta.mtimeNano) || '',
-          checksum: (item.meta && item.meta.checksum) || '',
+          mtime: item.meta?.mtimeNano || '',
+          checksum: item.meta?.checksum || '',
         };
         if (!metaMatches(stored, serverMeta)) {
           if (h.onMismatch) h.onMismatch(serverMeta, item);
@@ -464,44 +485,36 @@
       });
     };
 
-    function statResolve(transport, filename) {
-      return Promise.resolve().then(function () {
-        if (!transport || typeof transport.coreRequest !== 'function') throw new Error('传输层不可用');
-        return transport.coreRequest('HEAD', '/api/files/stat?filename=' + encodeURIComponent(filename), {});
-      }).then(serverMetaFromStat).catch(function () { return { size: 0, mtime: '', checksum: '' }; });
-    }
-
     // pauseDownload(id)：中断在途 + 写回 paused（保留缓存块供恢复）。同步写 paused 后
     // abort，让在途请求尽快中断（pump 的各 fetcher 遇 abort/stopped 转为已决值不再入队新块）。
-    self.pauseDownload = function (id) {
-      return new Promise(function (resolve) {
-        const item = self.findItem(id);
+    this.pauseDownload = (id) => {
+      return new Promise((resolve) => {
+        const item = this.findItem(id);
         if (!item) { resolve(); return; }
-        const sess = self._running[item.id];
-        if (sess) { sess.state = 'paused'; sess.aborter.abort(); delete self._running[item.id]; }
+        const sess = this._running[item.id];
+        if (sess) { sess.state = 'paused'; sess.aborter.abort(); delete this._running[item.id]; }
         if (item.status !== 'completed') persistItem(item, { status: 'paused' });
         resolve();
       });
     };
 
     // cancelDownload(id)：中断 + 清 IDB 块 + removeItem。
-    self.cancelDownload = function (id) {
-      return Promise.resolve().then(function () {
-        const item = self.findItem(id);
-        if (!item) return;
-        const sess = self._running[item.id];
-        if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete self._running[item.id]; }
-        if (typeof store.deleteChunkRange === 'function') {
-          store.deleteChunkRange(item.id).catch(function () { /* 清缓存失败容忍 */ });
-        }
-        store.removeItem(item.id);
-      });
+    this.cancelDownload = (id) => {
+      const item = this.findItem(id);
+      if (!item) return Promise.resolve();
+      const sess = this._running[item.id];
+      if (sess) { sess.state = 'cancelled'; sess.aborter.abort(); delete this._running[item.id]; }
+      if (typeof store.deleteChunkRange === 'function') {
+        store.deleteChunkRange(item.id).catch(function () { /* 清缓存失败容忍 */ });
+      }
+      store.removeItem(item.id);
+      return Promise.resolve();
     };
 
     // isRunning(id)：会话内是否进行中（供 UI 禁用重复操作/防止暂停后误判）。
-    self.isRunning = function (id) {
-      const s = self._running[id];
-      return !!(s && s.state === 'running');
+    this.isRunning = (id) => {
+      const s = this._running[id];
+      return s?.state === 'running';
     };
   }
 

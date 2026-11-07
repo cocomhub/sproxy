@@ -16,6 +16,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +31,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -52,18 +56,22 @@ type dirsEnv struct {
 	// 以下为写面族（upload/rename/delete）的可选钩子：nil 时 deps() 用既有桩（既有族的
 	// 行为不变）。写面族用例在 newDirsEnv 后按需赋值并调用 rebuild() 生效。
 	locateOwnerFile func(owner, rel string) (FileLocation, bool)
-	routeUpload     func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	routeUpload     func(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 	acquireFileLock func(owner, rel string) (func(), bool)
 	// versioningEnabled / versioningMaxVersions / versioningRetention 供覆盖写版本化分支
 	// （默认 false / 0 / 0，与迁移前装配层同缺省；Retention 0 = 不启用保留期清理）。
 	versioningEnabled     bool
-	eventSink             EventSink
+	eventSink             EventListener
 	versioningMaxVersions int
 	versioningRetention   time.Duration
 	// dedupEnabled 为 true 时注入内容寻址去重能力（DedupStoreFor 懒建 per-owner 台账）。
 	dedupEnabled bool
+	// phys 是可选的卷物理足迹能力（默认 nil = 无该能力，回落公式）——供「释放与结算同源」
+	// 类用例注入与公式不同的足迹（模拟 secretdata 的 parity + meta pad）。
+	phys VolumePhysFootprinter
 	// contentIndex 为 true 时启用内容索引（WithContentIndex）——默认 false 零回归。
 	contentIndex bool
+
 	// metrics 非 nil 时注入为领域计量能力（断言 RecordUpload/RecordDelete 调用）。
 	metrics *fakeMetrics
 	// audits 累积本环境收到的审计行（testRuntime.Record 追加）——批量族与审计归一化
@@ -81,9 +89,25 @@ type dirsEnv struct {
 	volSet      *registry.Set           // nil = 单卷（旧装配语义）
 	volDirs     map[string]string       // 卷名 → 卷根绝对路径（断言磁盘副作用用）
 	pools       map[string]*quota.Pool
+	// volRoots 是 enableVolumes 为本地卷建好的根句柄（enableExternalVolume 重建卷集时
+	// 复用，registry.NewSet 需要完整 roots 表）。与 volSet.roots 同源。
+	volRoots map[string]*storage.Root
+	// externalVols 是卷名 → 外部卷条目 fake：viewListSet 优先返回它（模拟外部卷列举）。
+	externalVols map[string]*fakeExternalVolume
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
+	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
+	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
+	fileMeta bool
+	// viewList 非 nil 时把卷集适配为 files.VolumeViewLister（模拟装配层 ListDirView；
+	// nil = 不提供该能力 ⇒ 领域侧走索引路径）。
+	viewList VolumeViewLister
+	// externalOps 是外部卷对象操作接缝替身（非 nil 时注入 Service；MoveFile/外部卷用例用）。
+	externalOps ExternalVolumeOps
+	// volumeClassifier 是卷类型分类能力替身（非 nil 时经 WithVolumeTypeClassifier 注入；
+	// nil = 未注入 → 领域侧回落内置基线名单，见 volumeCategoryFor）。
+	volumeClassifier VolumeTypeClassifier
 	// uploading 是替身锁池（TryMark/Acquire 共用，rebuild 时重置——与旧 deps() 每次新建
 	// &sync.Map{} 同语义）。
 	uploading sync.Map
@@ -95,18 +119,25 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 	t.Helper()
 	root := t.TempDir()
 	e := &dirsEnv{
-		root:     root,
-		logger:   testLogger(),
-		pool:     quota.NewPool(0),
-		tenants:  map[string]*storage.Tenant{},
-		checksum: map[string]*checksum.ChecksumStore{},
-		buckets:  map[string]*quota.Scope{},
+		root:         root,
+		logger:       testLogger(),
+		pool:         quota.NewPool(0),
+		tenants:      map[string]*storage.Tenant{},
+		checksum:     map[string]*checksum.ChecksumStore{},
+		buckets:      map[string]*quota.Scope{},
+		externalVols: map[string]*fakeExternalVolume{},
+		volRoots:     map[string]*storage.Root{},
 	}
 	e.rebuild()
 	t.Cleanup(func() {
 		for _, tnt := range e.tenants {
 			if tnt != nil && tnt.Root() != nil {
 				_ = tnt.Root().Close()
+			}
+		}
+		for _, r := range e.volRoots {
+			if r != nil {
+				_ = r.Close()
 			}
 		}
 		if e.volSet != nil {
@@ -159,12 +190,30 @@ func (e *dirsEnv) newService() *Service {
 		WithAudit(rt),
 		WithContentIndex(e.contentIndex),
 	}
+	if e.fileMeta {
+		opts = append(opts, WithFileMeta(testMetaPolicy{}))
+	}
+	if e.phys != nil {
+		opts = append(opts, WithPhysFootprinter(e.phys))
+	}
+	if e.externalOps != nil {
+		opts = append(opts, WithExternalOps(e.externalOps))
+	}
+	if e.volumeClassifier != nil {
+		opts = append(opts, WithVolumeTypeClassifier(e.volumeClassifier))
+	}
 	if e.metrics != nil {
 		opts = append(opts, WithMetrics(e.metrics))
 	}
 	svc, err := New(rt, opts...)
 	if err != nil {
 		panic("测试装配 files.New 失败: " + err.Error())
+	}
+	// 测试基建对齐生产装配（设计 2026-10-30 Phase 2）：Root 变异事件是**唯一**索引入口。
+	// 生产形态 = 观察者装在**卷根**，租户经 `OpenTenant` 子根继承（Rel 自动带 `<owner>/`
+	// 前缀、`m.Root` 恒为卷根）。此处同构：只装卷根，懒建租户自动继承。
+	if root := e.defaultRoot(); root != nil {
+		root.SetMutationObserver("main", svc.ApplyRootMutation)
 	}
 	return svc
 }
@@ -188,6 +237,9 @@ func (r testRuntime) Volumes() VolumeSet {
 	if r.e.volSet == nil {
 		return nil
 	}
+	if r.e.viewList != nil {
+		return viewListAdapter{VolumeSet: r.e.volSet, lister: r.e.viewList}
+	}
 	return r.e.volSet
 }
 
@@ -202,16 +254,21 @@ func (r testRuntime) Locate(owner, rel string) (FileLocation, bool) {
 	return r.e.locateOwnerFile(owner, rel)
 }
 
-func (r testRuntime) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+func (r testRuntime) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
 	if r.e.routeUpload == nil {
 		return UploadRoute{}, nil
 	}
-	return r.e.routeUpload(owner, rel, explicitVol, size, forceHomeVol)
+	return r.e.routeUpload(context.Background(), owner, rel, explicitVol, size, forceHomeVol)
+}
+
+// RouteTarget 显式卷（不查重）：回落 dirsEnv.routeUpload 的显式卷形态（替身 routeUploadDefault 不查重）。
+func (r testRuntime) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return r.e.routeUpload(context.Background(), owner, rel, volName, size, "")
 }
 
 func (r testRuntime) ScopeFor(owner, rel string) *quota.Scope { return r.e.quotaScopeFor(owner, rel) }
 
-func (r testRuntime) ChecksumStoreFor(owner string) *checksum.ChecksumStore {
+func (r testRuntime) ChecksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	return r.e.checksumStoreFor(owner)
 }
 
@@ -269,6 +326,52 @@ func (r testRuntime) Record(_ context.Context, action, object, result, detail st
 	r.e.audits = append(r.e.audits, auditRow{action: action, object: object, result: result, detail: detail})
 }
 
+// testMetaPolicy 是最小 FileMetaPolicy 替身：Enabled 恒 true；WriteMeta 写入 meta 桶
+// 的 `meta/<rel>.meta` 占位文件（内容无关——软删随迁/恢复/清理联动只关心 sidecar
+// 文件的落点与存在性，不校验 JSON 语义）。配额：按 meta 实际字节 ReleaseUsage 对称
+// 释放由被测生命周期代码处理（软删/恢复/清 trash 各自联动）。
+type testMetaPolicy struct{}
+
+var _ FileMetaPolicy = testMetaPolicy{}
+
+func (testMetaPolicy) Enabled() bool { return true }
+
+func (testMetaPolicy) WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string, _ map[string]any) error {
+	mrel := meta.MetaPath(rel)
+	if dir := filepath.ToSlash(filepath.Dir(mrel)); dir != "." {
+		if err := root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, ferr := root.OpenFile(mrel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if ferr != nil {
+		return ferr
+	}
+	_, werr := f.Write([]byte("test-meta"))
+	_ = f.Close()
+	return werr
+}
+
+// VerifyDownload 测试替身：不包装（返回 nil = 直通，域测试不测下载校验）。
+func (testMetaPolicy) VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error) {
+	return nil, nil
+}
+
+// ReadMetaRaw 测试替身：读 meta 桶 sidecar 原始字节（缺失 => os.ErrNotExist）。
+func (testMetaPolicy) ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error) {
+	rc, err := root.Open(mrel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
+}
+
+// UpdateMetaExtra 测试替身：本族用例不测补录，报不存在（零副作用）。
+func (testMetaPolicy) UpdateMetaExtra(context.Context, string, *storage.Root, string, map[string]any) error {
+	return os.ErrNotExist
+}
+
 // findAudit 返回首条匹配 action/object 的审计行（未命中 ok=false）。
 func (e *dirsEnv) findAudit(action, object string) (auditRow, bool) {
 	for _, row := range e.audits {
@@ -289,10 +392,18 @@ func (e *dirsEnv) enableDedup() {
 // enableVolumes 装配多卷（首卷为默认卷，物理根 = e.root），并重建 Service。
 func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 	t.Helper()
+	// 重建卷集前关闭旧卷根句柄（Windows 上未关句柄会让 t.TempDir cleanup 报
+	// "being used by another process"；`defaultRoot()` 懒建的句柄也在旧 map 里）。
+	for _, old := range e.volRoots {
+		if old != nil {
+			_ = old.Close()
+		}
+	}
 	vols := make([]volume.Volume, 0, len(names))
 	roots := map[string]*storage.Root{}
 	e.volDirs = map[string]string{}
 	e.pools = map[string]*quota.Pool{}
+	e.volRoots = map[string]*storage.Root{}
 	for i, name := range names {
 		dir := e.root
 		if i > 0 {
@@ -303,6 +414,7 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 			t.Fatalf("OpenRoot(%s): %v", name, err)
 		}
 		roots[name] = rt
+		e.volRoots[name] = rt
 		e.volDirs[name] = dir
 		e.pools[name] = quota.NewPool(0)
 		vols = append(vols, volume.Volume{Name: name, RootDir: dir})
@@ -320,26 +432,40 @@ func (e *dirsEnv) tenantFor(owner string) *storage.Tenant {
 	if !storage.ValidSegmentName(owner) {
 		return nil
 	}
-	dir := filepath.Join(e.root, owner)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	parent := e.defaultRoot()
+	if parent == nil {
 		return nil
 	}
-	rt, err := storage.OpenRoot(dir)
+	// 与生产一致：租户子根经 `OpenTenant` 创建 —— 继承卷根观察者（事件 Rel 自动加
+	// `<owner>/` 前缀、`m.Root` 恒为卷根）并预建 meta 桶。
+	tnt, err := storage.OpenTenant(parent, owner, storage.WithMetaBucket())
 	if err != nil {
-		return nil
-	}
-	tnt, err := storage.NewTenant(owner, rt)
-	if err != nil {
-		_ = rt.Close()
-		return nil
-	}
-	// 与生产 tenantFor 一致：预建 meta 桶（供 per-tenant checksum / meta 记录写入）。
-	if err := rt.MkdirAll("meta", 0o755); err != nil {
-		_ = rt.Close()
 		return nil
 	}
 	e.tenants[owner] = tnt
 	return tnt
+}
+
+// defaultRoot 返回默认卷的**卷根**句柄（懒建并缓存；单卷 env 以 e.root 为卷根）。
+func (e *dirsEnv) defaultRoot() *storage.Root {
+	if e.volRoots == nil {
+		e.volRoots = map[string]*storage.Root{}
+	}
+	if r, ok := e.volRoots["main"]; ok && r != nil {
+		return r
+	}
+	if e.volSet != nil {
+		if r := e.volSet.Root(e.volSet.Default().Name); r != nil {
+			e.volRoots["main"] = r
+			return r
+		}
+	}
+	r, err := storage.OpenRoot(e.root)
+	if err != nil {
+		return nil
+	}
+	e.volRoots["main"] = r
+	return r
 }
 
 // volumeTenant 复刻 pkg/server 语义：默认卷委托 tenantFor，其余卷走卷集合懒建。
@@ -352,7 +478,7 @@ func (e *dirsEnv) volumeTenant(volName, owner string) *storage.Tenant {
 }
 
 // checksumStoreFor 复刻 pkg/server 语义：台账落在租户 meta 桶，按 owner 懒建并缓存。
-func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
+func (e *dirsEnv) checksumStoreFor(owner string) checksum.ChecksumStoreIface {
 	owner = normalizeOwner(owner)
 	if cs, ok := e.checksum[owner]; ok {
 		return cs
@@ -361,14 +487,8 @@ func (e *dirsEnv) checksumStoreFor(owner string) *checksum.ChecksumStore {
 	if tnt == nil {
 		return nil
 	}
-	metaAbs, ok := tnt.Root().Abs("meta")
-	if !ok {
-		return nil
-	}
-	if err := os.MkdirAll(metaAbs, 0o755); err != nil {
-		return nil
-	}
-	cs := checksum.NewChecksumStore(filepath.Join(metaAbs, "checksums.json"), e.logger)
+	// 台账经租户**卷句柄**读写（与生产同口径：加密卷透明加解密 + 封印判定）。
+	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", e.logger)
 	e.checksum[owner] = cs
 	return cs
 }
@@ -491,7 +611,7 @@ func TestService_Mkdir_CreatesDirInUserBucket(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("mkdir 应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+	if ct := rr.Header().Get(headerContentType); ct != "application/json" {
 		t.Fatalf("Content-Type=%q want application/json", ct)
 	}
 	resp := decodeResp(t, rr)
@@ -525,7 +645,7 @@ func TestService_Mkdir_RejectsBadInput(t *testing.T) {
 	}{
 		{"空 dirname", "alice", "/mkdir", "dirname 不能为空"},
 		{"路径穿越", "alice", "/mkdir?dirname=../evil", "无效的目录名: "},
-		{"非法 owner", "..", "/mkdir?dirname=cloud", "无效的目录路径"},
+		{"非法 owner", "..", "/mkdir?dirname=cloud", errMsgInvalidDirPath},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,41 +711,59 @@ func TestService_Rmdir_ErrorMapping(t *testing.T) {
 	}
 
 	t.Run("目录不存在", func(t *testing.T) {
-		rr := env.post("alice", "/rmdir?dirname=ghost&force=true")
-		if rr.Code != http.StatusNotFound {
-			t.Fatalf("应 404, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "目录不存在" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirDirNotExist(t, env)
 	})
 
 	t.Run("普通文件不是目录", func(t *testing.T) {
-		if err := os.WriteFile(filepath.Join(userDir, "plain.txt"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		rr := env.post("alice", "/rmdir?dirname=plain.txt&force=true")
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "指定路径不是目录" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirPlainFileRejected(t, env, userDir)
 	})
 
 	t.Run("符号链接", func(t *testing.T) {
-		link := filepath.Join(userDir, "link")
-		if err := os.Symlink(userDir, link); err != nil {
-			t.Skipf("本环境无法创建符号链接（%v），跳过", err)
-		}
-		rr := env.post("alice", "/rmdir?dirname=link&force=true")
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
-		}
-		if resp := decodeResp(t, rr); resp.Message != "不允许删除符号链接" {
-			t.Fatalf("响应 message=%q", resp.Message)
-		}
+		assertRmdirSymlinkRejected(t, env, userDir)
 	})
+}
+
+// assertRmdirDirNotExist 目录不存在 → 404。
+func assertRmdirDirNotExist(t *testing.T, env *dirsEnv) {
+	t.Helper()
+	rr := env.post("alice", "/rmdir?dirname=ghost&force=true")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("应 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "目录不存在" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
+}
+
+// assertRmdirPlainFileRejected 普通文件 → 400「指定路径不是目录」。
+func assertRmdirPlainFileRejected(t *testing.T, env *dirsEnv, userDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(userDir, "plain.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr := env.post("alice", "/rmdir?dirname=plain.txt&force=true")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "指定路径不是目录" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
+}
+
+// assertRmdirSymlinkRejected 符号链接 → 400「不允许删除符号链接」（建链失败则跳过该场景）。
+func assertRmdirSymlinkRejected(t *testing.T, env *dirsEnv, userDir string) {
+	t.Helper()
+	link := filepath.Join(userDir, "link")
+	if err := os.Symlink(userDir, link); err != nil {
+		t.Skipf("本环境无法创建符号链接（%v），跳过", err)
+	}
+	rr := env.post("alice", "/rmdir?dirname=link&force=true")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("应 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if resp := decodeResp(t, rr); resp.Message != "不允许删除符号链接" {
+		t.Fatalf("响应 message=%q", resp.Message)
+	}
 }
 
 // TestService_Rmdir_ReleasesQuotaAndCleansChecksum 验证删除的副作用：
@@ -825,14 +963,47 @@ func TestService_QuotaScopeFor_NonBucketSegmentIgnored(t *testing.T) {
 	if sc := env.quotaScopeFor("alice", "notabucket/x.txt"); sc != nil {
 		t.Fatalf("非功能桶首段应返回 nil, got %v", sc)
 	}
-	if sc := env.quotaScopeFor("alice", "user/x.txt"); sc == nil {
+	if env.quotaScopeFor("alice", "user/x.txt") == nil {
 		t.Fatal("功能桶首段 user 应返回非 nil")
 	}
 }
 
 // withEventSink 注入事件接收器并重建 Service（返回重建后的 Service）。
-func (e *dirsEnv) withEventSink(sink EventSink) *Service {
+func (e *dirsEnv) withEventSink(sink EventListener) *Service {
 	e.eventSink = sink
 	e.rebuild()
 	return e.svc
+}
+
+// TestDirCreateHTTPError_Attributable 钉住「建目录失败可归因」（2026-10-15 代码审核第 6 项）：
+// 此前一律 500 + 固定文案「创建目录失败」⇒ 真实原因被吞掉（客户端与 CI 都无从判断，实测定位时
+// 只能临时插桩）。现在：卷层路径非法 ⇒ 400 + reasonPathInvalid；无权 ⇒ 403；其余 ⇒ 500 但**携带原因**。
+func TestDirCreateHTTPError_Attributable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantReason string
+		wantSub    string
+	}{
+		{"路径非法", volume.ErrInvalidUserPath, http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"路径非法（%w 包装）", fmt.Errorf("封装卷写路径: %w", volume.ErrInvalidUserPath), http.StatusBadRequest, reasonPathInvalid, "非法用户路径"},
+		{"无权", volume.ErrVolumeNotAuthorized, http.StatusForbidden, "", "无权访问"},
+		{"其它", errors.New("no space left on device"), http.StatusInternalServerError, "", "no space left"},
+	} {
+		he := dirCreateHTTPError(tc.err)
+		if he.Status != tc.wantStatus {
+			t.Errorf("%s: status=%d want %d", tc.name, he.Status, tc.wantStatus)
+		}
+		if he.Reason != tc.wantReason {
+			t.Errorf("%s: reason=%q want %q", tc.name, he.Reason, tc.wantReason)
+		}
+		if !strings.Contains(he.Message, errMsgCreateDirFailed) {
+			t.Errorf("%s: 应保留原语义文案前缀，got %q", tc.name, he.Message)
+		}
+		if !strings.Contains(he.Message, tc.wantSub) {
+			t.Errorf("%s: 应携带原因 %q，got %q", tc.name, tc.wantSub, he.Message)
+		}
+	}
 }

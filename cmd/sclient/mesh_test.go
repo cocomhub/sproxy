@@ -63,8 +63,8 @@ func TestNewCmdMesh_NodeSubcommand(t *testing.T) {
 	if node.Use != "node" {
 		t.Fatalf("unexpected node Use: %q", node.Use)
 	}
-	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun", "e2e-identity", "e2e-peer-fp"} {
-		if f := node.Flags().Lookup(name); f == nil {
+	for _, name := range []string{"hub", "node-id", "service", "dial-allow", "dial-allow-cidr", "local", "webrtc", "discover", "discover-interval", "gateway-addr", "mdns", "signal-addr", "stun", "e2e-identity", "e2e-peer-fp", "renew-interval"} {
+		if node.Flags().Lookup(name) == nil {
 			t.Errorf("node 缺少 flag: %s", name)
 		}
 	}
@@ -121,7 +121,7 @@ func TestNewCmdMeshConnect_ArgsAndFlags(t *testing.T) {
 		t.Fatalf("unexpected connect Use: %q", connect.Use)
 	}
 	for _, name := range []string{"listen", "webrtc", "hub", "node-id", "gateway", "mdns"} {
-		if f := connect.Flags().Lookup(name); f == nil {
+		if connect.Flags().Lookup(name) == nil {
 			t.Errorf("connect 缺少 flag: %s", name)
 		}
 	}
@@ -333,7 +333,7 @@ func TestMeshForwardListen_RefreshesTarget(t *testing.T) {
 	cmd.SetContext(ctx) // 未执行 Execute 的裸命令 Context() 为 nil，需显式设置
 	go func() {
 		// meshForwardListen 阻塞在 Accept，直到测试结束端口关闭
-		_ = meshForwardListen(cmd, svc, nil, dial, r, initial, "local-node", listenAddr, ios)
+		_ = meshForwardListen(cmd, meshForwardParams{svc: svc, signaler: nil, dial: dial, ref: r, localNode: "local-node", ios: ios}, initial, listenAddr)
 	}()
 
 	// 轮询拨号直到 meshForwardListen 的 listener 就绪（goroutine 启动有延迟）

@@ -178,7 +178,7 @@ func TestTunnelSigRoundTripper_CarriesEntryID(t *testing.T) {
 		t.Fatalf("解析 skeyID = %q, want %q", parsed.EntryID, entryID)
 	}
 	// 用有效 SK 校验签名（隧道外层 body_sha256=UNSIGNED；时间窗口内 now 取请求构造时刻）。
-	if err := sproxysig.Verify(validKey64(t), parsed, http.MethodPost, "/tunnel", "", time.Now(), 0, 0, nil); err != nil {
+	if err := sproxysig.Verify(validKey64(t), parsed, sproxysig.Request{Method: http.MethodPost, Path: "/tunnel"}, time.Now(), 0, 0, nil); err != nil {
 		t.Fatalf("带 skeyID 的外层签名 Verify 失败: %v", err)
 	}
 }
@@ -484,7 +484,7 @@ func TestRmdir_RoundTrip(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(t.Context(), "testdir"); err != nil {
+	if err := c.Rmdir(t.Context(), "testdir", true); err != nil {
 		t.Fatalf("Rmdir: %v", err)
 	}
 }
@@ -497,7 +497,7 @@ func TestRmdir_ServerError(t *testing.T) {
 	})
 
 	c := NewFileClient(ts.URL)
-	if err := c.Rmdir(t.Context(), "nonexistent"); err == nil {
+	if err := c.Rmdir(t.Context(), "nonexistent", true); err == nil {
 		t.Fatal("expected error for non-existent dir")
 	}
 }

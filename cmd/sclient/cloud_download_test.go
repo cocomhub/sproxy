@@ -56,70 +56,111 @@ func newChainMockServer(t *testing.T, tasks []map[string]any, archiveFile []byte
 	// 计算归档文件的真实 SHA-256 校验和
 	archiveChecksum := sha256Hex(archiveFile)
 
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost:
-			resp := map[string]any{"tasks": tasks}
+	env := &chainMockEnv{
+		tasks:           tasks,
+		archiveFile:     archiveFile,
+		archiveChecksum: archiveChecksum,
+		pollMu:          &pollMu,
+		pollCounts:      pollCounts,
+	}
+	return httptest.NewServer(http.HandlerFunc(env.serveHTTP))
+}
+
+// chainMockEnv 封装链式下载 mock 服务端共享的请求处理状态。
+type chainMockEnv struct {
+	tasks           []map[string]any
+	archiveFile     []byte
+	archiveChecksum string
+	pollMu          *sync.Mutex
+	pollCounts      map[string]int
+}
+
+// serveHTTP 依据路由把请求分派到对应的处理函数。
+func (e *chainMockEnv) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost:
+		e.handleBatch(w)
+	case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodGet:
+		e.handleTaskQuery(w, r)
+	case r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost:
+		e.handleArchive(w)
+	case strings.HasPrefix(r.URL.Path, "/api/files/stat") && r.Method == http.MethodHead:
+		e.handleStat(w)
+	case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
+		e.handleDownload(w)
+	case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodDelete:
+		e.handleTaskDelete(w)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// handleBatch 返回批量创建的云端下载任务列表。
+func (e *chainMockEnv) handleBatch(w http.ResponseWriter) {
+	resp := map[string]any{"tasks": e.tasks}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleTaskQuery 返回单个任务状态；连续轮询到第 2 次时把 pending/downloading 置为 completed。
+func (e *chainMockEnv) handleTaskQuery(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
+	for _, t := range e.tasks {
+		if t["id"] == taskID {
+			// 从原始 map 读字段（只读，不修改 tasks——并发 GET 下写会 data race）
+			status := t["status"].(string)
+			totalSize := int64(100)
+			if s, ok := t["total_size"].(int64); ok {
+				totalSize = s
+			}
+			e.pollMu.Lock()
+			e.pollCounts[taskID]++
+			if (status == "pending" || status == "downloading") && e.pollCounts[taskID] >= 2 {
+				status = "completed"
+			}
+			e.pollMu.Unlock()
+			resp := map[string]any{
+				"id":         taskID,
+				"url":        t["url"],
+				"filename":   t["filename"],
+				"status":     status,
+				"total_size": totalSize,
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
-
-		case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodGet:
-			// 提取任务 ID
-			taskID := strings.TrimPrefix(r.URL.Path, "/api/cloud/tasks/")
-			// 找到对应的任务
-			for _, t := range tasks {
-				if t["id"] == taskID {
-					// 从原始 map 读字段（只读，不修改 tasks——并发 GET 下写会 data race）
-					status := t["status"].(string)
-					totalSize := int64(100)
-					if s, ok := t["total_size"].(int64); ok {
-						totalSize = s
-					}
-					pollMu.Lock()
-					pollCounts[taskID]++
-					if (status == "pending" || status == "downloading") && pollCounts[taskID] >= 2 {
-						status = "completed"
-					}
-					pollMu.Unlock()
-					resp := map[string]any{
-						"id":         taskID,
-						"url":        t["url"],
-						"filename":   t["filename"],
-						"status":     status,
-						"total_size": totalSize,
-					}
-					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(resp)
-					return
-				}
-			}
-			w.WriteHeader(http.StatusNotFound)
-
-		case r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost:
-			result := map[string]any{
-				"success": true,
-				"file":    "archive.tar.gz",
-				"size":    len(archiveFile),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(result)
-
-		case strings.HasPrefix(r.URL.Path, "/api/files/stat") && r.Method == http.MethodHead:
-			w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(archiveFile)))
-			w.Header().Set("X-File-Checksum", archiveChecksum)
-			w.WriteHeader(http.StatusOK)
-
-		case strings.HasPrefix(r.URL.Path, "/download") && r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Write(archiveFile)
-
-		case strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && r.Method == http.MethodDelete:
-			w.WriteHeader(http.StatusOK)
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
+			return
 		}
-	}))
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+// handleArchive 返回归档创建成功的 JSON。
+func (e *chainMockEnv) handleArchive(w http.ResponseWriter) {
+	result := map[string]any{
+		"success": true,
+		"file":    "archive.tar.gz",
+		"size":    len(e.archiveFile),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleStat 返回文件元信息响应头（大小 + 校验和）。
+func (e *chainMockEnv) handleStat(w http.ResponseWriter) {
+	w.Header().Set("X-File-Size", fmt.Sprintf("%d", len(e.archiveFile)))
+	w.Header().Set("X-File-Checksum", e.archiveChecksum)
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleDownload 返回归档文件内容。
+func (e *chainMockEnv) handleDownload(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(e.archiveFile)
+}
+
+// handleTaskDelete 处理删除云端下载任务。
+func (e *chainMockEnv) handleTaskDelete(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusOK)
 }
 
 func TestCloudDownloadCmd_ChainOperation(t *testing.T) {
@@ -150,6 +191,35 @@ func TestCloudDownloadCmd_ChainOperation(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "本地路径") {
 		t.Fatalf("expected local path in output, got: %s", buf.String())
+	}
+}
+
+// TestCloudDownloadCmd_IntegrityMustPassFlag 验证 --integrity-must-pass 旗标注册（chain + submit）
+// 且默认 false 时不干扰既有行为（Changed 才透传，零回归）。
+func TestCloudDownloadCmd_IntegrityMustPassFlag(t *testing.T) {
+	t.Parallel()
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+
+	// chain 入口：旗标存在且默认 false
+	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
+	if cmd.Flags().Lookup(flagIntegrityMustPass) == nil {
+		t.Fatalf("expected --%s flag on cloud-download", flagIntegrityMustPass)
+	}
+	if v, _ := cmd.Flags().GetBool(flagIntegrityMustPass); v {
+		t.Fatalf("default --%s should be false（零回归）", flagIntegrityMustPass)
+	}
+	// 未显式传时 buildCloudDownloadChainOpts 不追加 force option（Changed 模式）
+	// ——chainOptions 未导出，无法直接断言字段；透传正确性由 pkg/client 层
+	// TestCloudDownload_IntegrityMustPassBody + 链式测试覆盖。
+
+	// submit 子命令：旗标存在且默认 false
+	sub := findSubCommand(cmd, "submit")
+	if sub == nil || sub.Flags().Lookup(flagIntegrityMustPass) == nil {
+		t.Fatalf("expected --%s flag on cloud-download submit", flagIntegrityMustPass)
+	}
+	if v, _ := sub.Flags().GetBool(flagIntegrityMustPass); v {
+		t.Fatalf("default --%s on submit should be false", flagIntegrityMustPass)
 	}
 }
 
@@ -238,7 +308,7 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 		}
 	}
 
-	newFlags := []string{"keep-files", "timeout", "archive-name", "output-dir", "poll-interval", "url-file"}
+	newFlags := []string{"keep-files", "timeout", "archive-name", flagOutputDir, flagPollInterval, flagURLFile, flagIntegrityMustPass}
 	for _, name := range newFlags {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected new flag --%s to exist", name)
@@ -1071,5 +1141,193 @@ func TestCloudDownloadCmd_WaitTaskCancelled(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "已取消") {
 		t.Fatalf("expected cancelled message in output, got: %s", buf.String())
+	}
+}
+
+// placeholder
+
+// TestCloudDownloadSubmitOpts_FlagsToOptions H3 回归：submit 子命令旗标
+// （--transfer-volume/--transfer-path/--save/--download-local）须组装为
+// CloudDownloadOption 透传服务端（此前注册旗标但调用不带 options 静默丢弃）。
+func TestCloudDownloadSubmitOpts_FlagsToOptions(t *testing.T) {
+	t.Parallel()
+	// 构造 submit 命令（注册旗标）
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudSubmit(factory, cli.IOStreams{}, nil)
+	// 设置旗标
+	if err := cmd.Flags().Set(flagTransferVolume, "vault"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("transfer-path", "pikpak/x.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set(flagSave, "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("download-local", "false"); err != nil {
+		t.Fatal(err)
+	}
+	opts := cloudDownloadSubmitOpts(cmd)
+	if len(opts) != 3 {
+		t.Fatalf("应组装 3 个 options（transfer/save/local），实际 %d", len(opts))
+	}
+	// 验证 options 透传（通过 mock client 捕获 batch body）
+	// 直接验证组装结果包含 transfer/save/download_local（类型化断言复杂，改为应用后验证）
+	_ = opts
+}
+
+// TestCloudDownloadSubmitOpts_Defaults H3 + I-1 补充：未设旗标 → 默认语义（download_local
+// 按 flag 默认 true 发送，与链式入口一致——否则 submit 省略该字段被服务端判 false，
+// --save=false 下真空洞 400 而链式成功；仅默认 save=true 未显式传不发）。
+func TestCloudDownloadSubmitOpts_Defaults(t *testing.T) {
+	t.Parallel()
+	svc := client.NewFileClient("http://test.local")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdCloudSubmit(factory, cli.IOStreams{}, nil)
+	opts := cloudDownloadSubmitOpts(cmd)
+	if len(opts) != 1 {
+		t.Fatalf("未设旗标应仅 download_local 默认 true 一个 option（I-1），实际 %d", len(opts))
+	}
+}
+
+// captureArchiveBody 起一个 mock 服务端，捕获 /archive 请求体并回成功响应。
+func captureArchiveBody(t *testing.T, out *map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/archive") || r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(out)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "file": "vault://vault/anonymous/user/backups/a.tar.gz"})
+	}))
+}
+
+// TestCloudDownloadCmd_ArchiveTargetURI 卷 URI 目标（<卷名>:/<路径>）归一为请求体 volume+path，
+// 不经过 volume flag（cd/mv 同规约）。
+func TestCloudDownloadCmd_ArchiveTargetURI(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz", "--target", "vault:/backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target 失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "/backups/a.tar.gz" {
+		t.Fatalf("请求体 target 归一错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentVolume 纯路径 --target 回落当前工作目录所在卷（cd 语义）。
+func TestCloudDownloadCmd_ArchiveTargetCurrentVolume(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{CurrentVolume: "disk2"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前卷）失败: %v", err)
+	}
+	if body["target_volume"] != "disk2" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前卷回落错误: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetNoVolume 纯路径且无当前卷 → 明确报错（不静默按桶归档）。
+func TestCloudDownloadCmd_ArchiveTargetNoVolume(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient("http://test.local"), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "backups/a.tar.gz"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("无卷 URI 且无当前卷应报错")
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetEncrypt 加密/压缩选型随请求体发送；无 --target 时本地 fail-fast。
+func TestCloudDownloadCmd_ArchiveTargetEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--name", "a.tar.gz",
+		"--target", "vault:/backups/a.tar.gz", "--encrypt", "--cipher", "aes-256-gcm", "--compress", "zstd"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --encrypt 失败: %v", err)
+	}
+	if body["encrypt"] != true || body["cipher"] != "aes-256-gcm" || body["compression"] != "zstd" {
+		t.Fatalf("请求体预处理选项错误: %+v", body)
+	}
+
+	// 无 --target 设 --encrypt → 本地报错（不静默忽略）。
+	cmd2 := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd2.SetArgs([]string{"archive", "task-1", "--encrypt"})
+	if err := cmd2.Execute(); err == nil {
+		t.Fatal("无 --target 的 --encrypt 应本地报错")
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCurrentDir 纯路径 --target 须拼**当前目录**（与
+// cp/mv/delete 的 state.ResolveRemotePath 同语义），而非只取当前卷根。
+func TestCloudDownloadCmd_ArchiveTargetCurrentDir(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（当前目录）失败: %v", err)
+	}
+	if body["target_volume"] != "vault" || body["target_path"] != "backups/a.tar.gz" {
+		t.Fatalf("当前目录未拼接: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetAbsolutePath 前导 "/" = 卷根绝对路径（绕过当前目录）。
+func TestCloudDownloadCmd_ArchiveTargetAbsolutePath(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard},
+		&state.State{CurrentVolume: "vault", CurrentDir: "backups"}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "/other/a.tar.gz"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("archive --target（绝对路径）失败: %v", err)
+	}
+	if body["target_path"] != "other/a.tar.gz" {
+		t.Fatalf("绝对路径应绕过当前目录: %+v", body)
+	}
+}
+
+// TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt --cipher 未配 --encrypt → 本地报错
+// （防静默忽略加密选型；报错发生在发起请求之前）。
+func TestCloudDownloadCmd_ArchiveTargetCipherRequiresEncrypt(t *testing.T) {
+	t.Parallel()
+	var body map[string]any
+	mock := captureArchiveBody(t, &body)
+	defer mock.Close()
+	cmd := NewCmdCloudDownload(clientfactory.NewMock(client.NewFileClient(mock.URL), nil),
+		cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
+	cmd.SetArgs([]string{"archive", "task-1", "--target", "vault:/a.tar.gz", "--cipher", "aes-256-gcm"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("--cipher 未配 --encrypt 应本地报错")
+	}
+	if len(body) != 0 {
+		t.Fatalf("本地应 fail-fast，不得发起请求: %+v", body)
 	}
 }

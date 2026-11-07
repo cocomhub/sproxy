@@ -25,7 +25,7 @@ func TestShareWatermark_Header(t *testing.T) {
 	}
 	// 创建分享（带 watermark）。
 	body := `{"filename":"wm.png","watermark":"trace-123"}`
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/share", bytes.NewReader([]byte(body)))
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/shares", bytes.NewReader([]byte(body)))
 	signBodyRequestEntry(req, testAccessKey, testEntryID(testAccessKey), testAccessSecret, []byte(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestShareWatermark_NoSeed(t *testing.T) {
 		t.Fatalf("upload = %d", st)
 	}
 	body := `{"filename":"plain.png"}`
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/share", bytes.NewReader([]byte(body)))
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/shares", bytes.NewReader([]byte(body)))
 	signBodyRequestEntry(req, testAccessKey, testEntryID(testAccessKey), testAccessSecret, []byte(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

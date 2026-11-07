@@ -160,27 +160,38 @@ func TestNewServiceDialPolicy(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := policy(tc.addr)
-			if ok != tc.want {
-				t.Fatalf("policy(%q) ok = %v, want %v", tc.addr, ok, tc.want)
-			}
-			if !tc.want {
-				return
-			}
-			switch tc.name {
-			case "announced-hostname":
-				// H1-S2：主机名宣告解析为 IP:port（localhost 解析平台相关，如 ::1 或
-				// 127.0.0.1），断言"是 IP 且端口正确"即可，不断言具体 IP。
-				host, port, err := net.SplitHostPort(got)
-				if err != nil || port != "10022" || net.ParseIP(host) == nil {
-					t.Fatalf("policy(%q) resolved = %q, want IP:10022", tc.addr, got)
-				}
-			default:
-				if got != tc.addr {
-					t.Fatalf("policy(%q) resolved = %q, want passthrough %q", tc.addr, got, tc.addr)
-				}
-			}
+			assertPolicyResolution(t, policy, tc)
 		})
+	}
+}
+
+// assertPolicyResolution 校验单个拨号策略用例：ok 必须等于 want；放行时按用例类型
+// 断言解析结果（主机名宣告 → IP:port；其余 → 原样透传）。
+func assertPolicyResolution(t *testing.T, policy func(string) (string, bool), tc struct {
+	name string
+	addr string
+	want bool
+}) {
+	t.Helper()
+	got, ok := policy(tc.addr)
+	if ok != tc.want {
+		t.Fatalf("policy(%q) ok = %v, want %v", tc.addr, ok, tc.want)
+	}
+	if !tc.want {
+		return
+	}
+	switch tc.name {
+	case "announced-hostname":
+		// H1-S2：主机名宣告解析为 IP:port（localhost 解析平台相关，如 ::1 或
+		// 127.0.0.1），断言"是 IP 且端口正确"即可，不断言具体 IP。
+		host, port, err := net.SplitHostPort(got)
+		if err != nil || port != "10022" || net.ParseIP(host) == nil {
+			t.Fatalf("policy(%q) resolved = %q, want IP:10022", tc.addr, got)
+		}
+	default:
+		if got != tc.addr {
+			t.Fatalf("policy(%q) resolved = %q, want passthrough %q", tc.addr, got, tc.addr)
+		}
 	}
 }
 
@@ -792,76 +803,88 @@ func TestPump_NonCooperativeRemote_ForceClose(t *testing.T) {
 func TestServeHTTP_BodyMethods(t *testing.T) {
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions} {
 		t.Run(method, func(t *testing.T) {
-			var gotBody string
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				gotBody = string(body)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte("ok"))
-			}))
-			defer backend.Close()
-
-			pipeA, pipeB := xfertest.Pipe()
-			serverMux := mux.New(pipeA, mux.RoleListener)
-			clientMux := mux.New(pipeB, mux.RoleDialer)
-			defer serverMux.Close()
-			defer clientMux.Close()
-
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-
-			// 注意：不在 goroutine 内关闭服务端流——mux 关闭竞态（Read 的 select 在
-			// dataCh 有缓冲数据但 done 已关时会随机丢数据）会把已写入的响应截断，
-			// 测试在读完响应后再关闭流，规避该竞态（mux bug 另行跟踪）。
-			serverDone := make(chan error, 1)
-			streamCh := make(chan mux.Stream, 1)
-			go func() {
-				stream, aerr := serverMux.Accept(ctx)
-				if aerr != nil {
-					serverDone <- aerr
-					return
-				}
-				streamCh <- stream
-				serveHTTP(ctx, stream, backend.URL, tunnel.Request{Method: method, URL: "/submit"}, &http.Client{Timeout: 5 * time.Second}, testLogger())
-				serverDone <- nil
-			}()
-
-			clientStream, oerr := clientMux.Open(ctx)
-			if oerr != nil {
-				t.Fatal(oerr)
-			}
-			defer clientStream.Close()
-
-			// 直接调 serveHTTP 时流已定位在 metadata 之后（metadata 由 Serve 预先读取），
-			// 因此这里只写 body 字节 + CloseWrite，serveHTTP 的 body reader 直接消费。
-			if _, werr := clientStream.Write([]byte("hello-body")); werr != nil {
-				t.Fatal(werr)
-			}
-			_ = clientStream.CloseWrite()
-
-			respMeta, rerr := readTunnelResponse(ctx, clientStream)
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			if respMeta.Status != http.StatusOK {
-				t.Fatalf("expected 200, got %d", respMeta.Status)
-			}
-			if gotBody != "hello-body" {
-				t.Fatalf("expected backend body hello-body, got %q", gotBody)
-			}
-			body := make([]byte, len("ok"))
-			if err := readFullWithTimeout(ctx, clientStream, body, "响应 body"); err != nil {
-				t.Fatalf("read body: %v", err)
-			}
-			if string(body) != "ok" {
-				t.Fatalf("expected body ok, got %q", body)
-			}
-			select {
-			case s := <-streamCh:
-				_ = s.Close()
-			default:
-			}
+			assertBodyMethodRelay(t, method)
 		})
+	}
+}
+
+// assertBodyMethodRelay 验证单个带 body 方法（POST/PUT/DELETE/OPTIONS）把流作为
+// 请求体转发到后端（I62 / S28）。
+func assertBodyMethodRelay(t *testing.T, method string) {
+	t.Helper()
+	var gotBody string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	pipeA, pipeB := xfertest.Pipe()
+	serverMux := mux.New(pipeA, mux.RoleListener)
+	clientMux := mux.New(pipeB, mux.RoleDialer)
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// 注意：不在 goroutine 内关闭服务端流——mux 关闭竞态（Read 的 select 在
+	// dataCh 有缓冲数据但 done 已关时会随机丢数据）会把已写入的响应截断，
+	// 测试在读完响应后再关闭流，规避该竞态（mux bug 另行跟踪）。
+	serverDone := make(chan error, 1)
+	streamCh := make(chan mux.Stream, 1)
+	go func() {
+		stream, aerr := serverMux.Accept(ctx)
+		if aerr != nil {
+			serverDone <- aerr
+			return
+		}
+		streamCh <- stream
+		serveHTTP(ctx, stream, backend.URL, tunnel.Request{Method: method, URL: "/submit"}, &http.Client{Timeout: 5 * time.Second}, testLogger())
+		serverDone <- nil
+	}()
+
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer clientStream.Close()
+
+	// 直接调 serveHTTP 时流已定位在 metadata 之后（metadata 由 Serve 预先读取），
+	// 因此这里只写 body 字节 + CloseWrite，serveHTTP 的 body reader 直接消费。
+	if _, werr := clientStream.Write([]byte("hello-body")); werr != nil {
+		t.Fatal(werr)
+	}
+	_ = clientStream.CloseWrite()
+
+	respMeta, rerr := readTunnelResponse(ctx, clientStream)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if respMeta.Status != http.StatusOK {
+		t.Fatalf("expected 200, got %d", respMeta.Status)
+	}
+	if gotBody != "hello-body" {
+		t.Fatalf("expected backend body hello-body, got %q", gotBody)
+	}
+	body := make([]byte, len("ok"))
+	if err := readFullWithTimeout(ctx, clientStream, body, "响应 body"); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("expected body ok, got %q", body)
+	}
+	closeAcceptedStream(streamCh)
+}
+
+// closeAcceptedStream 有则关闭 accept 侧流（读完整响应后再关，规避 mux 关闭竞态截断）。
+func closeAcceptedStream(streamCh chan mux.Stream) {
+	select {
+	case s := <-streamCh:
+		_ = s.Close()
+	default:
 	}
 }
 
@@ -876,13 +899,7 @@ func TestServeHTTP_URLValidation(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	cases := []struct {
-		name       string
-		url        string
-		wantStatus int
-		wantPath   string
-		wantQuery  string
-	}{
+	cases := []urlValidationCase{
 		{"relative-ok", "/relayed", http.StatusOK, "/relayed", ""},
 		{"relative-query-with-at", "/search?q=user@example.com", http.StatusOK, "/search", "q=user@example.com"},
 		{"absolute-rejected", "http://evil.com/x", http.StatusBadRequest, "", ""},
@@ -892,69 +909,81 @@ func TestServeHTTP_URLValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gotPath, gotQuery = "", ""
-			pipeA, pipeB := xfertest.Pipe()
-			serverMux := mux.New(pipeA, mux.RoleListener)
-			clientMux := mux.New(pipeB, mux.RoleDialer)
-			defer serverMux.Close()
-			defer clientMux.Close()
-
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-
-			// 不在 goroutine 内关闭服务端流，读完响应后再关（规避 mux 关闭竞态截断响应）。
-			serverDone := make(chan error, 1)
-			streamCh := make(chan mux.Stream, 1)
-			go func() {
-				stream, aerr := serverMux.Accept(ctx)
-				if aerr != nil {
-					serverDone <- aerr
-					return
-				}
-				streamCh <- stream
-				serveHTTP(ctx, stream, backend.URL, tunnel.Request{Method: http.MethodGet, URL: tc.url}, &http.Client{Timeout: 5 * time.Second}, testLogger())
-				serverDone <- nil
-			}()
-
-			clientStream, oerr := clientMux.Open(ctx)
-			if oerr != nil {
-				t.Fatal(oerr)
-			}
-			defer clientStream.Close()
-
-			reqMeta, _ := json.Marshal(tunnel.Request{Method: http.MethodGet, URL: tc.url})
-			lenBuf := make([]byte, 4)
-			binary.BigEndian.PutUint32(lenBuf, uint32(len(reqMeta)))
-			if _, werr := clientStream.Write(lenBuf); werr != nil {
-				t.Fatal(werr)
-			}
-			if _, werr := clientStream.Write(reqMeta); werr != nil {
-				t.Fatal(werr)
-			}
-			_ = clientStream.CloseWrite()
-
-			respMeta, rerr := readTunnelResponse(ctx, clientStream)
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			if respMeta.Status != tc.wantStatus {
-				t.Fatalf("case %s: expected status %d, got %d", tc.name, respMeta.Status, tc.wantStatus)
-			}
-			if tc.wantStatus == http.StatusOK {
-				if gotPath != tc.wantPath || gotQuery != tc.wantQuery {
-					t.Fatalf("case %s: backend got path=%q query=%q, want path=%q query=%q", tc.name, gotPath, gotQuery, tc.wantPath, tc.wantQuery)
-				}
-			} else if gotPath != "" {
-				// 拒绝路径不应触达后端（防 SSRF 数据外泄）
-				t.Fatalf("case %s: backend was hit with path=%q, want no forward", tc.name, gotPath)
-			}
-			select {
-			case s := <-streamCh:
-				_ = s.Close()
-			default:
-			}
+			assertURLValidationCase(t, backend, &gotPath, &gotQuery, tc)
 		})
 	}
+}
+
+// urlValidationCase 描述单个 URL 校验用例（I20 SSRF 防护）。
+type urlValidationCase struct {
+	name       string
+	url        string
+	wantStatus int
+	wantPath   string
+	wantQuery  string
+}
+
+// assertURLValidationCase 验证单个 URL 校验用例：只放行相对路径，绝对 URL / host
+// 注入 / userinfo 注入 / 非法编码一律拒绝（返回 400），query 内 @ 正常保留。
+func assertURLValidationCase(t *testing.T, backend *httptest.Server, gotPath, gotQuery *string, tc urlValidationCase) {
+	t.Helper()
+	*gotPath, *gotQuery = "", ""
+	pipeA, pipeB := xfertest.Pipe()
+	serverMux := mux.New(pipeA, mux.RoleListener)
+	clientMux := mux.New(pipeB, mux.RoleDialer)
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	// 不在 goroutine 内关闭服务端流，读完响应后再关（规避 mux 关闭竞态截断响应）。
+	serverDone := make(chan error, 1)
+	streamCh := make(chan mux.Stream, 1)
+	go func() {
+		stream, aerr := serverMux.Accept(ctx)
+		if aerr != nil {
+			serverDone <- aerr
+			return
+		}
+		streamCh <- stream
+		serveHTTP(ctx, stream, backend.URL, tunnel.Request{Method: http.MethodGet, URL: tc.url}, &http.Client{Timeout: 5 * time.Second}, testLogger())
+		serverDone <- nil
+	}()
+
+	clientStream, oerr := clientMux.Open(ctx)
+	if oerr != nil {
+		t.Fatal(oerr)
+	}
+	defer clientStream.Close()
+
+	reqMeta, _ := json.Marshal(tunnel.Request{Method: http.MethodGet, URL: tc.url})
+	lenBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lenBuf, uint32(len(reqMeta)))
+	if _, werr := clientStream.Write(lenBuf); werr != nil {
+		t.Fatal(werr)
+	}
+	if _, werr := clientStream.Write(reqMeta); werr != nil {
+		t.Fatal(werr)
+	}
+	_ = clientStream.CloseWrite()
+
+	respMeta, rerr := readTunnelResponse(ctx, clientStream)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if respMeta.Status != tc.wantStatus {
+		t.Fatalf("case %s: expected status %d, got %d", tc.name, respMeta.Status, tc.wantStatus)
+	}
+	if tc.wantStatus == http.StatusOK {
+		if *gotPath != tc.wantPath || *gotQuery != tc.wantQuery {
+			t.Fatalf("case %s: backend got path=%q query=%q, want path=%q query=%q", tc.name, *gotPath, *gotQuery, tc.wantPath, tc.wantQuery)
+		}
+	} else if *gotPath != "" {
+		// 拒绝路径不应触达后端（防 SSRF 数据外泄）
+		t.Fatalf("case %s: backend was hit with path=%q, want no forward", tc.name, *gotPath)
+	}
+	closeAcceptedStream(streamCh)
 }
 
 // startEchoServer 启动一个 127.0.0.1 TCP echo 服务（每个连接读多少回写多少，

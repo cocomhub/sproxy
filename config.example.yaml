@@ -27,8 +27,63 @@ storage_root: "./storage"
 #                               #   外部后端（如 baidupcs）用各自类型字面量，需后端已注册（plugin）
 #     root: "./storage"         # 物理根目录（首卷 root 缺省/占位形态时用 storage_root 建根，F1 门禁）
 #     extra: {}                 # 类型特有配置（V3）：本地卷恒空；外部后端构造器读取（如 baidupcs 的 bduss/baidu_root）
+#     direct_link: false        # 「允许明文外部卷 302 直链」开关（2026-10-05 通用文件获取）：
+#                               # **仅当 trusted_volume.skip_verify=true 时生效**（2026-10-11：
+#                               # 默认校验开启时强制服务端转发——302 会绕过逐分块校验并告警一次；
+#                               # 出口卷 type=egress 例外，其 302 二次进入仍由服务端校验）。
+#                               #   零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；
+#                               #   显式 true = 下载时 302 跳到后端直链（流量不经服务端，需后端支持直链）。
+#                               #   仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密（忽略本字段）。
+#   # 封装卷示例（2026-10-11 通用封装机制）：声明占用某个已装配卷的根/子目录，
+  # 由注册的封装处理器（wrapper）提供变换后的访问（如 secretdata 加密）。
+  # 装配后**源目录在源卷侧被封印**：直连写操作恒拒（409）、默认读按不存在（404）且列举过滤；
+  # 封装卷自身经服务器处理读写（不受封印影响）。支持嵌套（封装另一个封装卷，路径逐层拼接）与
+  # 深度上限 8；跨外部卷源当前装配期显式拒绝（禁静默降级）。
+  #
+  # **唯一声明形态 = wrapper 类型 + extra.source**（`type` 就是处理层名，如 secretdata/secrets）：
+  # 卷描述 Type 保持 wrapper 类型 ⇒ 协议（SchemeOf）/分类（CategoryOf）/API 回显全按 wrapper 语义。
+  # `type: "enclosure"` **不是可写卷类型**——配置校验与建卷 API 均 fail-closed 拒绝。
+  # 用户面亦可用嵌套语法 `extra.target: "<卷>/<子目录>"`（见下 secret 加密卷示例），装配层翻译出
+  # 同样的声明词汇（`extra.source`）后走同一装配路径。
+  #   - name: "vault"
+  #     type: "secretdata"             # 处理层名（= wrapper 类型）
+  #     extra:
+  #       # <源卷名>:<子路径>（子路径可空 = 整卷封装）。子路径为**卷根相对**：客户端可达路径
+  #       # 恒为 <卷根>/<owner>/<bucket>/<rel>，故要封印「客户端本来能直连的区间」须写
+  #       # "<源卷>:<owner>/user/<子路径>"（如 main:alice/user/vault）；写 "main:private/vault"
+  #       # 表示封装卷根专有区间（客户端不可寻址，封印属防御纵深）。
+  #       source: "main:alice/user/vault" # <源卷名>:<卷根相对子路径>
+  #       # wrapper 键冗余：恒等于卷类型本身（装配层不再书写；显式写出且不一致 → 启动 fail-closed）。
+  #       secret_url: "secrets://keys/vault"   # wrapper 自身配置（此处为密钥来源；secrets://<卷>/<名>）
+  #       source_read_mode: "hidden"     # hidden(默认，读 404+列举过滤) | readable(只读透视，便于迁移)
+  #       allow_direct_url: false        # 默认禁止 302 直链（禁客户端直连源存储）
+  #       max_bytes: 0                   # 0 = 仅受源卷池约束（继承）；>0 = 封装卷自身上限
+  # 集群出口示例（type=egress，2026-10-05 用户裁定凭证下发）：一出口卷 = 一持有节点卷
+#   # （多凭证/多持有节点 = 配多条 egress 卷）。持有节点签发自包含短效凭证（HMAC+时效+
+#   # 白名单+范围），出口节点经 mesh 从持有节点拉数据转发（播放器 302/转发目标 = 出口节点）。
+#   # 需配合：持有节点 remote_read.enabled + mesh.node.enabled（宣告 volread）+ 本节点
+#   # xfer 身份指纹列入持有卷 mesh_readers 或凭证白名单；cluster.credential_sign_key 为
+#   # 签发密钥（仅持有节点签发用；目标节点侧持同 key 验签——**出口节点不持有**，评审 I1）。
+#   #   - name: "egress1"          # type=egress：集群出口卷（出口节点侧）
+#   #     type: "egress"
+#   #     direct_link: false       # 默认私密（恒出口服务端转发）；true = 允许 302 到出口公网端点
+#   #     extra:
+#   #       holder_node: "holder-a"          # 必填：持有节点 mesh node ID
+#   #       holder_volume: "main"            # 必填：持有侧真实卷名
+#   #       holder_fingerprint: "sha256:..." # 必填：持有侧 xfer 身份指纹（WithPeerPin）
+#   #       holder_owner: "alice"            # 必填：凭证授的持有侧 owner（本地请求 owner 必须匹配，
+#   #                                        #       防跨 owner 越权读——评审 I2）
+#   #       holder_path: ""                  # 可选：卷内根路径前缀（限定子树，如 docs/）
+#   #       egress_base_url: "https://v.example.com"     # 可选：出口公网 base（B 态自转发 302）
+#   #       holder_public_base_url: ""                   # 可选：持有公网 base（B2 直跳持有，需同认证域）
+#   #     acl: {mode: allow, owners: [alice]}
+#   # 签发方 SK（持有节点签发凭证用；目标节点侧持同 key 验签授权）：
+#   # cluster:
+#   #   credential_sign_key: "<64-hex 32B>"   # 集群出口凭证签发密钥（仅配置凭证时必填）
+#   #   credentials:                          # 目标节点侧凭证池（持有节点签发后配置到本节点）
+#   #     - encoded: "<Credential.Marshal 串>"
 #   # 外部后端示例（type=baidupcs / webdav / s3，需后端已注册）：
-#   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/baidupcs）
+#   #   - name: "mydisk"          # type=baidupcs：百度网盘（独立 module pkg/volume/ext/baidupcs）
 #   #     type: "baidupcs"
 #   #     extra: {bduss: "...", baidu_root: "/", local_root: "/data/baidupcs"}
 #   #   - name: "nextcloud"       # type=webdav：WebDAV 服务（pkg/volume/webdav）
@@ -40,6 +95,38 @@ storage_root: "./storage"
 #   #   - name: "minio"           # type=s3：S3 兼容对象存储（独立 module pkg/volume/ext/s3）
 #   #     type: "s3"
 #   #     extra: {endpoint: "127.0.0.1:9000", bucket: "sproxy", access_key: "minioadmin", secret_key: "minioadmin"}
+#   # secret 加密卷示例（type=secrets + type=secretdata，走 Secretdata 透明加密卷）：
+#   #   先建 secrets 卷（放加密密钥文件），再建 secretdata 卷引用其密钥。密钥文件（64 hex）需
+#   #   **手动放置**：在 secrets 卷底层 `<extra.root>/secrets/` 目录放一个 64-hex 文本文件
+#   #   （如 `datakey`）。也可用 CLI/Web 创建（`sclient secret create` 写入的是 **per-owner
+#   #   默认桶** `<storage_root>/<owner>/meta/secrets/`，与显式声明的 secrets 卷不是同一目录）。
+#   #   - name: "mykeys"           # type=secrets：密钥管理卷（底层卷 secrets/ 目录视图）
+#   #     type: "secrets"
+#   #     extra: {target: "local", root: "./storage/keys"}  # root 必须在 extra 里（顶层 root 只服务本地卷）
+#   #   - name: "vault"            # type=secretdata：透明加密封装卷（卷内文件加密落盘）
+#   #     type: "secretdata"
+#   #     extra:
+#   #       target: "local"        # 底层卷本地根（secretdata 卷自身物理落盘处）
+#   #       root: "./storage/vault"
+#   #       secret_url: "secrets://mykeys/datakey"   # 从 mykeys secrets 卷读密钥（必填）
+#   #       algorithm: "shardseal/aes-256-gcm"       # KDF 档位（缺省 = 默认档 standard，N=2^14）
+#   #          可选 "-high"（保守 N=2^17，~202ms，真实 scrypt 内存 128MiB/次）、"-low"
+#   #          （测试/低配 N=2^12，~6ms，真实内存 4MiB/次）。内存口径 = RFC 7914 128×r×N。
+#   #          各档为不同 AlgoVersion + KDF 域，跨档 fail-closed；secret 为 256-bit 高熵随机时
+#   #          档位不影响暴力破解成本（KDF 只作域分离/抗离线字典，见设计 §4.2/§13）。
+#   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
+#   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
+#   #       block_policy:          # 分块策略（缺省 random 1MB-200MB + 自动选型）
+#   #         mode: "random"       #   块模式（"random" 默认）
+#   #         blocklet_mode: ""    #   视频关键帧分块开关：""（缺省）= 按扩展名自动选型
+#   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
+#   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；
+#   #                              #   "video-keyframe" = 强制开启（需 ffmpeg 或 go-mp4 提供者装配）
+#   #   # 默认 secrets 是 **per-owner** 的（每个 owner 各自的 <storage_root>/<owner>/meta/secrets/，免声明、
+#   #   # 首次使用时自动派生）：/api/secrets 恒作用于请求者自己的桶。**服务级声明（此处 config）没有
+#   #   # owner 上下文** ⇒ secret_url 必须指向显式命名的 secrets 卷（如 secrets://mykeys/datakey）；
+#   #   # 只有带身份的建卷请求（POST /api/volumes/user）才可写 "secrets://default-secrets/<name>"
+#   #   # （解析到该 owner 自己的桶）。
 #     vol_capacity: "100GiB"   # 本卷容量上限（支持人类可读大小或纯数字字节；0 = 不限）。auto 路由按容量换卷。
 #     mirror_to: "disk2"       # 镜像目标卷名（可选，仅本地卷）：本卷 user 桶按 mirror_interval 周期复制到目标卷
 #                               #   （源保留；目标一致跳过、不一致覆盖收敛；配置校验拒自指/不存在/成环）
@@ -87,6 +174,22 @@ log_level: "info"
 log_format: "text"
 max_header_bytes: 1048576
 
+# ---- 审计（audit）----
+# 服务端写路径审计（GET /api/audit 回看最近操作，落盘 <默认卷根>/audit/audit.log）。
+# audit:
+#   buffer_size: 2048         # 有界内存环形缓冲条数；0 = 关闭（返回空表）；负值非法
+#   max_size: ""              # 审计日志轮转大小（ByteSize，如 "10MiB"）；0/缺省 = 关闭轮转
+#   max_archives: 3           # 轮转保留归档份数（audit.log.1 … audit.log.N；0 = 轮转即删）
+#   # ---- 通用 span 审计（云下载/转存/加密阶段耗时与字节，pkg/audit）----
+#   # 每任务独立 sink 文件（每行一行 JSON）；当前 sink 目录未配置化（默认系统临时目录），
+#   # 下述字段为规格 §4.5 预留（接口已定义，配置暂未接线）：
+#   enabled: false            # 预留：span 审计开关（默认关，未接线）
+#   dir: ""                   # 预留：span 审计 sink 根目录（未接线）
+#   archive:                  # 预留：把 span 审计归档到所选卷——**默认不归档**
+#     enabled: false          #   开启需选卷 + 路径（未来接线后生效）
+#     volume: ""              #   归档目标卷（如 secretdata://audit）
+#     path: ""                #   归档目标卷内路径
+
 # Web 领域方法传输行为（默认隧道）。
 # web:
 #   tunnel: true   # true=Web 领域方法默认走加密隧道（由 SK 派生密钥）；false=走直连 SproxySig
@@ -111,7 +214,7 @@ tls:
 #     force_totp: false       # 强制 TOTP 注册（默认 false）：true = register 只下发
 #                             # AK + otpauth_uri/base32_secret，用户须经 TOTP 登录拿 session SK；
 #                             # false（默认）= 简单 AK/SK 注册，register 直接下发 SK。
-#     session_ttl: "24h"      # TOTP 登录 session SK（login_type=web，缺省）有效期（服务端控 TTL）
+#     session_ttl: "168h"     # TOTP 登录 session SK（login_type=web，缺省）有效期（默认 7 天）
 #     cli_ttl: "168h"         # login_type=cli（sclient trust login 回填）session SK 有效期（默认 7d）
 #     login_fail_limit: 5     # per-AK 失败锁定阈值（默认 5）：连续失败达此数即锁 15m
 #     login_fail_window: "15m" # per-AK 失败锁定窗口（默认 15m），到期自动解锁（U4）
@@ -198,6 +301,15 @@ tls:
 #   # coordinated: true
 #   # 协调后端：local（默认，内存计数）/ file（storage 根下 ratelimit/ 目录原子计数文件）
 #   # backend: file
+#   # per-endpoint 限流（可选；空 = 不启用）：path → {limit, window}，精确匹配优先 +
+#   # "/" 段边界前缀最长匹配；无匹配规则透传（只限显式配置的端点，不误伤 hub/mux 长连）
+#   # endpoints:
+#   #   /download: { limit: 100, window: "1s" }
+#   #   /upload:   { limit: 50,  window: "1s" }
+#   # 未匹配任何端点规则时的兜底 {limit, window}（可选；零值 = 无兜底透传）
+#   # endpoint_default: { limit: 20, window: "1s" }
+#   # 全局并发上限（同时处理中请求数；0 = 不启用）。并发闸满立即 429，不消耗 per-IP/全局/endpoint 配额
+#   # max_concurrent: 100
 
 # 分块上传设置
 # chunk_size: 4194304               # 每块大小 (4MB)
@@ -228,14 +340,18 @@ tls:
 # 云端离线下载（多任务/任务组）配置
 # cloud_sync_threshold: 20971520            # 同步下载阈值（默认 20 MiB；当前 handler 提交时大小未知恒异步，字段保留供未来按大小同步）
 # cloud_max_concurrent: 3                   # 最大并发下载数
+# cloud_transfer_concurrency: 2             # 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同）
 # cloud_max_batch_urls: 100                 # 批量/组下载单次最大 URL 数，超过服务端返回 400（默认 100）
-# cloud_downloader: "http"                  # 云端下载器名称（默认 http；当前仅内置 http 实现）
+# cloud_downloader: "http"                  # 云端下载器名称（默认 http；pikpak 可选用 PikPak 完整下载，见下 pikpak: 段）
 # cloud_task_ttl: "24h"                     # 完成任务保留时间，过期自动清理
 # cloud_failed_task_ttl: "1h"               # 失败/取消任务保留时间
 # cloud_download_timeout: "30m"             # 单次下载尝试整体超时（超时后自动重试续传）
 # cloud_download_idle_timeout: "1m"         # 响应体读取空闲超时：超过该时长未收到数据即中断本次尝试
 # cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数
 # cloud_retry_delay: "10s"                  # 重试间隔
+# cloud_check_mem_bytes: "512MiB"            # 完整性校验内存配额（ByteSize；<=0/缺省=512 MiB，配额治理默认生效）。
+#                                           # 校验器按 Check 前估算排队（不足等待释放）；
+#                                           # 单文件估算超配额→跳过校验标记 unverified（不误判 damaged）
 # cloud_download_allow_private: false       # 允许下载私有 IP 地址（默认关闭，SSRF 防护）
 # cloud_download_exit_node: "node-exit"    # 云端下载经 mesh 出口节点 ID（空=服务端本地直连；
 #                                           # 需 mesh.hub_url + mesh.access_key/secret；本地被墙时经出口下载）
@@ -245,6 +361,50 @@ tls:
 # 无论是否设置，都受 max_storage_bytes（TryReserve）兜底；归档文件计入对应租户 archive 桶空间。
 # 同名归档文件已存在时返回 409（O_EXCL 防覆盖）；打包完成后按磁盘实际大小对账预留配额。
 # cloud_archive_max_bytes: 10737418240   # 10 GiB 示例
+
+# 可信卷（Trusted Volume）：外部卷上传/转存默认包可信卷装饰器——写侧生成隐藏 FileMeta
+# sidecar（整文件 sha256/md5 + 逐分块 sha256/md5，落独立 meta 桶 <owner>/meta/<rel>.meta），
+# 读侧（下载 / 云转存读回）按 FileMeta 逐分块校验，跨信任边界静默损坏 fail-closed。
+# 默认即开启（安全可靠）；本地卷恒建 meta（只关校验不关 meta）。
+# trusted_volume:
+#   skip_verify: false        # true = 跳过下载/转存读侧数据校验（显式放宽，仅极端性能场景）；
+#                             #   meta 生成与 meta 桶隔离不受影响（meta 恒生成）。
+#   chunk_size: 0             # 分块大小（ByteSize；0 = 按文件大小自适应 1MiB~32MiB；
+#                             #   配置值小于下界 1MiB 时钳到 1MiB，防百万分块 DoS）
+#   staging_quota_bytes: 0    # 本地 staging（上传暂存）每-owner 配额上限（ByteSize；0 = 不限制但记账）。
+#                             #   所有外部卷写前预留、写后释放，防本地磁盘被上传暂存打满；
+#                             #   s3 流式直传显式豁免、baidupcs 自管。
+
+# PikPak 网盘中转后端（分享 URL → 转存个人网盘 → 官方 CLI 完整下载）：
+# 绕过 PikPak 分享链接 40-50% 下载限制（官方对分享链接的反下载设计）。
+# 前置：安装官方 CLI 并登录（`sproxy pikpak install` + `sproxy pikpak login`）。
+# pikpak:
+#   binary_path: ""                # pikpak 可执行路径；空 = PATH 查找
+#   install_dir: ""                # 自动安装目录；空 = 默认（~/.local/bin 或 %LOCALAPPDATA%\pikpak-cli）
+#   auto_install: false             # 是否允许自动下载官方 CLI（默认 false：先手动 install/login）
+#   download_dir: ""               # 下载落盘目录；空 = 系统临时目录
+#   timeout: "3h"                  # 单文件下载总超时（免费账号限速 ~1.15MB/s，4.5GB≈1h）
+#   auto_delete: false              # 下载完成后是否删除网盘转存文件（节省网盘空间）
+#   secrets_dir: ""               # 多账号凭据**加密卷**本地根（secretdata/shardseal 加密落盘；空 = <storage_root>/pikpak-secrets）
+#   insecure_tls: false             # 跳过 PikPak 解析出站 TLS 证书校验（仅本地自签联调；生产必须 false）
+#   hybrid:
+#     chunk_size: 33554432          # 分片大小（默认 32 MiB；中断恢复粒度）
+#     concurrency: 4                # 并行分片数（默认 4）
+#     auto_delete: true             # 下载完成后永久删除网盘转存副本（默认 true，释放免费账号空间）
+#     share_ratio: 0                # 匿名区比例上限：0=auto（按 416 边界探测结果，探测失败回落 50%）
+#                                   # >0=显式上限（与探测取小，clamp 到 (0,1]）
+#     disable_progress_journal: false  # 关闭下载进度 WAL（默认 false=启用：分片完成即写
+#                                   # <storage_root>/meta/state/pikpak-journal，重启后可恢复已完成分片）
+#   # 多账号（会话文件池）：每账号一份完整 credentials 会话（含 refresh_token，CLI 自动 refresh）。
+#   # 下载后按剩余配额轮换（20GB/日，按日重置）。可用 `sproxy pikpak account add/list/remove` 管理。
+#   accounts:
+#     - name: "acct01"            # 账号名（唯一）
+#       daily_quota: 20971520000   # 每日下载配额（字节，默认 20 GiB）
+#     - name: "acct02"
+#       daily_quota: 20971520000
+# 无需配置 cloud_downloader：pikpak 下载器一旦装配（CLI 可用即自动注册），
+# mypikpak.com/s/ 等分享 URL 会被云端下载（/api/v1/cloud/download）**自动按 URL 识别**。
+# cloud_downloader 仅作为「未命中任何已注册下载器」时的默认兜底（默认 http，请保持）。
 
 # 文件同步任务（SyncManager）——服务端托管节点间 push/pull 同步任务（v1）。
 # SyncManager 默认装配（/api/sync/tasks 等路由始终可用）；sync_remotes 为空时创建远程任务
@@ -436,3 +596,35 @@ tls:
 #   enabled: false
 #   listen: "127.0.0.1:19001"
 #   handshake_timeout: "10s"
+# 卷根 at-rest 加密（仅本地卷；用户访问恒见明文，落盘字节为密文）：
+#   - name: "secure"
+#     type: "local"
+#     root: "./storage-secure"
+#     extra:
+#       encrypt: true
+#       encrypt_key_file: "./secure.key"   # raw 32B 或 base64 32B（openssl rand -base64 32）
+#       cipher: "64KiB"                    # 可选：加密分块大小（非法值 fail-closed）
+#   —— 备份/迁移需导出存储原样密文时用 `?ciphertext=1`（详见 docs/api.md）。
+
+# ---- 卷状态缓存（volume_state；默认开启，disable=true 才关闭）----
+#   disable         显式关闭缓存（默认 false = 启用；强一致/调试场景用）
+#   ttl             缓存有效期（默认 0 = **永不过期**；>0 = 时间兜底；负值 = 每次回源）
+#   search_remote   允许对远端卷做递归搜索（默认 false：递归列举 = 全量远端往返）
+#   max_bytes       落盘 staging 上限（默认 256MiB；0 = 仅内存）
+#   persist_private 允许保密卷的元数据快照落节点磁盘（默认 false = 只内存）
+# 语义（默认永不过期）：本进程的写由事件写穿（下一次读立即可见）；**进程外**改动（运维直写盘/
+# 同根多实例/备份恢复/网盘 App 直改）**不会**自动收敛——需要可见时显式强制刷新：
+#   CLI:    sclient volume refresh [卷名]        （无参 = 全部卷）
+#   Web UI: 工具栏「强制刷新」按钮
+#   API:    POST /api/volumes/refresh[?volume=<卷>]
+# 需要时间兜底的部署可显式配 ttl（如 "5m"）；强一致/调试用负值（每次回源）。
+# volume_state:
+#   disable: false
+#   ttl: "0s"
+
+# 注册 / URL 票（SproxySig 查询参数形态，浏览器 <video> 与外部播放器直链共用）
+registration:
+  # URL 票（?spx_sig=）有效期。默认 1h；长视频/复制直链给本地播放器建议 3h。
+  # 语义：票不查 nonce 池（同一 URL 可被 <video> 的多个 Range 请求复用），
+  # URL 泄露 = 有效期内可访问，按需调短。
+  download_token_ttl: 3h

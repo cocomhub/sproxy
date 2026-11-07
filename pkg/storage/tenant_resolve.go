@@ -126,6 +126,22 @@ func openTenant(parent *Root, owner string, cfg tenantConfig) (*Tenant, error) {
 			return nil, fmt.Errorf("storage: OpenTenant: 租户子根加密态注入失败: %w", serr)
 		}
 	}
+	// 封印传播：**卷根命名空间 → 租户子根命名空间的等价翻译**（评审 P1：口径不一致）。
+	// 客户端一律经租户根寻址（`<volumeRoot>/<owner>/user/<rel>`），故卷根规则
+	// `<owner>/user/<x>` 在本租户根内的等价位置是 `user/<x>`（剥去 owner 段）；未以某 owner
+	// 开头的规则属卷根专有区间（客户端不可寻址），原样注入作防御纵深（多封无害）。
+	// 只读透视/写恒拒语义不变（封装卷持特权视图，不受影响）。
+	//
+	// **实时求值（不在创建时快照）**：源卷封印可在**运行期**变更（新增/删除封装卷 →
+	// pkg/server/enclosure.AttachEnclosureVolume/DetachEnclosureVolume 重设该卷根封印），而租户子根句柄被
+	// TenantCache 缓存、此后不再经 OpenTenant ⇒ 快照会让已缓存租户**绕过新封印**
+	// （客户端经租户根写 `<user>/<sub>/…` 直入封装区间：写保护失效窗口）。
+	// 故安装派生实时来源（deriveSealsFromParent：按父根当前规则翻译 + 本根别名展开 + 版本缓存）
+	// ——与父根变更天然同步，既不需要「缓存失效 + 关闭在用租户句柄」生命周期动作，也无每判定分配。
+	tenantRoot.deriveSealsFromParent(parent, owner)
+	// 变异观察者继承：租户子根上的写会以 `<owner>/<rel>`（卷根命名空间）上报，
+	// 消费方无需知道是哪个子根写的（设计 §4.1）。
+	tenantRoot.inheritMutationObserver(parent, owner)
 	t, err := NewTenant(owner, tenantRoot)
 	if err != nil {
 		cfg.warn("创建租户失败（fail-closed）", "owner", owner, "error", err)
@@ -252,4 +268,24 @@ func (c *TenantCache) Close() error {
 		delete(c.cache, owner)
 	}
 	return nil
+}
+
+// translateSealsForTenant 把**卷根命名空间**的封印规则翻译到某租户子根命名空间：
+// 首段与本租户 owner 相同（大小写不敏感）→ 剥去该段；其余原样保留。
+//
+// 例（owner=alice）：`alice/user/vault` → `user/vault`（客户端可达位置被正确封印）；
+// `private/vault` → 原样（卷根专有区间，非客户端可达，多封无害）。
+func translateSealsForTenant(rules []SealRule, owner string) []SealRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]SealRule, 0, len(rules))
+	for _, r := range rules {
+		rr := r
+		if first, rest, ok := strings.Cut(r.Path, "/"); ok && strings.EqualFold(first, owner) {
+			rr.Path = rest
+		}
+		out = append(out, rr)
+	}
+	return out
 }

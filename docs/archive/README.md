@@ -24,3 +24,7 @@ SPDX-License-Identifier: Apache-2.0
 
 > 说明：`docs/superpowers/learnings/` 目录已于 2026-09-20 移除（4 份内容移入本目录上述文件），原路径已删除。
 > 权威文档与代码引用已全部改指向本目录。`docs/testing/virtual-time-conversions.md`（固定等待清理台账，被 R14 门禁引用）仍保留原路径。
+
+## 统一卷模型（2026-10-28）
+
+- [unified-volume-model.md](./unified-volume-model.md) — 按用途封装的本地卷 + 唯一取卷入口（StorageVolume/VolumeView）的决策与踩坑

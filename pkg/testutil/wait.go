@@ -5,6 +5,10 @@ package testutil
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
 	"time"
 )
 
@@ -98,4 +102,23 @@ func WaitForBool(timeout time.Duration, cond func() bool) bool {
 		}
 		time.Sleep(waitPollInterval)
 	}
+}
+
+// MakeReadOnlyDir 创建一个只读目录并返回 (目录, 清理函数)，用于测试写入失败路径。
+//
+// Windows 上 chmod 不生效：返回临时根目录本身（其下写入仍可失败于只读文件场景）。
+func MakeReadOnlyDir(t *testing.T) (string, func()) {
+	t.Helper()
+	d := t.TempDir()
+	roDir := filepath.Join(d, "readonly")
+	if err := os.Mkdir(roDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(roDir, 0o444); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		return roDir, func() { _ = os.Chmod(roDir, 0o755) }
+	}
+	return d, func() {}
 }

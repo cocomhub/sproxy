@@ -163,7 +163,7 @@ func TestReadContract_StatHeaders(t *testing.T) {
 	if got := rr.Header().Get(headerFileChecksum); got != sha256Hex([]byte("AAA")) {
 		t.Fatalf("%s=%q want 台账值", headerFileChecksum, got)
 	}
-	if got := rr.Header().Get(headerFileMTime); got == "" {
+	if rr.Header().Get(headerFileMTime) == "" {
 		t.Fatal("X-File-MTime 应存在")
 	}
 	if got := rr.Header().Get("X-File-IsDir"); got != "" {
@@ -212,7 +212,7 @@ func TestReadContract_DownloadHeaders(t *testing.T) {
 	if got := rr.Header().Get(headerFileChecksum); got != sha256Hex([]byte("AAA")) {
 		t.Fatalf("%s=%q want 台账值", headerFileChecksum, got)
 	}
-	if got := rr.Header().Get(headerFileMTime); got == "" {
+	if rr.Header().Get(headerFileMTime) == "" {
 		t.Fatal("X-File-MTime 应存在")
 	}
 }

@@ -26,8 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -153,7 +155,80 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// list
+	assertRemoteList(t, c, ref)
+	assertRemoteStat(t, c, bodyA)
+	assertRemoteOpen(t, c, bodyA, big)
+	assertRemoteRange(t, c, bodyA, big)
+}
+
+// assertRemoteRange 钉住 remoteFS.OpenRangeRead（集群出口随机访问地基）：
+// Range 定点读 == 原文件对应明文段；负偏移/非法长度报错。
+func assertRemoteRange(t *testing.T, c *remote.Client, bodyA, big []byte) {
+	t.Helper()
+	fs := c.FS(mustRef(t, testVol+"/docs"))
+	rr, ok := fs.(syncpkg.RangeReader)
+	if !ok {
+		t.Fatal("remoteFS 应实现 syncpkg.RangeReader")
+	}
+	// 中间段定点读（Range 语义；path 为卷内相对完整路径 docs/a.bin——FS 根=owner 命名空间）。
+	rc, rerr := rr.OpenRangeRead(context.Background(), "docs/a.bin", 2, 5)
+	if rerr != nil {
+		t.Fatalf("OpenRangeRead: %v", rerr)
+	}
+	got, gerr := io.ReadAll(rc)
+	rc.Close()
+	if gerr != nil {
+		t.Fatalf("ReadAll: %v", gerr)
+	}
+	if !bytes.Equal(got, bodyA[2:7]) {
+		t.Fatalf("Range 段=%q want %q", got, bodyA[2:7])
+	}
+	// 尾部段。
+	rc2, rerr2 := rr.OpenRangeRead(context.Background(), "docs/big.bin", int64(len(big)-10), 10)
+	if rerr2 != nil {
+		t.Fatalf("OpenRangeRead 尾部: %v", rerr2)
+	}
+	tail, terr := io.ReadAll(rc2)
+	rc2.Close()
+	if terr != nil {
+		t.Fatalf("ReadAll 尾部: %v", terr)
+	}
+	if !bytes.Equal(tail, big[len(big)-10:]) {
+		t.Fatalf("尾部段 != 原尾部")
+	}
+	// 负偏移/非法长度 fail-closed。
+	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", -1, 5); err == nil {
+		t.Fatal("负偏移应报错")
+	}
+	// 零长度 = **空区间成功**（长度契约统一，2026-10-14 跨层扫雷）：此前 remoteFS 直接报错，
+	// 而本地卷/加密卷返回空流 ⇒ 同一调用随卷类型可成可败。空区间不触网、不读字节。
+	rc0, rerr0 := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, 0)
+	if rerr0 != nil {
+		t.Fatalf("零长度应为空区间成功（契约与本地卷/加密卷一致）: %v", rerr0)
+	}
+	got0, gerr0 := io.ReadAll(rc0)
+	_ = rc0.Close()
+	if gerr0 != nil || len(got0) != 0 {
+		t.Fatalf("零长度应为空流, got %q err=%v", got0, gerr0)
+	}
+	if _, err := rr.OpenRangeRead(context.Background(), "docs/a.bin", 0, -1); err == nil {
+		t.Fatal("负长度应报错（非法区间）")
+	}
+}
+
+// mustRef 解析 remote://<node>/<vol>[/<path>]（测试用）。
+func mustRef(t *testing.T, volPath string) remote.Ref {
+	t.Helper()
+	ref, err := remote.ParseRef("remote://" + testNodeA + "/" + volPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
+}
+
+// assertRemoteList 钉住 List：条目数量与卷名透传。
+func assertRemoteList(t *testing.T, c *remote.Client, ref remote.Ref) {
+	t.Helper()
 	infos, err := c.List(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("List: %v", err)
@@ -166,8 +241,11 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 			t.Fatalf("条目应带卷名 %q: %+v", testVol, fi)
 		}
 	}
+}
 
-	// stat（存在 / 不存在 / 目录）
+// assertRemoteStat 钉住 Stat 三分支：文件（含 checksum）/ 不存在 / 目录。
+func assertRemoteStat(t *testing.T, c *remote.Client, bodyA []byte) {
+	t.Helper()
 	fileRef, _ := remote.ParseRef("remote://" + testNodeA + "/" + testVol + "/docs/a.bin")
 	st, err := c.Stat(context.Background(), fileRef)
 	if err != nil {
@@ -188,8 +266,11 @@ func TestClient_ListStatOpen_EndToEnd(t *testing.T) {
 	if got, err := c.Stat(context.Background(), dirRef); err != nil || got == nil || !got.IsDir {
 		t.Fatalf("目录 stat 应 IsDir=true，got (%+v, %v)", got, err)
 	}
+}
 
-	// open（小文件与大文件：后者跨隧道多帧）
+// assertRemoteOpen 钉住 open：小文件与大文件（后者跨隧道多帧）逐字节全等。
+func assertRemoteOpen(t *testing.T, c *remote.Client, bodyA, big []byte) {
+	t.Helper()
 	for _, tc := range []struct {
 		rel  string
 		want []byte
@@ -314,8 +395,15 @@ func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 	c := newAClient(t, b, aID)
 	ref, _ := remote.ParseRef("remote://" + testNodeA + "/" + testVol)
 	fs := c.FS(ref)
-	ctx := context.Background()
 
+	assertFSReadSide(t, fs)
+	assertFSWritesFailClosed(t, fs)
+}
+
+// assertFSReadSide 钉住 FS 读面：ListDir / Stat / OpenRead。
+func assertFSReadSide(t *testing.T, fs syncpkg.FS) {
+	t.Helper()
+	ctx := context.Background()
 	// 读：ListDir 返回完整相对路径（FS 契约）
 	entries, err := fs.ListDir(ctx, "docs")
 	if err != nil {
@@ -346,10 +434,16 @@ func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 	if string(got) != "fs content" {
 		t.Fatalf("OpenRead 内容=%q", got)
 	}
+}
 
+// assertFSWritesFailClosed 钉住写面 fail-closed：未配置写面拨号器时四个写方法都报
+// ErrWriteNotConfigured（不得静默成功、不得回落读面链路绕过写面授权）。
+func assertFSWritesFailClosed(t *testing.T, fs syncpkg.FS) {
+	t.Helper()
+	ctx := context.Background()
 	// 写：本客户端未配置写面拨号器 ⇒ 四个方法都必须 fail-closed（不得静默成功）
 	for name, err := range map[string]error{
-		"WriteFile": fs.WriteFile(ctx, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),
+		"WriteFile": fs.WriteFile(ctx, syncpkg.LogicalKey{}, "docs/new.bin", strings.NewReader("x"), 1, time.Now().Unix()),
 		"Rename":    fs.Rename(ctx, "docs/a.bin", "docs/b.bin"),
 		"Delete":    fs.Delete(ctx, "docs/a.bin"),
 		"MakeDir":   fs.MakeDir(ctx, "docs/sub"),
@@ -361,5 +455,63 @@ func TestRemoteFS_ReadsAndWritesWithoutWriteDialer(t *testing.T) {
 		if !errors.Is(err, remote.ErrWriteNotConfigured) {
 			t.Fatalf("%s 的错误应包装 remote.ErrWriteNotConfigured: %v", name, err)
 		}
+	}
+}
+
+// writeBSidecar 在 B 侧卷写 sidecar（`<owner>/meta/<rel>.meta`）——与写路径同构：
+// meta.Calculator 算分块 + Marshal 落盘。用于 cross-node meta 面（op=meta）的端到端。
+func writeBSidecar(t *testing.T, cfg *server.Config, rel string, body []byte) {
+	t.Helper()
+	calc, err := meta.NewCalculator(int64(len(body)), int64(len(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, werr := calc.ReadFrom(bytes.NewReader(body)); werr != nil {
+		t.Fatal(werr)
+	}
+	raw, merr := meta.Marshal(calc.Finish())
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	abs := filepath.Join(cfg.StorageRoot, testOwner, filepath.FromSlash(meta.MetaPath("user/"+rel)))
+	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if werr := os.WriteFile(abs, raw, 0o644); werr != nil {
+		t.Fatal(werr)
+	}
+}
+
+// TestClient_Meta_EndToEnd：跨节点 meta 面（op=meta）——持有侧用自身可信栈把
+// **用户相对路径**解析为 sidecar（调用方无需也不得拼接 meta 桶段，凭证范围语义因此
+// 仍作用在用户路径上）；无 sidecar → 404 → os.ErrNotExist（预期降级可区分）。
+func TestClient_Meta_EndToEnd(t *testing.T) {
+	t.Parallel()
+	aID, err := tunnel.GenerateIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := startBEnd(t, aID.Fingerprint())
+	body := []byte("remote meta payload")
+	writeBFile(t, b.cfg, "docs/m.bin", body)
+	writeBSidecar(t, b.cfg, "docs/m.bin", body)
+	c := newAClient(t, b, aID)
+
+	raw, merr := c.Meta(context.Background(), mustRef(t, testVol+"/docs/m.bin"))
+	if merr != nil {
+		t.Fatalf("Meta: %v", merr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("Meta 返回的 sidecar 应可解析: %v", uerr)
+	}
+	if fm.Size != int64(len(body)) {
+		t.Fatalf("sidecar size=%d want %d", fm.Size, len(body))
+	}
+
+	// 无 sidecar（存量/旁路写）→ 404 → 包装 os.ErrNotExist。
+	writeBFile(t, b.cfg, "docs/none.bin", []byte("no sidecar"))
+	if _, nerr := c.Meta(context.Background(), mustRef(t, testVol+"/docs/none.bin")); !errors.Is(nerr, os.ErrNotExist) {
+		t.Fatalf("无 sidecar 应回 os.ErrNotExist, got %v", nerr)
 	}
 }

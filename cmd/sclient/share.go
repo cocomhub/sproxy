@@ -9,13 +9,17 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/volumectx"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
 // NewCmdShare 创建 share 命令的工厂函数。
-func NewCmdShare(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+// st 用于**卷 URI 寻址**（`share create vault:/docs/x.txt`）与「当前工作目录所在卷」默认上下文
+// ——与 ls/du/download 等命令同一套卷寻址（用户口径：卷 URI 是唯一寻址方式，无 --volume flag）。
+func NewCmdShare(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "share",
 		Short: "文件分享管理",
@@ -23,50 +27,43 @@ func NewCmdShare(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 			_ = cmd.Help()
 		},
 	}
-	cmd.AddCommand(NewCmdShareCreate(factory, ios))
+	cmd.AddCommand(NewCmdShareCreate(factory, ios, st))
 	cmd.AddCommand(NewCmdShareList(factory, ios))
 	cmd.AddCommand(NewCmdShareRevoke(factory, ios))
 	return cmd
 }
 
 // NewCmdShareCreate 创建 share create 命令的工厂函数。
-func NewCmdShareCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
+func NewCmdShareCreate(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <filename>",
 		Short: "创建文件分享链接",
-		Args:  cobra.ExactArgs(1),
+		Long: "创建文件分享链接。" +
+			"\n\n卷寻址：支持卷 URI（`share create vault:/docs/x.txt`）与「当前工作目录所在卷」" +
+			"（`cd vault:/` 后直接 `share create docs/x.txt`）；两者皆无 = 服务端自动定位" +
+			"（本地卷优先，未命中再扫外部卷/加密卷）。多卷存在同名文件时应显式指定卷。",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ 卷上下文 + 纯路径；与 ls/du/download 同规约）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
 			}
-
-			ttlStr, _ := cmd.Flags().GetString("ttl")
-			ttl := 24 * time.Hour
-			if ttlStr != "" {
-				d, parseErr := time.ParseDuration(ttlStr)
-				if parseErr == nil && d > 0 {
-					ttl = d
-				}
-			}
-			maxDownloads, _ := cmd.Flags().GetInt("max-downloads")
-			oneTime, _ := cmd.Flags().GetBool("one-time")
-
-			var shareOpts []client.ShareOption
-			if ttl > 0 {
-				shareOpts = append(shareOpts, client.WithShareTTL(ttl))
-			}
-			if oneTime {
-				shareOpts = append(shareOpts, client.WithShareOneTime())
-			}
-			if maxDownloads > 0 {
-				shareOpts = append(shareOpts, client.WithShareMaxDownloads(maxDownloads))
-			}
-
-			link, err := svc.CreateShare(cmd.Context(), args[0], shareOpts...)
+			shareOpts, err := shareCreateOptions(cmd)
 			if err != nil {
-				ios.WriteErrLine("创建分享链接失败: %v", err)
-				return fmt.Errorf("创建分享链接失败: %w", err)
+				return err
+			}
+			// 卷上下文 → 分享请求的 volume（空 = 服务端自动定位，旧行为不变）。
+			if vol, ok := volumectx.From(cmd.Context()); ok && vol != "" {
+				shareOpts = append(shareOpts, client.WithShareVolume(vol))
+			}
+			link, serr := svc.CreateShare(cmd.Context(), args[0], shareOpts...)
+			if serr != nil {
+				ios.WriteErrLine("创建分享链接失败: %v", serr)
+				return fmt.Errorf("创建分享链接失败: %w", serr)
 			}
 
 			serverURL, _ := cmd.Flags().GetString("server")
@@ -81,6 +78,32 @@ func NewCmdShareCreate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.
 	cmd.Flags().Int("max-downloads", 0, "最大下载次数（0=不限）")
 	cmd.Flags().Bool("one-time", false, "一次性分享（下载一次后自动失效）")
 	return cmd
+}
+
+// shareCreateOptions 从 flag 解析分享选项（ttl/max-downloads/one-time）：
+// ttl 非法或非正时回落默认 24h（与旧行为一致）；只追加正 TTL 与显式开启项。
+func shareCreateOptions(cmd *cobra.Command) ([]client.ShareOption, error) {
+	ttlStr, _ := cmd.Flags().GetString("ttl")
+	ttl := 24 * time.Hour
+	if ttlStr != "" {
+		if d, parseErr := time.ParseDuration(ttlStr); parseErr == nil && d > 0 {
+			ttl = d
+		}
+	}
+	maxDownloads, _ := cmd.Flags().GetInt("max-downloads")
+	oneTime, _ := cmd.Flags().GetBool("one-time")
+
+	var shareOpts []client.ShareOption
+	if ttl > 0 {
+		shareOpts = append(shareOpts, client.WithShareTTL(ttl))
+	}
+	if oneTime {
+		shareOpts = append(shareOpts, client.WithShareOneTime())
+	}
+	if maxDownloads > 0 {
+		shareOpts = append(shareOpts, client.WithShareMaxDownloads(maxDownloads))
+	}
+	return shareOpts, nil
 }
 
 // NewCmdShareList 创建 share list 命令的工厂函数。

@@ -41,18 +41,22 @@ const testSleepTotalBudget = 61
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
 var testSleepBudgets = map[string]int{
-	"cmd/sproxy/mesh_node_test.go":                        1,
-	"cmd/sproxy/root_extra_test.go":                       1,
-	"cmd/sproxy/graceful_restart_unix_test.go":            1, // fd helper 子进程 accept 轮询（10s 有界；子进程启动不可条件化）
-	"pkg/client/mesh_refresh_test.go":                     1,
-	"pkg/cloud/manager_test.go":                           4,
-	"pkg/cloud/quota_writer_test.go":                      3,
-	"pkg/downloader/http_downloader_test.go":              1,
-	"pkg/server/relay_stream_test.go":                     1,
-	"pkg/server/notify_test.go":                           4,
-	"pkg/tunnel/hub/ext/kad/kad_test.go":                  1,
-	"web/e2e/notify_panel_test.go":                        1,
-	"pkg/server/metrics_test.go":                          2,
+	"cmd/sproxy/mesh_node_test.go":             1,
+	"cmd/sproxy/root_extra_test.go":            1,
+	"cmd/sproxy/graceful_restart_unix_test.go": 1, // fd helper 子进程 accept 轮询（10s 有界；子进程启动不可条件化）
+	"pkg/audit/audit_test.go":                  1, // 有意计时：Begin/End 间隔 2ms 使 DurMS≥1 可断言（无事件可条件轮询，不能换 testutil.WaitFor）
+	"pkg/client/mesh_refresh_test.go":          1,
+	"pkg/cloud/manager_test.go":                4,
+	"pkg/cloud/quota_writer_test.go":           3,
+	"pkg/downloader/http_downloader_test.go":   1,
+	"pkg/server/relay_stream_test.go":          1,
+	"pkg/server/notify/center_test.go":         4,
+	"pkg/tunnel/hub/ext/kad/kad_test.go":       1,
+	"test/e2e_restart_cloud_test.go":           1, // 慢速源站节流（模拟弱网以制造「下载中断」窗口；无可条件化替代）
+	"web/e2e/notify_panel_test.go":             1,
+	"pkg/server/metrics_test.go":               2,
+	// staging 配额排队/超时/ctx 取消用例需定时释放或取消（无事件可轮询）；边界时序语义。
+	"pkg/quota/staging_tracker_test.go":                   2,
 	"web/e2e/trash_view_e2e_test.go":                      1,
 	"pkg/tunnel/hub/federation_test.go":                   2,
 	"pkg/tunnel/hub/signaling_client_test.go":             1,
@@ -66,6 +70,7 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/xfer/internal/tcp/tcp_test.go":            1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":        1,
 	"pkg/syncmgr/manager_test.go":                         1, // 终态轮询 10ms 间隔（并发安全回归测试，见 TestInjectResultsForTest_ConcurrentWithFinishTask）
+	"pkg/volume/ext/pikpak/hybrid_test.go":                2, // TestHybridDownload_ParallelPools 模拟分享/账号不同延迟
 	"test/e2e_mesh_node_test.go":                          3,
 	"test/e2e_mesh_rr_test.go":                            3,
 	"test/e2e_cli_upgrade_test.go":                        1, // ETXTBSY 重试间隔（10×100ms 有界；原子替换后等待句柄释放，无事件可轮询）

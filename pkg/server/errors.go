@@ -3,6 +3,8 @@
 
 package server
 
+import "github.com/cocomhub/sproxy/pkg/storage"
+
 // 通用错误消息常量（跨文件共享，避免字符串重复）
 //
 // 写面族专属的文案随处理器迁入 pkg/files：errMsgOpenFileFailed 在 chunked_response.go，
@@ -26,9 +28,40 @@ const (
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"
 	headerFileMTime    = "X-File-MTime" // stat/download 的修改时间（UnixNano）
+	// headerContentDisposition 是下载响应文件名头（archive 下载共用）。
+	headerContentDisposition = "Content-Disposition"
 
 	// Content-Type 值常量
 	contentTypeJSON        = "application/json"
 	contentTypeOctetStream = "application/octet-stream"
 	contentTypeTextPlain   = "text/plain; charset=utf-8"
+
+	// 时间布局与存储/URL 路径前缀（S1192：跨 handler 共享，防拼写漂移）
+	timeLayoutDate    = "2006-01-02"
+	sharePrefix       = "share/"
+	chunkPrefix       = storage.ChunkPrefix
+	partSuffix        = storage.PartSuffix
+	tarGZExt          = ".tar.gz"
+	metaAIDir         = "meta/ai/"
+	fileNameCredStore = "credentials.json"
+	fileNameDedup     = "dedup.json"
+
+	// 高频错误消息（跨 handler 共享文案）
+	msgNotFound             = "not found"
+	msgInvalidRequestBody   = "invalid request body"
+	msgBadRequest           = "请求体校验失败"
+	msgCredRingMissing      = "凭据 Ring 未装配"
+	msgArchiveDirFail       = "failed to create archive directory"
+	msgArchiveStatFail      = "failed to stat source file"
+	msgGroupNotFound        = "group not found"
+	msgJSONEncode           = "JSON encode error"
+	msgShareInvalid         = "分享链接无效或已过期"
+	msgCredGenFailed        = "生成凭据失败"
+	msgNonceMissing         = "nonce 池未装配"
+	msgAdminLoopbackOnly    = "首个 admin 注册仅限回环"
+	msgStorageQuotaExceeded = "存储配额不足"
+	msgVolumeNotAllowed     = "volume not allowed"
+	msgMoveFileFailed       = "移动文件失败"
+	msgVersionFileMissing   = "版本文件不存在"
+	msgVersionFileMissingPF = "版本文件不存在: "
 )

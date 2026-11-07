@@ -61,7 +61,7 @@ func NewToolRegistry(fc *client.FileClient, volume string) *ToolRegistry {
 				InputSchema: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"filename": map[string]any{"type": "string", "description": "服务端文件路径"},
+						"filename": map[string]any{"type": "string", "description": "服务端文件路径"}, // NOSONAR: S1192 — MCP 工具描述文案（多工具复用描述）抽常量无收益
 					},
 					"required": []string{"filename"},
 				},

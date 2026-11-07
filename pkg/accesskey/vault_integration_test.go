@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -50,8 +51,13 @@ func vaultEnv() (addr, token string) {
 // 会调用全局连接池的 CloseIdleConnections，打断并行集成用例在途的 idle 连接，表现为
 // "transport connection broken: http: CloseIdleConnections called"（与 pkg/client 同款
 // 硬规则——测试网络客户端必须隔离，禁止 http.DefaultClient/共享 Transport）。
+// Transport 必须显式独立（nil 会落到 http.DefaultTransport 全局池，CloseIdleConnections
+// 仍会互踩——R19 门禁语义）：用 netutil.IsolatedTransport 给每 client 独立连接池。
 func newVaultClient() *http.Client {
-	return &http.Client{Timeout: 10 * time.Second}
+	return &http.Client{
+		Transport: netutil.IsolatedTransport(),
+		Timeout:   10 * time.Second,
+	}
 }
 
 // requireVault 探测 Vault 可达性：健康检查 GET {addr}/v1/sys/health（短超时）。
@@ -61,7 +67,7 @@ func newVaultClient() *http.Client {
 func requireVault(t *testing.T) (string, string) {
 	t.Helper()
 	addr, token := vaultEnv()
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Transport: netutil.IsolatedTransport(), Timeout: 2 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, addr+"/v1/sys/health", nil)
 	if err != nil {
 		t.Fatalf("构造健康检查请求: %v", err)

@@ -94,7 +94,7 @@ func (f *fakeMeshFS) OpenRead(_ context.Context, p string) (io.ReadCloser, error
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-func (f *fakeMeshFS) WriteFile(_ context.Context, p string, r io.Reader, _ int64, _ int64) error {
+func (f *fakeMeshFS) WriteFile(_ context.Context, key syncpkg.LogicalKey, p string, r io.Reader, _ int64, _ int64) error {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err

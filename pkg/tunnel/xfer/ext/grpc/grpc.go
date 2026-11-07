@@ -119,7 +119,7 @@ type XferMsg struct {
 // 自定义序列化（避免 protobuf 反射 marshaling 需要 protoimpl 注册）。
 func (m *XferMsg) Reset()         { m.Payload = nil }
 func (m *XferMsg) String() string { return "xfermsg" }
-func (m *XferMsg) ProtoMessage()  {}
+func (m *XferMsg) ProtoMessage()  {} // 标记方法：满足 proto.Message 接口，无实际行为（手写骨架）
 
 // Marshal 直接返回 payload 字节（bytes 字段直传）。
 func (m *XferMsg) Marshal() ([]byte, error) { return m.Payload, nil }

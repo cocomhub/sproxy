@@ -5,6 +5,7 @@ package remote
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -87,6 +88,36 @@ func (f *remoteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 	return f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p})
 }
 
+// OpenRangeRead 实现 syncpkg.RangeReader（集群出口/联邦卷随机访问地基，
+// 2026-10-05）：经 /remote/download + Range 头定点读取 [offset, offset+size)。
+// 只拉含目标区间的段，不下载整文件——播放器 seek 随机访问的 mesh 侧数据面。
+func (f *remoteFS) OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	p, err := normalizeRelPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 || size < 0 {
+		return nil, fmt.Errorf("remote: 非法区间 offset=%d size=%d", offset, size)
+	}
+	if size == 0 {
+		// 长度契约（2026-10-14 跨层扫雷）：size==0 = 空区间成功——此前直接报错，与
+		// 本地卷/加密卷（返回空流）语义不一致，同一调用随卷类型可成可败。
+		return syncpkg.EmptyRangeReader(), nil
+	}
+	// 精确长度守卫：对端 `http.ServeContent` 会对越过文件尾的 Range **钳制**并回 206
+	// （少字节、无错误）⇒ 上层会当「区间读完」（静默短读）。本地卷/加密卷对越界是
+	// fail-closed 报错，此处以提前 EOF 判据对齐。
+	rc, oerr := f.c.Open(ctx, Ref{Node: f.ref.Node, Volume: f.ref.Volume, Path: p},
+		WithRange(offset, offset+size-1))
+	if oerr != nil {
+		return nil, oerr
+	}
+	return syncpkg.ExactRangeReader(rc, size), nil
+}
+
+// 编译期断言：接口形状即最终形态（含 4 个写方法）。
+var _ syncpkg.FS = (*remoteFS)(nil)
+
 // 写方法（Y 二期 P3-c 已实现）：只做「路径归一 → 调 Client 写面方法」，**不实现写语义**
 // （checksum 门禁/原子改名/版本/配额/文件锁/卷路由全在对端 `pkg/files` 的域方法里）。
 //
@@ -94,7 +125,7 @@ func (f *remoteFS) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 // 当成"已写"（数据丢失型缺陷），而回落读面链路会绕过「写面独立授权」的安全边界。
 
 // WriteFile 写入 path；size 为调用方声明的字节数，mtime 为 Unix 秒（0 = 不设置）。
-func (f *remoteFS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (f *remoteFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	p, err := normalizeRelPath(path)
 	if err != nil {
 		return err

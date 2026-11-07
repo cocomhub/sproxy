@@ -297,14 +297,13 @@ func targetHost(t *testing.T) string {
 	return "127.0.0.1"
 }
 
-func TestConnect_Tunnel_Echo(t *testing.T) {
-	t.Parallel()
-	// 出口 echo 服务
+// startEchoServer 启动 127.0.0.1 回环 echo 服务（接受连接即原样回显）。
+func startEchoServer(t *testing.T) net.Listener {
+	t.Helper()
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
 	go func() {
 		for {
 			c, aerr := echoLn.Accept()
@@ -314,16 +313,12 @@ func TestConnect_Tunnel_Echo(t *testing.T) {
 			go func(cc net.Conn) { defer cc.Close(); _, _ = io.Copy(cc, cc) }(c)
 		}
 	}()
-	// 桩：直连到 echo（验证 CONNECT 目标交给 Dial）
-	stub := &dialStub{}
-	addr := newTestProxy(t, stub.dial, nil)
+	return echoLn
+}
 
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	target := echoLn.Addr().String()
+// connectEchoTarget 经 CONNECT 隧道请求 echo 目标并断言回显（ping-tunnel）。
+func connectEchoTarget(t *testing.T, conn net.Conn, target string) {
+	t.Helper()
 	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
 	br := bufio.NewReader(conn)
 	status, _ := br.ReadString('\n')
@@ -346,6 +341,24 @@ func TestConnect_Tunnel_Echo(t *testing.T) {
 	if string(buf) != "ping-tunnel" {
 		t.Fatalf("回显 = %q, want ping-tunnel", buf)
 	}
+}
+
+func TestConnect_Tunnel_Echo(t *testing.T) {
+	t.Parallel()
+	// 出口 echo 服务
+	echoLn := startEchoServer(t)
+	defer echoLn.Close()
+	// 桩：直连到 echo（验证 CONNECT 目标交给 Dial）
+	stub := &dialStub{}
+	addr := newTestProxy(t, stub.dial, nil)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	target := echoLn.Addr().String()
+	connectEchoTarget(t, conn, target)
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
 	if len(stub.got) == 0 || stub.got[0] != target {
@@ -493,6 +506,50 @@ func TestAuth_407_ClosesConn(t *testing.T) {
 	}
 }
 
+// keepAliveRoundTrip 在同一代理连接上发送单个绝对 URI 请求，读完状态/头/body 并断言 200 与内容。
+func keepAliveRoundTrip(t *testing.T, conn net.Conn, base, path string) {
+	t.Helper()
+	fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: %s\r\n\r\n", base, path, strings.TrimPrefix(base, "http://"))
+	br := bufio.NewReader(conn)
+	status, rerr := br.ReadString('\n')
+	if rerr != nil {
+		t.Fatalf("读第 %q 响应失败: %v", path, rerr)
+	}
+	if !strings.Contains(status, "200") {
+		t.Fatalf("第 %q 请求状态 = %q, want 200", path, status)
+	}
+	body := readKeepAliveResponseBody(t, br, path)
+	if string(body) != "req-"+path {
+		t.Fatalf("第 %q body = %q, want req-%s", path, body, path)
+	}
+}
+
+// readKeepAliveResponseBody 读完响应头（含 Content-Length）与 body。
+func readKeepAliveResponseBody(t *testing.T, br *bufio.Reader, path string) []byte {
+	t.Helper()
+	var body []byte
+	for {
+		line, lerr := br.ReadString('\n')
+		if lerr != nil {
+			t.Fatalf("读第 %q 响应头失败: %v", path, lerr)
+		}
+		if strings.HasPrefix(line, "Content-Length:") {
+			n := 0
+			_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")), "%d", &n)
+			body = make([]byte, n)
+		}
+		if line == "\r\n" {
+			break
+		}
+	}
+	if len(body) > 0 {
+		if _, lerr := io.ReadFull(br, body); lerr != nil {
+			t.Fatalf("读第 %q body 失败: %v", path, lerr)
+		}
+	}
+	return body
+}
+
 // TestForward_KeepAlive_SecondRequest 断言正常路径 keep-alive：同一连接可复用发第二个请求。
 func TestForward_KeepAlive_SecondRequest(t *testing.T) {
 	t.Parallel()
@@ -512,43 +569,178 @@ func TestForward_KeepAlive_SecondRequest(t *testing.T) {
 
 	// 同一连接连续两个绝对 URI 请求（无 Connection: close）→ 均成功（keep-alive 正路径）。
 	for _, path := range []string{"/one", "/two"} {
-		fmt.Fprintf(conn, "GET %s%s HTTP/1.1\r\nHost: %s\r\n\r\n", target.URL, path, strings.TrimPrefix(target.URL, "http://"))
-		br := bufio.NewReader(conn)
-		status, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatalf("读第 %q 响应失败: %v", path, rerr)
-		}
-		if !strings.Contains(status, "200") {
-			t.Fatalf("第 %q 请求状态 = %q, want 200", path, status)
-		}
-		// 读完头（含 Content-Length）与 body
-		var body []byte
-		for {
-			line, lerr := br.ReadString('\n')
-			if lerr != nil {
-				t.Fatalf("读第 %q 响应头失败: %v", path, lerr)
-			}
-			if strings.HasPrefix(line, "Content-Length:") {
-				n := 0
-				_, _ = fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Content-Length:")), "%d", &n)
-				body = make([]byte, n)
-			}
-			if line == "\r\n" {
-				break
-			}
-		}
-		if len(body) > 0 {
-			if _, lerr := io.ReadFull(br, body); lerr != nil {
-				t.Fatalf("读第 %q body 失败: %v", path, lerr)
-			}
-		}
-		if string(body) != "req-"+path {
-			t.Fatalf("第 %q body = %q, want req-%s", path, body, path)
-		}
+		keepAliveRoundTrip(t, conn, target.URL, path)
 	}
 	stub.mu.Lock()
 	defer stub.mu.Unlock()
 	if len(stub.got) != 2 {
 		t.Fatalf("Dial 调用次数 = %d, want 2（keep-alive 复用同一连接两次转发）", len(stub.got))
+	}
+}
+
+// routeTestConn 实现 RouteInfoer（测试用）。
+type routeTestConn struct {
+	net.Conn
+	route string
+}
+
+func (c *routeTestConn) Route() string { return c.route }
+
+// TestForward_RouteHeader 验证 RouteHeader 开启时绝对 URI 响应加 X-Mesh-Path 头。
+func TestForward_RouteHeader(t *testing.T) {
+	t.Parallel()
+	// 目标 server
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	// 代理：Dial 返回带路由的连接（连目标后包装）。
+	proxy := New(Config{
+		Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+			conn, err := net.Dial("tcp", target.Listener.Addr().String())
+			if err != nil {
+				return nil, err
+			}
+			return &routeTestConn{Conn: conn, route: "sg-t|relay|e2e"}, nil
+		},
+		RouteHeader: true,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	ln := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 用代理 Dial 转发：模拟 handleForward 由 Server 处理。
+		_ = w
+	}))
+	// 直接测 Server.handleForward 更精确——但 handleConn 私有。用完整代理连测。
+	_ = ln
+
+	// 经代理发绝对 URI 请求
+	pln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pln.Close()
+	go func() { _ = proxy.Serve(context.Background(), pln) }()
+
+	// 手动构造 CONNECT 风格绝对 URI 请求
+	conn, err := net.Dial("tcp", pln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req := "GET http://" + target.Listener.Addr().String() + "/ HTTP/1.1\r\nHost: " + target.Listener.Addr().String() + "\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Mesh-Path") != "sg-t|relay|e2e" {
+		t.Fatalf("X-Mesh-Path 缺失: %q", resp.Header.Get("X-Mesh-Path"))
+	}
+}
+
+// TestForward_RouteHeader_OffByDefault 验证 RouteHeader 默认关：响应无 X-Mesh-Path 头
+// （路由拓扑不泄露给客户端——默认安全）。
+func TestForward_RouteHeader_OffByDefault(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	proxy := New(Config{
+		Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+			conn, err := net.Dial("tcp", target.Listener.Addr().String())
+			if err != nil {
+				return nil, err
+			}
+			return &routeTestConn{Conn: conn, route: "sg-t|relay|e2e"}, nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	pln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pln.Close()
+	go func() { _ = proxy.Serve(context.Background(), pln) }()
+
+	conn, err := net.Dial("tcp", pln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req := "GET http://" + target.Listener.Addr().String() + "/ HTTP/1.1\r\nHost: " + target.Listener.Addr().String() + "\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Mesh-Path") != "" {
+		t.Fatalf("默认关应无 X-Mesh-Path 头，got %q", resp.Header.Get("X-Mesh-Path"))
+	}
+	if resp.Header.Get("X-Mesh-Trace") != "" {
+		t.Fatalf("默认关应无 X-Mesh-Trace 头，got %q", resp.Header.Get("X-Mesh-Trace"))
+	}
+}
+
+// TestForward_TraceHeader 验证 TraceHeader 开启时响应加 X-Mesh-Trace 头。
+func TestForward_TraceHeader(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	proxy := New(Config{
+		Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+			conn, derr := net.Dial("tcp", target.Listener.Addr().String())
+			if derr != nil {
+				return nil, derr
+			}
+			return &routeTestConn{Conn: conn, route: "sg-t|relay|e2e"}, nil
+		},
+		RouteHeader: true,
+		TraceHeader: true,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	pln, lerr := net.Listen("tcp", "127.0.0.1:0")
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	defer pln.Close()
+	go func() { _ = proxy.Serve(context.Background(), pln) }()
+
+	conn, derr := net.Dial("tcp", pln.Addr().String())
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	defer conn.Close()
+	req := "GET http://" + target.Listener.Addr().String() + "/ HTTP/1.1\r\nHost: " + target.Listener.Addr().String() + "\r\n\r\n"
+	if _, werr := conn.Write([]byte(req)); werr != nil {
+		t.Fatal(werr)
+	}
+	br := bufio.NewReader(conn)
+	resp, rerr := http.ReadResponse(br, nil)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Mesh-Path") != "sg-t|relay|e2e" {
+		t.Fatalf("X-Mesh-Path: %q", resp.Header.Get("X-Mesh-Path"))
+	}
+	if resp.Header.Get("X-Mesh-Trace") == "" {
+		t.Fatal("X-Mesh-Trace 缺失")
 	}
 }

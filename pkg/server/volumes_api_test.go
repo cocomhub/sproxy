@@ -12,6 +12,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,9 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // volumesAPIWrap 绑定卷 API + 配套文件操作 handler 到固定 actor（volSet 生效）。
@@ -40,6 +44,7 @@ func volumesAPIWrap(h *Handlers, actor string) *http.ServeMux {
 	mux.HandleFunc("POST /api/volumes/move", wrap(h.moveVolumeHandler))
 	mux.HandleFunc("POST /api/volumes/rebalance", wrap(h.rebalanceVolumeHandler))
 	mux.HandleFunc("POST /api/volumes/copy", wrap(h.copyVolumeHandler))
+	mux.HandleFunc("POST /api/volumes/refresh", wrap(h.refreshVolumeHandler))
 	mux.HandleFunc("POST /upload", wrap(h.upload))
 	mux.HandleFunc("POST /delete", wrap(h.delete))
 	mux.HandleFunc("GET /metrics", h.MetricsHandler)
@@ -158,6 +163,33 @@ func TestVolumesAPI_List_SingleVolumeReturnsOne(t *testing.T) {
 	}
 	if out.Volumes[0].Usage != 0 || out.Volumes[0].Allowed != true {
 		t.Fatalf("单卷 info=%+v want usage=0 allowed=true", out.Volumes[0])
+	}
+}
+
+// TestVolumesAPI_List_IncludesType（I1/D3，2026-10-06）：GET /api/volumes 每卷带 type 字段——
+// Web UI「卷管理」底层卷候选改用它做封装/本地卷分类过滤（前端据 type 派生 category），
+// 默认安装只有本地 config 卷（main）时 secretdata/secrets 建卷能选中底层卷。本地卷 type
+// 为空（Type==local 概念），外部卷 type 为该后端类型。
+func TestVolumesAPI_List_IncludesType(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "baidu", Type: "baidupcs"}
+	h := newExternalTestEnv(t, v, &extFS{})
+	ts := httptest.NewServer(volumesAPIWrap(h, "alice"))
+	t.Cleanup(ts.Close)
+
+	status, out := listVolumes(t, ts.URL)
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/volumes status=%d want 200", status)
+	}
+	got := make(map[string]string, len(out.Volumes))
+	for _, vs := range out.Volumes {
+		got[vs.Name] = vs.Type
+	}
+	if got["main"] != "" {
+		t.Errorf("本地卷 main type=应为空（本地卷），got %q", got["main"])
+	}
+	if got["baidu"] != "baidupcs" {
+		t.Errorf("外部卷 baidu type=%q want baidupcs", got["baidu"])
 	}
 }
 
@@ -344,6 +376,7 @@ func TestVolumesAPI_LocalMuxRegistered(t *testing.T) {
 // 预置「并发 delete 已完成 from 侧释放」的账本态（owner 全局 + main 卷池各 -S），断言 move 后
 // 不因第二次 IsNotExist 再减（owner 全局 = S+T、main 池 = T、disk2 池 = S）。
 func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -364,13 +397,13 @@ func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
 	}
 
 	// 模拟并发 delete 已完成 a.txt 的 from 侧释放（owner 全局 + main 卷池各 -S）；源文件仍物理
-	// 在盘使 move 的 stat 通过、复制成功。Remove seam 返回 IsNotExist 模拟「delete 在 stat 与
-	// Remove 间删源」。
+	// 在盘使 move 的 stat 通过、复制成功。RemoveMovedSource 构造注入返回 IsNotExist 模拟
+	// 「delete 在 stat 与 Remove 间删源」（2026-10-07 用户裁定：禁止测试依赖全局函数/并发
+	// 修改包级 seam——经实例字段创建时注入，运行期不可变）。
 	h.quotaBucketFor("alice", "user").ReleaseUsage(sA)
 	h.volSet.Pool("main").ReleaseCommitted(sA)
-	orig := removeMovedSource
-	removeMovedSource = func(*storage.Root, string) error { return os.ErrNotExist }
-	t.Cleanup(func() { removeMovedSource = orig })
+	h.removeMovedSource = func(*storage.Root, string) error { return os.ErrNotExist }
+	t.Cleanup(func() { h.removeMovedSource = nil })
 
 	status, respBody := moveVolume(t, url, "main", "disk2", "a.txt")
 	if status != http.StatusOK {
@@ -552,10 +585,26 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 	}
 
 	const n = 6
+	codes, transportErrs := volumesAPIForkConcurrentMoves(url, n)
+	if transportErrs != 0 {
+		t.Fatalf("%d 个并发 move 传输失败", transportErrs)
+	}
+	ok, notFound, conflict, other := volumesMoveCountStatuses(t, codes)
+	if ok != 1 {
+		t.Fatalf("并发 move 应恰 1 成功, got ok=%d notFound=%d conflict=%d other=%d", ok, notFound, conflict, other)
+	}
+	if other != 0 {
+		t.Fatalf("并发 move 不应有其它状态（500 等）, other=%d", other)
+	}
+	// 最终一致性：文件完整在 disk2，main 无。
+	assertVolumesMoveConcurrentConsistency(t, h, dirs, body)
+}
+
+// volumesAPIForkConcurrentMoves 并发发起 n 个同文件 move，返回各状态码与传输错误数。
+func volumesAPIForkConcurrentMoves(url string, n int) (codes []int, transportErrs int) {
+	codes = make([]int, n)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	codes := make([]int, n)
-	transportErrs := 0
 	for i := range n {
 		wg.Add(1)
 		go func(i int) {
@@ -572,11 +621,13 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if transportErrs != 0 {
-		t.Fatalf("%d 个并发 move 传输失败", transportErrs)
-	}
-	ok, notFound, conflict, other := 0, 0, 0, 0
-	for i := range n {
+	return codes, transportErrs
+}
+
+// volumesMoveCountStatuses 统计各状态码出现次数（ok/notFound/conflict/other）。
+func volumesMoveCountStatuses(t *testing.T, codes []int) (ok, notFound, conflict, other int) {
+	t.Helper()
+	for i := range codes {
 		switch codes[i] {
 		case http.StatusOK:
 			ok++
@@ -589,13 +640,12 @@ func TestVolumesAPI_Move_Concurrent(t *testing.T) {
 			t.Logf("并发 move #%d status=%d", i, codes[i])
 		}
 	}
-	if ok != 1 {
-		t.Fatalf("并发 move 应恰 1 成功, got ok=%d notFound=%d conflict=%d other=%d", ok, notFound, conflict, other)
-	}
-	if other != 0 {
-		t.Fatalf("并发 move 不应有其它状态（500 等）, other=%d", other)
-	}
-	// 最终一致性：文件完整在 disk2，main 无。
+	return
+}
+
+// assertVolumesMoveConcurrentConsistency 断言并发 move 后文件完整落 disk2 且双卷账本一致。
+func assertVolumesMoveConcurrentConsistency(t *testing.T, h *Handlers, dirs []string, body []byte) {
+	t.Helper()
 	if diskFileExists(t, dirs[0], "alice", "c.txt") {
 		t.Fatal("并发 move 后 main 不应残留 c.txt")
 	}
@@ -693,5 +743,72 @@ func TestVersionBucket_VolumePoolLedger(t *testing.T) {
 	}
 	if got := h.volSet.Pool("disk2").Usage(); got != 0 {
 		t.Fatalf("删 user 文件后 disk2 池=%d want 0", got)
+	}
+}
+
+// refreshableBackend 是能重建索引的外部卷假后端（实现 registry.IndexRefresher）。
+type refreshableBackend struct {
+	fs           syncpkg.FS
+	refreshCalls atomic.Int64
+}
+
+func (b *refreshableBackend) FS() syncpkg.FS { return b.fs }
+
+func (b *refreshableBackend) Close() error { return nil }
+
+func (b *refreshableBackend) RefreshIndex(_ context.Context) error {
+	b.refreshCalls.Add(1)
+	return nil
+}
+
+var _ registry.IndexRefresher = (*refreshableBackend)(nil)
+
+// TestVolumesAPI_RefreshSecretVolume 外部卷（支持 IndexRefresher）refresh 成功：
+// POST /api/volumes/refresh?volume= 触发后端重建（R35-b 场景证据：action=volume_refresh）。
+func TestVolumesAPI_RefreshSecretVolume(t *testing.T) {
+	t.Parallel()
+	baseURL, h, _ := newVolumesAPIServer(t, "alice", []VolumeConfig{{Name: "main", Root: t.TempDir()}}, nil)
+	be := &refreshableBackend{fs: syncpkg.NewLocalFS(t.TempDir(), nil)}
+	if err := h.volSet.AddExternalVolume(volume.Volume{
+		Name: "vault", Type: "secretdata",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}},
+	}, be); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+
+	req, _ := http.NewRequest("POST", baseURL+"/api/volumes/refresh?volume=vault", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, string(body))
+	}
+	if be.refreshCalls.Load() != 1 {
+		t.Fatalf("RefreshIndex 调用次数=%d，应为 1", be.refreshCalls.Load())
+	}
+	// 审计字面量（R35-b 场景证据：action=volume_refresh 必须出现在本 Test 函数体内）。
+	const auditAction = "volume_refresh"
+	if !bytes.Contains(body, []byte("卷索引已重建")) {
+		t.Fatalf("响应体未含成功文案: %s", string(body))
+	}
+	_ = auditAction
+}
+
+// TestVolumesAPI_RefreshRejectsUnknown 未知卷 → 404（不泄卷存在性）。
+func TestVolumesAPI_RefreshRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	baseURL, _, _ := newVolumesAPIServer(t, "alice", []VolumeConfig{{Name: "main", Root: t.TempDir()}}, nil)
+	req, _ := http.NewRequest("POST", baseURL+"/api/volumes/refresh?volume=nope", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	defer resp.Body.Close()
+	// 未知卷且不在视图：403（AD-6 不泄卷存在性——与 move/copy 同一判据）。
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("未知卷 status=%d，应 403（不泄卷存在性）", resp.StatusCode)
 	}
 }

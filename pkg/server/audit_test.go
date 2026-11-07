@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,9 +17,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/audit"
 
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -54,6 +59,10 @@ func newAuditTestServer(t *testing.T, modifyCfg func(*Config)) (string, *atomic.
 		AuditLogger: auditLogger,
 	}
 	withTestCreds(&opts)
+	// 审计读面自 M1-11（审核 P0）起 admin-only ⇒ 本文件的审计**语义**用例（过滤/limit/
+	// 导出/隧道可达）以管理员主体运行；**角色矩阵**（reader ⇒ 403、admin ⇒ 200）由
+	// rbac_roles_test.go 覆盖 —— 两组互补，避免语义用例被权限门淹没。
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
 	h := RegisterRoutes(t.Context(), opts)
 
 	ts := httptest.NewServer(h.Handler())
@@ -130,7 +139,7 @@ func uploadFileSigned(t *testing.T, baseURL, filename string, body []byte) int {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", sha256hex(body))
 	signBodyRequest(req, testAccessKey, testAccessSecret, buf.Bytes())
 
@@ -277,6 +286,50 @@ func TestRecordAudit_DefaultTS(t *testing.T) {
 }
 
 // ---- actor 注入 ----
+
+// TestHandlers_RecordAudit_ConcurrentWithClose 回归（数据竞态）：停服（Close 关闭审计落盘
+// 存储）与在途请求的 RecordAudit **并发**时不得有 field 级竞态，-race 下必捕。
+// 此前 stopRemainingServices 在 Close 里写审计存储字段 = nil，而 RecordAudit 读同一字段
+// → CI 的 -race 跑曾偶发 TestRemoteWrite_ListenerEndToEnd 红（隧道写路径的在途 handler 与
+// 该用例 t.Cleanup 的 Close 并发）。「关闭后不再落盘」的语义改由 FileJournal 自身的 closed
+// 标记承担（见 FileJournal.Close/Append），故 Close 不再写审计字段。
+func TestHandlers_RecordAudit_ConcurrentWithClose(t *testing.T) {
+	t.Parallel()
+
+	var auditBuf bytes.Buffer
+	h := newRemoteReadHandlers(t, remoteReadTestConfig(t), &auditBuf)
+	if h.auditJournal == nil {
+		t.Fatal("前置条件不成立：expected non-nil auditJournal（cfg.Audit.BufferSize > 0）")
+	}
+
+	const writers, batches = 4, 64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range writers {
+		wg.Go(func() {
+			<-start
+			for j := range batches {
+				h.RecordAudit(t.Context(), AuditEvent{
+					Action: "probe",
+					Object: fmt.Sprintf("concurrent-close-%d-%d", i, j),
+				})
+			}
+		})
+	}
+	close(start)
+
+	// 与上面的 RecordAudit 并发停服：修复前此处写审计字段 = nil → 与读构成竞态。
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wg.Wait()
+
+	// 停服后 Append 必须被拒绝（closed 短路：不得重新打开落盘句柄，否则 Windows 下会
+	// 阻止 TempDir 清理，且与「已停服」语义矛盾）。用公开可观测断言（不再触碰非导出字段）。
+	if aerr := h.auditJournal.Append(audit.Entry{Scope: "system", Kind: audit.KindEvent, Action: "after-close"}); !errors.Is(aerr, audit.ErrClosed) {
+		t.Errorf("停服后 Append err = %v, want audit.ErrClosed", aerr)
+	}
+}
 
 func TestAuthMiddleware_SproxySigActorInjected(t *testing.T) {
 	t.Parallel()
@@ -740,6 +793,10 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 		AuditLogger: testLogger(),
 	}
 	withTestCreds(&opts)
+	// 审计读面自 M1-11（审核 P0）起 admin-only ⇒ 本文件的审计**语义**用例（过滤/limit/
+	// 导出/隧道可达）以管理员主体运行；**角色矩阵**（reader ⇒ 403、admin ⇒ 200）由
+	// rbac_roles_test.go 覆盖 —— 两组互补，避免语义用例被权限门淹没。
+	setKeyRole(t, opts.CredentialRing, testAccessKey, accesskey.RoleAdmin)
 	h := RegisterRoutes(t.Context(), opts)
 	ts := httptest.NewServer(h.Handler())
 	t.Cleanup(func() {

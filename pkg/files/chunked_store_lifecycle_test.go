@@ -10,6 +10,7 @@ package files
 // 包内零覆盖。
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ type fakeCapacity struct {
 	tryHook func()
 }
 
-func (f *fakeCapacity) TryReserveChunked(int64) error {
+func (f *fakeCapacity) WaitReserveChunked(context.Context, int64) error {
 	if f.tryHook != nil {
 		f.tryHook()
 	}
@@ -68,34 +69,34 @@ func TestUploadStore_SessionDirAndHealth(t *testing.T) {
 func TestUploadStore_SetStorageMgr_ReleasesFallbackReservation(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	cap := &fakeCapacity{}
+	capMock := &fakeCapacity{}
 
 	// 路径 1：DeleteSession。
 	us := MustNewUploadStore(filepath.Join(t.TempDir(), "chunk"), time.Hour, nil)
 	defer us.Stop()
-	us.SetStorageMgr(cap)
+	us.SetStorageMgr(capMock)
 	s, err := us.CreateSession("del-sid", "f.txt", 100, 50, 2, "", 0)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	s.StorageMgrReserved = 100
 	us.DeleteSession("del-sid")
-	if cap.released != 100 || cap.calls != 1 {
-		t.Fatalf("DeleteSession 应释放 100 字节, got released=%d calls=%d", cap.released, cap.calls)
+	if capMock.released != 100 || capMock.calls != 1 {
+		t.Fatalf("DeleteSession 应释放 100 字节, got released=%d calls=%d", capMock.released, capMock.calls)
 	}
 
 	// 路径 2：CleanupExpired（负 TTL → 创建即过期）。
 	us2 := MustNewUploadStore(filepath.Join(t.TempDir(), "chunk"), -time.Nanosecond, nil)
 	defer us2.Stop()
-	us2.SetStorageMgr(cap)
+	us2.SetStorageMgr(capMock)
 	s2, err := us2.CreateSession("exp-sid", "f.txt", 50, 25, 2, "", 0)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	s2.StorageMgrReserved = 50
 	us2.CleanupExpired()
-	if cap.released != 150 || cap.calls != 2 {
-		t.Fatalf("CleanupExpired 应累计释放 150 字节, got released=%d calls=%d", cap.released, cap.calls)
+	if capMock.released != 150 || capMock.calls != 2 {
+		t.Fatalf("CleanupExpired 应累计释放 150 字节, got released=%d calls=%d", capMock.released, capMock.calls)
 	}
 }
 
@@ -165,7 +166,7 @@ func TestUploadStore_VerifyTempChunks_DropsMismatchAndMissingChecksum(t *testing
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	s := newSession("sid", "f.txt", int64(len(full)), 4, 3, "", 0, time.Hour)
+	s := newSession(newSessionParams{UploadID: "sid", Filename: "f.txt", TotalSize: int64(len(full)), ChunkSize: 4, TotalChunks: 3, SessionTTL: time.Hour})
 	s.TempPath = "user/f.txt"
 	s.ChunkChecksums[0] = sha256Hex(chunk0)       // 匹配 → 保留
 	s.ChunkChecksums[1] = sha256Hex([]byte("ZZ")) // 不匹配 → 清除
@@ -202,7 +203,7 @@ func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newSession("sid", "f.txt", 8, 4, 2, "", 0, time.Hour)
+			s := newSession(newSessionParams{UploadID: "sid", Filename: "f.txt", TotalSize: 8, ChunkSize: 4, TotalChunks: 2, SessionTTL: time.Hour})
 			s.TempPath = tc.tempPath
 			s.ChunkChecksums[0] = sha256Hex([]byte("AAAA"))
 			s.ChunkChecksums[1] = sha256Hex([]byte("BBBB"))
@@ -221,7 +222,7 @@ func TestUploadStore_VerifyTempChunks_ClearsAllWhenTempUnavailable(t *testing.T)
 func TestUploadStore_AllMismatchIndices(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	s := newSession("sid", "f.txt", 12, 4, 3, "", 0, time.Hour)
+	s := newSession(newSessionParams{UploadID: "sid", Filename: "f.txt", TotalSize: 12, ChunkSize: 4, TotalChunks: 3, SessionTTL: time.Hour})
 	got := allMismatchIndices(s)
 	want := []int{0, 1, 2}
 	if len(got) != len(want) {
@@ -236,7 +237,7 @@ func TestUploadStore_AllMismatchIndices(t *testing.T) {
 	base := t.TempDir()
 	us := MustNewUploadStore(filepath.Join(base, "main", "alice", "chunk"), time.Hour, nil)
 	defer us.Stop()
-	s2 := newSession("sid2", "f.txt", 12, 4, 3, "", 0, time.Hour)
+	s2 := newSession(newSessionParams{UploadID: "sid2", Filename: "f.txt", TotalSize: 12, ChunkSize: 4, TotalChunks: 3, SessionTTL: time.Hour})
 	s2.TempPath = "user/missing.txt" // 临时文件不存在 → 走 allMismatchIndices 兜底
 	if idx := us.findMismatchChunks(s2); len(idx) != 3 {
 		t.Fatalf("临时文件缺失应返回全部分片 mismatch, got %v", idx)
@@ -277,10 +278,10 @@ func TestMustNewUploadStore_SuccessAndPanic(t *testing.T) {
 func TestUploadStore_DeleteSession_KeepsCompletedSessionReservation(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	cap := &fakeCapacity{}
+	capMock := &fakeCapacity{}
 	us := MustNewUploadStore(filepath.Join(t.TempDir(), "chunk"), time.Hour, nil)
 	defer us.Stop()
-	us.SetStorageMgr(cap)
+	us.SetStorageMgr(capMock)
 
 	doneSess, createErr := us.CreateSession("done-sid", "f.txt", 100, 50, 2, "", 0)
 	if createErr != nil {
@@ -288,7 +289,7 @@ func TestUploadStore_DeleteSession_KeepsCompletedSessionReservation(t *testing.T
 	}
 	// 必须走锁内 setter 登记，**不得**直写 CreateSession 的返回值：该返回值当前是 store
 	// 内部对象，但一旦它改为返回副本（与续传路径的 copySession 口径对齐），直写会静默失效 ⇒
-	// store 内对象仍为 0 ⇒ DeleteSession 两个分支都不走 ⇒ 下面的 cap.calls != 0 变成**真空
+	// store 内对象仍为 0 ⇒ DeleteSession 两个分支都不走 ⇒ 下面的 capMock.calls != 0 变成**真空
 	// 假绿**（断言「没调用」恰好被满足，与被修的 C-4 闸门无关）。下一行读回锁内对象，把
 	// 「确实走了哪条分支」变成证据而非巧合。
 	if !us.setSessionStorageMgrReservedIfCurrent(doneSess, 100) {
@@ -302,7 +303,7 @@ func TestUploadStore_DeleteSession_KeepsCompletedSessionReservation(t *testing.T
 	}
 
 	us.DeleteSession("done-sid")
-	if cap.calls != 0 {
-		t.Fatalf("已完成会话的 P5 预留不应被释放（字节已成正式文件）: released=%d calls=%d", cap.released, cap.calls)
+	if capMock.calls != 0 {
+		t.Fatalf("已完成会话的 P5 预留不应被释放（字节已成正式文件）: released=%d calls=%d", capMock.released, capMock.calls)
 	}
 }

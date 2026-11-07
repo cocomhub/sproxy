@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
@@ -20,7 +21,7 @@ import (
 
 // NewCmdCloudDownloadGroup 创建云端组下载命令的工厂函数。
 // 默认行为是完整链式操作：创建组 → 等待 → 打包 → 下载 → 清理。
-func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cloud-download-group <name> <url> [url...]",
 		Short: "从云端下载文件到组（链式操作：创建组→等待→打包→下载→清理）",
@@ -38,74 +39,30 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-
-			name := args[0]
-			archiveName, _ := cmd.Flags().GetString("archive-name")
-			if archiveName == "" {
-				archiveName = fmt.Sprintf("cloud-download-group-%d.tar.gz", time.Now().Unix())
-			}
-			outputDir, _ := cmd.Flags().GetString("output-dir")
-			keepFiles, _ := cmd.Flags().GetBool("keep-files")
-			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
-			timeout, _ := cmd.Flags().GetDuration("timeout")
-			urlFile, _ := cmd.Flags().GetString("url-file")
-
-			if len(args) < 2 && urlFile == "" {
-				return fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
-			}
-
-			entries, collectErr := collectCloudEntries(args[1:], urlFile)
-			if collectErr != nil {
-				return collectErr
-			}
-			if preflightErr := preflightGroupEntries(ios, name, entries); preflightErr != nil {
-				return preflightErr
-			}
-
-			ios.WriteOutLine("链式下载组 %q (%d 个条目)...", name, len(entries))
-			opts := []client.ChainOption{
-				client.WithChainPollInterval(pollInterval),
-				client.WithChainTimeout(timeout),
-			}
-			if keepFiles {
-				opts = append(opts, client.WithChainKeepFiles())
-			}
-
-			chainCtx := cmd.Context()
-			if timeout > 0 {
-				var cancel context.CancelFunc
-				chainCtx, cancel = context.WithTimeout(cmd.Context(), timeout)
-				defer cancel()
-			}
-			result, err := svc.CloudDownloadGroupChain(chainCtx, name, entries, archiveName, outputDir, opts...)
-			if err != nil {
-				return fmt.Errorf("链式下载失败: %w", err)
-			}
-
-			ios.WriteOutLine("链式下载完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
-			if !result.KeepFiles() {
-				ios.WriteOutLine("  远端文件: 已清理")
-			}
-			return nil
+			return runCloudDownloadGroupChain(cmd, ios, svc, args)
 		},
 	}
 
 	// 注册 flags
 	cmd.Flags().String("archive-name", "", "归档文件名（默认自动生成）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录")
 	cmd.Flags().Bool("keep-files", false, "下载到本地后不删除云端副本")
-	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "链式操作超时时间")
-	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（组内每个任务下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取组归档）；false = 只转存/只保留")
+	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudGroupSubmit(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupWait(factory, ios, cfgSvc))
-	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudGroupArchive(factory, ios, st, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupDownload(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupDownloadArchive(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudGroupList(factory, ios, cfgSvc))
@@ -115,6 +72,128 @@ func NewCmdCloudDownloadGroup(factory clientfactory.Factory, ios cli.IOStreams, 
 	cmd.AddCommand(NewCmdCloudGroupDelete(factory, ios, cfgSvc))
 
 	return cmd
+}
+
+// runCloudDownloadGroupChain 执行组链式下载的完整流程（创建组→等待→打包→下载→清理）。
+func runCloudDownloadGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, args []string) error {
+	p, planErr := cloudGroupChainPlan(cmd, ios, args)
+	if planErr != nil {
+		return planErr
+	}
+	return runCloudGroupChain(cmd, ios, svc, p)
+}
+
+// cloudGroupChainParams 是组链式下载的参数集合（flag 解析 + 客户端预校验结果）。
+type cloudGroupChainParams struct {
+	name           string
+	archiveName    string
+	outputDir      string
+	keepFiles      bool
+	pollInterval   time.Duration
+	timeout        time.Duration
+	entries        []cloudfilename.Entry
+	transfer       *client.TransferSpec // 组内每个任务转存目标（nil = 不转存）
+	save           *bool                // 保留 cloud 桶副本（nil = 默认 true）
+	downloadLocal  bool                 // 客户端是否下载本地（false = 只转存/只保留）
+	forceIntegrity bool                 // 强制源文件完整性（语义校验失败阻断）
+}
+
+// cloudGroupChainPlan 解析组链式下载相关 flags 与 URL 条目，并做客户端预校验。
+func cloudGroupChainPlan(cmd *cobra.Command, ios cli.IOStreams, args []string) (cloudGroupChainParams, error) {
+	name := args[0]
+	archiveName, _ := cmd.Flags().GetString("archive-name")
+	if archiveName == "" {
+		archiveName = fmt.Sprintf("cloud-download-group-%d.tar.gz", time.Now().Unix())
+	}
+	outputDir, _ := cmd.Flags().GetString(flagOutputDir)
+	keepFiles, _ := cmd.Flags().GetBool("keep-files")
+	pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
+	timeout, _ := cmd.Flags().GetDuration("timeout")
+	urlFile, _ := cmd.Flags().GetString(flagURLFile)
+
+	// 四参（transfer/save/download_local/integrity_must_pass）：与单条 chain 语义对齐（C1/M6）。
+	var transfer *client.TransferSpec
+	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
+		p, _ := cmd.Flags().GetString(flagTransferPath)
+		transfer = &client.TransferSpec{Volume: vol, Path: p}
+	}
+	var save *bool
+	if cmd.Flags().Changed(flagSave) {
+		s, _ := cmd.Flags().GetBool(flagSave)
+		save = &s
+	}
+	downloadLocal := true
+	if cmd.Flags().Changed(flagDownloadLocal) {
+		l, _ := cmd.Flags().GetBool(flagDownloadLocal)
+		downloadLocal = l
+	}
+	forceIntegrity := false
+	if cmd.Flags().Changed(flagIntegrityMustPass) {
+		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
+		forceIntegrity = f
+	}
+
+	if len(args) < 2 && urlFile == "" {
+		return cloudGroupChainParams{}, fmt.Errorf("请提供组名和至少一个 URL，或使用 --url-file 指定 URL 文件")
+	}
+
+	entries, collectErr := collectCloudEntries(args[1:], urlFile)
+	if collectErr != nil {
+		return cloudGroupChainParams{}, collectErr
+	}
+	if preflightErr := preflightGroupEntries(ios, name, entries); preflightErr != nil {
+		return cloudGroupChainParams{}, preflightErr
+	}
+	return cloudGroupChainParams{
+		name: name, archiveName: archiveName, outputDir: outputDir,
+		keepFiles: keepFiles, pollInterval: pollInterval, timeout: timeout, entries: entries,
+		transfer: transfer, save: save, downloadLocal: downloadLocal, forceIntegrity: forceIntegrity,
+	}, nil
+}
+
+// runCloudGroupChain 执行组链式下载的主体流程（构建选项 → 链式调用 → 结果展示）。
+func runCloudGroupChain(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, p cloudGroupChainParams) error {
+	ios.WriteOutLine("链式下载组 %q (%d 个条目)...", p.name, len(p.entries))
+	opts := []client.ChainOption{
+		client.WithChainPollInterval(p.pollInterval),
+		client.WithChainTimeout(p.timeout),
+	}
+	if p.keepFiles {
+		opts = append(opts, client.WithChainKeepFiles())
+	}
+	// 四参透传（transfer/save/download_local）：组链与单条 chain 语义对齐（M6/F1）。
+	if p.transfer != nil {
+		opts = append(opts, client.WithChainTransfer(p.transfer))
+	}
+	if p.save != nil {
+		opts = append(opts, client.WithChainSave(*p.save))
+	}
+	opts = append(opts, client.WithChainDownloadLocal(p.downloadLocal))
+	if p.forceIntegrity {
+		opts = append(opts, client.WithChainIntegrityMustPass(true))
+	}
+
+	chainCtx := cmd.Context()
+	if p.timeout > 0 {
+		var cancel context.CancelFunc
+		chainCtx, cancel = context.WithTimeout(cmd.Context(), p.timeout)
+		defer cancel()
+	}
+	result, err := svc.CloudDownloadGroupChain(chainCtx, p.name, p.entries, p.archiveName, p.outputDir, opts...)
+	if err != nil {
+		return fmt.Errorf("链式下载失败: %w", err)
+	}
+
+	ios.WriteOutLine("链式下载完成!")
+	if result.DownloadedLocal() {
+		ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+	} else {
+		ios.WriteOutLine("  未下载本地（只转存/只保留）")
+	}
+	if !result.KeepFiles() {
+		ios.WriteOutLine("  远端文件: 已清理")
+	}
+	return nil
 }
 
 // preflightGroupEntries 客户端预校验：组内保存文件名必须唯一（与服务端 CreateGroup 规则一致）。
@@ -152,11 +231,11 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			name := args[0]
-			urlFile, _ := cmd.Flags().GetString("url-file")
+			urlFile, _ := cmd.Flags().GetString(flagURLFile)
 			entries, collectErr := collectCloudEntries(args[1:], urlFile)
 			if collectErr != nil {
 				return collectErr
@@ -165,7 +244,12 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 				return preflightErr
 			}
 
-			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries)
+			// 四参透传（C1/F1）：submit 子命令同样可声明转存/保留/下载本地/完整性必须通过——
+			// 父命令 flag 非 persistent，子命令须自注册同款旗标（否则 --transfer-volume
+			// 在 submit 下是 unknown flag，组转存入口不可达）。
+			opts := cloudDownloadSubmitOpts(cmd)
+
+			group, err := svc.CloudCreateGroupEntries(cmd.Context(), name, entries, opts...)
 			if err != nil {
 				return fmt.Errorf("创建下载组失败: %w", err)
 			}
@@ -175,7 +259,13 @@ func NewCmdCloudGroupSubmit(factory clientfactory.Factory, ios cli.IOStreams, cf
 			return nil
 		},
 	}
-	cmd.Flags().String("url-file", "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	cmd.Flags().String(flagURLFile, "", "从文件读取 URL 条目（每行 URL 或 URL<TAB>FILENAME，FILENAME 为可选保存文件名）")
+	// 三参（C1/F1）：submit 子命令自注册（父命令 flag 非 persistent 不可达）。
+	cmd.Flags().String(flagTransferVolume, "", "转存目标卷名（组内每个任务下载完成后转存到该卷；secretdata 自动加密）")
+	cmd.Flags().String(flagTransferPath, "", "转存目标路径（含文件名；空 = 自动派生）")
+	cmd.Flags().Bool(flagSave, true, "保留 cloud 桶副本（false = 任务完成含转存后服务端自动清理，审计可查）")
+	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取组归档）；false = 只转存/只保留")
+	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	return cmd
 }
 
@@ -189,12 +279,12 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
 			groupID := args[0]
-			pollInterval, _ := cmd.Flags().GetDuration("poll-interval")
+			pollInterval, _ := cmd.Flags().GetDuration(flagPollInterval)
 			timeout, _ := cmd.Flags().GetDuration("timeout")
 
 			// 初始查询确认组存在
@@ -220,57 +310,76 @@ func NewCmdCloudGroupWait(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 			ticker := time.NewTicker(pollInterval)
 			defer ticker.Stop()
 
-			for {
-				select {
-				case <-pollCtx.Done():
-					return pollCtx.Err()
-				case <-ticker.C:
-					detail, err := svc.CloudGetGroup(pollCtx, groupID)
-					if err != nil {
-						return fmt.Errorf("轮询下载组状态失败: %w", err)
-					}
-					if detail.Group == nil {
-						return fmt.Errorf("下载组 %s 不存在", groupID)
-					}
-					completed, failed, cancelled, active := 0, 0, 0, 0
-					for _, t := range detail.Tasks {
-						switch t.Status {
-						case client.TaskStatusCompleted:
-							completed++
-						case client.TaskStatusFailed:
-							failed++
-						case client.TaskStatusCancelled:
-							cancelled++
-						default:
-							active++
-						}
-					}
-					ios.WriteOutLine("  %s: %s (%d/%d 完成, %d 失败, %d 取消, %d 进行中)",
-						groupID, detail.Group.Status, completed, detail.Group.TotalTasks, failed, cancelled, active)
-
-					if failed > 0 || cancelled > 0 {
-						return fmt.Errorf("下载组 %s 有 %d 个失败, %d 个取消，无法完成", groupID, failed, cancelled)
-					}
-					if active == 0 {
-						// 组状态为 failed/cancelled 且无活跃任务（空列表边界）→ 终态，视为异常报错，
-						// 避免转圈到超时（C7）。
-						if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" {
-							return fmt.Errorf("下载组 %s 已终止（状态 %s），无法完成", groupID, detail.Group.Status)
-						}
-						// 防御：服务端在极早期可能返回空 tasks，但组状态尚未到 completed。
-						// 只有组状态为 completed（或 tasks 非空且无活跃）才视为完成。
-						if detail.Group.Status == "completed" || len(detail.Tasks) > 0 {
-							return nil
-						}
-						continue
-					}
-				}
-			}
+			return cloudGroupWaitPoll(svc, pollCtx, groupID, ios, ticker)
 		},
 	}
-	cmd.Flags().Duration("poll-interval", 3*time.Second, "轮询间隔")
+	cmd.Flags().Duration(flagPollInterval, 3*time.Second, "轮询间隔")
 	cmd.Flags().Duration("timeout", 30*time.Minute, "等待超时时间")
 	return cmd
+}
+
+// cloudGroupWaitPoll 轮询等待下载组完成，直到组到终态或 pollCtx 取消。
+func cloudGroupWaitPoll(svc *client.FileClient, pollCtx context.Context, groupID string, ios cli.IOStreams, ticker *time.Ticker) error {
+	for {
+		select {
+		case <-pollCtx.Done():
+			return pollCtx.Err()
+		case <-ticker.C:
+			done, pollErr := cloudGroupWaitPollOnce(svc, pollCtx, groupID, ios)
+			if done {
+				return pollErr
+			}
+		}
+	}
+}
+
+// cloudGroupWaitPollOnce 执行一次轮询并返回是否应停止等待（done=true 时 pollErr 即结果）。
+func cloudGroupWaitPollOnce(svc *client.FileClient, pollCtx context.Context, groupID string, ios cli.IOStreams) (bool, error) {
+	detail, err := svc.CloudGetGroup(pollCtx, groupID)
+	if err != nil {
+		return true, fmt.Errorf("轮询下载组状态失败: %w", err)
+	}
+	if detail.Group == nil {
+		return true, fmt.Errorf("下载组 %s 不存在", groupID)
+	}
+	completed, failed, cancelled, active := cloudGroupCountTasks(detail.Tasks)
+	ios.WriteOutLine("  %s: %s (%d/%d 完成, %d 失败, %d 取消, %d 进行中)",
+		groupID, detail.Group.Status, completed, detail.Group.TotalTasks, failed, cancelled, active)
+
+	if failed > 0 || cancelled > 0 {
+		return true, fmt.Errorf("下载组 %s 有 %d 个失败, %d 个取消，无法完成", groupID, failed, cancelled)
+	}
+	if active == 0 {
+		// 组状态为 failed/cancelled 且无活跃任务（空列表边界）→ 终态，视为异常报错，
+		// 避免转圈到超时（C7）。
+		if detail.Group.Status == "failed" || detail.Group.Status == "cancelled" {
+			return true, fmt.Errorf("下载组 %s 已终止（状态 %s），无法完成", groupID, detail.Group.Status)
+		}
+		// 防御：服务端在极早期可能返回空 tasks，但组状态尚未到 completed。
+		// 只有组状态为 completed（或 tasks 非空且无活跃）才视为完成。
+		if detail.Group.Status == "completed" || len(detail.Tasks) > 0 {
+			return true, nil
+		}
+		return false, nil
+	}
+	return false, nil
+}
+
+// cloudGroupCountTasks 统计组内子任务状态计数。
+func cloudGroupCountTasks(tasks []client.CloudTask) (completed, failed, cancelled, active int) {
+	for _, t := range tasks {
+		switch t.Status {
+		case client.TaskStatusCompleted:
+			completed++
+		case client.TaskStatusFailed:
+			failed++
+		case client.TaskStatusCancelled:
+			cancelled++
+		default:
+			active++
+		}
+	}
+	return
 }
 
 // NewCmdCloudGroupList 创建 list 子命令。
@@ -282,7 +391,7 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			status, _ := cmd.Flags().GetString("status")
@@ -312,17 +421,20 @@ func NewCmdCloudGroupList(factory clientfactory.Factory, ios cli.IOStreams, cfgS
 	return cmd
 }
 
-// NewCmdCloudGroupArchive 创建 archive 子命令。
-func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
+// NewCmdCloudGroupArchive 创建 archive 子命令（--target 用卷 URI 路径，cd/mv 同规约）。
+func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <group-id> [archive-name]",
 		Short: "打包下载组文件为 tar.gz",
-		Long:  `将下载组内所有已完成的文件打包为单个 tar.gz 归档文件。`,
-		Args:  cobra.RangeArgs(1, 2),
+		Long: `将下载组内所有已完成的文件打包为单个 tar.gz 归档文件。
+
+使用 --target <卷名>:/<路径> 时转存到该外部卷（不落 archive 桶），如：
+  sclient cloud-download-group archive <group-id> --target vault:/backups/`,
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			groupID := args[0]
@@ -330,7 +442,18 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 			if len(args) > 1 {
 				archiveName = args[1]
 			}
-			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName)
+			targetRaw, _ := cmd.Flags().GetString("target")
+			target, terr := resolveArchiveTarget(st, targetRaw)
+			if terr != nil {
+				ios.WriteErrLine("%v", terr)
+				return terr
+			}
+			opts, oerr := archivePreOpts(cmd, target)
+			if oerr != nil {
+				ios.WriteErrLine("%v", oerr)
+				return oerr
+			}
+			result, err := svc.CloudArchiveGroup(cmd.Context(), groupID, archiveName, opts...)
 			if err != nil {
 				return fmt.Errorf("打包下载组失败: %w", err)
 			}
@@ -343,6 +466,10 @@ func NewCmdCloudGroupArchive(factory clientfactory.Factory, ios cli.IOStreams, c
 			return nil
 		},
 	}
+	cmd.Flags().String("target", "", "转存目标（卷 URI 路径 <卷名>:/<路径>；缺省落服务端 archive 桶）")
+	cmd.Flags().Bool("encrypt", false, "转存时流式加密（tar.aes；需服务端 archive.key_file；仅与 --target 同用）")
+	cmd.Flags().String("cipher", "", "加密算法（默认 aes-256-gcm；仅与 --encrypt/--target 同用）")
+	cmd.Flags().String("compress", "", "压缩算法（gzip 默认 / zstd / brotli；仅与 --target 同用）")
 	return cmd
 }
 
@@ -355,7 +482,7 @@ func NewCmdCloudGroupCancel(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.CloudCancelGroup(cmd.Context(), args[0]); err != nil {
@@ -383,7 +510,7 @@ func NewCmdCloudGroupResume(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			force, _ := cmd.Flags().GetBool("force")
@@ -407,49 +534,54 @@ func NewCmdCloudGroupDownload(factory clientfactory.Factory, ios cli.IOStreams, 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
-			concurrency, _ := cmd.Flags().GetInt("concurrency")
-			outputDir, _ := cmd.Flags().GetString("output-dir")
-
-			groupID := args[0]
-			detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
-			if err != nil {
-				return fmt.Errorf("获取下载组 %s 信息失败: %w", groupID, err)
-			}
-			taskByID := make(map[string]client.CloudTask, len(detail.Tasks))
-			for _, t := range detail.Tasks {
-				taskByID[t.ID] = t
-			}
-
-			items := make([]client.DownloadItem, 0, len(args)-1)
-			for _, subID := range args[1:] {
-				task, ok := taskByID[subID]
-				if !ok {
-					return fmt.Errorf("子任务 %s 不在组 %s 中", subID, groupID)
-				}
-				if task.Status != client.TaskStatusCompleted {
-					return fmt.Errorf("子任务 %s 未完成（当前 %s），无法下载原始文件", subID, task.Status)
-				}
-				// 审查 C1：云任务原始文件用 kind=cloud_task + <taskID>/<file>（服务端
-				// 校验任务 owner 后拼接内部路径，普通下载不开放 .__ 路径访问）。
-				remotePath := subID + "/" + task.Filename
-				items = append(items, client.DownloadItem{RemotePath: remotePath, LocalPath: filepath.Join(outputDir, task.Filename), Kind: client.DownloadKindCloudTask})
-			}
-
-			ios.WriteOutLine("下载组 %s 中 %d 个子任务原始文件...", groupID, len(items))
-			opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
-			if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
-				return fmt.Errorf("批量下载失败: %w", err)
-			}
-			ios.WriteOutLine("  ✓ 全部下载完成")
-			return nil
+			return runCloudGroupDownload(cmd, ios, svc, args)
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录（默认当前目录）")
 	return cmd
+}
+
+// runCloudGroupDownload 下载组内指定子任务的原始文件。
+func runCloudGroupDownload(cmd *cobra.Command, ios cli.IOStreams, svc *client.FileClient, args []string) error {
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	outputDir, _ := cmd.Flags().GetString(flagOutputDir)
+
+	groupID := args[0]
+	detail, err := svc.CloudGetGroup(cmd.Context(), groupID)
+	if err != nil {
+		return fmt.Errorf("获取下载组 %s 信息失败: %w", groupID, err)
+	}
+	taskByID := make(map[string]client.CloudTask, len(detail.Tasks))
+	for _, t := range detail.Tasks {
+		taskByID[t.ID] = t
+	}
+
+	items := make([]client.DownloadItem, 0, len(args)-1)
+	for _, subID := range args[1:] {
+		task, ok := taskByID[subID]
+		if !ok {
+			return fmt.Errorf("子任务 %s 不在组 %s 中", subID, groupID)
+		}
+		if task.Status != client.TaskStatusCompleted {
+			return fmt.Errorf("子任务 %s 未完成（当前 %s），无法下载原始文件", subID, task.Status)
+		}
+		// 审查 C1：云任务原始文件用 kind=cloud_task + <taskID>/<file>（服务端
+		// 校验任务 owner 后拼接内部路径，普通下载不开放 .__ 路径访问）。
+		remotePath := subID + "/" + task.Filename
+		items = append(items, client.DownloadItem{RemotePath: remotePath, LocalPath: filepath.Join(outputDir, task.Filename), Kind: client.DownloadKindCloudTask})
+	}
+
+	ios.WriteOutLine("下载组 %s 中 %d 个子任务原始文件...", groupID, len(items))
+	opts := []client.DownloadOption{client.WithDownloadConcurrency(concurrency)}
+	if err := svc.DownloadItems(cmd.Context(), items, opts...); err != nil {
+		return fmt.Errorf("批量下载失败: %w", err)
+	}
+	ios.WriteOutLine("  ✓ 全部下载完成")
+	return nil
 }
 
 // NewCmdCloudGroupDownloadArchive 创建 download-archive 子命令，下载归档文件。
@@ -461,11 +593,11 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
-			outputDir, _ := cmd.Flags().GetString("output-dir")
+			outputDir, _ := cmd.Flags().GetString(flagOutputDir)
 
 			items := make([]client.DownloadItem, 0, len(args))
 			for _, archiveFile := range args {
@@ -489,7 +621,7 @@ func NewCmdCloudGroupDownloadArchive(factory clientfactory.Factory, ios cli.IOSt
 		},
 	}
 	cmd.Flags().Int("concurrency", 2, "最大并发下载数（0=不限制，1=顺序，默认 2）")
-	cmd.Flags().String("output-dir", ".", "本地输出目录（默认当前目录）")
+	cmd.Flags().String(flagOutputDir, ".", "本地输出目录（默认当前目录）")
 	return cmd
 }
 
@@ -504,7 +636,7 @@ func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStream
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -517,7 +649,11 @@ func NewCmdCloudGroupResumeChain(factory clientfactory.Factory, ios cli.IOStream
 			}
 
 			ios.WriteOutLine("组链式操作完成!")
-			ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			if result.DownloadedLocal() {
+				ios.WriteOutLine("  本地路径: %s", result.LocalPath())
+			} else {
+				ios.WriteOutLine("  未下载本地（只转存/只保留）")
+			}
 			if !result.KeepFiles() {
 				ios.WriteOutLine("  远端文件: 已清理")
 			}
@@ -537,7 +673,7 @@ func NewCmdCloudGroupDelete(factory clientfactory.Factory, ios cli.IOStreams, cf
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			yes, _ := cmd.Flags().GetBool("yes")

@@ -148,13 +148,31 @@ func (r *ChainResult) KeepFiles() bool {
 	return false
 }
 
+// DownloadedLocal 返回本次链是否下载本地（download_local 生效值）。M1：CLI 据此在
+// download_local=false 时给出明确完成文案（「未下载本地（只转存/只保留）」），
+// 而非打印空「本地路径: 」误导。
+func (r *ChainResult) DownloadedLocal() bool {
+	if r.extra != nil {
+		if v, ok := r.extra["download_local"].(bool); ok {
+			return v
+		}
+	}
+	// 旧 resume 状态无 download_local 字段：历史语义总是下载 → 视为 true（与 Restore G2 一致）。
+	return true
+}
+
 // chainOptions 链式操作选项。
 type chainOptions struct {
-	pollInterval time.Duration
-	timeout      time.Duration
-	keepFiles    bool
-	progressFn   ProgressFunc
-	entries      []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	pollInterval   time.Duration
+	timeout        time.Duration
+	keepFiles      bool
+	progressFn     ProgressFunc
+	entries        []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	transfer       *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
+	save           *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	metaExtra      map[string]any        // 转存产物的自定义元数据（服务端叠加来源后写目标卷）
+	downloadLocal  bool                  // 客户端是否下载本地（链式拉取）
+	forceIntegrity bool                  // 强制源文件完整性（语义校验失败阻断）
 }
 
 // ChainOption 链式操作选项函数。
@@ -191,6 +209,48 @@ func WithChainProgress(fn ProgressFunc) ChainOption {
 // WithChainEntries 指定链式下载每个 URL 的可选保存文件名（URL→FILENAME 条目）。
 // 未指定时由服务端按 URL 自动生成文件名（wget 行为）。
 // 与 sclient --url-file 的 URL<TAB>FILENAME 格式对齐。
+// WithChainTransfer 链式云端下载转存目标（下载完成后转存到指定卷）。
+func WithChainTransfer(t *TransferSpec) ChainOption {
+	return func(o *chainOptions) {
+		o.transfer = t
+	}
+}
+
+// WithChainSave 链式云端下载是否保留 cloud 桶副本（nil = 默认 true）。
+func WithChainSave(save bool) ChainOption {
+	return func(o *chainOptions) {
+		o.save = &save
+	}
+}
+
+// WithChainDownloadLocal 链式云端下载客户端是否下载本地（链式拉取 cloud 桶文件）。
+// false = 只转存/只保留，不拉取本地。
+func WithChainDownloadLocal(local bool) ChainOption {
+	return func(o *chainOptions) {
+		o.downloadLocal = local
+	}
+}
+
+// WithChainIntegrityMustPass 链式云端下载强制源文件完整性校验（透传服务端）。
+func WithChainIntegrityMustPass(v bool) ChainOption {
+	return func(o *chainOptions) {
+		o.forceIntegrity = v
+	}
+}
+
+// WithChainMetaExtra 链式云端下载的转存产物自定义元数据（与来源信息合并写入目标卷）。
+func WithChainMetaExtra(extra map[string]any) ChainOption {
+	return func(o *chainOptions) {
+		if len(extra) == 0 {
+			o.metaExtra = nil
+			return
+		}
+		cp := make(map[string]any, len(extra))
+		maps.Copy(cp, extra)
+		o.metaExtra = cp
+	}
+}
+
 func WithChainEntries(entries []cloudfilename.Entry) ChainOption {
 	return func(o *chainOptions) {
 		o.entries = entries
@@ -199,9 +259,10 @@ func WithChainEntries(entries []cloudfilename.Entry) ChainOption {
 
 func defaultChainOptions() chainOptions {
 	return chainOptions{
-		pollInterval: 3 * time.Second,
-		timeout:      30 * time.Minute,
-		keepFiles:    false,
+		pollInterval:  3 * time.Second,
+		timeout:       30 * time.Minute,
+		keepFiles:     false,
+		downloadLocal: true, // 默认链式拉取本地（仅显式 --download-local=false 才只转存）
 	}
 }
 
@@ -264,7 +325,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	if err != nil {
 		state := runner.State()
 		state["status"] = StatusFailed
-		if saveErr := m.store.Save(context.WithoutCancel(ctx), "chain-"+runner.ID(), state); saveErr != nil {
+		if saveErr := m.store.Save(context.WithoutCancel(ctx), chainPrefix+runner.ID(), state); saveErr != nil {
 			return fmt.Errorf("链操作失败: %w（保存状态也失败: %v）", err, saveErr)
 		}
 		return err
@@ -273,7 +334,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 	// 用户可通过 List/Resume 查看已完成操作的历史，而不会误报为 error。
 	state := runner.State()
 	state["status"] = StatusCompleted
-	if err := m.store.Save(context.WithoutCancel(ctx), "chain-"+runner.ID(), state); err != nil {
+	if err := m.store.Save(context.WithoutCancel(ctx), chainPrefix+runner.ID(), state); err != nil {
 		// 保存完成状态失败只记录警告，不阻断成功返回
 		slog.Warn("链操作成功但保存完成状态失败", "chain_id", runner.ID(), "error", err)
 	}
@@ -281,7 +342,7 @@ func (m *ChainManager) RunWithProgress(ctx context.Context, runner ChainRunner, 
 }
 
 func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner, error) {
-	state, err := m.store.Load(ctx, "chain-"+chainID)
+	state, err := m.store.Load(ctx, chainPrefix+chainID)
 	if err != nil {
 		return nil, fmt.Errorf("加载链状态失败: %w", err)
 	}
@@ -299,7 +360,7 @@ func (m *ChainManager) Resume(ctx context.Context, chainID string) (ChainRunner,
 // 注意：返回的 runner 仅用于查看状态（Phase, Status, State），
 // 不可直接用于执行 Run 方法——如需恢复执行请使用 Resume。
 func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
-	keys, err := m.store.List(ctx, "chain-")
+	keys, err := m.store.List(ctx, chainPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -329,12 +390,12 @@ func (m *ChainManager) List(ctx context.Context) ([]ChainRunner, error) {
 }
 
 func (m *ChainManager) Delete(ctx context.Context, chainID string) error {
-	return m.store.Delete(ctx, "chain-"+chainID)
+	return m.store.Delete(ctx, chainPrefix+chainID)
 }
 
 func (m *ChainManager) saveState(ctx context.Context, runner ChainRunner) {
 	state := runner.State()
-	if err := m.store.Save(ctx, "chain-"+runner.ID(), state); err != nil {
+	if err := m.store.Save(ctx, chainPrefix+runner.ID(), state); err != nil {
 		m.logger.Warn("保存链状态失败", "chain_id", runner.ID(), "error", err)
 	}
 }

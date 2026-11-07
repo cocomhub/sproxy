@@ -70,6 +70,9 @@ func requireS3(t *testing.T) {
 }
 
 // newTestS3FS 探测 MinIO 可达后构造 S3FS（bucket 已存在则复用；否则 MakeBucket）。
+// 多个 t.Parallel 用例并发进入此处：BucketExists 检查与 MakeBucket 之间存在 TOCTOU
+// 窗口（都检查不存在 → 都 MakeBucket），后到者会收到 BucketAlreadyOwnedByYou——
+// 该错误视为「bucket 已被并发用例创建」，容忍不失败。
 func newTestS3FS(t *testing.T) *S3FS {
 	t.Helper()
 	requireS3(t)
@@ -84,8 +87,12 @@ func newTestS3FS(t *testing.T) *S3FS {
 		t.Fatalf("BucketExists(%s): %v", cfg.Bucket, err)
 	}
 	if !exists {
-		if err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
-			t.Fatalf("MakeBucket(%s): %v", cfg.Bucket, err)
+		err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			// 并发用例已抢先创建（TOCTOU）→ 容忍；其余错误真实失败。
+			if respErr := minio.ToErrorResponse(err); respErr.Code != minio.BucketAlreadyOwnedByYou {
+				t.Fatalf("MakeBucket(%s): %v", cfg.Bucket, err)
+			}
 		}
 	}
 	return fs
@@ -97,7 +104,7 @@ func TestS3FS_WriteRead(t *testing.T) {
 	fs := newTestS3FS(t)
 	ctx := context.Background()
 	content := []byte("s3 write-read payload")
-	if err := fs.WriteFile(ctx, "dir/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "dir/a.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "dir/a.txt")
@@ -119,10 +126,10 @@ func TestS3FS_ListDir(t *testing.T) {
 	t.Parallel()
 	fs := newTestS3FS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "list/top.txt", strings.NewReader("top"), 3, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "list/top.txt", strings.NewReader("top"), 3, 0); err != nil {
 		t.Fatalf("WriteFile top: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "list/sub/nested.txt", strings.NewReader("nested"), 6, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "list/sub/nested.txt", strings.NewReader("nested"), 6, 0); err != nil {
 		t.Fatalf("WriteFile nested: %v", err)
 	}
 	entries, err := fs.ListDir(ctx, "list")
@@ -149,7 +156,7 @@ func TestS3FS_Stat(t *testing.T) {
 	t.Parallel()
 	fs := newTestS3FS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "stat/f.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "stat/f.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.MakeDir(ctx, "stat-dir"); err != nil {
@@ -183,7 +190,7 @@ func TestS3FS_Rename(t *testing.T) {
 	t.Parallel()
 	fs := newTestS3FS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "ren/from.txt", strings.NewReader("mv"), 2, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "ren/from.txt", strings.NewReader("mv"), 2, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.Rename(ctx, "ren/from.txt", "ren/to.txt"); err != nil {
@@ -206,7 +213,7 @@ func TestS3FS_Delete(t *testing.T) {
 	t.Parallel()
 	fs := newTestS3FS(t)
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "del/d.txt", strings.NewReader("d"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "del/d.txt", strings.NewReader("d"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := fs.Delete(ctx, "del/d.txt"); err != nil {
@@ -254,7 +261,7 @@ func TestS3FS_SyncEngine(t *testing.T) {
 	if err := fs.MakeDir(ctx, "eng/sub"); err != nil {
 		t.Fatalf("MakeDir: %v", err)
 	}
-	if err := fs.WriteFile(ctx, "eng/sub/data.txt", strings.NewReader("engine-data"), 11, 0); err != nil {
+	if err := fs.WriteFile(ctx, sync.LogicalKey{}, "eng/sub/data.txt", strings.NewReader("engine-data"), 11, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// ListDir 递归可遍历（walkDir 由引擎驱动）。

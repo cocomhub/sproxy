@@ -12,6 +12,7 @@ package files
 // 版本保留这个用户可见功能（磁盘回收 + 配额回收）在域包内没有被验证过。
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 )
@@ -30,8 +31,8 @@ func TestService_CleanupOldVersions_DeletesOldestAndReleasesUsage(t *testing.T) 
 	contents := []string{"v1-content", "v2-content", "v3-content"}
 	for _, c := range contents {
 		writeUserFile(t, env, "alice", "user/f.txt", c)
-		if _, err := env.svc.SaveVersion("f.txt", tnt, "alice"); err != nil {
-			t.Fatalf("SaveVersion(%s): %v", c, err)
+		if _, err := env.svc.SaveVersion(context.Background(), "f.txt", tnt, "alice"); err != nil {
+			t.Fatalf("SaveVersion(context.Background(), %s): %v", c, err)
 		}
 	}
 	before, err := env.svc.CollectVersionEntries("alice", "f.txt")
@@ -78,7 +79,7 @@ func TestService_CleanupOldVersions_NotExceedingLimitKeepsAll(t *testing.T) {
 
 	tnt := env.tenantFor("alice")
 	writeUserFile(t, env, "alice", "user/f.txt", "only-v1")
-	if _, err := env.svc.SaveVersion("f.txt", tnt, "alice"); err != nil {
+	if _, err := env.svc.SaveVersion(context.Background(), "f.txt", tnt, "alice"); err != nil {
 		t.Fatalf("SaveVersion: %v", err)
 	}
 

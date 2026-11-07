@@ -46,7 +46,7 @@ func postJSONReq(t *testing.T, actor, target string, payload any) *http.Request 
 		t.Fatalf("Marshal payload: %v", err)
 	}
 	req := httptest.NewRequest("POST", target, bytes.NewReader(b))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, "application/json")
 	if actor != "" {
 		req.Header.Set("X-Test-Actor", actor)
 	}
@@ -145,7 +145,7 @@ func TestService_Rename_MissingSource(t *testing.T) {
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("源缺失应 404, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if resp := decodeResp(t, rr); resp.Message != "源文件不存在" {
+	if resp := decodeResp(t, rr); resp.Message != errMsgSrcNotExist {
 		t.Fatalf("Message=%q want 源文件不存在", resp.Message)
 	}
 }
@@ -165,7 +165,7 @@ func TestService_Rename_TargetExists(t *testing.T) {
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("目标已存在应 409, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if resp := decodeResp(t, rr); resp.Message != "目标路径已存在" {
+	if resp := decodeResp(t, rr); resp.Message != errMsgDestExists {
 		t.Fatalf("Message=%q want 目标路径已存在", resp.Message)
 	}
 	if got := mustReadUserFile(t, env, "alice", "user/a.txt"); got != "AAA" {
@@ -279,10 +279,10 @@ func TestService_BatchRename_MixedResults(t *testing.T) {
 		message string
 	}{
 		{true, "重命名成功"},
-		{false, "源文件不存在"},
+		{false, errMsgSrcNotExist},
 		{false, "无效的源路径"},
 		{false, "缺少 checksum"},
-		{false, "目标路径已存在"},
+		{false, errMsgDestExists},
 	}
 	for i, w := range wants {
 		if resp.Results[i].Success != w.success || resp.Results[i].Message != w.message {

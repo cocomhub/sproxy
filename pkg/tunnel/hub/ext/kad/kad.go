@@ -240,9 +240,20 @@ type Kademlia struct {
 	logger  *slog.Logger
 
 	// persistMu 保护以下持久化字段的并发访问。
-	persistMu    sync.Mutex
-	persistFile  string      // 持久化文件路径；"" 表示持久化关闭（零行为变更）
-	persistTimer *time.Timer // 去抖落盘计时器；非 nil 表示已有排队的落盘
+	persistMu sync.Mutex
+	// persistCond 是 persistMu 的条件变量，FlushPersist join 在途回调用
+	// （persistInflight 归零时广播，见 FlushPersist）。
+	persistCond *sync.Cond
+	// persistFile 持久化文件路径；"" 表示持久化关闭（零行为变更）。
+	persistFile string
+	// persistTimer 去抖落盘计时器；非 nil 表示已有排队的落盘。
+	persistTimer *time.Timer
+	// persistInflight 在途回调计数：notifyChange 排 timer 时 +1、回调 Save 完成后 -1。
+	// time.AfterFunc 的 Stop 只能取消**尚未触发**的回调：Stop 返回 true 时回调不会
+	// 执行，对应 +1 由 FlushPersist 手动抵消；返回 false 时回调保证执行并由其 -1。
+	// FlushPersist 等待计数归零，杜绝"停 timer 但回调已排队 → 测试 return 后异步
+	// 落盘撞 TempDir 清理"的竞态（#569 同类缺陷，根治版）。
+	persistInflight int
 	// saveMu 串行化实际落盘（SaveCandidates 的 buildSnap+write 全程持锁，审查 PR-3
 	// I-2）：回调与 FlushPersist 的 Save 都在锁内生成快照，后获得锁者必然写更新
 	// 快照——杜绝"陈旧覆盖最新变更"（与联邦 saveMu 模式一致）。变更路径
@@ -256,6 +267,7 @@ func NewKademlia(id string, logger *slog.Logger) *Kademlia {
 		id:     NodeIDFromString(id),
 		logger: defaultLogger(logger),
 	}
+	k.persistCond = sync.NewCond(&k.persistMu)
 	for i := range k.buckets {
 		k.buckets[i] = newBucket()
 	}
@@ -310,6 +322,7 @@ func (k *Kademlia) notifyChange() {
 		return // 已有排队的落盘，跳过（合并语义：到期落盘读的是最新快照）
 	}
 	path := k.persistFile
+	k.persistInflight++
 	k.persistTimer = time.AfterFunc(kadSaveDebounce, func() {
 		// 去抖到期：落盘当前最新快照（Save 读调用时刻状态，天然合并窗口内全部变更）。
 		k.persistMu.Lock()
@@ -318,6 +331,11 @@ func (k *Kademlia) notifyChange() {
 		if err := k.Save(path); err != nil {
 			k.logger.Error("kad: k-bucket 持久化落盘失败", "path", path, "err", err)
 		}
+		// 完成：先减计数再广播（FlushPersist join 在途回调用）。
+		k.persistMu.Lock()
+		k.persistInflight--
+		k.persistMu.Unlock()
+		k.persistCond.Broadcast()
 	})
 }
 
@@ -526,6 +544,11 @@ func (k *Kademlia) PersistFile() string {
 // 去抖窗口内未落盘的变更不丢失，且此后 Insert 不再重建去抖 timer——杜绝测试返回
 // 后异步落盘与 TempDir 清理竞态）。停掉去抖 timer + 清空 persistFile（notifyChange
 // 对空路径 no-op）+ 写一次。持久化关闭（path 为空）时是 no-op。
+//
+// 竞态根治（#569 同类，本版补齐）：time.AfterFunc 的 Stop 只能取消**尚未触发**的
+// timer；若去抖已到期、回调已入调度队列，Stop 返回 false 且回调仍会执行 Save。
+// 故 FlushPersist 除停 timer 外还必须 **join 在途回调**——等待 persistInflight 归零
+// 且最近回调的 persistDone close，保证返回时没有在途异步落盘与调用方目录清理竞态。
 func (k *Kademlia) FlushPersist() error {
 	k.persistMu.Lock()
 	path := k.persistFile
@@ -534,8 +557,21 @@ func (k *Kademlia) FlushPersist() error {
 	k.persistFile = "" // 停用：后续 notifyChange 快速返回，不再排新 timer
 	k.persistMu.Unlock()
 	if t != nil {
-		t.Stop()
+		// 取消尚未触发的回调：Stop 返回 true 时回调保证不会执行 → 其 +1 永不配对，
+		// 手动抵消；返回 false（已触发/在途）时回调保证执行，由其自身 -1 收尾。
+		if t.Stop() {
+			k.persistMu.Lock()
+			k.persistInflight--
+			k.persistMu.Unlock()
+		}
 	}
+	// join 在途回调：等待所有已执行/已排队的去抖回调完成落盘后再写最终快照，
+	// 避免异步 Save 与调用方（测试 TempDir / 进程退出）清理竞态。
+	k.persistMu.Lock()
+	for k.persistInflight > 0 {
+		k.persistCond.Wait()
+	}
+	k.persistMu.Unlock()
 	if path == "" {
 		return nil
 	}

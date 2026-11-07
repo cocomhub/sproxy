@@ -57,7 +57,7 @@ func NewCmdIdentityGenerate(ios cli.IOStreams) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&file, "file", "", "身份文件路径（默认 XDG 配置目录 sproxy/identity.json）")
+	cmd.Flags().StringVar(&file, "file", "", "身份文件路径（默认 XDG 配置目录 sproxy/identity.json）") // NOSONAR: S1192 — 帮助文案（同旗标多命令描述复用）抽常量无收益
 	cmd.Flags().BoolVar(&force, "force", false, "覆盖已有身份文件")
 	return cmd
 }

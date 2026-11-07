@@ -13,19 +13,13 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/state"
-)
-
-// ClusterRole 是节点角色。
-const (
-	ClusterRoleMaster  = "master"
-	ClusterRoleReplica = "replica"
 )
 
 // 节点状态机合法跳转（joining → active → draining → leaving；active ↔ draining）。
@@ -34,31 +28,6 @@ var nodeStatusTransitions = map[string]map[string]bool{
 	"active":   {"draining": true},
 	"draining": {"active": true, "leaving": true},
 	"leaving":  {},
-}
-
-// ClusterConfig 是集群节点配置（cluster 段）。空 = 单节点（零回归）。
-type ClusterConfig struct {
-	Enabled        bool          `yaml:"enabled" mapstructure:"enabled"`
-	NodeID         string        `yaml:"node_id" mapstructure:"node_id"`                             // 必填（Enabled 时）；跨节点唯一
-	Role           string        `yaml:"role" mapstructure:"role"`                                   // master | replica；默认 master
-	ResyncInterval time.Duration `yaml:"index_resync_interval" mapstructure:"index_resync_interval"` // 索引 resync 兜底周期（默认 5m；0 = 关闭）
-}
-
-// Validate 校验集群段（未启用 → 恒通过零回归）。
-func (c ClusterConfig) Validate() error {
-	if !c.Enabled {
-		return nil
-	}
-	if c.NodeID == "" {
-		return errors.New("cluster: enabled 时 node_id 必填")
-	}
-	if c.Role != ClusterRoleMaster && c.Role != ClusterRoleReplica {
-		return fmt.Errorf("cluster: role 必须为 %q 或 %q（got %q）", ClusterRoleMaster, ClusterRoleReplica, c.Role)
-	}
-	if c.ResyncInterval < 0 {
-		return errors.New("cluster: index_resync_interval 不能为负")
-	}
-	return nil
 }
 
 // nodeEntry 是节点注册表条目。
@@ -160,8 +129,7 @@ func (h *Handlers) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusBadRequest, "集群未启用")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"nodes": h.nodeRegistry.List(r.Context()),
 	})
 }
@@ -177,8 +145,7 @@ func (h *Handlers) handleClusterSelf(w http.ResponseWriter, r *http.Request) {
 		writeAIError(w, http.StatusBadRequest, "集群未启用")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httpjson.Send(w, http.StatusOK, map[string]any{
 		"node_id": cfg.Cluster.NodeID,
 		"role":    cfg.Cluster.Role,
 	})

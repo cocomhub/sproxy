@@ -4,20 +4,37 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cloud"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/testutil"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/secretdata"
 )
 
 func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Server, *cloud.CloudDownloadManager) {
@@ -34,25 +51,25 @@ func setupCloudTestServerWithSSRF(t *testing.T, allowPrivate bool) (*httptest.Se
 	// 装配租户布局（cloudArchiveTask/cloudArchiveGroup 读取任务源文件经 cloudDirFor 解析）
 	h := newAssemblyTestHandlers(t, dir)
 	h.storageMgr = sm
-	mgr := cloud.NewCloudDownloadManager(dir, cloudStorageManager{m: sm}, h.tenantFor, h.checksumStoreFor, h.listTenantIDs, testLogger(), cfg)
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{UploadsDir: dir, Storage: cloudStorageManager{m: sm}, TenantFor: h.tenantFor, ChecksumStoreFor: h.checksumStoreFor, ListTenants: h.listTenantIDs, Logger: testLogger(), Config: cfg})
 	h.cloudMgr = mgr
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download", h.cloudCreateDownload)
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
-	mux.HandleFunc("GET /api/cloud/tasks", h.cloudListTasks)
-	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudGetTask)
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudCancelTask)
-	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudDeleteTask)
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudResumeTask)
-	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.cloudArchiveTask)
-	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
-	mux.HandleFunc("GET /api/cloud/groups", h.cloudListGroups)
-	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudGetGroup)
-	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudCancelGroup)
-	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudDeleteGroup)
-	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudResumeGroup)
-	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudArchiveGroup)
+	mux.HandleFunc("POST /api/cloud/download", h.cloudTaskHandler(h.cloudTaskService().CreateDownload))
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
+	mux.HandleFunc("GET /api/cloud/tasks", h.cloudTaskHandler(h.cloudTaskService().ListTasks))
+	mux.HandleFunc("GET /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().GetTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelTask))
+	mux.HandleFunc("DELETE /api/cloud/tasks/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeTask))
+	mux.HandleFunc("POST /api/cloud/tasks/{id}/archive", h.archiveTaskHandler())
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
+	mux.HandleFunc("GET /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().ListGroups))
+	mux.HandleFunc("GET /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().GetGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/cancel", h.cloudTaskHandler(h.cloudTaskService().CancelGroup))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", h.cloudTaskHandler(h.cloudTaskService().DeleteGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/resume", h.cloudTaskHandler(h.cloudTaskService().ResumeGroup))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", h.cloudTaskHandler(h.cloudTaskService().ArchiveGroup))
 	return httptest.NewServer(mux), mgr
 }
 
@@ -71,7 +88,7 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/file.zip", "filename": "file.zip"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,12 +110,45 @@ func TestCloudHandler_CreateDownloadTask(t *testing.T) {
 	}
 }
 
+// TestCloudHandler_CreateDownloadTask_IntegrityMustPass 任务5：POST /api/cloud/download 的
+// integrity_must_pass 字段解析 → TaskParams.IntegrityMustPass（服务端接收链路最后一跳）。
+func TestCloudHandler_CreateDownloadTask_IntegrityMustPass(t *testing.T) {
+	t.Parallel()
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body := strings.NewReader(`{"url": "https://example.com/force.png", "integrity_must_pass": true}`)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var task cloud.CloudTask
+	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+		t.Fatal(err)
+	}
+	if task.ID == "" {
+		t.Fatal("expected non-empty task ID")
+	}
+	// 落点断言：请求 struct 的 IntegrityMustPass 必须进入 TaskParams → task 字段。
+	taskInMgr, ok := mgr.GetTask(task.ID, "")
+	if !ok {
+		t.Fatalf("task %s not found in manager", task.ID)
+	}
+	if !taskInMgr.IntegrityMustPass {
+		t.Fatalf("integrity_must_pass=true 未落到 TaskParams.IntegrityMustPass（task=%+v）", taskInMgr)
+	}
+}
+
 func TestCloudHandler_ListTasks(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", cloud.TaskParams{Save: true})
+	mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", cloud.TaskParams{Save: true})
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks")
 	if err != nil {
@@ -126,7 +176,7 @@ func TestCloudHandler_GetTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 
 	resp, err := http.Get(ts.URL + "/api/cloud/tasks/" + task.ID)
 	if err != nil {
@@ -166,10 +216,10 @@ func TestCloudHandler_CancelTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 	task.Status = "downloading"
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/cancel", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +234,7 @@ func TestCloudHandler_DeleteTask(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "")
+	task, _ := mgr.CreateTask("url", "https://example.com/file.zip", "file.zip", 100, "", cloud.TaskParams{Save: true})
 	task.Status = "completed"
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/cloud/tasks/"+task.ID, nil)
@@ -203,8 +253,8 @@ func TestCloudHandler_ListTasksFilterByStatus(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "")
-	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "")
+	t1, _ := mgr.CreateTask("url", "https://example.com/a.zip", "a.zip", 100, "", cloud.TaskParams{Save: true})
+	t2, _ := mgr.CreateTask("url", "https://example.com/b.zip", "b.zip", 200, "", cloud.TaskParams{Save: true})
 	t1.Status = "completed"
 	t2.Status = "failed"
 
@@ -248,7 +298,7 @@ func TestCloudHandler_SSRFBlocked(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := strings.NewReader(`{"url": "` + tt.url + `"}`)
-			resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+			resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -265,7 +315,7 @@ func TestCloudHandler_PathTraversalBlocked(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/file.zip", "filename": "../../../etc/passwd"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +333,7 @@ func TestCloudHandler_BatchCreateDownload_Success(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/a.zip"}, {"url": "https://example.com/b.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +367,7 @@ func TestCloudHandler_BatchCreateDownload_Empty(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": []}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +383,7 @@ func TestCloudHandler_BatchCreateDownload_InvalidJSON(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`not json`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +399,7 @@ func TestCloudHandler_BatchCreateDownload_MixedResults(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/valid.zip"}, {"url": "ftp://example.com/bad.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +439,7 @@ func TestCloudHandler_BatchCreateDownload_EmptyURL(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": ""}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +465,7 @@ func TestCloudHandler_BatchCreateDownload_PathTraversal(t *testing.T) {
 	defer ts.Close()
 
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/file.zip", "filename": "../../../etc/passwd"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +495,7 @@ func TestCloudHandler_BatchCreateDownload_Dedup(t *testing.T) {
 
 	// 提交相同 URL 两次
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/same.zip"}, {"url": "https://example.com/same.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +523,7 @@ func TestCloudHandler_BatchCreateDownload_AlwaysAsync(t *testing.T) {
 
 	// 小文件（< 20 MiB）在批量模式下也应返回 pending（异步）
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/small.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,13 +558,13 @@ func TestCloudHandler_BatchCreateDownload_StorageFull(t *testing.T) {
 
 	h := &Handlers{cloudMgr: mgr}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	// 请求 100 字节，超过 50 字节上限
 	body := strings.NewReader(`{"urls": [{"url": "https://example.com/big.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +596,7 @@ func TestCloudHandler_BatchCreateDownload_MaxLimit(t *testing.T) {
 		urls[i] = `{"url": "https://example.com/file` + strconv.Itoa(i) + `.zip"}`
 	}
 	body := strings.NewReader(`{"urls": [` + strings.Join(urls, ",") + `]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +611,7 @@ func TestCloudHandler_CancelNonexistent(t *testing.T) {
 	ts, _ := setupCloudTestServer(t)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/cancel", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/cloud/tasks/nonexistent/cancel", contentTypeJSON, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +649,22 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	ts, mgr := setupCloudTestServer(t)
 	defer ts.Close()
 
-	// 创建组
+	group := helperGroupCreateGetListArchive_createGroup(t, ts, srvA, srvB)
+
+	// 等待子任务完成
+	for _, tid := range group.TaskIDs {
+		waitTaskDone(t, mgr, tid)
+	}
+
+	helperGroupCreateGetListArchive_getDetail(t, ts, group)
+	helperGroupCreateGetListArchive_list(t, ts)
+	helperGroupCreateGetListArchive_archive(t, ts, mgr, group)
+}
+
+// helperGroupCreateGetListArchive_createGroup 创建包含两个子任务的组并
+// 断言响应返回 2 个 task。
+func helperGroupCreateGetListArchive_createGroup(t *testing.T, ts *httptest.Server, srvA, srvB *httptest.Server) cloud.CloudTaskGroup {
+	t.Helper()
 	body, _ := json.Marshal(map[string]any{
 		"name": "handler-group",
 		"urls": []map[string]string{
@@ -607,7 +672,7 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 			{"url": srvB.URL, "filename": "b.bin"},
 		},
 	})
-	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(string(body)))
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,14 +687,14 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(group.TaskIDs) != 2 {
 		t.Fatalf("expected 2 tasks in group, got %d", len(group.TaskIDs))
 	}
+	return group
+}
 
-	// 等待子任务完成
-	for _, tid := range group.TaskIDs {
-		waitTaskDone(t, mgr, tid)
-	}
-
-	// 组详情
-	resp, err = http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
+// helperGroupCreateGetListArchive_getDetail 查询组详情并断言状态
+// completed、任务数为 2。
+func helperGroupCreateGetListArchive_getDetail(t *testing.T, ts *httptest.Server, group cloud.CloudTaskGroup) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/cloud/groups/" + group.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,9 +715,12 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(detail.Tasks) != 2 {
 		t.Fatalf("expected 2 tasks in detail, got %d", len(detail.Tasks))
 	}
+}
 
-	// 组列表
-	resp, err = http.Get(ts.URL + "/api/cloud/groups")
+// helperGroupCreateGetListArchive_list 查询组列表并断言恰好 1 个组。
+func helperGroupCreateGetListArchive_list(t *testing.T, ts *httptest.Server) {
+	t.Helper()
+	resp, err := http.Get(ts.URL + "/api/cloud/groups")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,10 +735,14 @@ func TestCloudHandler_GroupCreateGetListArchive(t *testing.T) {
 	if len(listResp.Groups) != 1 {
 		t.Fatalf("expected 1 group in list, got %d", len(listResp.Groups))
 	}
+}
 
-	// 组归档（按子任务目录收集已完成文件）
+// helperGroupCreateGetListArchive_archive 组归档：断言归档成功、归档文件
+// 真实落盘，且 archive_file 已持久化到组对象。
+func helperGroupCreateGetListArchive_archive(t *testing.T, ts *httptest.Server, mgr *cloud.CloudDownloadManager, group cloud.CloudTaskGroup) {
+	t.Helper()
 	archiveBody := `{"archive_name": "handler-group.tar.gz"}`
-	resp, err = http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", "application/json", strings.NewReader(archiveBody))
+	resp, err := http.Post(ts.URL+"/api/cloud/groups/"+group.ID+"/archive", contentTypeJSON, strings.NewReader(archiveBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -718,7 +790,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 
 	// 提交一个必然失败的异步任务
 	body := strings.NewReader(`{"url": "` + srv404.URL + `"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +807,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	}
 
 	// resume 失败任务 → 200
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", "application/json", strings.NewReader(`{"force": true}`))
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/"+task.ID+"/resume", contentTypeJSON, strings.NewReader(`{"force": true}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +817,7 @@ func TestCloudHandler_ResumeTaskEndpoint(t *testing.T) {
 	resp.Body.Close()
 
 	// resume 不存在任务 → 404
-	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", "application/json", strings.NewReader("{}"))
+	resp, err = http.Post(ts.URL+"/api/cloud/tasks/nonexistent/resume", contentTypeJSON, strings.NewReader("{}"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,8 +843,8 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	mgr, _ := newCloudTestManager(t, dir, sm, cfg)
 	h := &Handlers{cloudMgr: mgr, logger: testLogger()}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudCreateBatchDownload)
-	mux.HandleFunc("POST /api/cloud/groups", h.cloudCreateGroup)
+	mux.HandleFunc("POST /api/cloud/download/batch", h.cloudTaskHandler(h.cloudTaskService().CreateBatchDownload))
+	mux.HandleFunc("POST /api/cloud/groups", h.cloudTaskHandler(h.cloudTaskService().CreateGroup))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -785,7 +857,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 批量：3 个 URL 超过配置上限 2 → 400
-	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
+	resp, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, strings.NewReader(`{"urls": `+urlsArrayJSON(3)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +871,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 批量：2 个 URL 未超限 → 200
-	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", "application/json", strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
+	resp2, err := http.Post(ts.URL+"/api/cloud/download/batch", contentTypeJSON, strings.NewReader(`{"urls": `+urlsArrayJSON(2)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,7 +882,7 @@ func TestCloudHandler_BatchAndGroup_ConfigurableMaxLimit(t *testing.T) {
 	}
 
 	// 组：3 个 URL 超过配置上限 2 → 400
-	resp3, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
+	resp3, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(`{"name":"g","urls": `+urlsArrayJSON(3)+`}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +907,7 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 	// 大写 scheme 应被规范化为小写 http://；端口 1 使下载连接被拒、快速失败，
 	// 不依赖外部网络（断言只看任务创建时的 URL）
 	body := strings.NewReader(`{"name":"g1","urls":[{"url":"HTTP://127.0.0.1:1/file.zip"}]}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/groups", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,14 +939,16 @@ func TestCloudHandler_CreateGroup_NormalizesURL(t *testing.T) {
 // 配额满时 POST /api/cloud/download 返回 507（InsufficientStorage）+ 无任务残留 + Scope 0。
 //
 // 说明：handler 提交恒为未知大小（totalSize=-1），创建期同步配额门是全局 storageMgr
-// 的 1 GiB 占位预留（m.storage.TryReserve(cloudReservePlaceholder)）；租户 Scope 的容量
-// 预检仅在已知大小路径（totalSize>0）触发，未知大小的租户配额在写盘流 NewQuotaWriter
-// 占位预留时执行（异步失败，不返回 507）。因此本测试把全局 storageMgr 上限压到占位之下
+// 的自适应占位预留（m.storage.TryReserveCloud(placeholderFor()) = min(1 GiB, 可用空间/并发)，
+// 下限 cloudReservePlaceholderMin=16 MiB）；租户 Scope 的容量预检仅在已知大小路径
+// （totalSize>0）触发，未知大小的租户配额在写盘流 NewQuotaWriter 占位预留时执行（异步失败，
+// 不返回 507）。因此本测试把全局 storageMgr 上限压到**下限之下**（8 MiB < 16 MiB 下限）
 // 触发同步 507，并断言 Scope 不因失败的创建留下任何占用（双轨无泄漏）。
 func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	dir := t.TempDir()
-	// 全局 max = 512MB < 1 GiB 占位 → 未知大小任务创建即 507。
-	sm := capacity.NewStorageManager(dir, 512*1024*1024, nil, testLogger())
+	// 全局 max = 8 MiB < 占位下限 16 MiB → 未知大小任务创建即 507（自适应占位见
+	// cloudReservePlaceholderMin：下限保证小配额卷也不会被超大占位吃光）。
+	sm := capacity.NewStorageManager(dir, 8*1024*1024, nil, testLogger())
 	cfg := &cloud.CloudDownloadConfig{
 		SyncThreshold: 20 * 1024 * 1024,
 		MaxConcurrent: 3,
@@ -888,13 +962,13 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/cloud/download", func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(withActor(r.Context(), "alice"))
-		h.cloudCreateDownload(w, r)
+		h.cloudTaskHandler(h.cloudTaskService().CreateDownload)(w, r)
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	body := strings.NewReader(`{"url": "https://example.com/big.bin", "filename": "big.bin"}`)
-	resp, err := http.Post(ts.URL+"/api/cloud/download", "application/json", body)
+	resp, err := http.Post(ts.URL+"/api/cloud/download", contentTypeJSON, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,5 +998,447 @@ func TestCloudHandler_CreateDownloadTask_507OnTenantQuota(t *testing.T) {
 	}
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("507 后 cloud 桶 Reserved()=%d want 0", got)
+	}
+}
+
+// TestCloudHandler_BatchCreateDownload_TransferACLDenied R1 回归：batch 路径转存
+// 目标卷 ACL 校验（CLI 链式主路径走 batch——此前漏检可跨租户转存写入）。
+// checkTransferACL 是单条/batch 共用校验（单条 handler 与 batch handler 均调用）；
+// 此处验证 helper 对 ACL 拒绝卷 fail-closed + 放行卷放行。
+// transferACLRejection 取用编排核心的 ACL 判定（checkTransferACL 随组创建迁入
+// cloudtasks 后，装配层不再保留同形薄封装；R1 回归仍在此断言文案/放行语义）。
+func transferACLRejection(h *Handlers, owner string, transfer *cloud.TransferSpec) string {
+	return cloudtasks.TransferACLRejection(h.cloudTaskDeps().Volumes, owner, transfer)
+}
+
+func TestCloudHandler_BatchCreateDownload_TransferACLDenied(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{volSet: newTransferACLSet(t)}
+	// ACL 拒绝卷（无授权）→ fail-closed
+	msg := transferACLRejection(h, "ownerX", &cloud.TransferSpec{Volume: "private-vault"})
+	if msg == "" {
+		t.Fatal("ACL 拒绝卷应返回错误")
+	}
+	// 未装配卷 → fail-closed
+	msg = transferACLRejection(h, "ownerX", &cloud.TransferSpec{Volume: "missing"})
+	if msg == "" {
+		t.Fatal("未装配卷应返回错误")
+	}
+	// 无 transfer → 放行
+	if msg := transferACLRejection(h, "ownerX", nil); msg != "" {
+		t.Fatalf("无 transfer 应放行，got %q", msg)
+	}
+}
+
+// newTransferACLSet 构造含 ACL deny 卷的 registry.Set（R1/C1 测试用）。
+// private-vault：ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
+// public-vault 由调用方经 AddExternalVolume 注入（external 卷才在 transferFS 解析面内）。
+func newTransferACLSet(t *testing.T) *registry.Set {
+	t.Helper()
+	root := t.TempDir()
+	rt, err := storage.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vols := []volume.Volume{
+		{
+			// ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
+			Name: "private-vault", Type: volume.TypeLocal, RootDir: root,
+			ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{}},
+		},
+	}
+	vs := registry.NewSet(vols, map[string]*storage.Root{"private-vault": rt}, nil, nil, "private-vault")
+	t.Cleanup(func() { _ = vs.Close() })
+	return vs
+}
+
+// TestCloudHandler_CreateGroup_PassesThreeParams C1 回归：组创建请求透传三参 → 服务端真实
+// 解析。此前 createGroupEntry 硬编码 Save:true，组链 save 参数在服务端最后一跳被丢弃。
+// 本测试验证：真空洞组合（save=false + download_local=false + 无 transfer）在组路径
+// fail-closed 拒绝（旧硬编码 Save:true 会绕过校验静默做错）；save/download_local 落点
+// 断言见 TestCloudHandler_CreateGroup_TransferParam（已装配 transfer 卷）。
+func TestCloudHandler_CreateGroup_PassesThreeParams(t *testing.T) {
+	t.Parallel()
+	ts, mgr := setupCloudTestServer(t)
+	defer ts.Close()
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "three-param-group",
+		"urls": []map[string]string{
+			{"url": "https://example.com/c1.bin", "filename": "c1.bin"},
+		},
+		"save":           false,
+		"download_local": false,
+	})
+	resp, err := http.Post(ts.URL+"/api/cloud/groups", contentTypeJSON, strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 真空洞（save=false + download_local=false + 无 transfer）应 fail-closed 拒绝——
+	// 证明 C1 修复后组路径的语义空洞校验生效（旧硬编码 Save:true 会绕过校验静默做错）。
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 400 (void semantics) for save=false+dl=false+no transfer, got %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+	_ = mgr // setupCloudTestServer 返回 mgr 供落点断言；真空洞路径无需再用
+}
+
+// TestCloudHandler_CreateGroup_TransferParam C1：组请求 transfer 参数落点——装配 volSet 与
+// transferFSFor 的 mgr 经 checkTransferACL/checkTransferVolumePreflight 放行后，子任务带
+// Transfer 目标（此前组创建无 transfer 路径）。external 卷用 secretdata backend 注入。
+func TestCloudHandler_CreateGroup_TransferParam(t *testing.T) {
+	t.Parallel()
+	vs := newTransferACLSet(t)
+	// 注入 secretdata external 卷（public-vault）：registry.External 按名返回 → transferFS 解析成功。
+	// 注册 "secretdata" 协议供 SchemeOf/checkTransferVolumePreflight 使用（t.Cleanup 解绑）。
+	// 类型用 "secretdata" 本身：SchemeOf(vol.Type) 按类型反查，注册 "secretdata-c1" 类型
+	// 会让 SchemeOf("secretdata") 查不到（协议已声明但类型不匹配）。pkg/server 测试进程
+	// 无 cmd/sproxy 的 secretdata 生产注册，无冲突。
+	registry.RegisterBackend("secretdata", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+		return nil, fmt.Errorf("unused")
+	}, "secretdata")
+	t.Cleanup(func() { registry.UnregisterBackendForTest("secretdata") })
+	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
+	be, err := secretdata.NewBackend(t.Context(), volume.Volume{Name: "public-vault", Type: "secretdata"}, inner, secretdata.Options{Secret: []byte("c1-test-key-000"), TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := vs.AddExternalVolume(volume.Volume{Name: "public-vault", Type: "secretdata"}, be); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handlers{volSet: vs}
+	sm := capacity.NewStorageManager(t.TempDir(), 10*1024*1024*1024, nil, testLogger())
+	mgr := cloud.NewCloudDownloadManager(cloud.CloudManagerOptions{
+		Storage: cloudStorageManager{m: sm},
+		Logger:  testLogger(),
+		Config:  defaultCloudDownloadConfig(),
+		// transferFSFor 用 volSet 装配：public-vault 开放卷 → (FS, scheme, shared)
+		TransferFSFor: func(volumeName string) (syncpkg.FS, string) {
+			be := vs.External(volumeName)
+			if be == nil {
+				return nil, ""
+			}
+			vol, ok := vs.ByName(volumeName)
+			if !ok {
+				return be.FS(), ""
+			}
+			return be.FS(), registry.SchemeOf(vol.Type)
+		},
+	})
+	h.cloudMgr = mgr
+
+	body, _ := json.Marshal(map[string]any{
+		"name": "transfer-group",
+		"urls": []map[string]string{
+			{"url": "https://example.com/c2.bin", "filename": "c2.bin"},
+		},
+		"transfer":       map[string]any{"volume": "public-vault", "path": "tgt/c2.bin"},
+		"save":           false,
+		"download_local": false,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/groups", strings.NewReader(string(body)))
+	rec := httptest.NewRecorder()
+	h.cloudTaskHandler(h.cloudTaskService().CreateGroup)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 with transfer, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var group cloud.CloudTaskGroup
+	if err := json.NewDecoder(rec.Body).Decode(&group); err != nil {
+		t.Fatal(err)
+	}
+	task, ok := mgr.SnapshotTask(group.TaskIDs[0], "")
+	if !ok {
+		t.Fatalf("task %s not found", group.TaskIDs[0])
+	}
+	if task.Transfer == nil || task.Transfer.Volume != "public-vault" || task.Transfer.Path != "tgt/c2.bin" {
+		t.Fatalf("C1: 组子任务 Transfer 落点错误 = %+v", task.Transfer)
+	}
+	// save/download_local 落点：请求 save=false + download_local=false → 子任务同值
+	// （C1 修复前硬编码 Save:true + download_local=false 恒真——save 参数被丢弃）。
+	if task.Save {
+		t.Fatal("C1: 组子任务 save 应 false（请求 save=false 被硬编码 true 覆盖）")
+	}
+	if task.DownloadLocal {
+		t.Fatal("C1: 组子任务 download_local 应 false")
+	}
+}
+
+// TestCloudArchiveGroupToVolume_UnifiedTransfer 统一转存：组归档 + target_volume →
+// 打包后转存到外部卷（transfer.Execute + TarPreprocessor）。验证目标卷收到 tar.gz 且可解包。
+func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
+	t.Parallel()
+	// 用独立临时目录（非 t.TempDir——newAssemblyTestHandlers 的 globalRoot 持有
+	// 目录句柄不关，Windows 下 TempDir 清理失败）。
+	dir := testutil.MkdirTemp(t, "unified-transfer-test-")
+	h := newAssemblyTestHandlers(t, dir)
+	// 装配 fake 外部卷（memFS 作目标）。
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if h.volSet == nil || h.volSet.External("vault") == nil {
+		t.Fatal("fake volSet 未装配 vault 外部卷")
+	}
+	// 组文件：两个小文件源（真实租户桶 root，一次性用完）。
+	tenantDir := filepath.Join(dir, "anonymous")
+	if mkErr := os.MkdirAll(tenantDir, 0755); mkErr != nil {
+		t.Fatalf("mkdir tenant: %v", mkErr)
+	}
+	tenantRoot, err := storage.OpenRoot(tenantDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
+	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
+	sources := []cloudtasks.ArchiveSource{
+		{Root: tenantRoot, Rel: "cloud/g1/a.txt", TarRel: "a.txt"},
+		{Root: tenantRoot, Rel: "cloud/g1/b.txt", TarRel: "b.txt"},
+	}
+	req := CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
+	h.cloudTaskService().ArchiveGroupToVolume(rec, r, "g1", "", sources, req, "g1-archive")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unified transfer status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 目标卷收到 tar.gz 且含两个文件（键含 owner 前缀——owner 为空归一 anonymous）。
+	gotKey := "anonymous/user/archive/g1-archive.tar.gz"
+	if _, ok := fs.files[gotKey]; !ok {
+		t.Fatalf("目标卷 key=%q 缺失（实际 %v）", gotKey, slices.Sorted(maps.Keys(fs.files)))
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(fs.files[gotKey]))
+	if err != nil {
+		t.Fatalf("gzip 解包: %v", err)
+	}
+	defer gr.Close()
+	tr := tar.NewReader(gr)
+	names := []string{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		names = append(names, hdr.Name)
+	}
+	if len(names) != 2 || names[0] != "a.txt" || names[1] != "b.txt" {
+		t.Fatalf("tar 文件列表 %v", names)
+	}
+	// 关 root（Windows 句柄：不关 TempDir 清理失败）。
+	if err := tenantRoot.Close(); err != nil {
+		t.Logf("tenantRoot close: %v", err)
+	}
+}
+
+// TestCloudArchiveGroupToVolume_TrustedVolumeWiring 锁定统一转存对 master 可信卷能力的
+// 复用：目标键恒带 owner 前缀（与读路径 ResolveUserLocation 同键空间）、目标卷经
+// trusted.Wrap 生成 sidecar meta（可信卷）、返回 URL 用 FS 键可 ResolveURL 往返。
+//
+// 回归背景：分支原实现用裸 be.FS() + 自拼 "archive/<name>"，转存产物既无 meta（不是
+// 可信卷）、又不在读路径键空间（／download 与列表均不可命中）。
+func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
+	t.Parallel()
+	dir := testutil.MkdirTemp(t, "unified-transfer-trusted-")
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+
+	tenantDir := filepath.Join(dir, "alice")
+	if mkErr := os.MkdirAll(tenantDir, 0o755); mkErr != nil {
+		t.Fatalf("mkdir tenant: %v", mkErr)
+	}
+	tenantRoot, err := storage.OpenRoot(tenantDir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0o755); mkErr != nil {
+		t.Fatalf("mkdir: %v", mkErr)
+	}
+	writeRootFile(t, tenantRoot, "cloud/g1/a.txt", "aaaaa")
+	writeRootFile(t, tenantRoot, "cloud/g1/b.txt", "bbbbb")
+	sources := []cloudtasks.ArchiveSource{
+		{Root: tenantRoot, Rel: "cloud/g1/a.txt", TarRel: "a.txt"},
+		{Root: tenantRoot, Rel: "cloud/g1/b.txt", TarRel: "b.txt"},
+	}
+	req := CloudArchiveRequest{ArchiveName: "g1-archive", TargetVolume: "vault"}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/cloud/groups/g1/archive", nil)
+	h.cloudTaskService().ArchiveGroupToVolume(rec, r, "g1", "alice", sources, req, "g1-archive")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// 1) 目标键恒带 owner 前缀（volume.ResolveLocation 唯一入口），与读路径同键空间。
+	key := "alice/user/archive/g1-archive.tar.gz"
+	if _, ok := fs.files[key]; !ok {
+		t.Fatalf("目标键应为 %q（owner 前缀），实际键 %v", key, slices.Sorted(maps.Keys(fs.files)))
+	}
+	// 2) 可信卷 sidecar meta 恒生成（裸 FS 无此）。
+	sidecar := meta.MetaPath(key)
+	if _, ok := fs.files[sidecar]; !ok {
+		t.Fatalf("应有可信卷 sidecar %q，实际键 %v", sidecar, slices.Sorted(maps.Keys(fs.files)))
+	}
+	// 3) 返回 URL 用 FS 键（ResolveURL 可往返）。
+	var resp CloudArchiveResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	wantURL := "vault://vault/" + key
+	if resp.File != wantURL {
+		t.Fatalf("File=%q want %q", resp.File, wantURL)
+	}
+	// 4) 外部卷转存不占租户 archive 桶——不经该桶记账（无预留/占用）。
+	sc := h.quotaBucketFor("alice", "archive")
+	if sc == nil {
+		t.Fatal("测试前提：archive 桶 Scope 应可装配（globalPool 已配）")
+	}
+	if got := sc.Reserved(); got != 0 {
+		t.Fatalf("archive 桶预留泄漏：Reserved=%d want 0", got)
+	}
+	// 5) 返回 URL 经 registry.ResolveURL 往返（backend 解析 scheme/authority/path 后 OpenRead）。
+	rc, uerr := h.volSet.ResolveURL(context.Background(), resp.File)
+	if uerr != nil {
+		t.Fatalf("ResolveURL(%q): %v", resp.File, uerr)
+	}
+	body, rerr := io.ReadAll(rc)
+	_ = rc.Close()
+	if rerr != nil {
+		t.Fatalf("URL 取回读取: %v", rerr)
+	}
+	if _, gerr := gzip.NewReader(bytes.NewReader(body)); gerr != nil {
+		t.Fatalf("URL 取回内容应可 gzip 解（往返一致）: %v", gerr)
+	}
+	if err := tenantRoot.Close(); err != nil {
+		t.Logf("tenantRoot close: %v", err)
+	}
+}
+
+// serverMemFS 测试用内存卷（统一转存目标）。
+type serverMemFS struct {
+	files map[string][]byte
+}
+
+func (m *serverMemFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	return nil, nil
+}
+func (m *serverMemFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
+	if b, ok := m.files[p]; ok {
+		return &syncpkg.Entry{Name: p, Path: p, IsDir: false, Size: int64(len(b))}, nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
+	if b, ok := m.files[p]; ok {
+		return io.NopCloser(bytes.NewReader(b)), nil
+	}
+	return nil, os.ErrNotExist
+}
+func (m *serverMemFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, sz, mt int64) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	m.files[p] = b
+	return nil
+}
+func (m *serverMemFS) Rename(ctx context.Context, f, t string) error { return nil }
+func (m *serverMemFS) Delete(ctx context.Context, p string) error    { delete(m.files, p); return nil }
+func (m *serverMemFS) MakeDir(ctx context.Context, p string) error   { return nil }
+
+// newFakeVolSetForTransfer 构造带 fake 外部卷（类型 "vault"）的 registry.Set（统一转存目标）。
+func newFakeVolSetForTransfer(name string, fs syncpkg.FS) *registry.Set {
+	return newFakeVolSetForTypedTransfer(name, "vault", fs)
+}
+
+// newFakeVolSetForTypedTransfer 构造带指定类型 fake 外部卷的 registry.Set，并按类型注册
+// 协议映射（SchemeOf 需要类型→协议；生产由各后端 RegisterBackend 声明），使转存 URL 有
+// 非空 scheme。
+func newFakeVolSetForTypedTransfer(name, typ string, fs syncpkg.FS) *registry.Set {
+	switch typ {
+	case "vault":
+		registerFakeTransferScheme()
+	case "secrets":
+		registerFakeSecretsScheme()
+	}
+	vs := registry.NewSet(nil, nil, nil, nil, name)
+	if err := vs.AddExternalVolume(volume.Volume{Name: name, Type: typ}, fakeTransferBackend{fs: fs}); err != nil {
+		panic("fake volSet AddExternalVolume: " + err.Error())
+	}
+	return vs
+}
+
+// transferFakeSchemeOnce 保证 fake 类型 "vault" 仅注册一次（RegisterBackend 重名 panic）；
+// 不随测试清理——测试二进制生命周期内保持（BackendTypes 断言用 Contains，不受额外类型影响）。
+var transferFakeSchemeOnce sync.Once
+
+func registerFakeTransferScheme() {
+	transferFakeSchemeOnce.Do(func() {
+		registry.RegisterBackend("vault", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+			return nil, errors.New("fake vault backend 不用于构造")
+		}, "vault")
+	})
+}
+
+// fakeSecretsSchemeOnce 注册 "secrets" 协议（统一转存须拒绝 secrets 密钥卷的测试用）。
+var fakeSecretsSchemeOnce sync.Once
+
+func registerFakeSecretsScheme() {
+	fakeSecretsSchemeOnce.Do(func() {
+		registry.RegisterBackend("secrets", func(context.Context, volume.Volume) (registry.ExternalBackend, error) {
+			return nil, errors.New("fake secrets backend 不用于构造")
+		}, "secrets")
+	})
+}
+
+// fakeTransferBackend 实现 registry.ExternalBackend（FS 视图）+ URLResolver（URL 往返测试）。
+type fakeTransferBackend struct{ fs syncpkg.FS }
+
+func (f fakeTransferBackend) FS() syncpkg.FS { return f.fs }
+func (f fakeTransferBackend) Close() error   { return nil }
+
+// OpenURL 解析 URL（<scheme>://<volume>/<path>）后按解码路径读回——验证转存产物 URL 可
+// 经 registry.ResolveURL 往返。
+func (f fakeTransferBackend) OpenURL(ctx context.Context, urlStr string) (io.ReadCloser, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, err
+	}
+	return f.fs.OpenRead(ctx, strings.TrimPrefix(u.Path, "/"))
+}
+
+// writeRootFile 用 storage.Root 写测试文件。
+func writeRootFile(t *testing.T, root *storage.Root, rel, content string) {
+	t.Helper()
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatalf("open %s: %v", rel, err)
+	}
+	if _, err := io.WriteString(f, content); err != nil {
+		f.Close()
+		t.Fatalf("write %s: %v", rel, err)
+	}
+	f.Close()
+}
+
+// TestDeleteGroupArchive_ExternalURL 组删除联动清理外部卷转存产物：URL 形态按卷可信 FS
+// 删除（主文件 + sidecar 一并删净），非 URL 走既有 archive 桶删除。
+func TestDeleteGroupArchive_ExternalURL(t *testing.T) {
+	t.Parallel()
+	dir := testutil.MkdirTemp(t, "del-group-archive-")
+	h := newAssemblyTestHandlers(t, dir)
+	fs := &serverMemFS{files: map[string][]byte{
+		"alice/user/archive/x.tar.gz":      []byte("data"),
+		"alice/meta/archive/x.tar.gz.meta": []byte("meta"),
+		"alice/user/archive/keep.tar.gz":   []byte("keep"),
+	}}
+	h.volSet = newFakeVolSetForTransfer("vault", fs)
+	if err := h.deleteGroupArchive("alice", "vault://vault/alice/user/archive/x.tar.gz"); err != nil {
+		t.Fatalf("删除外部卷归档: %v", err)
+	}
+	if got := slices.Sorted(maps.Keys(fs.files)); len(got) != 1 || got[0] != "alice/user/archive/keep.tar.gz" {
+		t.Fatalf("应仅删目标主文件+sidecar，剩余 %v", got)
 	}
 }

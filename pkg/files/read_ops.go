@@ -18,12 +18,15 @@
 package files
 
 import (
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -56,6 +59,10 @@ type ListResult struct {
 // SearchQuery 是搜索的领域入参（搜索无常规分页：Offset/Limit 回填为结果总数）。
 type SearchQuery struct {
 	Owner string
+	// Offset / Limit 是**可选分页**（审计 2026-10-29 P3）：默认 0/0 = 不分页（返回全部，
+	// 与既有契约一致）；`Limit > 0` 时按排序后切片，`Total` 恒为**全部命中数**。
+	Offset int
+	Limit  int
 	// Query 是文件名子串（大小写不敏感）。与 Tag 可组合（AND）。
 	// 空（或全空白）且 Tag 也为空 → *HTTPError{400}。
 	Query string
@@ -88,7 +95,7 @@ type OpenedFile struct {
 //   - `*HTTPError{400}`：owner 不可用 / 派生 user 桶失败 / subdir 非法（同 List 的 subdir 分支）
 //   - `*HTTPError{404}`：`?volume=` 未知或不在 owner 视图（fail-closed，不泄露存在性）
 //   - 其他 error：目录读取失败（仅旧装配路径会走到）
-func (s *Service) List(q ListQuery) (ListResult, error) {
+func (s *Service) List(ctx context.Context, q ListQuery) (ListResult, error) {
 	owner := normalizeOwner(q.Owner)
 	subdir := strings.TrimPrefix(q.Subdir, "/")
 	empty := ListResult{Files: []FileInfo{}, Offset: q.Offset, Limit: q.Limit}
@@ -120,19 +127,19 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 		volFilter = q.VolName
 	}
 
-	// 列表走索引：dirRel = rel 去 user/ 前缀（索引 key 空间；"" = 根目录）。
-	dirRel := strings.TrimPrefix(rel, tnt0.UserRoot()+"/")
-	if dirRel == rel {
-		dirRel = ""
+	// 注：被封装卷占用的源区间（`source: "<卷>:<子路径>"`）直查**保持读路径不拦**——
+	// 该区间位于**卷根命名空间**（客户端经 `<owner>/user/...` 寻址不到），故对基础卷的
+	// 用户视图而言它通常就是空目录（200）。写侧由 `storage.Root` 封印恒拒（ErrSealed）。
+
+	// 数据源（§15.2 步骤 3，2026-10-29）：视图不可用时**实时扫描**（`listFallback`）——
+	// `searchIndex` 不再承担 list（它只服务搜索）。可见性由装配层卷状态缓存负责：默认永不过期 +
+	// 事件写穿 + 显式 `volume refresh`；`volume_state.disable: true` ⇒ 每次回源（强一致）。
+	if res, handled := s.listFromVolumeViews(ctx, q, owner, subdir, volFilter); handled {
+		return res, nil
 	}
-	csMap := s.checksumSnapshot(owner)
-	var allFiles []FileInfo
-	if s.index != nil {
-		allFiles = s.index.list(owner, dirRel, volFilter, csMap)
-	}
+	allFiles := s.listFallback(ctx, owner, subdir, q.VolName, rel)
 	if allFiles == nil {
-		// 索引不可用（index nil：零值构造的 Service 不触达列表时）→ 回落实时扫描。
-		allFiles = s.listFallback(owner, subdir, q.VolName, rel, csMap)
+		allFiles = []FileInfo{} // 契约：空结果必须是空数组（JSON `[]`），不能是 null
 	}
 	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
 	return ListResult{
@@ -141,67 +148,221 @@ func (s *Service) List(q ListQuery) (ListResult, error) {
 	}, nil
 }
 
+// volumeCategoryWrapper 是 wrapper 分类的展示值（**跨层 JSON 契约**：Web UI 卷徽标按它显示
+// 🔒；与 registry 的 schema category 字面量同值）。空串 = 不填（`omitempty` 不出现在 JSON）。
+const volumeCategoryWrapper = "wrapper"
+
+// volumeCategoryFor 从卷后端类型推导展示分类：wrapper 加密/封装卷 → "wrapper"，其余类型 →
+// ""（不填，omitempty 不出现）。
+//
+// **分类事实源是装配层注入的 VolumeTypeClassifier**（转发 `registry.CategoryOf`——它含
+// wrapper 处理层注册表的动态投影，新增 wrapper 类型只须在 registry 侧登记即可被识别）；
+// pkg/files 是**另一个领域**，不得 import pkg/volume/registry（门禁 R2），故经能力接口取用。
+//
+// **未注入时回落内置基线名单**（secretdata/secrets/egress）：仅供测试与旧装配路径零回归，
+// 生产装配恒注入（pkg/server handlers.go 的 `WithVolumeTypeClassifier`）。
+func (s *Service) volumeCategoryFor(typ string) string {
+	if tc := s.rt.volTypeClassifier(); tc != nil {
+		if tc.CategoryOf(typ) == volumeCategoryWrapper {
+			return volumeCategoryWrapper
+		}
+		return ""
+	}
+	switch typ {
+	case "secretdata", "secrets", "egress":
+		return volumeCategoryWrapper
+	}
+	return ""
+}
+
+// listFromVolumeViews 探测「经卷视图列举」能力并委派（能力缺失/门控关闭 ⇒ false，走索引）。
+func (s *Service) listFromVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string) (ListResult, bool) {
+	lister, ok := s.rt.volSet().(VolumeViewLister)
+	if !ok || lister == nil {
+		return ListResult{}, false
+	}
+	return s.listViaVolumeViews(ctx, q, owner, subdir, volFilter, lister)
+}
+
+// volumeViewTargets 返回本次要列举的卷：owner 可见卷中**有本地根**的那些（外部卷的默认聚合
+// 从不包含它们；显式 ?volume= 已由 listExternalVolume 处理）。
+// volumeViewTargets 返回本次要列举的卷：显式 ?volume=（本地/外部均可，单卷）或 owner 可见卷中
+// **有本地根**的那些（默认聚合从不含外部卷——与历史语义一致）。
+func (s *Service) volumeViewTargets(owner, volFilter string) []volume.Volume {
+	vs := s.rt.volSet()
+	if vs == nil {
+		return nil
+	}
+	if volFilter != "" {
+		if v, ok := vs.ByName(volFilter); ok {
+			return []volume.Volume{v}
+		}
+		return nil
+	}
+	all := volume.AllowedVolumes(vs.All(), owner)
+	out := make([]volume.Volume, 0, len(all))
+	for _, v := range all {
+		if vs.HasLocalRoot(v.Name) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// listViaVolumeViews 经卷视图列举本地卷（每卷一次 ListDir，含缓存装饰），聚合语义与
+// `listFallback` 一致：目录条目跨卷去重（Volume 空）、文件条目带卷名与 checksum、在途临时
+// 文件不对外可见。handled=false 表示「本层不提供该能力」⇒ 调用方回落索引路径。
+func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, subdir, volFilter string,
+	lister VolumeViewLister) (ListResult, bool) {
+	allFiles, ok := s.collectVolumeViewEntries(ctx, lister, s.volumeViewTargets(owner, volFilter),
+		owner, subdir)
+	if !ok {
+		return ListResult{}, false
+	}
+	// 显式单卷（含外部/封装卷）时补展示分类（wrapper → "wrapper"，Web UI 卷徽标用）。
+	if volFilter != "" {
+		if v, ok := s.rt.volSet().ByName(volFilter); ok {
+			cat := s.volumeCategoryFor(v.Type)
+			for i := range allFiles {
+				allFiles[i].VolumeCategory = cat
+			}
+		}
+	}
+	sortFileEntries(allFiles, q.SortBy, q.SortOrder)
+	return ListResult{
+		Files: paginateEntries(allFiles, q.Offset, q.Limit), Total: len(allFiles),
+		Offset: q.Offset, Limit: q.Limit,
+	}, true
+}
+
+// collectVolumeViewEntries 逐卷列举并聚合；supported=false ⇒ 整层能力不可用（调用方回落）。
+func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeViewLister,
+	vols []volume.Volume, owner, subdir string) ([]FileInfo, bool) {
+	seenDirs := make(map[string]bool)
+	var out []FileInfo
+	for _, v := range vols {
+		entries, supported, err := lister.ListDirView(ctx, v.Name, owner, subdir)
+		if !supported {
+			return nil, false
+		}
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				s.rt.logger().Warn("卷视图列举失败", "volume", v.Name, "subdir", subdir, "error", err.Error())
+			}
+			continue
+		}
+		out = append(out, s.fileInfosFromViewEntries(ctx, owner, entries, v.Name, subdir, seenDirs)...)
+	}
+	return out, true
+}
+
+// fileInfosFromViewEntries 把一个卷的视图条目转成领域列表条目（目录跨卷去重；在途临时文件
+// 不对外可见——与索引/回退路径同一语义）。
+func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, entries []ExternalEntry,
+	volName, subdir string, seenDirs map[string]bool) []FileInfo {
+	csAt := checksumGetter(s.checksumStoreReady(ctx, owner), volName)
+	out := make([]FileInfo, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir {
+			if seenDirs[e.Name] {
+				continue
+			}
+			seenDirs[e.Name] = true
+			out = append(out, FileInfo{Name: e.Name, IsDir: true})
+			continue
+		}
+		if IsInflightTempName(e.Name) {
+			continue
+		}
+		relName := e.Name
+		if subdir != "" {
+			relName = strings.Trim(subdir, "/") + "/" + e.Name
+		}
+		fi := FileInfo{Name: e.Name, Size: e.Size, ModTime: e.MTime, Volume: volName}
+		fi.Checksum = csAt(relName)
+		out = append(out, fi)
+	}
+	return out
+}
+
 // listFallback 是 List 的实时扫描回退（索引不可用时）：逐卷 ReadDir 聚合，语义与索引化前
 // 逐字一致（目录条目去重、文件条目带卷名、checksum 按 user/<rel> 键）。仅 index nil 的
 // 零值 Service 走此路径；生产装配（New 构造）恒有索引。
-func (s *Service) listFallback(owner, subdir, volName, rel string, csMap map[string]string) []FileInfo {
-	var allFiles []FileInfo
-	seenDirs := make(map[string]bool)
+func (s *Service) listFallback(ctx context.Context, owner, subdir, volName, rel string) []FileInfo {
 	if s.rt.volSet() == nil {
-		// 单卷：唯一根 ReadDir（rel 相对租户根）。
-		tnt := s.rt.tenantOf(owner)
-		if tnt == nil || tnt.Root() == nil {
-			return allFiles
-		}
-		entries, err := tnt.Root().ReadDir(rel)
-		if os.IsNotExist(err) {
-			return allFiles
-		}
-		if err != nil {
-			s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
-			return allFiles
-		}
-		return s.buildFileListEntries(entries, csMap, subdir)
+		// 单卷：唯一根 ReadDir（rel 相对租户根）；checksum 走全量台账（无卷维度可区分）。
+		return s.listFallbackSingle(owner, subdir, rel,
+			checksumGetter(s.checksumStoreReady(ctx, owner), ""))
 	}
 	// 多卷：owner 视图逐卷聚合（?volume= 已在上层校验）。
+	var allFiles []FileInfo
+	seenDirs := make(map[string]bool)
 	vols := volume.AllowedVolumes(s.rt.volSet().All(), owner)
 	if volName != "" {
 		vols = []volume.Volume{{Name: volName}}
 	}
 	for _, v := range vols {
-		tnt := s.rt.volumeTenant(v.Name, owner)
-		if tnt == nil || tnt.Root() == nil {
-			continue
-		}
-		entries, err := tnt.Root().ReadDir(rel)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
-			continue
-		}
-		for _, e := range s.buildFileListEntries(entries, csMap, subdir) {
-			if e.IsDir {
-				if seenDirs[e.Name] {
-					continue
-				}
-				seenDirs[e.Name] = true
-				allFiles = append(allFiles, e)
-				continue
-			}
-			e.Volume = v.Name
-			allFiles = append(allFiles, e)
-		}
+		allFiles = append(allFiles, s.listVolumeDirEntries(ctx, v, owner, subdir, rel, seenDirs)...)
 	}
 	return allFiles
+}
+
+// listFallbackSingle 是单卷回退：唯一根 ReadDir（rel 相对租户根）。
+func (s *Service) listFallbackSingle(owner, subdir, rel string, csAt func(rel string) string) []FileInfo {
+	tnt := s.rt.tenantOf(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	entries, err := tnt.Root().ReadDir(rel)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		s.rt.logger().Warn("读取卷目录失败", "dir", rel, "error", err)
+		return nil
+	}
+	return s.buildFileListEntries(entries, csAt, subdir, tnt.Root())
+}
+
+// listVolumeDirEntries 聚合多卷回退中单个卷的目录条目：目录条目去重、文件条目带卷名。
+func (s *Service) listVolumeDirEntries(ctx context.Context, v volume.Volume, owner, subdir, rel string,
+	seenDirs map[string]bool) []FileInfo {
+	// 按卷**逐条**取 checksum（§15.1.1：卷维度键优先，旧键兜底）——同名文件不串值；
+	// 不再为每次目录列举拷贝全量台账（O(全库) → O(本目录条目)）。
+	csAt := checksumGetter(s.checksumStoreReady(ctx, owner), v.Name)
+	var out []FileInfo
+	tnt := s.rt.volumeTenant(v.Name, owner)
+	if tnt == nil || tnt.Root() == nil {
+		return out
+	}
+	entries, err := tnt.Root().ReadDir(rel)
+	if os.IsNotExist(err) {
+		return out
+	}
+	if err != nil {
+		s.rt.logger().Warn("读取卷目录失败", "volume", v.Name, "dir", rel, "error", err)
+		return out
+	}
+	for _, e := range s.buildFileListEntries(entries, csAt, subdir, tnt.Root()) {
+		if e.IsDir {
+			if seenDirs[e.Name] {
+				continue
+			}
+			seenDirs[e.Name] = true
+			out = append(out, e)
+			continue
+		}
+		e.Volume = v.Name
+		out = append(out, e)
+	}
+	return out
 }
 
 // Search 实现 GET /api/files/search 的领域逻辑：owner 可见卷内按文件名子串递归匹配，
 // 可选按标签精确过滤（SearchQuery.Tag 非空时与 Query AND 组合）。
 //
 // 错误语义：`*HTTPError{400}` = 搜索词与标签都为空 / owner 不可用 / 派生搜索根失败。
-func (s *Service) Search(q SearchQuery) (ListResult, error) {
+func (s *Service) Search(ctx context.Context, q SearchQuery) (ListResult, error) {
 	query := strings.TrimSpace(q.Query)
 	qLower := strings.ToLower(query)
 	tag := strings.TrimSpace(q.Tag)
@@ -211,8 +372,8 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
 	owner := normalizeOwner(q.Owner)
-	// 一次性快照（见 ListFiles #8 结论注释，勿再分析）：per-tenant store，key 为相对租户根的 rel。
-	csMap := s.checksumSnapshot(owner)
+	// checksum 逐条惰性取（§15.1.1：卷维度键优先、旧键兜底）——不再每请求全量拷贝台账。
+	cs := s.checksumLookupFor(ctx, owner)
 
 	// 索引化（roadmap P0）：搜索走内存增量索引（首次全量构建 + 写路径增量维护）。
 	// 与旧 WalkDir 实现**逐字一致的语义**由 search_index_test.go 钉住：子串匹配 base name
@@ -222,33 +383,96 @@ func (s *Service) Search(q SearchQuery) (ListResult, error) {
 	if tnt := s.rt.tenantOf(owner); tnt == nil || tnt.Root() == nil {
 		return ListResult{Files: []FileInfo{}}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgInvalidPath}
 	}
-	results := s.index.search(owner, qLower, tag, csMap)
-	return ListResult{Files: results, Total: len(results), Offset: 0, Limit: len(results)}, nil
+	results := s.index.search(owner, qLower, tag, cs)
+
+	results = s.appendExternalVolumeHits(ctx, owner, qLower, tag, results)
+
+	// 可选分页（默认 0/0 = 返回全部，兼容既有契约）：Total 恒为全部命中数。
+	total := len(results)
+	page := paginateEntries(results, q.Offset, q.Limit)
+	limit := q.Limit
+	if limit <= 0 {
+		limit = total // 不分页 ⇒ Limit = Total（既有契约 TestReadContract_SearchLimitEqualsTotal）
+	}
+	return ListResult{Files: page, Total: total, Offset: q.Offset, Limit: limit}, nil
+}
+
+// appendExternalVolumeHits 把 owner 可见**外部卷**的命中项并入 results（设计 2026-10-30 D4）：
+// 经 `VolumeViewLister`（装配层视图，含卷状态缓存）递归列举并聚合；缓存命中后为内存遍历。
+// 标签是本地卷元数据（外部卷无标签语义）⇒ tag 非空时不遍历外部卷。
+func (s *Service) appendExternalVolumeHits(ctx context.Context, owner, qLower, tag string, results []FileInfo) []FileInfo {
+	if tag != "" {
+		return results
+	}
+	lister, ok := s.rt.volSet().(VolumeViewLister)
+	if !ok || lister == nil {
+		return results
+	}
+	seenDirs := make(map[string]bool, len(results))
+	for _, f := range results {
+		if f.IsDir {
+			seenDirs[f.Name] = true
+		}
+	}
+	results = append(results, s.searchExternalVolumes(ctx, lister, owner, "", qLower, seenDirs)...)
+	sortSearchResults(results)
+	return results
 }
 
 // StatPath 对**已解析**的下载路径取元信息。
 //
-// `dp` 由装配层的 DownloadPaths 能力解析（含 kind 白名单 / 跨卷读定位 / 云任务归属校验）——
+// `dp` 由装配层的 DownloadPathResolver 能力解析（含 kind 白名单 / 跨卷读定位 / 云任务归属校验）——
 // 那属装配层策略，领域侧只消费结果（见包文档「只读面的分工」）。
 //
 // 错误语义：`*HTTPError{404}` 不存在；`*HTTPError{500}` 其他 IO 错。
-func (s *Service) StatPath(dp DownloadPath) (FileStat, error) {
+func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, error) {
+	// **外部卷读源（2026-10-05）**：dp.Source 非 nil → 经装配层服务端读取源 Stat。
+	if dp.Source != nil {
+		return statExternalSource(ctx, s.rt.logger(), dp)
+	}
 	info, err := dp.Tenant.Root().Stat(dp.Rel)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return FileStat{}, &HTTPError{Status: http.StatusNotFound, Message: "not found"}
 		}
-		s.rt.logger().Error("stat 失败", "file_name", dp.Filename, "error", err.Error())
+		s.rt.logger().Error(errMsgStatFailed, "file_name", dp.Filename, "error", err.Error())
 		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
 	}
-	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
+	st := FileStat{IsDir: info.IsDir(), Size: logicalSizeFor(dp.Tenant.Root(), dp.Rel, info), MTime: info.ModTime().UnixNano()}
+	// **密文导出模式（?ciphertext=1）**：实体是存储原样密文 ⇒ size 必须用**密文**长度（info.Size()，
+	// 而非 logicalSizeFor 的明文长度），且不回明文 checksum；否则客户端「先 stat 再分块」会按
+	// 明文坐标规划区间，与 /download/chunk?ciphertext=1 的密文 Content-Range 判据矛盾。
+	if dp.Ciphertext && dp.Tenant != nil && dp.Tenant.Root() != nil && dp.Tenant.Root().IsEncrypted() {
+		st.Size = info.Size()
+		return st, nil
+	}
 	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
+		// 卷维度键优先（§15.1.1），旧键由 GetInVolume 内部兜底。
+		if cs, ok := checksumGet(csStore, dp.VolumeName, csKey); ok {
 			st.Checksum = cs
 		} else if !info.IsDir() {
 			if cs, cerr := fileChecksumRoot(dp.Tenant.Root(), dp.Rel); cerr == nil {
 				st.Checksum = cs
 			}
+		}
+	}
+	return st, nil
+}
+
+// statExternalSource 对外部卷读取源取元信息（可选能力 `ChecksumSource` 生效时一并取
+// **明文**整文件 SHA-256——加密卷实体是加密容器，`Stat` 拿不到明文哈希，但可信外部卷经
+// meta.Provider 能就地给出 ⇒ 客户端 `mv` 的源校验和门禁与 `X-File-Checksum` 据此工作；
+// 无该能力 → 保持旧行为（空，不伪造））。
+func statExternalSource(ctx context.Context, logger *slog.Logger, dp DownloadPath) (FileStat, error) {
+	info, serr := dp.Source.Stat(ctx)
+	if serr != nil {
+		logger.Error("外部卷 stat 失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
+		return FileStat{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat error"}
+	}
+	st := FileStat{IsDir: info.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano()}
+	if cs, ok := dp.Source.(ChecksumSource); ok {
+		if sum, ok2 := cs.Checksum(ctx); ok2 {
+			st.Checksum = sum
 		}
 	}
 	return st, nil
@@ -261,7 +485,12 @@ func (s *Service) StatPath(dp DownloadPath) (FileStat, error) {
 //
 // 错误语义：`*HTTPError{404}` 不存在（errMsgFileNotFound）；`*HTTPError{500}` 打开或
 // stat 失败（errMsgOpenFileFailed / "stat 失败"）。
-func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
+func (s *Service) OpenPath(ctx context.Context, dp DownloadPath) (OpenedFile, error) {
+	// **外部卷读源（2026-10-05 通用文件获取）**：dp.Source 非 nil = secretdata 加密卷
+	// / 私密外部卷——绕过 Tenant.Root()，经装配层注入的服务端读取源打开（解密转发）。
+	if dp.Source != nil {
+		return s.openExternalSource(ctx, dp)
+	}
 	// 所有下载 kind 均经租户根打开（root 相对，防符号链接逃逸）。
 	// 先 Stat（加密卷 Stat 返回密文大小，调用方按 opaque 处理），再打开解密流。
 	info, serr := dp.Tenant.Root().Stat(dp.Rel)
@@ -270,12 +499,17 @@ func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 		}
 		s.rt.logger().Error("stat 文件失败", "file_name", dp.Filename, "error", serr.Error())
-		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: "stat 失败"}
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgStatFailed}
 	}
 	// 审查 P3：目录不可下载——显式 400（此前 ServeContent 对目录 seek 失败返回
 	// 平台相关的 403/500，语义不统一）。目录下载是用户误操作，明确拒绝。
 	if info.IsDir() {
 		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
+	}
+	// 显式请求密文（?ciphertext=1）：at-rest 加密卷返回**存储原样**字节（不解密）——
+	// 加密只在存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验。
+	if dp.Ciphertext && dp.Tenant.Root().IsEncrypted() {
+		return s.openCiphertext(dp, info)
 	}
 	file, err := dp.Tenant.Root().OpenDecrypted(dp.Rel)
 	if err != nil {
@@ -290,34 +524,108 @@ func (s *Service) OpenPath(dp DownloadPath) (OpenedFile, error) {
 		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
 
-	out := OpenedFile{File: file, Info: info}
-	// 设置 SHA-256 checksum：优先从 store 读取，回退实时计算。
-	// 回退路径优先复用已打开的文件句柄（零额外 I/O），仅当计算成功后才写入缓存。
-	// 统一 per-tenant store + 根内相对路径 key（无 owner 前缀，与写端 checksumStoreFor 一致）。
-	if csStore, csKey := s.checksumStoreForRead(dp); csStore != nil {
-		if cs, ok := csStore.Get(csKey); ok {
-			out.Checksum = cs
-		} else {
-			if cs, cerr := checksumReader(file); cerr == nil {
-				csStore.Set(csKey, cs)
-				out.Checksum = cs
-			} else {
-				s.rt.logger().Warn("计算文件 checksum 失败", "error", cerr.Error(), "file_name", dp.Filename)
-			}
+	// 信任保证演进：下载流逐分块校验（读回比对 meta，异常 fail-closed）。装配层未注入
+	// meta 能力 / skip_verify / meta 缺失 → 返回 nil 直通（零回归）。仅可 Seek 流可校验
+	// （ServeContent 需求一致——不可 Seek 不校验，后续断言 500）。
+	if srf, ok := file.(SeekReadCloser); ok {
+		if vf, verr := s.rt.verifyDownload(ctx, dp.Tenant.Root(), dp.Rel, srf); verr != nil {
+			_ = file.Close()
+			s.rt.logger().Error("下载校验装配失败", "file_name", dp.Filename, "error", verr.Error())
+			return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+		} else if vf != nil {
+			file = vf
 		}
 	}
+
+	out := OpenedFile{File: file, Info: info}
+	s.attachChecksum(dp, file, &out)
 	return out, nil
 }
 
-// checksumSnapshot 返回 owner 的 checksum 台账快照（未装配 → 空 map）。
-//
-// 抽成方法是为了让 List/Search 的"一次性快照"约定只有一处（见既有注释：per-tenant store，
-// key 为相对租户根的 rel）。
-func (s *Service) checksumSnapshot(owner string) map[string]string {
-	if cs := s.rt.checksumStore(owner); cs != nil {
-		return cs.GetAll()
+// openCiphertext 打开 at-rest 加密卷的**存储原样**字节（?ciphertext=1，不解密）——
+// info 为上方 raw Stat（真实密文大小，raw *os.File 原生可 Seek，Range/Content-Length 正确）；
+// 不接明文的 meta 校验与 checksum 台账（那份描述明文，不适用于密文响应）。
+func (s *Service) openCiphertext(dp DownloadPath, info os.FileInfo) (OpenedFile, error) {
+	raw, oerr := dp.Tenant.Root().Open(dp.Rel)
+	if oerr != nil {
+		if os.IsNotExist(oerr) {
+			return OpenedFile{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
+		}
+		s.rt.logger().Error("打开密文文件失败", "file_name", dp.Filename, "error", oerr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
 	}
-	return map[string]string{}
+	return OpenedFile{File: raw, Info: info}, nil
+}
+
+// attachChecksum 为 OpenedFile 填充 SHA-256 checksum（台账命中或实时计算，零额外 I/O）。
+func (s *Service) attachChecksum(dp DownloadPath, file io.Reader, out *OpenedFile) {
+	// 统一 per-tenant store + 根内相对路径 key（无 owner 前缀，与写端 checksumStoreFor 一致）。
+	csStore, csKey := s.checksumStoreForRead(dp)
+	if csStore == nil {
+		return
+	}
+	if cs, ok := checksumGet(csStore, dp.VolumeName, csKey); ok {
+		out.Checksum = cs
+		return
+	}
+	if cs, cerr := checksumReader(file); cerr == nil {
+		checksumSet(csStore, dp.VolumeName, csKey, cs)
+		out.Checksum = cs
+	} else {
+		s.rt.logger().Warn("计算文件 checksum 失败", "error", cerr.Error(), "file_name", dp.Filename)
+	}
+}
+
+// openExternalSource 打开外部卷服务端读取源（2026-10-05 通用文件获取 A/C 态）：
+// dp.Source 非 nil = secretdata 加密卷 / 私密明文外部卷——绕过 Tenant.Root()，
+// 经装配层注入的服务端读取源 Stat + Open（解密转发 / 整流）。ctx 贯穿（评审 I-3
+// 修复：此前用 Background 丢弃请求 ctx，client 断开不中止在途解密读）。
+func (s *Service) openExternalSource(ctx context.Context, dp DownloadPath) (OpenedFile, error) {
+	info, serr := dp.Source.Stat(ctx)
+	if serr != nil {
+		s.rt.logger().Error("外部卷 stat 文件失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", serr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgStatFailed}
+	}
+	if info.IsDir() {
+		return OpenedFile{}, &HTTPError{Status: http.StatusBadRequest, Message: "不能下载目录"}
+	}
+	seeker, oerr := dp.Source.Open(ctx)
+	if oerr != nil {
+		s.rt.logger().Error("外部卷打开文件失败", "file_name", dp.Filename, "volume", dp.VolumeName, "error", oerr.Error())
+		return OpenedFile{}, &HTTPError{Status: http.StatusInternalServerError, Message: errMsgOpenFileFailed}
+	}
+	return OpenedFile{File: seeker, Info: info}, nil
+}
+
+// checksumStoreReady 返回可用于**逐条**查询的台账（未装配 ⇒ nil）；台账为空时按 owner
+// 触发**一次**自愈重建。判空用 O(1) 的 Len（不再 GetAll 全量拷贝）。
+func (s *Service) checksumStoreReady(ctx context.Context, owner string) checksum.ChecksumStoreIface {
+	st := s.rt.checksumStore(owner)
+	if st == nil {
+		return nil
+	}
+	if lc, ok := st.(checksum.LenCounter); ok && lc.Len() == 0 && s.checksumRebuildAllowed(owner) {
+		if n, err := s.RebuildChecksums(ctx, owner); err == nil && n > 0 {
+			s.rt.logger().Info("checksum 台账已从对象 meta 重建", "owner", owner, "entries", n)
+		}
+	}
+	return st
+}
+
+// checksumLookupFor 返回搜索期**逐条惰性**取 checksum 的查找器（O(1)/次，无全量拷贝）：
+// 卷维度键优先、旧无卷键兜底（§15.1.1 迁移兼容）。台账为空时按 owner **一次**自愈重建
+// （与既有全量入口同语义；判空用 O(1) 的 Len，避免 GetAll 拷贝）。
+func (s *Service) checksumLookupFor(ctx context.Context, owner string) checksumLookup {
+	st := s.checksumStoreReady(ctx, owner)
+	if st == nil {
+		return nil
+	}
+	return func(vol, rel string) string {
+		if sum, ok := checksumGet(st, vol, "user/"+rel); ok {
+			return sum
+		}
+		return ""
+	}
 }
 
 // asHTTPError 取出 *HTTPError（非该类型返回 nil）。

@@ -21,11 +21,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 
 	"github.com/cocomhub/sproxy/pkg/quota"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/sync/httptransport"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // Executor 基于 pkg/sync.Engine 的同步执行器（实现 syncmgr.Executor）。
@@ -33,6 +35,18 @@ type Executor struct {
 	// TenantRoot 按任务 owner 解析租户 user 根绝对路径（push 的 src / pull 的 dst 根）。
 	// 装配层注入（如 Handlers.syncTenantRoot）；nil 时 Run 报错（fail-closed）。
 	TenantRoot syncmgr.TenantRootResolver
+	// TenantRootFS 是**可选**的「Root 感知本地 FS 提供者」：按 owner 返回根在该租户**租户根**
+	// （user 桶父目录）的 FS。装配层注入 `server.NewRootFS(tnt.Root())` ⇒ 本地侧读写经
+	// `storage.Root` 入口，自动获得 **at-rest 透明加解密**与**封印**语义（评审 P0：此前本地侧
+	// 一律裸 `NewLocalFS(绝对路径)`——加密卷上 pull 落明文、push 上传密文）。
+	// nil = 回落路径式 LocalFS（测试/未接线装配；生产应注入）。
+	TenantRootFS func(owner string) (syncpkg.FS, bool)
+	// TenantPhysSize 是**可选**的「记账口径提供者」：按 owner 返回本卷的**物理**字节折算
+	// （nil = 恒等）。与 `TenantRootFS` **必须同源**：`TenantRootFS` 返回的 FS 经
+	// `NewRootFS` **透明加密**落盘（物理 > 逻辑），而逐文件配额记账用的是源条目 `size`
+	// （**逻辑**）⇒ 不折算会**少记** `(物理 − 逻辑)`（owner 配额侧永不收敛 ⇒ 可超真实配额，G1）。
+	// 装配层注入 `h.SyncTenantPhysSize`（`files.RootPhysSizer` 同源）。
+	TenantPhysSize func(owner string) func(int64) int64
 	// TenantScope 按任务 owner 解析租户 user 桶配额 Scope（nil 时不启用逐文件预留，
 	// 由 syncmgr 占位/对账机制兜底——兼容未装配 Scope 的旧装配）。写前逐文件
 	// TryReserve(文件 size) 是"写前 guard"，写成功 Commit(actual) 使 user 桶等额入账。
@@ -57,7 +71,7 @@ type Executor struct {
 	MeshFS MeshFSFactory
 	// BaidupcsFS 是**装配层注入**的本机百度网盘卷 FS 工厂（P4）。
 	//
-	// 与 mesh 同构：`pkg/syncexec` 不得依赖 `pkg/baidupcs` 具体类型、也不自己装配网盘卷
+	// 与 mesh 同构：`pkg/syncexec` 不得依赖 `pkg/volume/ext/baidupcs` 具体类型、也不自己装配网盘卷
 	// （卷名/凭据/中间态目录全在装配层）。工厂按远端配置的 Volume（本机卷名）构造对应
 	// StorageFS 并返回 close。
 	//
@@ -153,6 +167,18 @@ type quotaLocalFS struct {
 	// sync pull 同样生效。
 	owner    string
 	scopeFor func(owner, rel string) *quota.Scope
+	// phys 是本卷的**记账口径折算**（nil = 恒等；加密卷 ⇒ `EncryptedPhysicalSize`）。
+	// 见 `Executor.TenantPhysSize` 的注释：本地目标经 `NewRootFS` 透明加密落盘，
+	// 而 `size` 是源条目的**逻辑**长度 ⇒ 不折算会少记（可超真实配额，G1）。
+	phys func(int64) int64
+}
+
+// physSize 把**逻辑**字节折算为本卷**记账口径**（物理）；nil / 非正值 ⇒ 原样（明文卷零回归）。
+func (q *quotaLocalFS) physSize(n int64) int64 {
+	if n <= 0 || q.phys == nil {
+		return n
+	}
+	return q.phys(n)
 }
 
 func (q *quotaLocalFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
@@ -172,22 +198,30 @@ func (q *quotaLocalFS) MakeDir(ctx context.Context, p string) error { return q.i
 
 // WriteFile 先按 relPath 解析子 Scope 并 TryReserve(size)，写成功 Commit(actual) 入账；
 // 失败 Release 归还。scopeFor 为 nil 时退化为直写。
-func (q *quotaLocalFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (q *quotaLocalFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	scope := q.examScope(relPath)
 	if scope == nil {
-		return q.inner.WriteFile(ctx, relPath, r, size, mtime)
+		return q.inner.WriteFile(ctx, key, relPath, r, size, mtime)
 	}
-	res, err := scope.TryReserve(size)
+	// 记账口径（2026-10-16 高风险区审核修复）：本地目标经 `TenantRootFS`（生产 = `NewRootFS`）
+	// **透明加密落盘** ⇒ 预留与结算都必须按**物理**字节；`size` 是源条目的**逻辑**长度。
+	charge := q.physSize(size)
+	// **刻意不排队等待**（用 TryReserve 而非 WaitReserve）：逐文件 guard 的语义是
+	// 「该文件因配额失败（ActionError）并**继续同步其余文件**」，不是「阻塞 30s 等空间」——
+	// 改成等待会让一个配额不足的文件把整轮同步拖住（实测 `TestQuota_TwoConcurrentPulls_*`
+	// 由「立即失败」变为 30s 超时 ✗）。整任务的排队重试由 syncmgr 的占位/对账承担。
+	res, err := scope.TryReserve(charge)
 	if err != nil {
 		return err // 配额不足：该文件失败（ActionError），不中止整体同步
 	}
-	// 委托 inner.WriteFile（其 copyWithCtx 已做 ctx 感知拷贝）。成功 Commit(size)——
-	// 源条目 size 即已知真实大小（与 engine 的 BytesDone/进度一致）；失败 Release 归还。
-	if werr := q.inner.WriteFile(ctx, relPath, r, size, mtime); werr != nil {
+	// 委托 inner.WriteFile（其 copyWithCtx 已做 ctx 感知拷贝）。成功 Commit(charge)——
+	// 源条目 size 即已知真实**逻辑**大小（与 engine 的 BytesDone/进度一致），入账前折算为物理；
+	// 失败 Release 归还。
+	if werr := q.inner.WriteFile(ctx, key, relPath, r, size, mtime); werr != nil {
 		res.Release()
 		return werr
 	}
-	res.Commit(size)
+	res.Commit(charge)
 	return nil
 }
 
@@ -226,16 +260,6 @@ func (e *Executor) tenantScope(owner string) *quota.Scope {
 // 的 HTTP 文件 API（SproxySig 认证）。mesh 通道为后续增强——Dial 由配置驱动，未来可注入
 // mesh 拨号器（HTTPTransportConfig.Dial 是注入点）。
 func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig) (*syncmgr.RunResult, error) {
-	var srcFS, dstFS syncpkg.FS
-	var remoteClosers []func()
-	defer func() {
-		for _, closeFn := range remoteClosers {
-			if closeFn != nil {
-				closeFn()
-			}
-		}
-	}()
-
 	// 本地端（push 的 src / pull 的 dst）按任务 owner 解析到租户 user 根（<root>/<tenant>/user）。
 	// 布局迁移后由注入的 TenantRoot 解析器派生（与 pkg/server 租户布局单一来源，owner
 	// 校验集中到 pkg/storage，消除双端漂移）；owner 由服务端派生（可信），解析失败 fail-closed。
@@ -243,43 +267,123 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(localRoot, 0o755); err != nil {
-		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, err)
+	if mkErr := os.MkdirAll(localRoot, 0o755); mkErr != nil {
+		return nil, fmt.Errorf("创建本地同步根 %s 失败: %w", localRoot, mkErr)
 	}
-
-	if task.Direction == string(syncmgr.DirectionPush) {
-		srcFS = syncpkg.NewLocalFS(localRoot, e.logger())
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
-		if err != nil {
-			return nil, err
-		}
-		remoteClosers = append(remoteClosers, closeRemote)
-		dstFS = remoteFS
-	} else {
-		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
-		if err != nil {
-			return nil, err
-		}
-		remoteClosers = append(remoteClosers, closeRemote)
-		srcFS = remoteFS
-		dstFS = &quotaLocalFS{
-			inner: syncpkg.NewLocalFS(localRoot, e.logger()),
-			owner: task.Owner,
-			// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
-			// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
-			// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
-			scopeFor: e.scopeFor,
-		}
+	srcFS, dstFS, remoteClosers, err := e.prepareDirectionFS(ctx, task, remote, localRoot, filepath.Dir(localRoot))
+	if err != nil {
+		return nil, err
 	}
+	defer closeRemoteFS(remoteClosers)
 
 	// 双向（both）：push+pull 合并为一次任务——先 push（本地→远程）再 pull（远程→本地）。
 	// 语义（roadmap P0）：一次提交两边一致；两端各自新增/修改在任务内互相传播；
 	// 删除传播与冲突策略由任务参数控制。
 	if task.Direction == string(syncmgr.DirectionBoth) {
-		return e.runBoth(ctx, task, remote, localRoot)
+		return e.runBoth(ctx, task, remote, localRoot, filepath.Dir(localRoot))
 	}
 
-	job := &syncpkg.Job{
+	job := buildJob(task)
+
+	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
+	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
+	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
+
+	result := e.buildRunResult(job, verifyFailed, srcFS, dstFS)
+	e.applyFailureStatus(result, job, syncErr)
+	return result, syncErr
+}
+
+// closeRemoteFS 依次关闭所有远端 FS 的 close 回调（幂等：nil 跳过）。
+func closeRemoteFS(remoteClosers []func()) {
+	for _, closeFn := range remoteClosers {
+		if closeFn != nil {
+			closeFn()
+		}
+	}
+}
+
+// prepareDirectionFS 按方向准备 src/dst FS：push（本地→远程）；pull（远程→本地）。
+// 返回待延迟关闭的远端 close 回调列表。
+func (e *Executor) prepareDirectionFS(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (syncpkg.FS, syncpkg.FS, []func(), error) {
+	if task.Direction == string(syncmgr.DirectionPush) {
+		// **键空间**：push 源的引擎键空间是 **user 桶相对**（job.Src 为空 = 桶根），而
+		// `localFS` 返回的是**租户根** FS（Root 感知提供者注入后）⇒ 必须补 `user/` 前缀，
+		// 否则会把整个租户根（含 meta/ 等内部桶）当源推送（评审第 2 轮 P0 回归）。
+		srcFS := e.pushSourceFS(tenantRoot, task.Owner)
+		remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return srcFS, remoteFS, []func(){closeRemote}, nil
+	}
+	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dstFS := &quotaLocalFS{
+		inner: e.newLocalPullFS(tenantRoot, task.Owner),
+		owner: task.Owner,
+		// 解析器按 (owner, rel) 路由 bucket_limits 子目录配额；e.tenantScope 仅按 owner
+		// 取 user 桶——由 syncexec 统一补 "user/" 前缀交给注册的 scopeFor（若为 nil 则
+		// 该租户无配额，退化为直写）。装配层注入的 ParseScope 见 Handlers.SyncQuotaScope。
+		scopeFor: e.scopeFor,
+		phys:     e.physFor(task.Owner),
+	}
+	return remoteFS, dstFS, []func(){closeRemote}, nil
+}
+
+// pushSourceFS 返回 push 方向的**源 FS**：引擎键空间是 **user 桶相对**（`job.Src` 空 = 桶根），
+// 而 `localFS` 返回**租户根** FS ⇒ 必须叠加 `user/` 前缀（否则会把整个租户根——含 meta/ 等内部
+// 桶——当源推送；评审第 2 轮 P0 回归）。抽为单一事实源，供 push 与 runBoth 共用。
+func (e *Executor) pushSourceFS(tenantRoot, owner string) syncpkg.FS {
+	return syncpkg.NewPrefixFS(e.localFS(tenantRoot, owner), "user/")
+}
+
+// physFor 返回该 owner 本卷的**记账口径折算**（nil = 恒等）。与 `TenantRootFS` 同源注入：
+// 本地目标经 `NewRootFS` 透明加密落盘 ⇒ 逐文件配额必须按**物理**字节记（见字段注释）。
+func (e *Executor) physFor(owner string) func(int64) int64 {
+	if e.TenantPhysSize == nil {
+		return nil
+	}
+	return e.TenantPhysSize(owner)
+}
+
+// localFS 返回本地侧 FS：优先 **Root 感知**提供者（加密/封印语义正确），否则回落路径式 LocalFS。
+// 生产装配注入 TenantRootFS；测试可注入替身或留 nil（零回归）。
+func (e *Executor) localFS(localRoot, owner string) syncpkg.FS {
+	if e.TenantRootFS != nil {
+		if fs, ok := e.TenantRootFS(owner); ok && fs != nil {
+			return fs
+		}
+	}
+	return syncpkg.NewLocalFS(localRoot, e.logger())
+}
+
+// newLocalPullFS 构造 pull 方向的本地目标 FS：租户根上的「user 桶视图」× trusted.Wrap。
+//
+// 安全/完整性背景（第 5 轮对抗评审 P1）：`pkg/syncexec` 全包零 meta 引用——pull/both
+// 的本地落盘不重建也不失效 sidecar，导致（a）覆盖已上传文件后旧 sidecar 描述旧内容 →
+// `/download` 经 `meta.VerifyReadSeeker` 尺寸/分块失配 → **永久 fail-closed 不可下载**；
+// （b）新落盘文件无 sidecar → 下载**静默零校验**。
+//
+// 为何不直接在 user 根上 Wrap：`TenantRoot` 解析器返回的是 **user 桶绝对路径**，其键为
+// 裸相对路径（无功能桶段）——`meta.MetaPath` 会回落 `docs/x.meta`（用户可见目录，§8
+// 记档的无桶段兜底）。故先上移到租户根（user 桶父目录）并把键映射为 `user/<rel>`，
+// trusted.Wrap 随之把 sidecar 落到 `meta/<rel>.meta`——与本地卷上传路径
+// `filesMetaPolicy.WriteMeta` **同一布局**，下载校验侧无需任何额外接线。
+func (e *Executor) newLocalPullFS(tenantRoot string, owner string) syncpkg.FS {
+	inner := e.localFS(tenantRoot, owner)
+	// M8 修复（第 7 轮 MAJOR）：桶前缀视图改用 `syncpkg.PrefixFS`（**单一实现**：全能力
+	// 转发——WriteIfAbsent/ReserveSpace/LocalVolume/Mover/Copier/Linker/RangeReader/
+	// DirectURL/Provider/StagingQuota*，并已纳入 R21 门禁）。此前本包自建的 userBucketFS
+	// 只转发 7 个基础方法：消费方对 meta.Provider/Mover 等的断言恒 false → 静默降级。
+	return syncpkg.NewPrefixFS(trusted.Wrap(inner, trusted.Options{Logger: e.logger()}), "user/")
+}
+
+// buildJob 由任务参数构造 sync 引擎 Job。
+func buildJob(task *syncmgr.SyncTask) *syncpkg.Job {
+	return &syncpkg.Job{
 		ID:             task.ID,
 		Direction:      syncpkg.Direction(task.Direction),
 		Src:            task.Src,
@@ -292,12 +396,11 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 		VerifyAfter:    task.VerifyAfter,
 	}
+}
 
-	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
-	syncErr := engine.Sync(ctx, srcFS, dstFS, job)
-	verifyFailed := e.verifyAfterSync(ctx, srcFS, dstFS, job)
-
-	result := &syncmgr.RunResult{
+// buildRunResult 汇总引擎结果到 syncmgr.RunResult（含载体计数上报）。
+func (e *Executor) buildRunResult(job *syncpkg.Job, verifyFailed int64, srcFS, dstFS syncpkg.FS) *syncmgr.RunResult {
+	return &syncmgr.RunResult{
 		Status:       string(job.Status),
 		FilesTotal:   job.Stats.FilesTotal,
 		FilesDone:    job.Stats.FilesDone,
@@ -310,12 +413,21 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		// 双向都查（push 时远端是 dstFS，pull 时是 srcFS）；两者都没实现则留空。
 		Carriers: carrierStatsOf(dstFS, srcFS),
 	}
+}
+
+// applyFailureStatus 识别失败并标记可重试性：
+//   - job.Status=Failed 且有 syncErr：业务/传输错误按 IsRetryableError 判定重试性；
+//   - 引擎把单文件传输错误吞为 FileResult{ActionError} 且全部文件失败（网络类）：标记
+//     StatusFailed + 可重试（审查 I-2，交给 syncmgr 自动重试）。
+func (e *Executor) applyFailureStatus(result *syncmgr.RunResult, job *syncpkg.Job, syncErr error) {
 	if job.Status == syncpkg.StatusFailed && syncErr != nil {
 		result.Error = syncErr.Error()
 		// 阶段 6 自动重试：瞬时网络错误（连接拒绝/超时/5xx）标记为可重试，
 		// 业务失败（校验/路径等确定性错误）为 false（重试不会成功）。
 		result.Retryable = httptransport.IsRetryableError(syncErr)
-	} else if httptransport.IsRetryableFileFailure(job) {
+		return
+	}
+	if httptransport.IsRetryableFileFailure(job) {
 		// 审查 I-2：引擎把单文件传输错误吞为 FileResult{ActionError}，最终
 		// job.Status 保持 completed（不触发 StatusFailed 路径）——但"全部文件
 		// 传输失败且错误为网络类"（如 push 到宕机远端）实际是可重试瞬时故障，
@@ -325,7 +437,6 @@ func (e *Executor) Run(ctx context.Context, task *syncmgr.SyncTask, remote syncm
 		result.Error = "同步全部文件传输失败（疑似瞬时网络故障，将重试）"
 		result.Retryable = true
 	}
-	return result, syncErr
 }
 
 // ErrMeshTransportNotWired 表示**本进程未注入 mesh 载体工厂**（`Executor.MeshFS == nil`），
@@ -363,42 +474,51 @@ func (e *Executor) newRemoteFS(ctx context.Context, remote syncmgr.RemoteConfig,
 		}
 		return tr, func() { _ = tr.Close() }, nil
 	case syncmgr.RemoteKindMesh:
-		if e.MeshFS == nil {
-			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
-		}
-		fs, closeFn, err := e.MeshFS(ctx, remote)
-		if err != nil {
-			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
-			return nil, nil, fmt.Errorf("remote %q: mesh 载体建链失败: %w", remote.Name, err)
-		}
-		if fs == nil {
-			return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
-		}
-		if closeFn == nil {
-			closeFn = func() {}
-		}
-		return fs, closeFn, nil
+		return e.newMeshFS(ctx, remote)
 	case syncmgr.RemoteKindVolume:
-		// volume = 通用本机卷（WebDAV/baidupcs 等；kind=baidupcs 经 KindOrDirect 归一到此）：
-		// 工厂按 remote.Volume 查装配层注入的本机卷 FS（Set.External 统一寻址）。
-		if e.BaidupcsFS == nil {
-			return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
-		}
-		fs, closeFn, err := e.BaidupcsFS(ctx, remote, owner)
-		if err != nil {
-			// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
-			return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)
-		}
-		if fs == nil {
-			return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
-		}
-		if closeFn == nil {
-			closeFn = func() {}
-		}
-		return fs, closeFn, nil
+		return e.newVolumeFS(ctx, remote, owner)
 	default:
 		return nil, nil, fmt.Errorf("remote %q: 未知载体类型 %q（可选：direct|mesh|volume）", remote.Name, remote.Kind)
 	}
+}
+
+// newMeshFS 经 mesh 隧道构造远端 sync.FS（P3 装配，未注入工厂明确报错而**不**回落 direct）。
+func (e *Executor) newMeshFS(ctx context.Context, remote syncmgr.RemoteConfig) (syncpkg.FS, func(), error) {
+	if e.MeshFS == nil {
+		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrMeshTransportNotWired)
+	}
+	fs, closeFn, err := e.MeshFS(ctx, remote)
+	if err != nil {
+		// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+		return nil, nil, fmt.Errorf("remote %q: mesh 载体建链失败: %w", remote.Name, err)
+	}
+	if fs == nil {
+		return nil, nil, fmt.Errorf("remote %q: mesh 载体工厂返回空 FS（装配错误）", remote.Name)
+	}
+	if closeFn == nil {
+		closeFn = func() { /* 无清理 */ }
+	}
+	return fs, closeFn, nil
+}
+
+// newVolumeFS 构造本机卷版远端 sync.FS（kind=baidupcs 经 KindOrDirect 归一为 volume）。
+// 未注入工厂明确报错而**不**回落 direct。
+func (e *Executor) newVolumeFS(ctx context.Context, remote syncmgr.RemoteConfig, owner string) (syncpkg.FS, func(), error) {
+	if e.BaidupcsFS == nil {
+		return nil, nil, fmt.Errorf("remote %q: %w", remote.Name, ErrVolumeNotWired)
+	}
+	fs, closeFn, err := e.BaidupcsFS(ctx, remote, owner)
+	if err != nil {
+		// 工厂错误原样上抛（errors.Is 可判定），**绝不回落 direct**。
+		return nil, nil, fmt.Errorf("remote %q: 本机卷建链失败: %w", remote.Name, err)
+	}
+	if fs == nil {
+		return nil, nil, fmt.Errorf("remote %q: 本机卷工厂返回空 FS（装配错误）", remote.Name)
+	}
+	if closeFn == nil {
+		closeFn = func() { /* 无清理 */ }
+	}
+	return fs, closeFn, nil
 }
 
 // newDirectTransport 构造直连远程 sproxy 的 HTTPTransport（SproxySig 认证）。
@@ -485,7 +605,7 @@ var _ syncmgr.Executor = (*Executor)(nil)
 // runBoth 执行双向同步：push（本地→远程）+ pull（远程→本地）两次单向，合并进度/结果。
 // push 方向本地配额不预留（对齐单向 push）；pull 方向本地写侧用 quotaLocalFS 装饰（对齐单向 pull）。
 // 顺序先 push 后 pull：先把我方新增/修改推出去，再拉取对方新增/修改——两边最终一致。
-func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot string) (*syncmgr.RunResult, error) {
+func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote syncmgr.RemoteConfig, localRoot, tenantRoot string) (*syncmgr.RunResult, error) {
 	remoteFS, closeRemote, err := e.newRemoteFS(ctx, remote, task.Owner)
 	if err != nil {
 		return nil, err
@@ -508,7 +628,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		VerifyAfter:    task.VerifyAfter,
 	}
 	engine := &syncpkg.Engine{Logger: e.logger(), ConflictRecorder: e.conflictRecorder()}
-	pushErr := engine.Sync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pushErr := engine.Sync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	if ctx.Err() != nil {
 		return &syncmgr.RunResult{Status: string(syncpkg.StatusCancelled), Error: ctx.Err().Error()}, ctx.Err()
 	}
@@ -527,11 +647,12 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 		DeletePolicy:   syncpkg.DeletePolicy(task.DeletePolicy),
 		Remote:         syncpkg.RemoteRef{Node: task.Remote},
 	}
-	// pull 写侧配额感知（对齐单向 pull）。
+	// pull 写侧配额感知（对齐单向 pull）；本地目标叠 trusted.Wrap 生成/联动 sidecar。
 	pullJobDst := &quotaLocalFS{
-		inner:    syncpkg.NewLocalFS(localRoot, e.logger()),
+		inner:    e.newLocalPullFS(tenantRoot, task.Owner),
 		owner:    task.Owner,
 		scopeFor: e.scopeFor,
+		phys:     e.physFor(task.Owner),
 	}
 	pullErr := engine.Sync(ctx, remoteFS, pullJobDst, pullJob)
 	if ctx.Err() != nil {
@@ -539,7 +660,7 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 	}
 
 	// 校验核对（verify_after=true）：push 段验远程目标、pull 段验本地目标（读侧同步用源 FS）。
-	pushVerify := e.verifyAfterSync(ctx, syncpkg.NewLocalFS(localRoot, e.logger()), remoteFS, pushJob)
+	pushVerify := e.verifyAfterSync(ctx, e.pushSourceFS(tenantRoot, task.Owner), remoteFS, pushJob)
 	pullVerify := e.verifyAfterSync(ctx, remoteFS, pullJobDst.inner, pullJob)
 
 	// 合并结果：进度累计（push 的传输 + pull 的传输 + 两段删除）。
@@ -577,3 +698,16 @@ func (e *Executor) runBoth(ctx context.Context, task *syncmgr.SyncTask, remote s
 	}
 	return result, syncErr
 }
+
+// ListDirNames 转发轻量列举（未实现时回落 ListDir）：装配期只按名字分类时避免外部卷
+// 逐条补精确 size（见 sync.NameLister）。
+func (q *quotaLocalFS) ListDirNames(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	if nl, ok := syncpkg.AssertNameLister(q.inner); ok {
+		return nl.ListDirNames(ctx, p)
+	}
+	return q.inner.ListDir(ctx, p)
+}
+
+var (
+	_ syncpkg.NameLister = (*quotaLocalFS)(nil)
+)

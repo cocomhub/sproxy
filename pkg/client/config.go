@@ -61,6 +61,10 @@ type Config struct {
 	// Volume 是默认卷上下文（空 = auto）。多卷服务端下把文件操作默认限定到指定卷；
 	// 单条命令可用 --volume flag 覆盖（flag > 配置 > auto）。
 	Volume string `yaml:"volume" mapstructure:"volume"`
+
+	// DownloadProxy 是下载直连失败时的回退代理地址（如 "http://127.0.0.1:1080"）。
+	// 空 = 关闭回退（客户端默认）；配 DefaultDownloadProxy 启用本地代理。
+	DownloadProxy string `yaml:"download_proxy,omitempty" mapstructure:"download_proxy"`
 }
 
 func DefaultConfig() *Config {
@@ -220,12 +224,57 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的服务器地址: %s", value)
 		}
 		cfg.ServerURL = value
+	case "access_key", "access_key_secret", "access_key_id", "xfer_ca_file", "volume":
+		applyConfigDirect(cfg, key, value)
+	case "timeout", "chunk_size", "max_chunk_size":
+		return applyConfigNumeric(cfg, key, value)
+	case "hub_url":
+		if err := validateHubURL(value); err != nil {
+			return err
+		}
+		cfg.HubURL = value
+	case "node_id":
+		if strings.ContainsAny(value, " \t\r\n") {
+			return fmt.Errorf("node_id 不能包含空白字符: %s", value)
+		}
+		cfg.NodeID = value
+	case "peer_fingerprints":
+		fps, err := parsePeerFingerprints(value)
+		if err != nil {
+			return err
+		}
+		cfg.PeerFingerprints = fps
+	case "xfer_insecure":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("无效的 xfer_insecure: %w（应为 true/false）", err)
+		}
+		cfg.XferInsecure = b
+	default:
+		return fmt.Errorf("未知配置键: %s", key)
+	}
+	return nil
+}
+
+// applyConfigDirect 处理纯字符串赋值的配置键。
+func applyConfigDirect(cfg *Config, key, value string) {
+	switch key {
 	case "access_key":
 		cfg.AccessKey = value
 	case "access_key_secret":
 		cfg.AccessKeySecret = value
 	case "access_key_id":
 		cfg.AccessKeyID = value
+	case "xfer_ca_file":
+		cfg.XferCAFile = value
+	case "volume":
+		cfg.Volume = strings.TrimSpace(value)
+	}
+}
+
+// applyConfigNumeric 处理数值类配置键（timeout/chunk_size/max_chunk_size）。
+func applyConfigNumeric(cfg *Config, key, value string) error {
+	switch key {
 	case "timeout":
 		if timeout, err := strconv.Atoi(value); err != nil {
 			return fmt.Errorf("无效的超时值: %w", err)
@@ -244,46 +293,36 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的最大分块大小: %w", err)
 		}
 		cfg.MaxChunkSize = maxChunkSize
-	case "hub_url":
-		if value != "" {
-			u, perr := url.Parse(value)
-			if perr != nil || u.Scheme == "" || u.Host == "" {
-				return fmt.Errorf("无效的 hub 地址: %s", value)
-			}
-		}
-		cfg.HubURL = value
-	case "node_id":
-		if strings.ContainsAny(value, " \t\r\n") {
-			return fmt.Errorf("node_id 不能包含空白字符: %s", value)
-		}
-		cfg.NodeID = value
-	case "peer_fingerprints":
-		fps := []string{}
-		for part := range strings.SplitSeq(value, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-			if _, err := tunnel.ParseFingerprint(part); err != nil {
-				return fmt.Errorf("无效的对端指纹: %s（应为 64 hex 或 sha256:<64 hex>）", part)
-			}
-			fps = append(fps, part)
-		}
-		cfg.PeerFingerprints = fps
-	case "xfer_ca_file":
-		cfg.XferCAFile = value
-	case "xfer_insecure":
-		b, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("无效的 xfer_insecure: %w（应为 true/false）", err)
-		}
-		cfg.XferInsecure = b
-	case "volume":
-		cfg.Volume = strings.TrimSpace(value)
-	default:
-		return fmt.Errorf("未知配置键: %s", key)
 	}
 	return nil
+}
+
+// validateHubURL 校验 hub 地址可解析且含 scheme/host。
+func validateHubURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	u, perr := url.Parse(value)
+	if perr != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("无效的 hub 地址: %s", value)
+	}
+	return nil
+}
+
+// parsePeerFingerprints 解析逗号分隔的对端指纹列表并逐个校验格式。
+func parsePeerFingerprints(value string) ([]string, error) {
+	fps := []string{}
+	for part := range strings.SplitSeq(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, err := tunnel.ParseFingerprint(part); err != nil {
+			return nil, fmt.Errorf("无效的对端指纹: %s（应为 64 hex 或 sha256:<64 hex>）", part)
+		}
+		fps = append(fps, part)
+	}
+	return fps, nil
 }
 
 // HandleConfigSet 更新配置并写入文件。
@@ -296,22 +335,23 @@ func HandleConfigSet(cfg *Config, configPath, key, value string) error {
 
 // ConfigResponse 是 GET /api/config 的响应结构体。
 type ConfigResponse struct {
-	LogLevel           string `json:"log_level"`
-	LogFormat          string `json:"log_format"`
-	AccessKeysSet      bool   `json:"access_keys_set"`
-	RateLimitRequests  int    `json:"rate_limit_requests"`
-	RateLimitWindow    string `json:"rate_limit_window"`
-	MaxStorageBytes    int64  `json:"max_storage_bytes"`
-	ChunkSize          int64  `json:"chunk_size"`
-	UploadSessionTTL   string `json:"upload_session_ttl"`
-	VersioningEnabled  bool   `json:"versioning_enabled"`
-	VersioningMax      int    `json:"versioning_max_versions"`
-	CloudMaxConcurrent int    `json:"cloud_max_concurrent"`
-	CloudSyncThreshold int64  `json:"cloud_sync_threshold"`
-	HubEnabled         bool   `json:"hub_enabled"`
-	TLSEnabled         bool   `json:"tls_enabled"`
-	Addr               string `json:"addr"`
-	StorageRoot        string `json:"storage_root"`
+	LogLevel                 string `json:"log_level"`
+	LogFormat                string `json:"log_format"`
+	AccessKeysSet            bool   `json:"access_keys_set"`
+	RateLimitRequests        int    `json:"rate_limit_requests"`
+	RateLimitWindow          string `json:"rate_limit_window"`
+	MaxStorageBytes          int64  `json:"max_storage_bytes"`
+	ChunkSize                int64  `json:"chunk_size"`
+	UploadSessionTTL         string `json:"upload_session_ttl"`
+	VersioningEnabled        bool   `json:"versioning_enabled"`
+	VersioningMax            int    `json:"versioning_max_versions"`
+	CloudMaxConcurrent       int    `json:"cloud_max_concurrent"`
+	CloudTransferConcurrency int    `json:"cloud_transfer_concurrency"`
+	CloudSyncThreshold       int64  `json:"cloud_sync_threshold"`
+	HubEnabled               bool   `json:"hub_enabled"`
+	TLSEnabled               bool   `json:"tls_enabled"`
+	Addr                     string `json:"addr"`
+	StorageRoot              string `json:"storage_root"`
 }
 
 // GetConfig 获取远程服务器配置。

@@ -17,7 +17,6 @@ import (
 //   - `atomicRenameRoot`（`pkg/files/service.go` ↔ `pkg/server/upload_handler.go`）；
 //   - `volumePoolForTenant`（`pkg/files/version_store.go` ↔ `pkg/server/volumes.go`）；
 //   - `volumeFileExists`（`pkg/files/read.go` ↔ `pkg/server/volumes.go`，只读面引入）；
-//   - `copyWithContext`（`pkg/files/write.go` ↔ `pkg/server/upload_handler.go`，写面引入）；
 //   - `defaultVolumeAllows` / `locateForRead`（`pkg/files/service.go` ↔ `pkg/server/volumes.go`，
 //     写面引入）；
 //   - `drainAndVerifyBody`（`pkg/files/service.go` ↔ `pkg/server/auth.go`）；
@@ -41,7 +40,6 @@ import (
 //   - `volumeFileExists` 的「卷未知 → (false, nil)」与「stat 非 NotExist 错误 → 包装错误」
 //     两个分支——前者要求传入集合外的卷名（调用点只遍历视图内卷，不可达），后者要求
 //     I/O 权限类故障（测试环境难构造）；搜索用例只覆盖「存在/不存在」两条正常分支；
-//   - `copyWithContext` 的 `ctx.Done()` 提前返回分支——上传/移动的行为测试不会中途取消；
 //   - `defaultVolumeAllows` / `locateForRead` 的「VolSet 未装配 → 恒放行/未命中」与
 //     「显式 volume 未知卷名」分支——前者只在旧装配路径可达，后者在 ACL 用例里也只覆盖
 //     到「卷存在但不在视图」；且两份实现的差异面（ACL 判定次序）在多数用例矩阵下结果相同。
@@ -189,19 +187,12 @@ func assertImplParity(t *testing.T, name, domainFile, assemblyFile string, minLe
 	}
 }
 
-// copyCtxProbeRe / defaultVolProbeRe / locateReadProbeRe 是各守卫的正探针锚点
+// defaultVolProbeRe / locateReadProbeRe 是各守卫的正探针锚点
 // （两份实现归一化后都必须命中的语义标记）。
 var (
-	copyCtxProbeRe    = regexp.MustCompile(`ctx\.Done\(\)|32\*1024|sync\.Pool|copyBufPool`)
 	defaultVolProbeRe = regexp.MustCompile(`VS\.Default\(\)\.Name|Authorize\(owner\)`)
 	locateReadProbeRe = regexp.MustCompile(`LOC\{v\.Name,tnt\}|LOF\(owner, rel\)|VS\.ByName\(explicitVol\)`)
 )
-
-// TestCopyWithContext_ImplParity 断言 pkg/files 与 pkg/server 两份 copyWithContext 的
-// 归一化函数体逐字一致（该函数无 receiver，两份文本应完全相同）。
-func TestCopyWithContext_ImplParity(t *testing.T) {
-	assertImplParity(t, "copyWithContext", "pkg/files/write.go", "pkg/server/upload_handler.go", 200, copyCtxProbeRe)
-}
 
 // TestDefaultVolumeAllows_ImplParity 断言两份 defaultVolumeAllows 的归一化函数体逐字一致。
 func TestDefaultVolumeAllows_ImplParity(t *testing.T) {
@@ -333,16 +324,18 @@ func funcBodyOnly(t *testing.T, src, name string, norm func(string) string) stri
 }
 
 // TestFileChecksumRoot_ImplParity 断言两份 `*ChecksumRoot` 包装（领域侧 fileChecksumRoot /
-// 装配侧 FileChecksumRoot）的归一化函数体逐字一致：都必须「root.Open → defer Close →
-// 委托哈希函数」。分叉会让两侧对同一 storage.Root 相对路径给出不同摘要或不同错误语义。
+// 装配侧 FileChecksumRoot）都**委托** G0 基础包 `checksum.File`（单一事实源）：
+// 任一侧重新内联 OpenDecrypted + 哈希循环即破坏单一事实源，本断言判红。
 func TestFileChecksumRoot_ImplParity(t *testing.T) {
 	domain := funcBodyOnly(t, readRepoFile(t, "pkg/files/service.go"), "fileChecksumRoot", normChecksumImpl)
 	assembly := funcBodyOnly(t, readRepoFile(t, "pkg/server/checksum.go"), "FileChecksumRoot", normChecksumImpl)
-	if domain != assembly {
-		t.Fatalf("FileChecksumRoot 函数体漂移：\n pkg/files =\n%s\n pkg/server=\n%s", domain, assembly)
-	}
-	if len(domain) < 80 || !strings.Contains(domain, "HASH(") || !strings.Contains(domain, "root.Open(") {
-		t.Fatalf("抽取结果过弱，守卫可能失效（len=%d）：%q", len(domain), domain)
+	for name, body := range map[string]string{"pkg/files": domain, "pkg/server": assembly} {
+		if !strings.Contains(body, "checksum.File(") {
+			t.Fatalf("%s 的 *ChecksumRoot 包装必须委托 checksum.File（单一事实源）：%q", name, body)
+		}
+		if strings.Contains(body, "OpenDecrypted(") || strings.Contains(body, "sha256.") {
+			t.Fatalf("%s 重新内联了解密/哈希逻辑（破坏单一事实源）：%q", name, body)
+		}
 	}
 }
 

@@ -12,30 +12,37 @@ import (
 	"time"
 )
 
-func TestClientListVersions(t *testing.T) {
-	t.Parallel()
+// pushTestErr 非阻塞地向 errCh 推送错误（通道已满时丢弃，避免 mock handler 阻塞）。
+func pushTestErr(errCh chan<- error, err error) {
+	select {
+	case errCh <- err:
+	default:
+	}
+}
 
-	errCh := make(chan error, 3)
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// drainTestErrors 关闭 errCh 并上报其中收集的 mock 断言错误。
+func drainTestErrors(t *testing.T, errCh chan error) {
+	t.Helper()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+}
+
+// mockListVersionsHandler 返回 GET /api/versions 的 mock handler：
+// 校验方法/路径/filename 参数并返回两个版本，参数不符时 push 到 errCh。
+func mockListVersionsHandler(errCh chan<- error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
-			select {
-			case errCh <- fmt.Errorf("expected GET, got %s", r.Method):
-			default:
-			}
+			pushTestErr(errCh, fmt.Errorf("expected GET, got %s", r.Method))
 			return
 		}
 		if r.URL.Path != "/api/versions" {
-			select {
-			case errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path):
-			default:
-			}
+			pushTestErr(errCh, fmt.Errorf("expected /api/versions, got %s", r.URL.Path))
 			return
 		}
 		if r.URL.Query().Get("filename") != "test.txt" {
-			select {
-			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
-			default:
-			}
+			pushTestErr(errCh, fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")))
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
@@ -44,14 +51,12 @@ func TestClientListVersions(t *testing.T) {
 				{Filename: "test.txt", VersionID: 2, Size: 200, Checksum: "def456", CreatedAt: time.Now().Format(time.RFC3339)},
 			},
 		})
-	}))
-	defer mock.Close()
-
-	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
-	versions, err := c.ListVersions(t.Context(), "test.txt")
-	if err != nil {
-		t.Fatalf("ListVersions() = %v", err)
 	}
+}
+
+// assertVersionList 断言 /api/versions 返回的两个版本字段。
+func assertVersionList(t *testing.T, versions []VersionInfo) {
+	t.Helper()
 	if len(versions) != 2 {
 		t.Errorf("expected 2 versions, got %d", len(versions))
 	}
@@ -61,11 +66,69 @@ func TestClientListVersions(t *testing.T) {
 	if versions[0].Checksum != "abc123" {
 		t.Errorf("versions[0].Checksum = %q, want abc123", versions[0].Checksum)
 	}
+}
 
-	close(errCh)
-	for err := range errCh {
-		t.Error(err)
+// mockRestoreVersionHandler 返回 POST /api/versions 的 mock handler：
+// 校验 filename/version_id 参数并返回成功，参数不符时 push 到 errCh。
+func mockRestoreVersionHandler(errCh chan<- error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			pushTestErr(errCh, fmt.Errorf("expected POST, got %s", r.Method))
+			return
+		}
+		if r.URL.Query().Get("filename") != "test.txt" {
+			pushTestErr(errCh, fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")))
+			return
+		}
+		if r.URL.Query().Get("version_id") != "1" {
+			pushTestErr(errCh, fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "restored"})
 	}
+}
+
+// mockDeleteVersionHandler 返回 DELETE /api/versions 的 mock handler：
+// 校验方法/路径/filename/version_id 参数并返回成功，参数不符时 push 到 errCh。
+func mockDeleteVersionHandler(errCh chan<- error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			pushTestErr(errCh, fmt.Errorf("expected DELETE, got %s", r.Method))
+			return
+		}
+		if r.URL.Path != "/api/versions" {
+			pushTestErr(errCh, fmt.Errorf("expected /api/versions, got %s", r.URL.Path))
+			return
+		}
+		if r.URL.Query().Get("filename") != "test.txt" {
+			pushTestErr(errCh, fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")))
+			return
+		}
+		if r.URL.Query().Get("version_id") != "1" {
+			pushTestErr(errCh, fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "deleted"})
+	}
+}
+
+func TestClientListVersions(t *testing.T) {
+	t.Parallel()
+
+	errCh := make(chan error, 3)
+	mock := httptest.NewServer(mockListVersionsHandler(errCh))
+	defer mock.Close()
+
+	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
+	versions, err := c.ListVersions(t.Context(), "test.txt")
+	if err != nil {
+		t.Fatalf("ListVersions() = %v", err)
+	}
+	assertVersionList(t, versions)
+
+	drainTestErrors(t, errCh)
 }
 
 func TestClientListVersions_NotFound(t *testing.T) {
@@ -88,31 +151,7 @@ func TestClientRestoreVersion(t *testing.T) {
 	t.Parallel()
 
 	errCh := make(chan error, 3)
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			select {
-			case errCh <- fmt.Errorf("expected POST, got %s", r.Method):
-			default:
-			}
-			return
-		}
-		if r.URL.Query().Get("filename") != "test.txt" {
-			select {
-			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
-			default:
-			}
-			return
-		}
-		if r.URL.Query().Get("version_id") != "1" {
-			select {
-			case errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")):
-			default:
-			}
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "restored"})
-	}))
+	mock := httptest.NewServer(mockRestoreVersionHandler(errCh))
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
@@ -121,10 +160,7 @@ func TestClientRestoreVersion(t *testing.T) {
 		t.Fatalf("RestoreVersion() = %v", err)
 	}
 
-	close(errCh)
-	for err := range errCh {
-		t.Error(err)
-	}
+	drainTestErrors(t, errCh)
 }
 
 func TestClientRestoreVersion_Failure(t *testing.T) {
@@ -147,38 +183,7 @@ func TestClientDeleteVersion(t *testing.T) {
 	t.Parallel()
 
 	errCh := make(chan error, 4)
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "DELETE" {
-			select {
-			case errCh <- fmt.Errorf("expected DELETE, got %s", r.Method):
-			default:
-			}
-			return
-		}
-		if r.URL.Path != "/api/versions" {
-			select {
-			case errCh <- fmt.Errorf("expected /api/versions, got %s", r.URL.Path):
-			default:
-			}
-			return
-		}
-		if r.URL.Query().Get("filename") != "test.txt" {
-			select {
-			case errCh <- fmt.Errorf("expected filename=test.txt, got %s", r.URL.Query().Get("filename")):
-			default:
-			}
-			return
-		}
-		if r.URL.Query().Get("version_id") != "1" {
-			select {
-			case errCh <- fmt.Errorf("expected version_id=1, got %s", r.URL.Query().Get("version_id")):
-			default:
-			}
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]any{"Success": true, "Message": "deleted"})
-	}))
+	mock := httptest.NewServer(mockDeleteVersionHandler(errCh))
 	defer mock.Close()
 
 	c := NewFileClient(mock.URL, WithTimeout(5*time.Second))
@@ -187,10 +192,7 @@ func TestClientDeleteVersion(t *testing.T) {
 		t.Fatalf("DeleteVersion() = %v", err)
 	}
 
-	close(errCh)
-	for err := range errCh {
-		t.Error(err)
-	}
+	drainTestErrors(t, errCh)
 }
 
 func TestClientDeleteVersion_Failure(t *testing.T) {

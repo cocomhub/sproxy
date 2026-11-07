@@ -56,8 +56,8 @@ func TestService_UploadInit_RollsBackWhenSessionVanished(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	env := newChunkedTestEnv(t)
-	cap := &fakeCapacity{}
-	env.capacity = cap // 启用 P5 回退预留支，验证其归还
+	capMock := &fakeCapacity{}
+	env.capacity = capMock // 启用 P5 回退预留支，验证其归还
 
 	const uploadID = "vanish-1"
 	env.routeHook = func() {
@@ -88,8 +88,8 @@ func TestService_UploadInit_RollsBackWhenSessionVanished(t *testing.T) {
 		t.Fatalf("route.Release 应恰好被调用 1 次（回滚预留）, got %d", env.routeReleases)
 	}
 	// P5 回退预留必须恰好归还一次（从未登记进会话 ⇒ 只能由本路径归还）。
-	if cap.released != int64(len(content)) || cap.calls != 1 {
-		t.Fatalf("P5 回退预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), cap.released, cap.calls)
+	if capMock.released != int64(len(content)) || capMock.calls != 1 {
+		t.Fatalf("P5 回退预留应恰好归还 %d 字节, got released=%d calls=%d", len(content), capMock.released, capMock.calls)
 	}
 	// 刚创建的在途临时文件不得残留（否则永久占盘且无人回收）。
 	if n := countInflightTempFiles(t, env); n != 0 {
@@ -165,7 +165,7 @@ func TestService_AbortInitOrphanRollback_KeepsTakeoverTempFile(t *testing.T) {
 
 	// A 的 init 回滚：该临时名此刻归新会话 B ⇒ 不得删除。
 	rec := httptest.NewRecorder()
-	svc.abortInitOrphanRollback(rec, env.us, UploadRoute{Tenant: env.tnt, Release: func() { env.routeReleases++ }},
+	svc.abortInitOrphanRollback(&chunkedInit{w: rec, store: env.us}, UploadRoute{Tenant: env.tnt, Release: func() { env.routeReleases++ }},
 		env.tnt, tempRel, 0, "dir/takeover.bin", uploadID)
 
 	if rec.Code != http.StatusConflict {
@@ -184,7 +184,7 @@ func TestService_AbortInitOrphanRollback_KeepsTakeoverTempFile(t *testing.T) {
 		t.Fatalf("重新造遗留件: %v", err)
 	}
 	rec2 := httptest.NewRecorder()
-	svc.abortInitOrphanRollback(rec2, env.us, UploadRoute{Tenant: env.tnt, Release: func() {}},
+	svc.abortInitOrphanRollback(&chunkedInit{w: rec2, store: env.us}, UploadRoute{Tenant: env.tnt, Release: func() {}},
 		env.tnt, tempRel, 0, "dir/takeover.bin", uploadID)
 	if _, err := os.Stat(abs); !os.IsNotExist(err) {
 		t.Fatalf("该 id 无人接管时回滚应删除遗留临时名（对照方向）, stat err=%v", err)

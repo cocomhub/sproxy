@@ -62,7 +62,7 @@
 // 留在装配层 pkg/server；本包承载其存储侧（version_store.go）。
 //
 // 只读面的分工：`/download` 与 `/api/files/stat` 的**路径解析**（kind 白名单 / 跨卷读定位 /
-// 云任务归属校验）留在装配层，经能力 `DownloadPaths.Resolve` 交进来；处理器本身
+// 云任务归属校验）留在装配层，经能力 `DownloadPathResolver.Resolve` 交进来；处理器本身
 // （ListFiles / SearchFiles / Download / Stat）在本包（read.go）。
 //
 // 写面的分工：`/upload`（含路径校验、并发互斥、重复检测/版本化覆盖、卷路由双账本）、
@@ -95,8 +95,8 @@
 //  2. **默认即最小可用**：未注入的 Option 回落内建默认（单卷 `singleVolume`、无配额、
 //     无台账、无版本、无审计、无计量、内建锁池、下载仅普通文件），零 Option 即可完成
 //     单卷的列表/上传/下载/删除/改名/目录/批量。
-//  3. **能力是接口**：`TenantResolver` / `ActorResolver` / `VolumeRouter` / `QuotaScopes` /
-//     `ChecksumLedgers` / `DownloadPaths` / `FileLocks` / `ChunkedUploads` / `Versioning` /
+//  3. **能力是接口**：`TenantResolver` / `ActorResolver` / `VolumeRouter` / `QuotaScopeProvider` /
+//     `ChecksumLedgerProvider` / `DownloadPathResolver` / `FileLocks` / `ChunkedUploads` / `Versioning` /
 //     `Auditor` / `Metrics`——方法每次调用读实时状态，故**不存在「取用函数 vs 快照值」的
 //     形状歧义**，配置热更新天然可见（例：`Logger` 是 `func() *slog.Logger` 取用函数）。
 //  4. **nil 语义由实现表达**：未装配的卷集合/容量/台账/配额在 runtime 访问器（runtime.go）
@@ -133,7 +133,7 @@
 // `defaultVolumeAllows`、`locateForRead`（五个都在本文件末尾，按此顺序）
 // 与 `formatContentDisposition`
 // （在 `chunked_response.go`）、`volumePoolForTenant`（在 `version_store.go`）、
-// `volumeFileExists`（在 `read.go`）、`copyWithContext`（在 `write.go`）
+// `volumeFileExists`（在 `read.go`）、`copyWithContext`（已收敛到 `internal/iocopy`）
 // 在 `pkg/server` 侧另有消费者，
 // 既不能随本族从那边删走、本包也无法 import `pkg/server`（规则③）。故本包持**语义等价的
 // 本地实现**，逐条注明对应实现，并由 `pkg/server` 的源码级等价断言守卫
@@ -158,11 +158,14 @@ package files
 
 import (
 	"context"
-	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -191,7 +194,99 @@ type VolumeSet interface {
 	All() []volume.Volume
 	ByName(name string) (volume.Volume, bool)
 	Root(name string) *storage.Root
+	// HasLocalRoot 报告该卷是否为**本地根形态**（有 *storage.Root；外部/封装卷为 false）。
+	// M3：取代 `Root(name) != nil` 这类**间接探针**（把「是否本地卷」语义显式化，并减少裸
+	// root 访问器面；`Root` 的剩余调用点由 archcheck R28 棘轮登记）。
+	HasLocalRoot(name string) bool
 	Pool(name string) *quota.Pool
+}
+
+// ExternalEntry 是外部卷（非本地后端）目录条目的领域视图（逻辑目录浏览的明文信息）：
+// 只含 Name/Size/MTime/IsDir，不暴露底层分片名与加密 meta。装配层（pkg/server）在适配
+// sync.FS 的 ListDir 结果时转换为本类型。
+type ExternalEntry struct {
+	Name  string
+	IsDir bool
+	Size  int64
+	// MTime 是条目修改时间（UnixNano；0 = 未知）。列表给出 mod_time 需要它。
+	MTime int64
+	// Checksum 是底层 FS 自报的**整文件 SHA-256**（`sync.Entry.ChecksumType == "sha256"` 时
+	// 透传；空 = 未知，由消费方 stat 兜底）。只认 sha256——ETag 等非 SHA-256 算法不得填入
+	// （它会直达 Web UI 的 checksum 门禁）。
+	Checksum string
+}
+
+// VolumeViewLister 是**唯一的目录列举能力**（设计 2026-10-28-volume-state-maintenance §15.2）：
+// 经卷视图（装配层 `VolumeView`，含可信封装/容量/状态缓存装饰）列出任意可见卷的直接子项。
+//
+// **本地卷与外部卷共用这一条路径**（2026-10-29 收敛：`ExternalList` / `ExternalVolumeSource`
+// 已删除）——键空间差异（共享卷 owner 前缀 / 独立卷无前缀）由装配层用
+// `Volume.ResolveUserLocation` 统一处理，领域层只传 `(owner, subdir)`。
+//
+// supported=false 表示「本层不提供该能力」（卷集未装配 / 卷不存在或未授权）⇒ 调用方回落实时
+// 扫描（本地卷）或空结果。缓存开关（`volume_state.disable`）不影响本能力——它决定视图是否带缓存。
+type VolumeViewLister interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
+	ListDirView(ctx context.Context, volName, owner, subdir string) (entries []ExternalEntry, supported bool, err error)
+}
+
+// ExternalDeleter 是外部卷删除能力（C2，2026-10-06）：files 域用它在不 import pkg/sync
+// 的前提下删除外部卷文件（secretdata 等无 *storage.Tenant 的后端）。rel 为用户桶内相对
+// 路径（如 user/videos/x）——实现侧负责 owner 前缀/键空间适配（ResolveUserPath）。
+type ExternalDeleter interface {
+	// StatSize 返回卷上 owner 的 rel 文件大小与存在性（删除前计量；目录 → (0,true,nil)）。
+	StatSize(ctx context.Context, volumeName, owner, rel string) (int64, bool, error)
+	// Delete 删除卷上 owner 的 rel 文件（整流，外部卷无原子 quarantine；失败原样返回）。
+	Delete(ctx context.Context, volumeName, owner, rel string) error
+}
+
+// VolumeTypeClassifier 是卷**类型 → schema category**的分类能力（可选注入，经
+// WithVolumeTypeClassifier）：CategoryOf(typ) 返回 wrapper|linked|mt-local|""。
+//
+// 为什么需要它：卷的展示分类（`volume_category`）事实源是 `registry.CategoryOf`——它含
+// **wrapper 处理层注册表的动态投影**（enclosure.RegisterWrapper 经 MarkWrapperType 登记），
+// 而 pkg/files 不得 import pkg/volume/registry（门禁 R2：跨域消费走能力接口），故由装配层
+// 适配器转发注入。
+//
+// **未注入 → 领域侧回落内置基线名单**（见 Service.volumeCategoryFor：secretdata/secrets/
+// egress，零回归兜底；生产装配恒注入）。因此新增 wrapper 类型**只须在 registry 侧登记**
+// 即可被列表分类识别，无需改动领域包。
+type VolumeTypeClassifier interface {
+	// CategoryOf 返回类型 typ 的 schema category。实现方按 registry 语义给出：
+	// wrapper 封装卷 → "wrapper"、本地类型 → "mt-local"、其余外部类型 → "linked"；
+	// 领域侧只在 == "wrapper" 时填展示分类，其余一律留空。
+	CategoryOf(typ string) string
+}
+
+// ExternalVolumeDeleter 是 VolumeSet 的**可选扩展**：按卷名返回外部卷删除能力。
+// 未知卷名/非外部卷（本地卷）→ nil。files 域在删除路径用类型断言探测——
+// 断言失败 = 未提供外部删除能力，delete 走既有本地卷路径（零回归）。
+type ExternalVolumeDeleter interface {
+	ExternalDeleter(name string) ExternalDeleter
+}
+
+// ExternalSinkSource 是 VolumeSet 的**可选扩展**：按卷名返回外部卷**写入面**（UploadSink）。
+//
+// 为什么需要：分块上传外部卷（2026-10-22 缺陷修复）在 init 时经 `Route` 拿到 Sink，但
+// complete 可能发生在**进程重启之后**（断点续传）⇒ 不能把 Sink 存在会话里（接口不可序列化），
+// 而必须按 `session.Volume` 重新解析。本能力与 `ExternalVolumeDeleter` 同模式：装配层适配器
+// 实现，领域侧按需类型断言（未实现 = 无外部写面，外部卷分块上传 fail-closed）。
+//
+// 与 `RouteTarget` 的区别：本接口**不做预留**（分块上传的预留已在 init 由 Route 完成并挂在
+// 会话上）——重新 RouteTarget 会双计配额。
+// owner 用于键空间映射（共享卷 owner 前缀）；已存在卷/类型不支持 → nil。
+type ExternalSinkSource interface {
+	ExternalSink(owner, volName string) UploadSink
+}
+
+// ExternalFileChecksum 是 ExternalDeleter 的**可选扩展**（评审 CRIT-1，2026-10-07）：
+// 返回卷上 owner 的 rel 文件的实际内容 SHA-256（hex，明文）。deleteExternalFile 用它
+// 做「ExpectedChecksum 非空且与实际不符 → 保留文件 + 400」门禁（对齐本地删除契约——
+// 否则外部封装卷删除完全绕过 checksum 校验，客户端随手带错 checksum 即删）。
+//
+// 未实现（未来非 FS 后端）→ 删除路径在 ExpectedChecksum 非空时**无法校验**，回落
+// StatSize 的 size 锚做弱校验并告警（记录取舍：强内容校验由实现侧提供，缺失即降级）。
+type ExternalFileChecksum interface {
+	FileChecksum(ctx context.Context, volumeName, owner, rel string) (string, error)
 }
 
 // StorageManager 是本域需要的**容量核算**能力（P5 回退预留路径：quota 未装配时按字节
@@ -206,7 +301,9 @@ type VolumeSet interface {
 // **typed-nil 陷阱**：nil 的具体指针装入本接口会得到非 nil 接口，使 `deps.StorageManager != nil`
 // （P5 回退路径闸门）判断失效。装配层必须先判 nil 再赋值。
 type StorageManager interface {
-	TryReserveChunked(bytes int64) error
+	// WaitReserveChunked 预留分块上传所需的全局容量（**不足时排队重试**，非立即失败）。
+	// ctx 用于在客户端断连/请求取消时立即打断等待。
+	WaitReserveChunked(ctx context.Context, bytes int64) error
 	ReleaseChunked(bytes int64)
 	Usage() int64
 	MaxBytes() int64
@@ -227,19 +324,70 @@ type Metrics interface {
 	// RecordVolumeIO 记一次卷 IO（upload/download）指标（roadmap §3 P1）：请求总数 + 失败数 +
 	// 累计延迟，按卷+操作打标签。volume 空 = 卷未装配（旧路径）。
 	RecordVolumeIO(volume, op string, latency time.Duration, ok bool)
+	// RecordUploadForOwner / RecordDownloadForOwner 记 per-owner 上传/下载字节（计量报告
+	// roadmap 11.10-⑩ 片 2）：成功路径按请求主体记入 usageStore 与 /metrics owner 序列。
+	RecordUploadForOwner(owner string, bytes int64)
+	RecordDownloadForOwner(owner string, bytes int64)
 }
 
 // DownloadPath 是 `ResolveDownloadPath` 的解析结果：目标租户 + 租户根内相对路径 + 用户可见名。
 // 所有下载 kind（普通 / cloud_task / cloud_archive）都被装配层解析为同一形状后交进来。
+//
+// **外部卷读分化（2026-10-05 通用文件获取）**：secretdata/baidupcs 等外部卷没有
+// *storage.Tenant（Tenant 为 nil），装配层经 RedirectURL / Source 两个可选字段分化——
+// `files` 域只消费分化好的值，不经 registry 接触外部后端（R2 门禁）。
 type DownloadPath struct {
 	// Filename 是用户可见文件名（Content-Disposition / 日志用）。
 	Filename string
 	// VolumeName 是文件所在卷名（空 = 卷未装配/默认卷旧路径；卷 IO 指标用）。
 	VolumeName string
 	// Tenant 是文件所属租户（经 Tenant.Root() 打开，os.Root 防符号链接逃逸）。
+	// 外部卷（secretdata/baidupcs）为 nil——走 RedirectURL/Source 分支。
 	Tenant *storage.Tenant
 	// Rel 是租户根内相对路径（如 user/dir/f.txt、cloud/<taskID>/<file>、archive/<name>）。
 	Rel string
+	// RedirectURL 是 302 直链目标（B 态：明文外部卷且未私密）。非空时 Download /
+	// DownloadChunk 在打开文件前 http.Redirect(302)，流量不经服务端；Stat 不据此
+	// 重定向（仍回元信息，经 Source）。
+	RedirectURL string
+	// Source 是可选的「服务端读取源」（A/C 态：secretdata 加密卷 / 私密外部卷）。
+	// 非 nil 时 OpenPath/StatPath 改经它打开/stat，绕过 dp.Tenant.Root()（本地卷
+	// 恒 nil → 零回归）。
+	Source DownloadSource
+	// Ciphertext 为 true 时请求 at-rest 加密卷的**存储原样字节**（不解密）——加密只在
+	// 存储层，用户常规访问恒为明文；此开关供备份/迁移/带外校验等需要密文的场景。
+	// 非加密卷该标志无副作用（原始字节 == 明文）。
+	Ciphertext bool
+}
+
+// SeekReadCloser 是服务端读取流形态（2026-10-05）：同时满足 io.ReadSeeker（http.
+// ServeContent 消费）与 io.ReadCloser（OpenedFile.File 关闭语义）。实现方把
+// OpenRangeRead 适配为此形态（如 syncpkg.RangeSeeker：Read/Seek/Close）。
+type SeekReadCloser interface {
+	io.Reader
+	io.Seeker
+	io.Closer
+}
+
+// DownloadSource 是装配层提供的服务端读取源消费者接口（2026-10-05）：
+// `files` 域用它在不 import pkg/volume/registry / pkg/sync 的前提下读取外部卷
+// （secretdata 加密卷解密转发 / 私密明文外部卷整流）。本地卷恒 nil（走 Tenant.Root()）。
+type DownloadSource interface {
+	// Stat 返回文件元信息（size/modtime；Dir 判定供「不能下载目录」）。
+	Stat(ctx context.Context) (fs.FileInfo, error)
+	// Open 打开服务端读取流（SeekReadCloser——http.ServeContent 消费；调用方 Close）。
+	Open(ctx context.Context) (SeekReadCloser, error)
+}
+
+// ChecksumSource 是可选的「服务端读取源就地提供**明文**整文件 SHA-256」能力（StatPath 用）。
+//
+// 为什么需要：加密卷（secretdata）的实体在卷内是加密容器，`Stat` 只能给出大小/时间；而
+// 客户端 `mv`/校验需要**明文**整文件哈希。可信外部卷（secretdata 的 `meta.Provider`、
+// trusted.Wrap 的 sidecar）能就地给出该值，故经本可选接口上抛；不实现该接口的读取源
+// 保持旧行为（checksum 空，不误报、不伪造）。
+type ChecksumSource interface {
+	// Checksum 返回明文整文件 SHA-256；不可用（无 meta 能力/读取失败/无记录值）→ ok=false。
+	Checksum(ctx context.Context) (string, bool)
 }
 
 // FileLocation 是 `LocateOwnerFile` 的定位结果：目标文件所在卷名（空 = 默认卷）与该卷租户。
@@ -248,11 +396,32 @@ type FileLocation struct {
 	Tenant     *storage.Tenant
 }
 
+// UploadSink 是装配层提供的「外部卷写入源」消费者接口（2026-10-05 用户裁定：
+// 普通上传进外部卷 + 统一 user/ 前缀）。`files` 域用它在不 import pkg/sync 的前提
+// 下把文件写入外部卷（baidupcs / secretdata 等无 *storage.Tenant 的后端）。
+// 本地卷恒 nil（走 route.Tenant.Root()）。
+//
+// 语义（外部卷是远程后端）：无原子写（临时文件+rename）、无硬链接去重、无版本
+// 管理——这些是本地 inode 语义，外部卷天然不适用，域侧对 Sink 非 nil 跳过。
+type UploadSink interface {
+	// MakeDir 创建目录（含中间目录语义；已存在幂等）。
+	MakeDir(ctx context.Context, path string) error
+	// WriteFile 写入文件（整流；size 为预期大小，mtime 为 mod time）。
+	WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error
+	// Stat 返回路径大小；不存在 → (0, false, nil)（覆盖写差分用）。
+	Stat(ctx context.Context, path string) (size int64, exists bool, err error)
+	// Remove 删除路径（checksum 校验失败清理用）。
+	Remove(ctx context.Context, path string) error
+}
+
 // UploadRoute 是 `RouteUpload` 的结果：目标卷租户 + owner 全局 Scope 预留 + 卷容量池预留
 // （双账本，AD-7；未装配卷集合/配额时对应字段为 nil）。
 type UploadRoute struct {
 	VolumeName string
 	Tenant     *storage.Tenant
+	// Sink 是外部卷写入源（2026-10-05）：非 nil = 目标卷是外部后端（baidupcs/
+	// secretdata），WriteFile 经它写（无原子/去重/版本）；nil = 本地卷走 Tenant.Root()。
+	Sink UploadSink
 	// Scope 是预留所依据的 owner 全局/user 桶 Scope（与 ScopeRes 同源；覆盖写用它的
 	// Adjust 做差分结算）。必须由 RouteUpload 一并交回：装配层按同一 (owner, rel) 解析出的
 	// 就是本预留使用的那个 Scope，领域侧重解析（QuotaScopeFor）在配置热更新下不保证同对象。
@@ -262,6 +431,11 @@ type UploadRoute struct {
 	// Pool/PoolRes 是卷容量池预留（双账本之二，未装配卷集合时为 nil）。
 	Pool    *quota.Pool
 	PoolRes *quota.Reservation
+	// PhysSize 是「逻辑字节 → 物理字节」换算（nil = 恒等）。**加密卷**（at-rest，`extra.encrypt`）
+	// 装配为 `storage.EncryptedPhysicalSize`：容量账本按**物理占用**记账（2026-10-14 容量口径收口）。
+	// 为什么必须按物理：加密块每 64KiB 多 32B（4B 长度前缀 + nonce + GCM tag）+ 22B 文件头，
+	// 此前按逻辑长度记账 ⇒ 账本低估（卷池靠周期对账收敛，**owner 配额侧永不收敛** ⇒ 短时可超限）。
+	PhysSize func(int64) int64
 	// Release 双回滚（预留全额归还），供路由后失败路径调用。
 	Release func()
 }
@@ -272,6 +446,68 @@ type UploadRoute struct {
 // 本方法是该结算规则的**单一事实源**：装配层 routeUpload 的 *volumeRoute 已不再持有
 // commit 方法（唯一调用方随写面迁入本包），故两侧的账单收敛结果结构性不可分叉。
 // Scope 字段即为此处覆盖写差分所需（见其字段注释）。
+// physicalSize 把逻辑字节折算为本次路由的记账口径（nil = 恒等；<=0 原样返回）。
+func (r *UploadRoute) physicalSize(size int64) int64 {
+	if r.PhysSize == nil || size <= 0 {
+		return size
+	}
+	return r.PhysSize(size)
+}
+
+// PhysicalSize 导出同一口径：**预留与结算必须同口径**（路由实现方在 TryReserve 前用它折算）。
+func (r *UploadRoute) PhysicalSize(size int64) int64 { return r.physicalSize(size) }
+
+// settleSize 返回本次写入应结算的**物理**字节（写内核唯一入口）。
+//
+// 优先级：① 卷自报**实测足迹**（`VolumePhysFootprinter.PhysFootprint`——secretdata 的 parity +
+// **meta pad** 无法由逻辑长度推出，必须实测）；② 回落 `PhysicalSize`（加密卷公式折算）；③ 恒等。
+//
+// **释放侧必须同口径**（同一 helper / 同一能力），否则：少释放 = 幽灵占用/假 507；
+// 多释放 = 配额虚低/超真实配额。
+func (s *Service) settleSize(route UploadRoute, owner, remotePath string, written int64) int64 {
+	// 不要求 VolumeName 非空：能力由装配层判定（未知卷/无能力 ⇒ ok=false 回落），单卷旧装配下
+	// 卷名为空但能力仍可能装配（能力实现自行裁决）。
+	if s.rt.phys != nil {
+		if n, ok := s.rt.phys.PhysFootprint(route.VolumeName, owner, remotePath); ok && n > 0 {
+			return n
+		}
+	}
+	return route.physicalSize(written)
+}
+
+// physChargeFor 返回 volName 卷上对象的**记账字节**（卷自报实测足迹优先；无能力 ⇒ ok=false）。
+// 释放侧与写入侧必须同源（`settleSize`）——否则少释放 = 幽灵占用/假 507、多释放 = 超真实配额。
+func (s *Service) physChargeFor(volName, owner, remotePath string) (int64, bool) {
+	if s.rt.phys == nil || remotePath == "" {
+		return 0, false
+	}
+	n, ok := s.rt.phys.PhysFootprint(volName, owner, remotePath)
+	if !ok || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// prevCharge 返回覆盖写场景的**旧值**——必须与**结算同源**。
+//
+// 为什么（对账矩阵实测的幽灵占用）：结算走 `settleSize`（**卷自报足迹优先**），而旧值原先用
+// **测量尺寸**——对 secretdata 这类卷，测量到的是**逻辑**长度、结算是**物理**足迹（meta pad
+// + parity）⇒ `Commit/Adjust(prev, new)` 每次覆盖写都泄漏 `(足迹 − 逻辑)` 字节的幽灵占用
+// （实测 3MB 足迹卷覆盖写后配额多记 ≈3MB，且随覆盖次数累积 ⇒ 假 507）。
+// 故旧值优先取**同一来源**的卷自报足迹；能力缺失时回落测量值（明文/加密本地两口径本就一致）。
+func (s *Service) prevCharge(route UploadRoute, owner, remotePath string, measured int64) int64 {
+	if n, ok := s.physChargeFor(route.VolumeName, owner, remotePath); ok {
+		return n
+	}
+	return measured
+}
+
+// Commit 结算双账本（prev → written 差分）。
+//
+// **口径契约（易错）**：两个参数都必须是**物理**字节——`prev` 来自 `root.Stat`（加密卷上已是密文
+// 长度），`written` 必须由调用方经 `Service.settleSize`（卷自报实测足迹优先，否则 `PhysicalSize`
+// 折算）得到。**本方法不再折算**：折算只允许发生在 `settleSize` 一处，否则「谁折算了」不可知 ⇒
+// 双重折算（过度释放/幽灵占用）或漏折算（配额虚低）都是静默错。
 func (r *UploadRoute) Commit(prev, written int64) {
 	if r.ScopeRes != nil {
 		if prev > 0 {
@@ -314,6 +550,7 @@ const (
 	reasonPathInvalid = "path_invalid"
 	// reasonChecksumMissing 是客户端未提供 X-File-Checksum 的失败。
 	reasonChecksumMissing = "checksum_missing"
+	reasonConflict        = "conflict"
 	// reasonMkdirFailed 是重命名时创建目标父目录失败的失败。
 	reasonMkdirFailed = "mkdir_failed"
 	// reasonRemoveFailed 是删除时 os.Remove 失败的失败。
@@ -346,6 +583,9 @@ type Service struct {
 	index *searchIndex
 	// vector 是语义搜索向量索引（roadmap 11.9-④）：nil = 未装配（端点 404 零回归）。
 	vector *VectorStore
+	// checksumRebuild 记录「已尝试过从 meta 重建台账」的 owner（每 owner 仅一次，防列表路径
+	// 反复全量遍历）。值为 struct{}。
+	checksumRebuild sync.Map
 }
 
 // SaveIndexSnapshots 保存全部已构建 owner 的索引快照（幂等；供装配层周期调用，
@@ -361,10 +601,84 @@ func (s *Service) SaveIndexSnapshots() int {
 	return n
 }
 
+// IndexMove 跨卷移动成功后**迁移 checksum 台账**（旁路面 /api/volumes/move、rebalance 物理
+// 搬移后调用）。V4 阶段二：搜索索引不再在此维护——物理搬移经 `storage.Root`（目标卷写 /
+// 源卷删）必然发出结构/内容写事件，索引由 `ApplyRootMutation` 自动跟进（源条目移除 + 目标
+// 条目与卷归属更新）。此处只做事件观察不到的事：**台账键 → 值**的迁移。
+//
+// rel 为租户根相对路径（user/<name>）；size/toVol/toRoot 参数保留以兼容既有调用方（索引不再
+// 使用）；checksum 为源卷台账读出的整文件 SHA-256（空 = 源无台账，回落读源 rel 旧值）。
+func (s *Service) IndexMove(owner, rel string, size int64, checksum, toVol string, toRoot *storage.Root) {
+	_, _, _ = size, toVol, toRoot // 索引改由 Root 事件维护；参数保留兼容（见 doc）
+	if checksum == "" {
+		if cs := s.rt.checksumStore(owner); cs != nil {
+			if v, ok := cs.Get(rel); ok {
+				checksum = v
+			}
+		}
+	}
+	if checksum != "" {
+		if cs := s.rt.checksumStore(owner); cs != nil {
+			// 目标卷维度键（§15.1.1）：跨卷 move 只迁 checksum，归属必须写到**目标卷**，
+			// 否则同名文件在源卷条目上会互相张冠李戴。
+			checksumSet(cs, toVol, rel, checksum)
+		}
+	}
+}
+
+// RecordBypassWrite 是**旁路写路径**（cloud 下载转存 / 归档转存 / 直接落 user 桶）的派生状态
+// 统一登记入口（R16 缺陷族修复）：写 checksum 台账 + 搜索索引 upsert——否则这些产物的
+// list 条目缺失 / checksum 空（普通上传经写内核自动登记；旁路写不经写内核）。
+//
+// rel 为租户根相对路径（含 user/ 前缀，如 user/transfer/x.bin）；size 为产物字节；
+// checksum 为整文件 SHA-256（空 = 未知，跳过 store 写入——list 的 checksum 保持空可预期）；
+// volume 为产物所在卷名（索引条目归属）；root 为产物所在卷租户根（取 mtime）。
+//
+// 幂等：同 rel 重复调用覆盖（与写内核 upsert 同语义）。
+func (s *Service) RecordBypassWrite(owner, rel string, size int64, checksum, volume string, root *storage.Root) {
+	if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
+		checksumSet(cs, volume, rel, checksum) // 卷维度（§15.1.1）
+	}
+	if s.index == nil {
+		return
+	}
+	var modTime int64
+	if root != nil {
+		if fi, err := root.Stat(rel); err == nil {
+			modTime = fi.ModTime().UnixNano()
+		}
+	}
+	usr := strings.TrimPrefix(rel, "user/")
+	s.index.upsert(owner, usr, size, modTime, volume, root, rel)
+}
+
+// RecordBypassChecksum 只登记旁路写的 **checksum 台账**（不碰搜索索引）。
+//
+// 用途（V4 收敛）：本地卷的搜索索引已由 `storage.Root` 事件自动维护（结构 + 内容写），
+// 旁路写只需补 checksum；再调 `RecordBypassWrite` 会重复 upsert（幂等但白做一次整表 COW 克隆），
+// 且对「被写入卷里并不存在的路径」会**造幽灵条目**（root=nil ⇒ 没有 Stat 兜底）。
+// 外部卷仍走 `RecordBypassWrite`（无本地 Root 事件）。
+func (s *Service) RecordBypassChecksum(owner, rel, checksum, vol string) {
+	if checksum == "" {
+		return
+	}
+	if cs := s.rt.checksumStore(owner); cs != nil {
+		checksumSet(cs, vol, rel, checksum)
+	}
+}
+
 // AttachIndexSync 挂载集群索引同步钩子（装配层调用；nil = 不装配零回归）。
 func (s *Service) AttachIndexSync(sync IndexSync) {
 	if s.index != nil {
 		s.index.AttachIndexSync(sync)
+	}
+}
+
+// AttachIndexPersist 挂载索引快照的 StateStore 后端（装配层调用；nil = 不装配，
+// 本地 JSON 落盘零回归。statestore.md §5.1 P1 适配）。
+func (s *Service) AttachIndexPersist(p *stateBackedIndexStore) {
+	if s.index != nil {
+		s.index.persist = p
 	}
 }
 
@@ -429,20 +743,12 @@ const (
 	auditResultError   = "error"
 )
 
-// sendJSON 写出 JSON 响应：Content-Type、状态码与「序列化失败」兜底（500 +
-// {"error":"internal server error"} + Warn 日志）与 pkg/server.sendJSONResponse 一致，
-// 只是日志器改从接缝取当前生效实例。
+// sendJSON 写出 JSON 响应：委托 internal/httpjson（全仓唯一实现）。
+//
+// 告警日志仍用本服务实例的日志器（SendOpt），保持日志路由不变；此前本包持有一份
+// 与 pkg/server.sendJSONResponse 等价的副本，现已收敛。
 func (s *Service) sendJSON(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set("Content-Type", "application/json")
-	buf, err := json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		s.rt.logger().Warn("Encode JSON response failed", "error", err)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
-		return
-	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(buf)
+	httpjson.SendOpt(w, statusCode, response, httpjson.Opt{Logger: s.rt.logger()})
 }
 
 // 本文件末尾是**跨族共享纯函数**在本包内的等价实现（checksumReader / fileChecksumRoot /
@@ -467,12 +773,8 @@ func checksumReader(src io.Reader) (string, error) {
 // 全程 root 内打开，防符号链接逃逸。对应 pkg/server.FileChecksumRoot（语义等价：
 // 同经 root.Open 打开后哈希整文件）。
 func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
-	f, err := root.Open(rel)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	return checksumReader(f)
+	// 用户可见语义（加密卷算明文摘要）由 checksum.File 单一实现承担。
+	return checksum.File(root, rel)
 }
 
 // verifyFileWithChecksumRoot 验证 storage.Root 内相对路径文件的 SHA-256 checksum。
@@ -481,7 +783,7 @@ func fileChecksumRoot(root *storage.Root, rel string) (string, error) {
 // **先 root.Open**（打开失败即不匹配，即使 expected 为空），打开成功后才做 `expected == ""`
 // 空值短路。顺序刻意对齐——两处实现的行为必须可逐句对照。
 func verifyFileWithChecksumRoot(root *storage.Root, rel, expectedChecksum string) bool {
-	f, err := root.Open(rel)
+	f, err := root.OpenDecrypted(rel)
 	if err != nil {
 		return false
 	}

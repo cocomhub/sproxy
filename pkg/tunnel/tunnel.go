@@ -49,7 +49,6 @@
 package tunnel
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -292,48 +291,29 @@ type noopCloseReader struct{ io.Reader }
 
 func (noopCloseReader) Close() error { return nil }
 
-type bufferedResponseWriter struct {
-	buf      *bytes.Buffer
-	code     *int
-	hdrs     *http.Header
-	mu       sync.Mutex
-	wroteHdr bool
-}
-
-func (rw *bufferedResponseWriter) Header() http.Header { return *rw.hdrs }
-
-func (rw *bufferedResponseWriter) WriteHeader(code int) {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	if !rw.wroteHdr {
-		*rw.code = code
-		rw.wroteHdr = true
-	}
-}
-
-func (rw *bufferedResponseWriter) Write(data []byte) (int, error) {
-	rw.mu.Lock()
-	if !rw.wroteHdr {
-		*rw.code = http.StatusOK
-		rw.wroteHdr = true
-	}
-	rw.mu.Unlock()
-	return rw.buf.Write(data)
-}
-
 // streamRecorder 是一个自定义 http.ResponseWriter，将 handler 的输出通过 Pipe 流式输出，
-// 供 EncryptStream 消费。状态码和响应头在首次 Write 时确定并通知给加密 goroutine。
+// 供 EncryptStream 消费。状态码和响应头在首次 Write/WriteHeader 时确定并通知给加密 goroutine。
 //
 // 所有对 header / statusCode 的访问都通过 mu 串行化：
 // 标准 http.Handler 约定单个 goroutine 使用 ResponseWriter，但响应头组装 goroutine 与
 // handler goroutine 之间通过 metaReady 跨边界共享 header，因此显式加锁更安全。
+//
+// **状态码确定性（评审 I4 修复）**：此前仅首次 Write 触发 metaReady，handler 先 Write
+// body 再调用 WriteHeader(500) 时，加密 goroutine 已在 Write 时读到 200 并发出元数据，
+// 与后续 500 形成竞态（对端收到非确定 200/500）。现按标准 ResponseWriter 语义：
+//   - 首次 WriteHeader 或首次 Write 触发 metaReady（首发冻结 statusCode）；
+//   - Write 后再 WriteHeader 被忽略（wroteHeader 门）——状态码在 metaReady 关闭前
+//     已由同一 happens-before 链写入，goroutine 收到 metaReady 后读到的即最终值（无竞态）。
 type streamRecorder struct {
 	header     http.Header
-	statusCode int
-	mu         sync.Mutex
-	bodyWriter *io.PipeWriter
-	once       sync.Once
-	metaReady  chan struct{}
+	sentHeader http.Header // freeze 快照（metaReady 关闭时锁定，消费者读它——后续 handler
+	// 违约继续改 header 不影响已发送快照，消除并发 race，评审 M2）
+	statusCode  int
+	wroteHeader bool
+	mu          sync.Mutex
+	bodyWriter  *io.PipeWriter
+	once        sync.Once
+	metaReady   chan struct{}
 }
 
 func newStreamRecorder(bodyWriter *io.PipeWriter) *streamRecorder {
@@ -345,6 +325,15 @@ func newStreamRecorder(bodyWriter *io.PipeWriter) *streamRecorder {
 	}
 }
 
+// freeze 在 metaReady 关闭前锁定 header 快照（消费者 metaReady 后读 sentHeader 无锁安全）。
+func (sr *streamRecorder) freeze() {
+	sr.mu.Lock()
+	if sr.sentHeader == nil {
+		sr.sentHeader = sr.header.Clone()
+	}
+	sr.mu.Unlock()
+}
+
 func (sr *streamRecorder) Header() http.Header {
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -353,12 +342,24 @@ func (sr *streamRecorder) Header() http.Header {
 
 func (sr *streamRecorder) WriteHeader(code int) {
 	sr.mu.Lock()
-	sr.statusCode = code
+	if !sr.wroteHeader {
+		sr.statusCode = code
+		sr.wroteHeader = true
+	}
 	sr.mu.Unlock()
+	// 首次 WriteHeader 也触发元数据就绪（此前仅在 Write 时触发）。
+	sr.once.Do(func() {
+		sr.freeze()
+		close(sr.metaReady)
+	})
 }
 
 func (sr *streamRecorder) Write(data []byte) (int, error) {
+	sr.mu.Lock()
+	sr.wroteHeader = true // 写过 body 后，后续 WriteHeader 不覆盖（标准语义）
+	sr.mu.Unlock()
 	sr.once.Do(func() {
+		sr.freeze()
 		close(sr.metaReady)
 	})
 	return sr.bodyWriter.Write(data)

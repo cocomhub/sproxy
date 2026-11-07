@@ -89,7 +89,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
@@ -138,7 +138,7 @@ func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direc
 	cmd.Flags().BoolVar(&o.verify, "verify", false, "同步完成后校验核对（重读目标 checksum 与源比对）")
 	cmd.Flags().BoolVar(&o.wait, "wait", false, "等待任务完成并展示进度")
 	cmd.Flags().DurationVar(&o.timeout, "timeout", 5*time.Minute, "等待超时时间（--wait 时生效，0=不限时）")
-	cmd.Flags().DurationVar(&o.pollInterval, "poll-interval", 2*time.Second, "轮询间隔")
+	cmd.Flags().DurationVar(&o.pollInterval, flagPollInterval, 2*time.Second, "轮询间隔")
 	return cmd
 }
 
@@ -249,9 +249,23 @@ func printSyncReport(ios cli.IOStreams, task *client.SyncTask) {
 		task.Status == client.SyncStatusRetrying {
 		return // 未终态无报告
 	}
-	var created, updated, skipped, conflict, deleted, failed, verifyFailed int64
-	var failList []string
-	for _, r := range task.Results {
+	created, updated, skipped, conflict, deleted, failed, verifyFailed, failList := syncResultCounts(task.Results)
+	sum := fmt.Sprintf("  汇总: 新增 %d 更新 %d 跳过 %d 冲突 %d 删除 %d 失败 %d 校验失败 %d",
+		created, updated, skipped, conflict, deleted, failed, verifyFailed)
+	ios.WriteOutLine(sum)
+	if len(failList) > 0 {
+		ios.WriteOutLine("  失败清单（最多 20 条）:")
+		for _, f := range failList {
+			ios.WriteOutLine("    - " + f)
+		}
+	}
+}
+
+// syncResultCounts 汇总同步结果计数（created/updated/skipped/conflict/deleted/failed/
+// verify_failed）并收集失败清单（校验失败/传输失败，最多 20 条路径+错误，供审计与
+// 单文件重试参考）。
+func syncResultCounts(results []client.SyncFileResult) (created, updated, skipped, conflict, deleted, failed, verifyFailed int64, failList []string) {
+	for _, r := range results {
 		switch r.Action {
 		case "created":
 			created++
@@ -276,15 +290,7 @@ func printSyncReport(ios cli.IOStreams, task *client.SyncTask) {
 			}
 		}
 	}
-	sum := fmt.Sprintf("  汇总: 新增 %d 更新 %d 跳过 %d 冲突 %d 删除 %d 失败 %d 校验失败 %d",
-		created, updated, skipped, conflict, deleted, failed, verifyFailed)
-	ios.WriteOutLine(sum)
-	if len(failList) > 0 {
-		ios.WriteOutLine("  失败清单（最多 20 条）:")
-		for _, f := range failList {
-			ios.WriteOutLine("    - " + f)
-		}
-	}
+	return created, updated, skipped, conflict, deleted, failed, verifyFailed, failList
 }
 
 // printSyncTaskJSON 把同步任务以缩进 JSON 输出到 w。
@@ -332,30 +338,42 @@ func waitSyncTask(ctx context.Context, ios cli.IOStreams, svc *client.FileClient
 		case <-pollCtx.Done():
 			return pollCtx.Err()
 		case <-ticker.C:
-			task, err := svc.GetSyncTask(pollCtx, id)
-			if err != nil {
-				return fmt.Errorf("轮询同步任务 %s 状态失败: %w", id, err)
+			done, perr := syncPollOnce(ios, svc, pollCtx, id, jsonOut)
+			if done || perr != nil {
+				return perr
 			}
-			if isSyncTerminal(task.Status) {
-				return printSyncTaskResult(ios, task, jsonOut)
-			}
-			if jsonOut {
-				continue // --json 轮询时不刷屏，仅终态输出
-			}
-			pct := int64(0)
-			if task.BytesTotal > 0 {
-				pct = task.BytesDone * 100 / task.BytesTotal
-			}
-			if task.Status == client.SyncStatusRetrying {
-				// 审查 M-4：重试中显示"重试中"而非"同步中"，区分瞬时故障等待退避。
-				ios.WriteOutLine("  ⟳ 重试中: %d%% (%d/%d bytes, %d/%d files)",
-					pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
-				continue
-			}
-			ios.WriteOutLine("  ⟳ 同步中: %d%% (%d/%d bytes, %d/%d files)",
-				pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
 		}
 	}
+}
+
+// syncPollOnce 单次轮询同步任务状态。返回 (done, err)：
+// done=true 表示已到终态并输出结果（调用方应退出轮询，err 为该状态的错误或 nil）；
+// done=false 表示非终态（err 为 nil=继续轮询，非 nil=轮询请求失败立即退出）。
+// --json 模式轮询时不刷屏（仅终态输出）。
+func syncPollOnce(ios cli.IOStreams, svc *client.FileClient, pollCtx context.Context, id string, jsonOut bool) (done bool, err error) {
+	task, err := svc.GetSyncTask(pollCtx, id)
+	if err != nil {
+		return false, fmt.Errorf("轮询同步任务 %s 状态失败: %w", id, err)
+	}
+	if isSyncTerminal(task.Status) {
+		return true, printSyncTaskResult(ios, task, jsonOut)
+	}
+	if jsonOut {
+		return false, nil // --json 轮询时不刷屏，仅终态输出
+	}
+	pct := int64(0)
+	if task.BytesTotal > 0 {
+		pct = task.BytesDone * 100 / task.BytesTotal
+	}
+	if task.Status == client.SyncStatusRetrying {
+		// 审查 M-4：重试中显示"重试中"而非"同步中"，区分瞬时故障等待退避。
+		ios.WriteOutLine("  ⟳ 重试中: %d%% (%d/%d bytes, %d/%d files)",
+			pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
+		return false, nil
+	}
+	ios.WriteOutLine("  ⟳ 同步中: %d%% (%d/%d bytes, %d/%d files)",
+		pct, task.BytesDone, task.BytesTotal, task.FilesDone, task.FilesTotal)
+	return false, nil
 }
 
 // isSyncTerminal 报告任务状态是否为终态（completed/failed/cancelled）。
@@ -384,7 +402,7 @@ func newCmdSyncRetry(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			jsonOut, _ := cmd.Flags().GetBool("json")

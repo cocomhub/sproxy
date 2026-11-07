@@ -5,14 +5,16 @@ go 1.27
 require (
 	github.com/cocomhub/buildinfo v0.0.1
 	github.com/cocomhub/sproxy v0.12.0
-	github.com/cocomhub/sproxy/pkg/baidupcs v0.0.0
+	github.com/cocomhub/sproxy/pkg/integrity/ext/video v0.0.0
 	github.com/cocomhub/sproxy/pkg/telemetry/ext/otel v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/hub/ext/kad v0.0.0-00010101000000-000000000000
-	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.0.0-00010101000000-000000000000
+	github.com/cocomhub/sproxy/pkg/tunnel/mesh v0.22.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/grpc v0.20.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic v0.0.0-00010101000000-000000000000
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc v0.0.0
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws v0.0.0
+	github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs v0.22.0
+	github.com/cocomhub/sproxy/pkg/volume/ext/pikpak v0.0.0
 	github.com/cocomhub/sproxy/pkg/volume/ext/s3 v0.17.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/spf13/cobra v1.10.2
@@ -21,12 +23,14 @@ require (
 )
 
 require (
+	github.com/abema/go-mp4 v1.7.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bitly/go-simplejson v0.5.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/cocomhub/sproxy/pkg/media/ext/mp4 v0.24.1-0.20261028083918-2847194fbd8a // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -133,7 +137,11 @@ require (
 
 replace github.com/cocomhub/sproxy => ../../
 
-replace github.com/cocomhub/sproxy/pkg/baidupcs => ../../pkg/baidupcs
+replace github.com/cocomhub/sproxy/pkg/integrity/ext/video => ../../pkg/integrity/ext/video
+
+replace github.com/cocomhub/sproxy/pkg/media/ext/mp4 => ../../pkg/media/ext/mp4
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ../../pkg/volume/ext/baidupcs
 
 replace github.com/cocomhub/sproxy/pkg/telemetry/ext/otel => ../../pkg/telemetry/ext/otel
 
@@ -146,3 +154,7 @@ replace github.com/cocomhub/sproxy/pkg/tunnel/mesh => ../../pkg/tunnel/mesh
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
 
 replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic => ../../pkg/tunnel/xfer/ext/quic
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/pikpak => ../../pkg/volume/ext/pikpak
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/s3 => ../../pkg/volume/ext/s3

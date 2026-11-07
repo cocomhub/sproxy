@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -27,7 +28,7 @@ func TestHubNodeMetrics_PerNodeMetrics(t *testing.T) {
 	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger()}
-	h.metrics = NewMetrics()
+	h.metrics = metrics.NewMetrics()
 
 	a, _ := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
@@ -58,7 +59,7 @@ func TestMetrics_RTTGaugeOutput(t *testing.T) {
 	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger()}
-	h.metrics = NewMetrics()
+	h.metrics = metrics.NewMetrics()
 
 	a, _ := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
@@ -81,7 +82,7 @@ func TestMetrics_RTTGaugeUnknownIsMinusOne(t *testing.T) {
 	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := &Handlers{routeTable: rt, logger: testutil.DiscardLogger()}
-	h.metrics = NewMetrics()
+	h.metrics = metrics.NewMetrics()
 
 	a, _ := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)

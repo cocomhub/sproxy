@@ -197,3 +197,33 @@ func TestBackupCmd_MissingDest(t *testing.T) {
 		t.Errorf("错误信息应说明目标路径缺失，got: %v", err)
 	}
 }
+
+// TestBackupCmd_InvalidSchedule 断言：--schedule 非法 cron → 报错（fail-closed，
+// 不静默降级为单次导出）。
+func TestBackupCmd_InvalidSchedule(t *testing.T) {
+	t.Parallel()
+	svc := client.NewFileClient("http://127.0.0.1:1")
+	factory := clientfactory.NewMock(svc, nil)
+	cmd := NewCmdBackup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	cmd.SetArgs([]string{"disk2", "/tmp/x.tar", "--schedule", "not-a-cron"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("非法 --schedule 应报错（fail-closed）")
+	}
+	if !strings.Contains(err.Error(), "cron") {
+		t.Errorf("错误信息应提及 cron，got: %v", err)
+	}
+}
+
+// TestBackupCmd_ScheduleFlagRegistered 断言：--schedule flag 已注册（定时模式入口存在）。
+func TestBackupCmd_ScheduleFlagRegistered(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdBackup(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	f := cmd.Flags().Lookup("schedule")
+	if f == nil {
+		t.Fatal("--schedule flag 未注册（定时备份入口缺失）")
+	}
+	if f.Usage == "" {
+		t.Error("--schedule flag 应有帮助文案")
+	}
+}

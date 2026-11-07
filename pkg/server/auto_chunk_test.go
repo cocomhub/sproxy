@@ -48,7 +48,7 @@ func TestUpload_OverLimitReturnsAutoChunkHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", cs)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestUpload_WithinLimitNoHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set(headerContentType, mw.FormDataContentType())
 	req.Header.Set("X-File-Checksum", cs)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {

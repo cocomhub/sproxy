@@ -6,7 +6,9 @@
 
 image:
   repository: ghcr.io/cocomhub/sproxy
-  tag: latest
+  # tag 默认回落 .Chart.AppVersion（发布版本号，禁 latest 不可预测标签）；发布时由
+  # release-please 更新 Chart.yaml 的 appVersion。
+  tag: ""
   pullPolicy: IfNotPresent
 
 replicaCount: 1

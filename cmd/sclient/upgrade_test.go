@@ -125,9 +125,9 @@ func newUpgradeCmdForTest(ios cli.IOStreams, apiBase string, currentVersion stri
 // newUpgradeCmdWithVersion 构造 upgrade 命令并注入当前版本（不走 buildinfo 包级变量）。
 func newUpgradeCmdWithVersion(ios cli.IOStreams, apiBase, currentVersion string) *cobra.Command {
 	cmd := newUpgradeCmd(ios, upgradeDeps{version: func() string { return currentVersion }})
-	_ = cmd.Flags().Set("api-base", apiBase)
+	_ = cmd.Flags().Set(flagAPIBase, apiBase)
 	// ReleaseBase 默认指向 GitHub CDN；测试用假服务器 URL（httptest 派生）。
-	_ = cmd.Flags().Set("release-base", strings.TrimSuffix(apiBase, "/repos/cocomhub/sproxy"))
+	_ = cmd.Flags().Set(flagReleaseBase, strings.TrimSuffix(apiBase, "/repos/cocomhub/sproxy"))
 	return cmd
 }
 
@@ -137,9 +137,9 @@ func newUpgradeCmdWithTarget(ios cli.IOStreams, apiBase, currentVersion, target 
 		version: func() string { return currentVersion },
 		exec:    func() (string, error) { return target, nil },
 	})
-	_ = cmd.Flags().Set("api-base", apiBase)
+	_ = cmd.Flags().Set(flagAPIBase, apiBase)
 	// ReleaseBase 默认指向 GitHub CDN；测试用假服务器 URL（httptest 派生）。
-	_ = cmd.Flags().Set("release-base", strings.TrimSuffix(apiBase, "/repos/cocomhub/sproxy"))
+	_ = cmd.Flags().Set(flagReleaseBase, strings.TrimSuffix(apiBase, "/repos/cocomhub/sproxy"))
 	return cmd
 }
 
@@ -151,7 +151,7 @@ func TestUpgradeCmd_UseAndFlags(t *testing.T) {
 	if cmd.Use != "upgrade" {
 		t.Fatalf("Use = %q, want upgrade", cmd.Use)
 	}
-	for _, name := range []string{"check", "to", "force", "api-base"} {
+	for _, name := range []string{"check", "to", "force", flagAPIBase} {
 		f := cmd.Flags().Lookup(name)
 		if f == nil {
 			t.Errorf("upgrade 缺少 flag --%s", name)

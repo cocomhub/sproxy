@@ -81,25 +81,7 @@ func (p *viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, ta
 			Priority: p.Priority(),
 			Dial: func(ctx context.Context, svc *client.FileClient, _ webrtc.Signaler,
 				target *client.MeshService, _ string, opts DialOptions) (*Result, error) {
-				start := time.Now()
-				conn, err := svc.RelayStreamE2E(ctx, xID, target.Addr, true, "via-relay")
-				if err != nil {
-					return nil, fmt.Errorf("via-relay(%s): %w", xID, err)
-				}
-				// 端到端加密（显式 E2E 配置）：X 是**中间节点**——RelayStreamE2E 让 hub
-				// 写 e2e+via-relay 首帧（X 侧据此识别自己是中转，走透传分支而非解密）。
-				// X 出口拨 T 后把 Path 置空的 e2e 帧透传给 T，T 侧 ServeE2EStream 解密——
-				// L⇄T 端到端加密，X 全程不见明文（T1 红线：X 持 SK 也读不到明文）。
-				// L 侧随后 DialE2EHandshake 完成 ECDH 握手（不重复写帧）。
-				if opts.E2E != nil {
-					e2eConn, derr := DialE2EHandshake(ctx, conn, *opts.E2E)
-					if derr != nil {
-						_ = conn.Close()
-						return nil, fmt.Errorf("via-relay(%s) E2E 握手失败: %w", xID, derr)
-					}
-					return &Result{Conn: e2eConn, Kind: KindViaNode, EndToEnd: true, Latency: time.Since(start)}, nil
-				}
-				return &Result{Conn: conn, Kind: KindViaNode, Latency: time.Since(start)}, nil
+				return viaRelayXDial(ctx, svc, xID, target, opts)
 			},
 		})
 		// via-direct:<X>：数据面 webrtc 直连 X（信令器打洞到 X，X 出口拨 T）。
@@ -113,6 +95,28 @@ func (p *viaNodeProvider) Expand(ctx context.Context, svc *client.FileClient, ta
 		})
 	}
 	return out
+}
+
+// viaRelayXDial 是 via-relay:X 候选的拨号函数：数据面经 hub 中继到 X，X 出口拨 T。
+// 端到端加密（显式 E2E 配置）：X 是**中间节点**——RelayStreamE2E 让 hub 写 e2e+via-relay
+// 首帧（X 侧据此识别自己是中转，走透传分支而非解密）。X 出口拨 T 后把 Path 置空的 e2e 帧
+// 透传给 T，T 侧 ServeE2EStream 解密——L⇄T 端到端加密，X 全程不见明文（T1 红线：X 持 SK
+// 也读不到明文）。L 侧随后 DialE2EHandshake 完成 ECDH 握手（不重复写帧）。
+func viaRelayXDial(ctx context.Context, svc *client.FileClient, xID string, target *client.MeshService, opts DialOptions) (*Result, error) {
+	start := time.Now()
+	conn, err := svc.RelayStreamE2E(ctx, xID, target.Addr, true, "via-relay")
+	if err != nil {
+		return nil, fmt.Errorf("via-relay(%s): %w", xID, err)
+	}
+	if opts.E2E != nil {
+		e2eConn, derr := DialE2EHandshake(ctx, conn, *opts.E2E)
+		if derr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("via-relay(%s) E2E 握手失败: %w", xID, derr)
+		}
+		return &Result{Conn: e2eConn, Kind: KindViaNode, EndToEnd: true, Latency: time.Since(start)}, nil
+	}
+	return &Result{Conn: conn, Kind: KindViaNode, Latency: time.Since(start)}, nil
 }
 
 // KindViaDirect 表示经中间节点 X 的 webrtc 直连数据面（L→X 不经 hub 字节）。

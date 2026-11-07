@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
@@ -166,9 +167,18 @@ func newTrustLoginTLSClient(t *testing.T, cfg *client.Config, srv *httptest.Serv
 	return svc
 }
 
-// newTrustLoginCmd 构造 trust login 命令（mock factory + 隔离配置路径）。
+// newTrustLoginCmd 构造 trust login 命令（mock factory + 隔离 config.yaml）。
 func newTrustLoginCmd(t *testing.T, cfg *client.Config, cfgPath string, svc *client.FileClient) *cobra.Command {
 	t.Helper()
+	// 统一 context：config.yaml 带 current-context（env 段 server_url 供 trust 直读）。
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: cfg.ServerURL})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatalf("save config.yaml: %v", err)
+	}
 	ios := cli.IOStreams{Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}, In: strings.NewReader("123456\n")}
 	trust := NewCmdTrust(clientfactory.NewMock(svc, nil), ios, &testConfigProvider{cfg: cfg}, &cfgPath)
 	trust.PersistentFlags().String("ca-file", "", "")

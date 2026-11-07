@@ -5,11 +5,19 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
 )
+
+// ErrUnsupported 是可选能力「未实现」的哨兵错误（B1 修复契约）：能力接口用类型断言
+// 查询（ok=false = 未实现），但**装饰器/封装层为委托底层能力必须实现接口方法**——此时
+// 底层未实现能力无法用断言表达，只能返回本哨兵。使用方（如 pkg/cloud 转存）经
+// errors.Is(err, ErrUnsupported) 识别后回落降级分支，语义与直接使用裸 FS 的
+// 断言失败一致（不把「未实现」当配额拒绝/写失败）。
+var ErrUnsupported = errors.New("sync: 底层未实现该可选能力")
 
 // Entry 表示一个文件系统条目。
 type Entry struct {
@@ -17,9 +25,17 @@ type Entry struct {
 	Path      string // 相对路径（正斜杠，不含根）
 	Size      int64
 	MTime     int64  // UnixNano
-	Checksum  string // SHA-256 hex；空=未知（调用方按需计算）
+	Checksum  string // 首选校验和（默认 SHA-256 hex）；空=未知（调用方按需计算）
 	IsDir     bool
 	IsSymlink bool
+
+	// ChecksumType 是首选校验和的算法标识（"sha256"/"md5"/"etag" 等；Checksum 非空时
+	// 自述算法，空 = 未知/沿用历史默认 sha256）。供 Equal/校验比对按算法取值。
+	ChecksumType string `json:"checksum_type,omitempty"`
+	// Checksums 是**全部已知校验和**（算法名 → 值），Stat/ListDir 尽可能填全
+	// （如 LocalFS: sha256；baidupcs: sha256+md5；s3: etag+sha256）——比对方按可用
+	// 算法取交集（用户裁定：每个 entry 提供已知的所有校验和数据，便于比较）。
+	Checksums map[string]string `json:"checksums,omitempty"`
 }
 
 // FS 抽象文件系统操作，供 LocalFS 与后续远程传输实现。
@@ -35,10 +51,106 @@ type FS interface {
 	ListDir(ctx context.Context, path string) ([]Entry, error)
 	Stat(ctx context.Context, path string) (*Entry, error)
 	OpenRead(ctx context.Context, path string) (io.ReadCloser, error)
-	WriteFile(ctx context.Context, path string, r io.Reader, size int64, mtime int64) error
+	WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size int64, mtime int64) error
 	Rename(ctx context.Context, from, to string) error
 	Delete(ctx context.Context, path string) error
 	MakeDir(ctx context.Context, path string) error
+}
+
+// WriteIfAbsent 是 FS 的可选原子写能力（并发安全前提）：
+// 仅当 path 在目标处不存在时写入并返回 (true, nil)；若已存在则**不覆盖**并返回
+// (false, nil)。用于「转存目标须唯一、拒绝静默覆盖」类语义（W1/W3）。
+//
+// 使用方（如 pkg/cloud 转存）通过类型断言查询该能力，而**不**在调用侧硬编码每类卷的
+// 存在性语义（机制化：卷自描述能力，使用方只查能力→查实现）。
+type WriteIfAbsent interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	WriteIfAbsent(ctx context.Context, path string, r io.Reader, size int64, mtime int64) (bool, error)
+}
+
+// ReserveSpace 是 FS 的可选容量预检能力（卷自管理配额，NH1）：
+// 卷后端实现则转存前预分配空间检查——成功返回 nil；不足返回 error（fail-closed 不转存）。
+// 未实现 = 卷无独立配额概念（由用户配额/全局账本管），转存侧跳过卷配额检查。
+//
+// 机制化：使用方（pkg/cloud 转存）只查询该能力，不在调用侧硬编码每类卷的容量语义。
+// **实现位置**：卷容量层 `volume/capacity.CapacityFS`（用本卷池的可用额度做只读预检）——
+// 它是所有卷（本地/加密/外部网盘）装配后共同的容量权威；外部后端若自带配额 API 可自行
+// 实现本接口，CapacityFS 会**优先**采用其判断，未实现/ErrUnsupported 时回落到本卷池。
+// （注：此前文档称「外部网盘卷在各自后端实现」并不成立——实测 s3/baidupcs/pikpak 均未实现，
+// 装饰器只转发 ⇒ 调用点恒得 ErrUnsupported ⇒ 预检形同不存在；2026-10-18 已由容量层落地。）
+type ReserveSpace interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	ReserveSpace(ctx context.Context, relPath string, size int64) error
+}
+
+// LocalVolume 是 FS 的**本地性自述能力**（用户裁定 2026-10-05）：
+//   - **未实现该接口的 FS 默认视为外部卷**（false）——registry 域内注册的都是外部卷
+//     后端，外部新增零配置自动扩展；**内部/本地卷必须实现** `IsLocalVolume()==true`，
+//     以显式声明自己是内部卷（走用户配额 + 提供本地化便利）；
+//   - **封装卷**（secretdata/secrets 等 wrapper）实现时委派给被封装的底层卷——「只要
+//     有一层是外部就是外部」，层层判断，不靠类型名硬编码（secretdata 封装 s3 → 外部、
+//     封装本地 → 内部自动正确）；
+//   - 使用方（pkg/cloud 转存配额）经类型断言查询：实现且返回 true → 内部/本地卷（用户
+//     配额生效）；否则 → 外部卷（容量/配额由卷自身管理，用户通用配额跳过）。
+type LocalVolume interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	IsLocalVolume() bool
+}
+
+// Mover 是 FS 的可选**同卷移动**能力（卷自身提供；`pkg/sync` 引擎不关心 Move 语义——
+// 引擎是复制语义，Move 供 cloud save 等明确"源移除"调用方用）。同卷原子移动、源移除；
+// 跨物理卷/文件系统返回 EXDEV 类错误由调用方回退复制。
+type Mover interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Move(ctx context.Context, from, to string) error
+}
+
+// Copier 是 FS 的可选**同卷复制**能力（源保留、目标新写；覆盖语义下用于保留旧目标）。
+// 跨卷返回 EXDEV 类错误由调用方回退常规复制。实现可用底层服务端复制（如 s3 CopyObject、
+// baidupcs 服务端 copy），零流量。
+type Copier interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Copy(ctx context.Context, from, to string) error
+}
+
+// Linker 是 FS 的可选**硬链接**能力（源保留、两个名字共享同一 inode）。跨卷返回 EXDEV
+// 类错误由调用方回退复制。实现可用底层文件系统硬链接（LocalFS os.Link）或卷内 blob
+// 复用（secretdata dedup 池、去重引用）。
+type Linker interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	Link(ctx context.Context, from, to string) error
+}
+
+// StagingQuotaTracker 是本地中间态（staging/上传暂存）写入的配额记账钩子接口。
+// 语义：WriteFile 先落本地 staging 再上传——本地磁盘须防占满，写入计入配额
+// （预留 → 上传完成释放）。实现方（装配层）注入，不依赖具体配额池类型。
+// 与 ReserveSpace（目标卷容量预检）区分：StagingQuotaTracker 管**本地暂存**占用。
+// ErrStagingQuotaExceeded 是「本地 staging 配额不足」的**哨兵错误**（P2 修复，2026-10-19）：
+// 供上层用 errors.Is 判定降级原因，而不是匹配错误文案子串（文案一变即静默落入 default）。
+// 生产者为门卫（StagingQuotaGateFS）与自管卷（secretdata 的 stagingReserve 包装）。
+var ErrStagingQuotaExceeded = errors.New("本地 staging 配额不足")
+
+type StagingQuotaTracker interface {
+	// ReserveUsage 预留 size 字节（本地 staging 写入前调用）。本地磁盘不足 → 实现方
+	// **排队等待**（受 ctx 约束：释放信号/ctx.Done 中断）；返回错误 = 拒绝本次写入。
+	ReserveUsage(ctx context.Context, size int64) error
+	// ReleaseUsage 释放 size 字节（上传成功或失败后调用；唤醒排队等待者）。
+	ReleaseUsage(size int64)
+}
+
+// StagingQuotaCapable 是 FS 的**可选** staging 配额能力（装配层探测并注入：
+// 不依赖具体卷类型——baidupcs_sync 从 *StorageFS 类型断言解耦为通用接口，Wrap 装饰
+// 后的 fs 也实现委托 inner，避免包装后 quota 丢失）。
+// **自管语义（用户裁定）**：实现本接口的卷 = 获取配额句柄后**内部自行接管**本地
+// staging 配额管理（如 baidupcs StorageFS 在 WriteFile 内预留/释放）——装配层注入
+// 钩子后不再包 gate 装饰器。
+type StagingQuotaCapable interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// WithStagingQuota 装配 staging 配额钩子（链式返回自身；nil = 不记账）。
+	WithStagingQuota(q StagingQuotaTracker)
+}
+
+// StagingQuotaExempt 是**显式豁免** staging 配额的标记接口（用户裁定：不需要 staging
+// 或实际只占用部分空间的卷须**显式实现**本接口才豁免——不实现 = 默认强制 gate）。
+// 流式直传卷（如 s3：PutObject 单请求直传、无本地中间态）实现；装配层探测到本接口
+// → 跳过 gate 包装（不预留本地磁盘，零误伤）。**显式声明而非实现遗漏**：新卷未实现
+// 本接口也未实现 StagingQuotaCapable → 默认被 gate 强制预留（fail-safe，宁多勿漏）。
+type StagingQuotaExempt interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义，设计保留
+	// ExemptStagingQuota 报告本卷无需本地 staging 配额（流式直传不落盘）。
+	ExemptStagingQuota() bool
 }
 
 // maxWalkDepth 限制目录递归深度（符号链接环的 fail-closed 兜底）。
@@ -97,86 +209,123 @@ func WalkEntries(ctx context.Context, f FS, root string, recursive, followSymlin
 	if !rootEntry.IsDir {
 		return []Entry{*rootEntry}, nil
 	}
-	var out []Entry
-	visited := make(map[string]bool)
-	if err := walkDir(ctx, f, root, root, recursive, followSymlinks, filters, visited, 0, &out); err != nil {
+	// walker 承载一次 WalkEntries 遍历的共享过滤/递归上下文（S107：收敛 walkDir 家族
+	// 10+ 参数为结构体；ctx/f/root/recursive/followSymlinks/filters/visited/out 全程不变）。
+	w := &walker{ctx: ctx, f: f, root: root, recursive: recursive, followSymlinks: followSymlinks, filters: filters, visited: make(map[string]bool)}
+	if err := w.walkDir(root, 0); err != nil {
 		return nil, err
 	}
 	// 空（或全部被过滤掉）的根目录：作为一个空目录条目返回
-	if len(out) == 0 {
-		out = append(out, *rootEntry)
+	if len(w.out) == 0 {
+		w.out = append(w.out, *rootEntry)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	sort.Slice(w.out, func(i, j int) bool { return w.out[i].Path < w.out[j].Path })
+	return w.out, nil
 }
 
-func walkDir(ctx context.Context, f FS, root, dir string, recursive, followSymlinks bool, filters []Filter, visited map[string]bool, depth int, out *[]Entry) error {
+// walker 是 WalkEntries 递归遍历共享的工作上下文（S107：收敛 walkDir/walkDirEntry/
+// walkDirSubtree/appendSymlinkEntry 的 ctx/f/root/recursive/followSymlinks/filters/
+// visited/out 参数为结构体）。
+type walker struct {
+	//nolint:containedctx // S8242 已评估：单次目录遍历共享 ctx（S107 收敛），非请求侧驻留——与下行 NOSONAR 双抑制
+	ctx            context.Context // NOSONAR: S8242 — 单次目录遍历的共享 ctx（S107 收敛），非请求侧驻留
+	f              FS
+	root           string
+	recursive      bool
+	followSymlinks bool
+	filters        []Filter
+	visited        map[string]bool
+	out            []Entry
+}
+
+// walkDir 递归（或单层）枚举 dir，深度超限（疑似符号链接环）时 fail-closed 报错。
+func (w *walker) walkDir(dir string, depth int) error {
 	if depth > maxWalkDepth {
 		return fmt.Errorf("目录深度超限（疑似符号链接环）: %s", dir)
 	}
-	entries, err := f.ListDir(ctx, dir)
+	entries, err := w.f.ListDir(w.ctx, dir)
 	if err != nil {
 		return fmt.Errorf("列目录 %s 失败: %w", dir, err)
 	}
 	for _, e := range entries {
-		if isInternalName(e.Name) {
-			continue
+		if err := w.walkDirEntry(e, depth); err != nil {
+			return err
 		}
-		rel := stripRootPrefix(e.Path, root)
-		if e.IsDir {
-			// 目录：仅 exclude 命中才剪枝；include 不阻断递归——否则 path.Match 的 `*`
-			// 不跨 `/`，`--include "*.go"` 会让 `sub/x.go` 所在子树被整棵遗漏（审查 I-1）。
-			if !MatchFiltersDir(rel, filters) {
-				continue
-			}
-			if recursive {
-				before := len(*out)
-				if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
-					return err
-				}
-				// 空目录（或过滤后为空）：include 命中（或无 include）才作为目录条目输出
-				if len(*out) == before && MatchFilters(rel, filters) {
-					*out = append(*out, e)
-				}
-			} else if MatchFilters(rel, filters) {
-				*out = append(*out, e)
-			}
-			continue
+	}
+	return nil
+}
+
+// walkDirEntry 处理单个目录条目：内部目录跳过、目录走子树剪枝/递归、文件走过滤与符号链接处理。
+func (w *walker) walkDirEntry(e Entry, depth int) error {
+	if isInternalName(e.Name) {
+		return nil
+	}
+	rel := stripRootPrefix(e.Path, w.root)
+	if e.IsDir {
+		return w.walkDirSubtree(e, rel, depth)
+	}
+	if !MatchFilters(rel, w.filters) {
+		return nil
+	}
+	if e.IsSymlink {
+		return w.appendSymlinkEntry(e, depth)
+	}
+	w.out = append(w.out, e) // 常规文件
+	return nil
+}
+
+// walkDirSubtree 处理目录条目：仅 exclude 命中才剪枝；include 不阻断递归——否则
+// path.Match 的 `*` 不跨 `/`，`--include "*.go"` 会让 `sub/x.go` 所在子树被整棵遗漏
+// （审查 I-1）。递归后空目录（或过滤后为空）在 include 命中（或无 include）时作为目录条目输出。
+func (w *walker) walkDirSubtree(e Entry, rel string, depth int) error {
+	if !MatchFiltersDir(rel, w.filters) {
+		return nil
+	}
+	if w.recursive {
+		before := len(w.out)
+		if err := w.walkDir(e.Path, depth+1); err != nil {
+			return err
 		}
-		if !MatchFilters(rel, filters) {
-			continue
+		if len(w.out) == before && MatchFilters(rel, w.filters) {
+			w.out = append(w.out, e)
 		}
-		if e.IsSymlink {
-			if !followSymlinks {
-				*out = append(*out, e)
-				continue
+		return nil
+	}
+	if MatchFilters(rel, w.filters) {
+		w.out = append(w.out, e)
+	}
+	return nil
+}
+
+// appendSymlinkEntry 处理符号链接条目：不跟随 → 原样输出；跟随 → 解析目标，
+// 目录递归进入、文件以解析后元信息输出；环保护（同一路径只跟随一次）。
+func (w *walker) appendSymlinkEntry(e Entry, depth int) error {
+	if !w.followSymlinks {
+		w.out = append(w.out, e)
+		return nil
+	}
+	resolved, rerr := w.f.Stat(w.ctx, e.Path)
+	if rerr != nil || resolved == nil {
+		// 损坏/无法解析的符号链接：保留为符号链接条目（引擎跳过）
+		w.out = append(w.out, e)
+		return nil
+	}
+	if w.visited[e.Path] {
+		return nil // 环保护：同一符号链接路径只跟随一次
+	}
+	if resolved.IsDir {
+		w.visited[e.Path] = true
+		if w.recursive {
+			if err := w.walkDir(e.Path, depth+1); err != nil {
+				return err
 			}
-			resolved, rerr := f.Stat(ctx, e.Path)
-			if rerr != nil || resolved == nil {
-				// 损坏/无法解析的符号链接：保留为符号链接条目（引擎跳过）
-				*out = append(*out, e)
-				continue
-			}
-			if visited[e.Path] {
-				continue // 环保护：同一符号链接路径只跟随一次
-			}
-			if resolved.IsDir {
-				visited[e.Path] = true
-				if recursive {
-					if err := walkDir(ctx, f, root, e.Path, recursive, followSymlinks, filters, visited, depth+1, out); err != nil {
-						return err
-					}
-				} else {
-					*out = append(*out, *resolved)
-				}
-			} else {
-				e2 := *resolved
-				e2.IsSymlink = false
-				*out = append(*out, e2)
-			}
-			continue
+		} else {
+			w.out = append(w.out, *resolved)
 		}
-		*out = append(*out, e) // 常规文件
+	} else {
+		e2 := *resolved
+		e2.IsSymlink = false
+		w.out = append(w.out, e2)
 	}
 	return nil
 }

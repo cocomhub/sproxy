@@ -106,11 +106,11 @@ func TestUploadStore_CleanupExpired_ReclaimsCompletedSession(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	chunkDir := filepath.Join(t.TempDir(), "chunk")
-	cap := &fakeCapacity{}
+	capMock := &fakeCapacity{}
 
 	us := MustNewUploadStore(chunkDir, -time.Nanosecond, nil) // 创建即过期
 	defer us.Stop()
-	us.SetStorageMgr(cap)
+	us.SetStorageMgr(capMock)
 
 	doneSess, err := us.CreateSession("done-1", "f.txt", 100, 50, 2, "", 0)
 	if err != nil {
@@ -132,8 +132,8 @@ func TestUploadStore_CleanupExpired_ReclaimsCompletedSession(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(chunkDir, "done-1")); !os.IsNotExist(err) {
 		t.Fatalf("已完成会话目录应被回收, stat err=%v", err)
 	}
-	if cap.released != 0 || cap.calls != 0 {
-		t.Fatalf("已完成会话不得归还 P5 回退预留（字节已成正式文件）, got released=%d calls=%d", cap.released, cap.calls)
+	if capMock.released != 0 || capMock.calls != 0 {
+		t.Fatalf("已完成会话不得归还 P5 回退预留（字节已成正式文件）, got released=%d calls=%d", capMock.released, capMock.calls)
 	}
 }
 

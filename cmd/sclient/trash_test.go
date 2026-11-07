@@ -136,7 +136,7 @@ func TestTrashClient_ListTrash(t *testing.T) {
 	t.Parallel()
 	srv := newTrashMockServer(t)
 	svc := client.NewFileClient(srv.URL)
-	items, err := svc.ListTrash(context.Background())
+	items, err := svc.ListTrash(context.Background(), "")
 	if err != nil {
 		t.Fatalf("ListTrash: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestTrashClient_RestoreSendsFileQuery(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	svc := client.NewFileClient(srv.URL)
-	if err := svc.RestoreTrash(context.Background(), "trash/f.txt.deleted"); err != nil {
+	if err := svc.RestoreTrash(context.Background(), "trash/f.txt.deleted", ""); err != nil {
 		t.Fatalf("RestoreTrash: %v", err)
 	}
 	if gotFile != "trash/f.txt.deleted" {
@@ -199,7 +199,67 @@ func TestTrashClient_RestoreSuccessFalse(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	svc := client.NewFileClient(srv.URL)
-	if err := svc.RestoreTrash(context.Background(), "trash/x"); err == nil {
+	if err := svc.RestoreTrash(context.Background(), "trash/x", ""); err == nil {
 		t.Fatalf("success=false 应报错")
+	}
+}
+
+// TestTrash_MultiVolume 服务端多卷回收站（#830）已支持 ?volume=/all=1，CLI 必须接入：
+// list 默认汇总、--volume 只看该卷；empty 默认只清默认卷、--all 清全部（安全默认不扩大）。
+func TestTrash_MultiVolume(t *testing.T) {
+	var gotPaths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/trash" {
+			_, _ = w.Write([]byte(`{"entries":[{"trash_rel":"trash/user/a.txt.__deleted__","name":"a.txt","volume":"vault"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer ts.Close()
+
+	svc := client.NewFileClient(ts.URL)
+	factory := clientfactory.NewMock(svc, nil)
+
+	// list --volume vault
+	var buf strings.Builder
+	listCmd := newCmdTrash(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	listCmd.SetArgs([]string{"list", "--volume", "vault"})
+	if err := listCmd.Execute(); err != nil {
+		t.Fatalf("trash list --volume: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; !strings.Contains(got, "volume=vault") {
+		t.Fatalf("list 请求未带 volume: %s", got)
+	}
+	if !strings.Contains(buf.String(), "vault") {
+		t.Fatalf("list 输出应含 VOLUME 列值 vault, got %q", buf.String())
+	}
+
+	// empty --all（清全部卷）
+	emptyCmd := newCmdTrash(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	emptyCmd.SetArgs([]string{"empty", "--yes", "--all"})
+	if err := emptyCmd.Execute(); err != nil {
+		t.Fatalf("trash empty --all: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; !strings.Contains(got, "all=1") {
+		t.Fatalf("empty --all 请求未带 all=1: %s", got)
+	}
+
+	// empty 默认（不带参数）只清默认卷：不得发送 all=1 / volume
+	emptyDefault := newCmdTrash(factory, cli.IOStreams{Out: &buf, ErrOut: io.Discard})
+	emptyDefault.SetArgs([]string{"empty", "--yes"})
+	if err := emptyDefault.Execute(); err != nil {
+		t.Fatalf("trash empty 默认: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; strings.Contains(got, "all=1") || strings.Contains(got, "volume=") {
+		t.Fatalf("empty 默认不得扩大范围（破坏性默认不静默扩大）: %s", got)
+	}
+
+	// --all 与 --volume 互斥
+	bad := newCmdTrash(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
+	bad.SetArgs([]string{"empty", "--yes", "--all", "--volume", "vault"})
+	if err := bad.Execute(); err == nil {
+		t.Fatal("--all 与 --volume 应互斥报错")
 	}
 }

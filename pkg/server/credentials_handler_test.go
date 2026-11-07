@@ -41,7 +41,7 @@ func doSignedJSON(t *testing.T, method, url string, ak, sk string, body any) (in
 		t.Fatalf("new request: %v", err)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequest(req, ak, sk, buf.Bytes())
 	} else {
 		signRequest(req, ak, sk)
@@ -92,7 +92,7 @@ func doSignedJSONEntry(t *testing.T, url, ak, entryID, sk string, body any) (int
 		t.Fatalf("new request: %v", err)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequestEntry(req, ak, entryID, sk, buf.Bytes())
 	} else {
 		signRequestEntry(req, ak, entryID, sk)
@@ -353,6 +353,16 @@ func TestCredentials_Renew_TTLServer(t *testing.T) {
 func TestCredentials_SKList_OwnListing(t *testing.T) {
 	url, _, _ := newCredentialsTestServer(t, "", testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
+	renewResp, list := renewAndListOwnSK(t, url)
+	if list.Total < 2 {
+		t.Fatalf("sk list total = %d, want >= 2（initial + renew）", list.Total)
+	}
+	assertSKListContainsRenew(t, list, renewResp.SKID)
+}
+
+// renewAndListOwnSK 对当前 AK 发起 renew，随后列出本人 SK 列表。
+func renewAndListOwnSK(t *testing.T, url string) (renewCredentialResponse, skListResponse) {
+	t.Helper()
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
 	status, body := doSignedJSON(t, http.MethodPost, renewURL, testAccessKey, testAccessSecret, map[string]any{})
 	if status != http.StatusOK {
@@ -367,15 +377,18 @@ func TestCredentials_SKList_OwnListing(t *testing.T) {
 	}
 	var list skListResponse
 	decodeJSONInto(t, data, &list)
-	if list.Total < 2 {
-		t.Fatalf("sk list total = %d, want >= 2（initial + renew）", list.Total)
-	}
+	return renewResp, list
+}
+
+// assertSKListContainsRenew 断言 SK 列表含 renew 新条目且元数据（status/meta_type/expires）正确。
+func assertSKListContainsRenew(t *testing.T, list skListResponse, wantSKID string) {
+	t.Helper()
 	found := false
 	for _, s := range list.SKs {
 		if s.WrappedSecret == nil {
 			t.Errorf("条目 %s wrapped_secret 缺失", s.SKID)
 		}
-		if s.SKID == renewResp.SKID {
+		if s.SKID == wantSKID {
 			found = true
 			if s.Status != accesskey.StatusActive {
 				t.Errorf("新条目 status = %q, want active", s.Status)
@@ -389,7 +402,7 @@ func TestCredentials_SKList_OwnListing(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("列表未包含 renew 新条目 %q: %+v", renewResp.SKID, list.SKs)
+		t.Fatalf("列表未包含 renew 新条目 %q: %+v", wantSKID, list.SKs)
 	}
 }
 
@@ -716,7 +729,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 	if err := os.WriteFile(base, []byte("block"), 0o600); err != nil {
 		t.Fatalf("write block file: %v", err)
 	}
-	store := accesskey.NewCredentialStore(filepath.Join(base, "credentials.json"))
+	store := accesskey.NewCredentialStore(filepath.Join(base, fileNameCredStore))
 	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, &auditBuf, store)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
@@ -728,7 +741,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 		t.Errorf("500 响应不应回传含服务器路径的原始错误: %s", body)
 	}
 	// 审计 credential_persist_error 留痕。
-	if count := len(auditActions(t, &auditBuf, auditActionCredPersistFail)); count < 1 {
+	if len(auditActions(t, &auditBuf, auditActionCredPersistFail)) < 1 {
 		t.Fatalf("未找到 credential_persist_error 审计")
 	}
 	// 内存态不丢：ring 已追加新条目（AddKey 在 Save 之前成功）——旧 SK 仍可用。
@@ -939,7 +952,7 @@ func TestCredentials_AKDelete_Security(t *testing.T) {
 	if stAuth != http.StatusUnauthorized {
 		t.Fatalf("删除后原 AK 访问 status = %d, want 401", stAuth)
 	}
-	if count := len(auditActions(t, &auditBuf, auditActionCredAKDelete)); count < 1 {
+	if len(auditActions(t, &auditBuf, auditActionCredAKDelete)) < 1 {
 		t.Fatalf("未找到 credential_ak_delete 审计")
 	}
 

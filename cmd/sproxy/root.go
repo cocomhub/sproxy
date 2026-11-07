@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -23,9 +26,16 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/files"
+	_ "github.com/cocomhub/sproxy/pkg/integrity/ext/video" // 注册视频语义校验器（ffprobe）
+	"github.com/cocomhub/sproxy/pkg/leader"
+	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/credentials"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/state"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	"github.com/cocomhub/sproxy/pkg/syncexec"
@@ -42,9 +52,12 @@ import (
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic" // 注册 QUIC 传输层（hub.transports.quic）
 	quic "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/quic"
 	wsxfer "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws"
+	"github.com/cocomhub/sproxy/pkg/volume/enclosure"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/cluster"
 	s3ext "github.com/cocomhub/sproxy/pkg/volume/ext/s3"
 	"github.com/cocomhub/sproxy/pkg/volume/federated"
 	"github.com/cocomhub/sproxy/pkg/volume/ftp"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 	"github.com/cocomhub/sproxy/pkg/volume/sftp"
 	"github.com/cocomhub/sproxy/pkg/volume/webdav"
 	"github.com/spf13/cobra"
@@ -63,6 +76,9 @@ const (
 	logListenClosed     = "listen and serve closed"
 	logHandlersCloseErr = "handlers close error"
 	errFmtListenServe   = "listen and serve error: %w"
+	// errFmtSecretAssembly 是配置声明的加密卷补装失败的统一 boot-fail 文案（四步装配序中三步共用，
+	// 收敛字面量；封装卷补装另有更具体的文案）。
+	errFmtSecretAssembly = "secret 卷装配失败（配置声明的加密卷补装 boot fail）：%w"
 )
 
 var (
@@ -111,618 +127,16 @@ func init() {
 	rootCmd.AddCommand(NewVersionSubcommand())
 	rootCmd.AddCommand(newCmdDav())
 	rootCmd.AddCommand(newCmdBaidupcs())
+	rootCmd.AddCommand(newCmdPikpak(cli.SystemIOStreams()))
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
-	// --version 处理
 	if showVer, _ := cmd.Flags().GetBool(flagVersion); showVer {
 		fmt.Printf("Version: %s\n", Version)
 		fmt.Printf("BuildAt: %s\n", BuildAt)
 		return nil
 	}
-
-	cfg, err := buildServerConfig(cmd)
-	if err != nil {
-		return err
-	}
-	// 凭据 store 化装配：SproxySig 权威表 = Ring（取代 yaml access_keys）。
-	// 载入 <storage_root>/anonymous/meta/credentials.json；**U3：零凭据启动**——store
-	// 为空不生成 anonymous 凭据，系统以零凭据等 register 公开端点接入首个 admin
-	// （首个经回环注册的用户由 AddRegistration 原子授 admin）。
-	// api_keys.enabled 时 Ring 仍装配（hub 准入与隧道派生仍需 AK/SK）。
-	credRing, credStore, err := server.BootstrapServerCredentials(cfg, slog.Default())
-	if err != nil {
-		return fmt.Errorf("装配凭据 Ring 失败: %w", err)
-	}
-	cfgPtr.Store(cfg)
-
-	logger := initLogger(cfg)
-	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// telemetry 装配：telemetry.enabled=true 时创建 OTel provider（autoexport 按环境
-	// 变量驱动 exporter），其 Tracer 注入 server 请求路径——requestLogMiddleware 的
-	// trace/span id 改由 OTel 生成，同时经 SpanContextKey 同步进 slog 日志（见
-	// telemetry.WithContextHandler）。enabled=false（默认）时 tracer 为 nil，server
-	// 保持自生成 id 的既有行为。provider 装配失败（非法采样率/端点）fail-fast 拒绝启动。
-	var tracer telemetry.Tracer // nil = 关闭（默认）
-	if cfg.Telemetry.Enabled {
-		tp, terr := oteltracing.NewProvider(
-			oteltracing.WithSampleRatio(cfg.Telemetry.SampleRatio),
-			oteltracing.WithOTLPEndpoint(cfg.Telemetry.OTLPEndpoint),
-		)
-		if terr != nil {
-			return fmt.Errorf("初始化 telemetry provider 失败: %w", terr)
-		}
-		// 停服时冲刷并关闭 TracerProvider（幂等）。
-		defer func() {
-			if cerr := tp.Shutdown(context.Background()); cerr != nil {
-				logger.Warn("telemetry provider 关停失败", "error", cerr)
-			}
-		}()
-		tracer = tp.Tracer("sproxy")
-		logger.Info("telemetry 已启用", "sample_ratio", cfg.Telemetry.SampleRatio, "otlp_endpoint", cfg.Telemetry.OTLPEndpoint)
-	}
-
-	mux := http.NewServeMux()
-	var routeTable *hub.MeshRouteTable
-	var persist *hub.Persister          // hub 状态持久化器（仅 hub.enabled 且 persist_file 非空时创建）
-	var restoredMsgs []hub.MessageSnap  // 启动时从持久化恢复的信令收件箱（灌入 SignalBroker）
-	var restoredSnap *hub.Snapshot      // 启动时从持久化恢复的完整快照（灌回虚拟 IP 分配器）
-	var hubDHT hub.DHT                  // hub 节点发现表（hub.dht: kad 时装配；注入 HubServer 与 Handlers）
-	var fedClient *hub.FederationClient // hub 联邦节点表同步客户端（hub.federation.enabled 时装配；注入 Handlers）
-	// Hub 中继：先创建 MeshRouteTable + HubServer 收口（ws/tcp 传输共用注册/中继逻辑），
-	// 再按传输配置挂载 WS 升级端点与裸 TCP listener，最后注册 HTTP 路由。
-	if cfg.Hub.Enabled {
-		routeTable = hub.NewMeshRouteTable()
-		logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
-
-		// hub 状态持久化：配置了 persist_file 时加载历史快照恢复节点注册，
-		// 并让后续注册/移除变更异步落盘（sproxy 启动后经 handlers 的 SetOnChange 触发）。
-		// 文件缺失或损坏均按空状态启动（不因损坏文件拒绝启动，见 Persister.Load）。
-		if cfg.Hub.PersistFile != "" {
-			persist = hub.NewPersister(cfg.Hub.PersistFile)
-			if snap, err := persist.Load(); err != nil {
-				return fmt.Errorf("读取 hub 持久化文件失败: %w", err)
-			} else if snap != nil {
-				hub.RestoreFromSnapshot(routeTable, snap)
-				restoredMsgs = snap.Messages
-				restoredSnap = snap
-				if len(snap.Nodes) > 0 || len(snap.Messages) > 0 {
-					logger.Info("hub 状态已从持久化恢复", "file", cfg.Hub.PersistFile, "nodes", len(snap.Nodes), "messages", len(snap.Messages))
-				}
-			}
-		}
-		// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
-		// hub 与 HTTP 面共用同一个凭据 Ring（credRing，单一事实源）：
-		// rotate / 过期在 ring 上动态生效，无需在 hub 侧做任何同步。
-		hubSrv := hub.NewHubServer(routeTable, hub.NewAuthenticator(credRing), logger.With("component", "hub"), cfg.Hub.MaxConnections)
-		// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
-		// 100.64.0.0/10，config.Validate 已保证 IPv4）。分配权在 hub，节点不可自选。
-		// S-5：防御兜底同时覆盖非法 CIDR 与 IPv6（NewHubAllocator 对非 IPv4 panic，
-		// 此处避免把 IPv6 前缀传给它）。默认分配器已在 NewHubServer 建立。
-		if prefix, perr := netip.ParsePrefix(cfg.Hub.VirtualSubnet); perr == nil {
-			if prefix.Addr().Is4() {
-				hubSrv.SetAllocator(hub.NewHubAllocator(prefix))
-			} else {
-				logger.Warn("hub.virtual_subnet 非 IPv4，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet)
-			}
-		} else {
-			logger.Warn("hub.virtual_subnet 非法，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet, "error", perr)
-		}
-		// 重启快照重建分配表：把已持久化的 (mesh,nodeID)→VIP 灌回分配器，
-		// 避免把已持久化的 VIP 再分给新节点（DoD 1）。
-		// R-5：快照内虚拟 IP 冲突/越界（损坏或伪造持久化文件）时显式记录 Error——
-		// 被拒条目不保留，可能使已持久化节点重启后拿新 VIP；清晰告警供运维定位，
-		// 不再静默以空表启动掩盖问题。
-		if restoredSnap != nil {
-			if perr := hub.PreloadAllocator(hubSrv.Allocator(), restoredSnap); perr != nil {
-				logger.Error("虚拟 IP 分配表快照重建冲突（冲突条目不保留；对应节点重启后可能拿到新虚拟 IP）", "error", perr)
-			}
-		}
-		// DHT 节点发现表（hub.dht: kad）：装配 Kademlia，注册进 DHTRegistry，
-		// 注入 HubServer（注册时喂入 DHT）与 Handlers（/api/hub/nodes 合并候选）。
-		// 路由表仍 hub 权威；DHT 只提供候选节点/发现，不改路由表状态。
-		if cfg.Hub.DHT == "kad" {
-			dhtNodeID := cfg.Hub.NodeID
-			if dhtNodeID == "" {
-				dhtNodeID = "hub-dht"
-			}
-			// 装配 Kademlia 进 DHTRegistry（Active 返回最高优先级实现 = kad），
-			// 随后经 DHTRegistry.Active() 注入 HubServer/Handlers——registry 是
-			// 实际选择机制（非装饰性副作用）。
-			kadDHT := kad.NewDHT(dhtNodeID, nil, logger.With("component", "dht"))
-			// k-bucket 持久化（缓存语义，路由表仍 hub 权威）：配置
-			// hub.dht_persist_file 时启动 Load 恢复上次发现缓存（不冷启动），
-			// 后续 Register/Remove 变更经去抖异步落盘。文件缺失/损坏/超限按
-			// 空桶启动（kad.Load 语义）；Load 的其余 I/O 错误 fail-fast。
-			if cfg.Hub.DHTPersistFile != "" {
-				if perr := kadDHT.EnablePersistence(cfg.Hub.DHTPersistFile); perr != nil {
-					return fmt.Errorf("初始化 kad DHT 持久化失败: %w", perr)
-				}
-				logger.Info("kad DHT k-bucket 持久化已启用", "file", cfg.Hub.DHTPersistFile)
-			}
-			hub.RegisterDHT("kad", kadDHT, 10)
-			hubDHT = hub.DHTRegistry.Active()
-			// 停服时 flush 去抖窗口内未落盘的 k-bucket 变更（hubDHT.Close 委托
-			// kad.FlushPersist；内存 DHT 的 Close 是 no-op）。
-			// 审查 PR-3 M-1：flush 失败（写盘错误）记录 Error，不静默吞（禁止静默失败）。
-			defer func() {
-				if cerr := hubDHT.Close(); cerr != nil {
-					logger.Error("kad DHT 关停 flush 失败", "err", cerr)
-				}
-			}()
-			if len(cfg.Hub.DHTSeeds) > 0 {
-				// 多 hub DHT 组网未实现，种子暂不引导（kad.Bootstrap 现会把种子
-				// 当假 ID 节点插入路由表，污染发现列表）；预留配置，未来实现
-				// 真实 bootstrap 时再消费。
-				logger.Warn("hub.dht_seeds 预留（多 hub DHT 组网未实现），暂不引导", "seeds", cfg.Hub.DHTSeeds)
-			}
-			hubSrv.SetDHT(hubDHT)
-			logger.Info("Hub DHT 已启用", "impl", "kad", "node_id", dhtNodeID)
-		}
-		// hub 联邦（hub-to-hub peering）：配置 hub.federation.peers 时周期拉取
-		// 对端 hub 节点表（联邦候选），/api/hub/nodes 合并（路由表权威 +
-		// DHT + 联邦候选，去重）。入站端点 /api/hub/federation/nodes 由
-		// RegisterRoutes 在 hub.enabled 且 federation.enabled 时注册。
-		// 拉取认证复用 SproxySig AccessKey（对端 hub 凭据 Ring 登记的 AK/SK）；
-		// peer URL 为空回落默认 loopback（远程 peering 需显式配置，见
-		// Config.Validate）。联邦只提供发现/可达性，不改路由表状态。
-		// federation.persist_file 非空时启用候选持久化（重启后恢复上次同步的
-		// 候选节点，不冷启动；损坏/缺失文件按空候选启动）。
-		if cfg.Hub.Federation.Enabled {
-			peers := make([]hub.FederationPeer, 0, len(cfg.Hub.Federation.Peers))
-			for _, p := range cfg.Hub.Federation.Peers {
-				peers = append(peers, hub.FederationPeer{
-					ID:                 p.ID,
-					URL:                p.URL,
-					AccessKey:          p.AccessKey,
-					AccessKeySecret:    p.AccessKeySecret,
-					AccessKeyID:        p.AccessKeyID,
-					CAFile:             p.CAFile,
-					InsecureSkipVerify: p.InsecureSkipVerify,
-				})
-			}
-			var ferr error
-			fedClient, ferr = hub.NewFederationClientWithPersist(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"), cfg.Hub.Federation.PersistFile)
-			if ferr != nil {
-				return fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
-			}
-			fedClient.Start(ctx)
-			defer fedClient.Close()
-			logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval, "persist_file", cfg.Hub.Federation.PersistFile)
-		}
-		if cfg.Hub.Transports.WS.Enabled {
-			// WS 升级路径（roadmap §5.3 P1 被动伪装层：形态对齐，贴近业务路径可配）。
-			// 默认 /ws 零回归；显式配置生效（客户端须同步同一路径）。
-			wsPath := cfg.Hub.Transports.WS.Path
-			if wsPath == "" {
-				wsPath = "/ws"
-			}
-			if !strings.HasPrefix(wsPath, "/") {
-				wsPath = "/" + wsPath
-			}
-			if wsPath != "/ws" {
-				logger.Info("WS 升级路径已自定义（形态对齐）", "path", wsPath)
-			}
-			// 挂载 WebSocket 升级端点到主 mux；连接后由 HubServer 处理注册与转发。
-			hubNode := wsxfer.NewHandlerNode(wsxfer.WithUpgradeHeader(cfg.Hub.Transports.WS.UpgradeHeader))
-			hubNode.AddToMux(mux, wsPath)
-			go func() {
-				for {
-					conn, aerr := hubNode.Accept(ctx)
-					if aerr != nil {
-						return
-					}
-					// I30：连接并发上限由 HubServer 信号量控制；超限立即关闭新连接。
-					if !hubSrv.TryHandleConn(ctx, conn) {
-						logger.Warn("Hub 连接数达到上限，拒绝新连接", "max", cfg.Hub.MaxConnections)
-						_ = conn.Close()
-						continue
-					}
-				}
-			}()
-		}
-		if cfg.Hub.Transports.TCP.Enabled {
-			// 裸 TCP 中继：独立 raw TCP listener（复用注册/鉴权/中继逻辑，传输层从
-			// ws 扩到 tcp）。同步绑定（端口占用等错误 fail-fast，而非后台静默失败），
-			// accept 循环在 goroutine 中运行。
-			tcpListen := cfg.Hub.Transports.TCP.Listen
-			if tcpListen == "" {
-				tcpListen = server.DefaultHubTCPListen
-			}
-			tcpLn, lerr := hubSrv.ListenTCP(ctx, tcpListen)
-			if lerr != nil {
-				return fmt.Errorf("hub TCP 中继监听失败: %w", lerr)
-			}
-			defer tcpLn.Close()
-			go func() {
-				if aerr := hubSrv.AcceptTCP(ctx, tcpLn); aerr != nil && ctx.Err() == nil {
-					logger.Error("Hub TCP 中继 accept 退出", "addr", tcpListen, "error", aerr)
-				}
-			}()
-			logger.Info("Hub TCP 中继已启用", "addr", tcpListen)
-		}
-		if cfg.Hub.Transports.QUIC.Enabled {
-			// QUIC 中继：独立 raw UDP listener（复用注册/鉴权/中继逻辑——AcceptTCP
-			// 的 xfer.Listener 抽象与传输无关，QUIC listener 直接传入）。同步绑定
-			// fail-fast，accept 循环在 goroutine 中运行。
-			// QUIC 自带 TLS（ALPN sproxy-quic）：生产应显式配置
-			// SPROXY_QUIC_CERT_FILE/KEY_FILE，客户端经 SPROXY_QUIC_CA_CERT 校验；
-			// 未配置时 ext/quic 回落开发用自签证书。
-			quicListen := cfg.Hub.Transports.QUIC.Listen
-			if quicListen == "" {
-				quicListen = server.DefaultHubQUICListen
-			}
-			quicTP := xfer.Get("quic")
-			if quicTP == nil {
-				return fmt.Errorf("quic 传输层未注册（装配引入 ext/quic 触发 init 注册）")
-			}
-			qln, qerr := quicTP.Listen(ctx, quicListen)
-			if qerr != nil {
-				return fmt.Errorf("hub QUIC 中继监听失败: %w", qerr)
-			}
-			defer qln.Close()
-			go func() {
-				if aerr := hubSrv.AcceptTCP(ctx, qln); aerr != nil && ctx.Err() == nil {
-					logger.Error("Hub QUIC 中继 accept 退出", "addr", quicListen, "error", aerr)
-				}
-			}()
-			logger.Info("Hub QUIC 中继已启用", "addr", quicListen)
-		}
-		// gRPC 传输（HTTP/2 形态，roadmap P2 gRPC 传输装配）：独立端口监听。
-		if cfg.Hub.Transports.GRPC.Enabled {
-			grpcListen := cfg.Hub.Transports.GRPC.Listen
-			if grpcListen == "" {
-				grpcListen = server.DefaultHubGRPCListen
-			}
-			grpcTP := xfer.Get("grpc")
-			if grpcTP == nil {
-				return fmt.Errorf("grpc 传输层未注册（装配引入 ext/grpc 触发 init 注册）")
-			}
-			gln, gerr := grpcTP.Listen(ctx, grpcListen)
-			if gerr != nil {
-				return fmt.Errorf("hub gRPC 中继监听失败: %w", gerr)
-			}
-			defer gln.Close()
-			go func() {
-				if aerr := hubSrv.AcceptTCP(ctx, gln); aerr != nil && ctx.Err() == nil {
-					logger.Error("Hub gRPC 中继 accept 退出", "addr", grpcListen, "error", aerr)
-				}
-			}()
-			logger.Info("Hub gRPC 中继已启用", "addr", grpcListen)
-		}
-	}
-	// 云端下载经 mesh 出口（cloud_download_exit_node 启用）：构造经出口拨号函数注入
-	// （main 包装配——pkg/server 不 import pkg/client 避免包级环）。
-	var cloudExitDial func(context.Context, string) (net.Conn, error)
-	if cfg.CloudDownloadExitNode != "" {
-		dial, derr := buildCloudExitDial(cfg)
-		if derr != nil {
-			logger.Warn("cloud_download_exit_node 装配失败，回落本地直连下载", "error", derr)
-		} else {
-			cloudExitDial = dial
-		}
-	}
-	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
-		Mux:                 mux,
-		CfgPtr:              &cfgPtr,
-		CloudExitDial:       cloudExitDial,
-		Version:             Version,
-		BuildAt:             BuildAt,
-		Logger:              logger,
-		RouteTable:          routeTable,
-		HubPersist:          persist,
-		HubRestoredMessages: restoredMsgs,
-		Tracer:              tracer,
-		CredentialRing:      credRing,
-		CredentialStore:     credStore,
-		XferMetrics:         xferMetricsProvider{},
-	})
-	if hubDHT != nil {
-		h.SetDHT(hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
-	}
-	if fedClient != nil {
-		h.SetFederationClient(fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
-	}
-	// 语义搜索向量索引（roadmap 11.9-④；ai.search.enabled=false → 不装配零回归）。
-	if cfg.Notify.AISearch.Enabled {
-		vs := files.NewVectorStore(h.InsightCacheDir())
-		h.SetVectorStore(vs)
-	}
-	// AI 文件洞察（roadmap 11.9-⑤；ai.insight.enabled=false → nil 零回归）。
-	if ai := server.NewAIInsightFromConfig(cfg.Notify.AIInsight, h.InsightCacheDir(), logger); ai != nil {
-		// AI 配额（roadmap 11.9-⑦；ai.quota.enabled=false → nil 零回归）。
-		ai.SetQuota(server.NewAIQuota(cfg.Notify.AIQuota, logger))
-		h.SetAIInsight(ai)
-	}
-	// 集群节点注册表（roadmap 11.11 方案 A-⑤；cluster.enabled=false → nil 零回归）。
-	// 本地 StateStore 承载（单节点演示/测试；生产多节点共享需 state_store=mongo，见 docs/config.md）。
-	if cfg.Cluster.Enabled {
-		stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
-		st := state.NewLocalStateStore(stateDir, logger)
-		h.SetNodeRegistry(server.NewNodeRegistry(st, logger))
-		// 副本索引失效桥接（roadmap 11.11 方案 A-⑥ W3）：事件总线 → InvalidateIndex。
-		// 一致性事实源仍在 StateStore 快照（Watch/resync 兜底）；事件只缩短失效窗口。
-		server.NewEventIndexBridge(h.EventsBus(), h.FileService(), logger).Start()
-	}
-	// AI 派生数据隐私（roadmap 11.9-⑧；ai.privacy.enabled=false → nil 零回归）。
-	// fail-closed：启用但默认卷未加密 → Warn + 不装配（AI 数据不落明文）。
-	if cfg.Notify.AIPrivacy.Enabled {
-		if pr := server.NewAIPrivacy(true, h.PrivacyRoot(), logger); pr != nil {
-			h.SetAIPrivacy(pr)
-		}
-	}
-	// 先停 SyncManager（drain 同步任务）再关 Handlers：defer LIFO，h.Close 先注册
-	// （后执行），syncMgr.Stop 后注册（先执行）——同步任务收尾完成后才关 Handlers（审查 M-1）。
-	defer func() {
-		if err := h.Close(); err != nil {
-			slog.Warn(logHandlersCloseErr, "error", err.Error())
-		}
-	}()
-	// xfer listener（阶段 5 工作项 1）：接收 `sclient tunnel --xfer tcp/tcp+tls --hub <addr>`
-	// 的会话，经 mux → tunnel 解密 → 路由到本地文件 API（h.LocalHandler() 的 localMux）。
-	// 必须在 RegisterRoutes 之后启动（handler 彼时才构造）。注意用 LocalHandler() 而非
-	// 隧道的 h.tunnelHandler（Handlers 的未导出字段）：xfer 隧道 handleStream 已解密请求体为明文，
-	// h.tunnelHandler 是 POST /tunnel 的外层帧解密器（期望 ctx 带派生密钥 + 帧 body），直接使用会 401。
-	// fail-closed：xfer 段启用但装配失败（无有效凭据 Ring / 无证书）→ 拒绝启动。
-	if _, err := startXferListener(ctx, cfg, credRing, h.LocalHandler(), logger); err != nil {
-		return err
-	}
-	// 跨节点只读面（Y 一期）：remote_read.enabled 时起 loopback listener（每连接建
-	// mux + Tunnel，真握手/真加密/双向 pin）。未启用时返回 (nil, nil)，零开销零回归。
-	//
-	// 关闭顺序（I3 订正）：**不依赖本 defer 链的 LIFO**。正常信号停机走
-	// handleSignalShutdown（下方 runSignalHandler），它先 cancel(ctx) → s.Shutdown →
-	// **直接调用 h.Close()**（关卷根、清 volSet/globalRoot），此时 RunE 的 defer 链还
-	// 没跑，本文件这个 defer 反而在它之后才执行——「h.Close 先注册→后执行，本 listener
-	// 后注册→先关闭」在真实停机路径上不成立。真正保证「先停 accept、再关卷根」的是
-	// listener 自身的 ctx 感知 accept 循环（pkg/server/remote_read_listener.go:
-	// ctx 取消即 Close listener 解开阻塞的 Accept；cancel 后 accept 到的竞态连接也直接
-	// 丢弃）——cancel 恒早于 h.Close()。本 defer 只覆盖 RunE 提前返回的路径（该路径下
-	// LIFO 顺序恰好也是 rrLn 先于 h.Close 关闭，与 ctx 路径行为一致）。
-	rrLn, rrErr := server.StartRemoteReadListener(ctx, cfg, h, logger)
-	if rrErr != nil {
-		return fmt.Errorf("remote_read 启动失败: %w", rrErr)
-	}
-	if rrLn != nil {
-		defer func() { _ = rrLn.Close() }()
-	}
-	// 跨节点写面（Y 二期 P3-b2）：与只读面**独立开关/监听**；pin 只收「授写」指纹，
-	// 只读对端连握手都建立不了。关闭路径与只读面完全一致（ctx 感知 accept）。
-	rwLn, rwErr := server.StartRemoteWriteListener(ctx, cfg, h, logger)
-	if rwErr != nil {
-		return fmt.Errorf("remote_write 启动失败: %w", rwErr)
-	}
-	if rwLn != nil {
-		defer func() { _ = rwLn.Close() }()
-	}
-	// 跨节点面**运行态**（W1）：listener 实际地址 + node 角色是否成功启动 ⇒ 供
-	// `GET /api/mesh/status` 显示真实状态（配置了但没起成功时必须诚实显示，否则误导排障）。
-	nodeRoleRunning := &atomic.Bool{}
-	readFaceAddr, writeFaceAddr := "", ""
-	if rrLn != nil {
-		readFaceAddr = rrLn.Addr()
-	}
-	if rwLn != nil {
-		writeFaceAddr = rwLn.Addr()
-	}
-	h.SetMeshRuntimeInfo(newMeshRuntimeInfoProvider(readFaceAddr, writeFaceAddr, nodeRoleRunning.Load))
-
-	// B 侧 mesh node 角色（S5，默认关闭）：把本机的只读/写面宣告到 mesh 并允许出口拨号，
-	// 使对端 A 无需依赖外部 sidecar（`sclient mesh node …`）即可经服务发现到达本机。
-	// 用**监听器实际地址**（配置写 `:0` 时只有 listener 知道真实端口）；凭据取本机自用凭据
-	// （与 A 侧 mesh 客户端同源）。未启用时本调用是 no-op（零回归）。
-	if cfg.Mesh.Node.Enabled {
-		readAddr, writeAddr := "", ""
-		if rrLn != nil {
-			readAddr = rrLn.Addr()
-		}
-		if rwLn != nil {
-			writeAddr = rwLn.Addr()
-		}
-		var creds *meshHubCreds
-		if ak, sk, skeyID, ok := h.SelfCredential(); ok {
-			creds = &meshHubCreds{AK: ak, SK: sk, SkeyID: skeyID}
-		}
-		if startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, h.AlertEngine(), logger) {
-			nodeRoleRunning.Store(true)
-		}
-	}
-	// 文件同步 SyncManager：配置了 sync（sync.max_concurrent 或 sync_remotes 非空）时装配。
-	// 远程访问用 HTTP 直连远程 sproxy（sync_remotes URL + SproxySig 凭据）；mesh 通道为后续增强。
-	if cfg.Sync.MaxConcurrent > 0 || len(cfg.SyncRemotes) > 0 {
-		remotes := make([]syncmgr.RemoteConfig, 0, len(cfg.SyncRemotes))
-		for _, r := range cfg.SyncRemotes {
-			remotes = append(remotes, syncmgr.RemoteConfig{
-				Name: r.Name, Kind: syncmgr.RemoteKind(r.Kind),
-				// direct 组
-				URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
-				AccessKeyID: r.AccessKeyID,
-				// mesh 组（写批次装配）
-				Node: r.Node, Volume: r.Volume, PeerPins: r.PeerPins, Transport: r.Transport,
-			})
-		}
-		// P4/P5：quota 以 nil 注入（NewManager 内部回退 noop），随后 SetQuotaResolver 注入
-		// per-owner resolver（sync pull 按任务 owner 在 user 桶 Scope 上预留/对账，owner_quotas 生效）。
-		// 逐文件写前 guard：由 syncexec.Executor 装配 h.SyncQuotaScope() 与 h.SyncScopeFor()——
-		// pull 本地写侧每个文件按实际 rel 路由到 bucket_limits 子目录子 Scope 后 TryReserve(size)
-		// 再落盘，配额不足该文件失败（不中止整体）；子目录配额对 sync pull 生效。
-		exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
-		exec.SetTenantScopeResolver(h.SyncQuotaScope())
-		exec.SetScopeResolver(h.SyncScopeFor())
-		// merge3 冲突索引：<storage_root>/anonymous/meta/sync（与凭据/审计同层持久化）。
-		conflictIdx, idxErr := syncmgr.NewConflictIndex(filepath.Join(cfg.StorageRoot, "anonymous", "meta", "sync"))
-		if idxErr != nil {
-			logger.Warn("冲突索引初始化失败（冲突登记降级为仅内存标记文件）", "error", idxErr)
-		} else {
-			exec.ConflictIndex = conflictIdx
-			h.SetConflictIndex(conflictIdx)
-		}
-		// Y 二期 P3-d：mesh 载体（`kind=mesh` 的远端）。仅在配置了 mesh 远端时装配；任一前置
-		// 缺失都不注入并告警（保持 fail-closed：mesh 远端报 ErrMeshTransportNotWired，不回落 direct）。
-		setupMeshFSFactory(exec, cfg, h, logger)
-		// P4/V3：baidupcs 载体（`kind=baidupcs` 的本机网盘卷，经 volumes[] type=baidupcs 装配）。
-		// 1. 先注册 baidupcs 后端插件（RegisterBackend，可插拔）；
-		// 2. 卷集合（h.Volumes()）由 assembleVolumes 装配——type=baidupcs 的卷已经 registry.NewBackend
-		//    构造并持有在 Set.external；工厂查 Set.External(remote.Volume) 统一寻址。
-		// 3. set.External 无 baidupcs 卷时工厂不注入并告警（kind=baidupcs 远端报 ErrBaidupcsNotWired，不回落 direct）。
-		registerBaidupcsBackend()
-		setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.SyncQuotaScope())
-		// WebDAV 后端（V3 plugin，第二个真实外部后端）：RegisterBackend("webdav") 可插拔注册——
-		// volumes[] type=webdav 的卷由 assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；
-		// kind=volume 远端查 Set.External(volume) 统一寻址（与 baidupcs 同构，见 volume/webdav/backend.go）。
-		webdav.RegisterWebDAVBackend()
-		// SFTP 后端（V3 plugin，第四个真实外部后端；pkg/volume/sftp）：
-		// RegisterBackend("sftp") 可插拔注册——volumes[] type=sftp 的卷由 assembleVolumes
-		// 经 registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
-		// 统一寻址（与 baidupcs/webdav 同构）。健康探针（registry.HealthProbe）随装配生效：
-		// GET /api/volumes 时 state=healthy/degraded/unknown 可观测（roadmap 3.3 P1）。
-		sftp.RegisterSFTPBackend()
-		// FTP 后端（V3 plugin，第六个真实外部后端；pkg/volume/ftp）：
-		// RegisterBackend("ftp") 可插拔注册——volumes[] type=ftp 的卷由 assembleVolumes
-		// 经 registry.NewBackend 构造持有在 Set.external；kind=volume 远端查
-		// Set.External(volume) 统一寻址（与 sftp/webdav 同构）。健康探针
-		// （registry.HealthProbe）随装配生效：GET /api/volumes 时 state 可观测。
-		ftp.RegisterFTPBackend()
-		// S3 后端（V3 plugin，第三个真实外部后端；pkg/volume/ext/s3 独立 module）：
-		// RegisterBackend("s3") 可插拔注册——volumes[] type=s3 的卷由 assembleVolumes 经
-		// registry.NewBackend 构造持有在 Set.external；kind=volume 远端查 Set.External(volume)
-		// 统一寻址（与 baidupcs/webdav 同构）。
-		s3ext.RegisterS3Backend()
-		// federated 后端（V3 plugin，第五个真实外部后端；pkg/volume/federated）：
-		// RegisterBackend("federated") 可插拔注册——volumes[] type=federated 的卷由
-		// assembleVolumes 经 registry.NewBackend 构造持有在 Set.external；Extra 读
-		// node/volume/path（远端 mesh 节点卷只读挂载，roadmap 3.3 P2）。dialer 经
-		// hub 中继（newMeshHubClient + NewRelayDialer）——远端卷读走 mesh 加密链路。
-		if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
-			// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
-			// volumes[] type=federated + Extra.writable=true 时写操作经写面授权链路。
-			federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
-				remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
-		}
-		// 用户卷重启恢复（U4）：扫描 <storage_root>/<owner>/meta/volume/ 恢复用户卷到 Set.external
-		// （单卷失败跳过 + 告警），并注入 store + owner 归属校验（跨 owner 创建任务 404）。
-		// 敏感 Extra 加密（审查 P2）：credential_store.encrypt=true 时用同一 master key 加密
-		// 用户卷 Extra（bduss 等凭据）；未启用时 nil（明文兼容，权限 0600 兜底）。
-		var uvMasterKey []byte
-		if cfg.CredentialStore.Encrypt {
-			if mk, mkErr := server.ResolveCredentialMasterKey(cfg); mkErr == nil {
-				uvMasterKey = mk
-			} else {
-				logger.Warn("credential_store.encrypt=true 但解析 master key 失败，用户卷 Extra 保持明文（建议修复配置后重启）", "error", mkErr)
-			}
-		}
-		uvStore := server.NewUserVolumeStore(cfg.StorageRoot, uvMasterKey)
-		if rErr := restoreUserVolumes(h.Volumes(), uvStore, logger.With("component", "user_volumes")); rErr != nil {
-			logger.Warn("用户卷恢复扫描失败（用户卷功能降级为不可用）", "error", rErr)
-		}
-		h.SetUserVolumeStore(uvStore)
-		syncMgr := syncmgr.NewManager(h.SyncTenantResolver(), h.SyncTenantList(), nil, int(capacity.CategoryUserFiles),
-			remotes, exec,
-			logger.With("component", "sync"),
-			&syncmgr.Config{
-				MaxConcurrent:  cfg.Sync.MaxConcurrent,
-				TaskTTL:        cfg.Sync.TaskTTL,
-				MaxRetries:     cfg.Sync.MaxRetries,
-				RetryDelay:     cfg.Sync.RetryDelay,
-				RetryBackoff:   cfg.Sync.RetryBackoff,
-				PerFileReserve: true,
-			})
-		syncMgr.SetQuotaResolver(h.SyncQuotaStore())
-		// 同步失败告警挂点（roadmap P1 阈值告警）：任务转 failed → 告警引擎（nil = 未启用）。
-		if h.AlertEngine() != nil {
-			syncMgr.OnTaskFailed = func(taskID, detail string) {
-				h.AlertEngine().OnSyncFailed(context.Background(), taskID, detail)
-			}
-		}
-		// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner
-		// （跨 owner 404 防枚举）。闭包判定：
-		//   1. 系统盘（config volumes[] type=baidupcs，Set.external 已有且 store 无该卷）→ 用户可用（true）；
-		//   2. 用户卷（store 有且 Owner == owner）→ true；
-		//   3. 其它（store 无该卷且非系统盘）→ false（未知卷，跨 owner 语义 404）。
-		volSet := h.Volumes()
-		syncMgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
-			// 1. 用户卷：store 有且 Owner == owner → 归属。
-			v, gErr := uvStore.Get(owner, volumeName)
-			if gErr == nil && v != nil && v.Owner == owner {
-				return true
-			}
-			// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
-			//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
-			//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
-			isUserVol := false
-			if allUVs, sErr := uvStore.ScanRestore(); sErr == nil {
-				for _, uv := range allUVs {
-					if uv.Name == volumeName {
-						isUserVol = true
-						break
-					}
-				}
-			}
-			if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
-				return true
-			}
-			// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
-			return false
-		})
-		h.SetSyncMgr(syncMgr)
-		defer syncMgr.Stop()
-	}
-
-	protocol := "http"
-	if cfg.TLS.Enabled {
-		protocol = "https"
-	}
-	displayHost, displayPort, _ := net.SplitHostPort(cfg.Addr)
-	if displayHost == "" {
-		displayHost = "127.0.0.1"
-	}
-	fmt.Printf("downserver start at: %s://%s:%s\n", protocol, displayHost, displayPort)
-	fmt.Printf("storage root: %s\n", cfg.StorageRoot)
-
-	srv := createHTTPServer(cfg, h.Handler())
-	// 独立指标端口（roadmap 6.x P1 残余）：cfg.MetricsPort > 0 时额外监听该端口
-	// 仅暴露 /metrics（MetricsHandler + metricsAuth 令牌门；不挂业务路由）。
-	// 0 = 关闭（默认零回归）。
-	var metricsSrv *http.Server
-	if cfg.MetricsPort > 0 {
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-			h.MetricsHandler(w, r)
-		})
-		metricsSrv = &http.Server{
-			Addr:              fmt.Sprintf(":%d", cfg.MetricsPort),
-			Handler:           h.MetricsAuth(http.Handler(mux)),
-			ReadHeaderTimeout: cfg.ServerTimeouts.ReadHeader,
-			IdleTimeout:       cfg.ServerTimeouts.Idle,
-		}
-		go func() {
-			slog.Info("独立指标端口启动", "addr", metricsSrv.Addr)
-			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				slog.Error("独立指标端口退出", "error", err)
-			}
-		}()
-		defer metricsSrv.Close()
-	}
-	stopSigCh, shutdownDone := runSignalHandler(cancel, srv, h, logger, cfg)
-	defer close(stopSigCh) // 确保所有退出路径上信号 goroutine 退出
-
-	if cfg.TLS.Enabled {
-		if err := startTLSListener(cfg, srv); err != nil {
-			return err
-		}
-	} else {
-		if err := startPlainListener(srv); err != nil {
-			return err
-		}
-	}
-
-	<-shutdownDone
-	slog.Info("downserver exit")
-	return nil
+	return runServerMain(cmd, args)
 }
 
 // xferListenerInfo 记录已启动的 xfer listener 信息（供测试与观测）。
@@ -782,17 +196,43 @@ func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.
 	// 走 registry：builtin.SetDefaultTLSConfig 后经 xfer.Get("tcp+tls").Listen。
 	// defaultTLSConfig 是 internal/tcp 包级全局，服务端进程内证书单一（同一 cfg），
 	// 多段共享同一 TLS 配置无冲突。
-	if xferTLS.Enabled || xferTCP.TLSEnabled {
+	if err := prepareXferTLS(cfg); err != nil {
+		return nil, err
+	}
+
+	return startXferListeners(ctx, xferListenerCtx{cfg: cfg, key: key, identity: identity, tunnelHandler: tunnelHandler, logger: logger}, xferTLS, xferTCP)
+}
+
+// prepareXferTLS 装配 xfer TLS 默认配置（任一启用段需要 TLS 时）。
+func prepareXferTLS(cfg *server.Config) error {
+	if cfg.Hub.Transports.XferTLS.Enabled || cfg.Hub.Transports.XferTCP.TLSEnabled {
 		tlsCfg, tErr := server.BuildXferTLSConfig(cfg)
 		if tErr != nil {
-			return nil, fmt.Errorf("start xfer listener: %w", tErr)
+			return fmt.Errorf("start xfer listener: %w", tErr)
 		}
 		builtin.SetDefaultTLSConfig(tlsCfg)
 	}
+	return nil
+}
 
+// xferListenerCtx 是 xfer listener 装配与服务循环共享的会话上下文
+// （config/隧道密钥/服务端身份/隧道 handler/日志），收敛各段间的重复传递
+// （避免 go:S107 参数爆炸）。
+type xferListenerCtx struct {
+	cfg           *server.Config
+	key           []byte
+	identity      *tunnel.Identity
+	tunnelHandler http.Handler
+	logger        *slog.Logger
+}
+
+// startXferListeners 逐个启动已启用的 xfer 段（xfer_tls 恒 TLS；xfer_tcp 段
+// tls_enabled=true 升级为 TLS）。
+func startXferListeners(ctx context.Context, xc xferListenerCtx, xferTLS, xferTCP server.XferTransportConfig) ([]xferListenerInfo, error) {
+	var infos []xferListenerInfo
 	if xferTLS.Enabled {
 		// xfer_tls 段恒 TLS（段名即约定），不消费 TLSEnabled 字段。
-		info, sErr := startOneXferListener(ctx, cfg, "xfer_tls", xferTLS, true, key, identity, tunnelHandler, logger)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tls", xferTLS, true)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -800,7 +240,7 @@ func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.
 	}
 	if xferTCP.Enabled {
 		// xfer_tcp 段默认明文（显式 option），tls_enabled=true 升级为 TLS。
-		info, sErr := startOneXferListener(ctx, cfg, "xfer_tcp", xferTCP, xferTCP.TLSEnabled, key, identity, tunnelHandler, logger)
+		info, sErr := startOneXferListener(ctx, xc, "xfer_tcp", xferTCP, xferTCP.TLSEnabled)
 		if sErr != nil {
 			return nil, sErr
 		}
@@ -811,7 +251,7 @@ func startXferListener(ctx context.Context, cfg *server.Config, ring *accesskey.
 
 // startOneXferListener 启动单个 xfer accept 循环（同步绑定，绑定失败 fail-fast）。
 // tlsEnabled 显式指定传输方式：xfer_tls 段恒传 true；xfer_tcp 段传 tc.TLSEnabled。
-func startOneXferListener(ctx context.Context, cfg *server.Config, name string, tc server.XferTransportConfig, tlsEnabled bool, key []byte, identity *tunnel.Identity, tunnelHandler http.Handler, logger *slog.Logger) (xferListenerInfo, error) {
+func startOneXferListener(ctx context.Context, xc xferListenerCtx, name string, tc server.XferTransportConfig, tlsEnabled bool) (xferListenerInfo, error) {
 	transportName := "tcp"
 	if tlsEnabled {
 		transportName = "tcp+tls"
@@ -834,10 +274,18 @@ func startOneXferListener(ctx context.Context, cfg *server.Config, name string, 
 	}
 	addr := xferListenerAddr(ln)
 
-	// 连接数上限信号量（复用 hub.max_connections 语义）。xfer 是隧道帧，不走 hub
-	// 注册帧语义的 TryHandleConn（那会误读注册帧破坏隧道握手），故独立信号量控制
-	// 并发，超限立即关闭新连接（防未认证/慢连接拖垮进程，C-1 DoS 收敛）。
-	maxConns := cfg.Hub.MaxConnections
+	serveXferAcceptLoop(ctx, ln, xc, name)
+
+	xc.logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
+	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: xc.identity.Fingerprint()}, nil
+}
+
+// serveXferAcceptLoop 启动单个 xfer listener 的 accept 循环（goroutine 内运行）。
+// 连接数上限走独立信号量（复用 hub.max_connections 语义）：xfer 是隧道帧，不走 hub
+// 注册帧语义的 TryHandleConn（那会误读注册帧破坏隧道握手），超限立即关闭新连接
+// （防未认证/慢连接拖垮进程，C-1 DoS 收敛）。
+func serveXferAcceptLoop(ctx context.Context, ln xfer.Listener, xc xferListenerCtx, name string) {
+	maxConns := xc.cfg.Hub.MaxConnections
 	if maxConns <= 0 {
 		maxConns = 256
 	}
@@ -851,35 +299,33 @@ func startOneXferListener(ctx context.Context, cfg *server.Config, name string, 
 				if ctx.Err() != nil {
 					return
 				}
-				logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
+				xc.logger.Error("xfer listener accept 退出", "name", name, "error", aErr)
 				return
 			}
 			select {
 			case sem <- struct{}{}:
 			default:
-				logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
+				xc.logger.Warn("xfer 连接数达到上限，拒绝新连接", "name", name, "max", maxConns)
 				_ = conn.Close()
 				continue
 			}
-			go func() {
-				defer func() { <-sem }()
-				m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(cfg)...)
-				tun := tunnel.NewTunnel(m, key, tunnel.WithIdentity(identity))
-				// Serve 同步执行 ECDH 握手（listener 侧）+ accept 循环；ctx 取消时返回。
-				// 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」（见
-				// pkg/tunnel/tunnel_mux.go）。判空守卫有意义：只在**真错误**且进程尚未
-				// 进入关闭流程（ctx 仍存活）时告警——避免把优雅停机的握手中断/accept
-				// 退出误报为异常。
-				if sErr := tun.Serve(ctx, tunnelHandler); sErr != nil && ctx.Err() == nil {
-					logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
-				}
-				_ = m.Close()
-			}()
+			go serveXferConn(ctx, conn, xc, name, sem)
 		}
 	}()
+}
 
-	logger.Info("xfer listener 已启用", "name", name, "transport", transportName, "addr", addr)
-	return xferListenerInfo{Name: name, Addr: addr, TLS: tlsEnabled, Fingerprint: identity.Fingerprint()}, nil
+// serveXferConn 处理一条已接受的 xfer 隧道连接：mux + Tunnel.Serve（ECDH 握手 +
+// accept 循环）。ctx 取消时返回（优雅停机）；连接数信号量由调用方释放。
+// 契约：Tunnel.Serve「ctx 取消 → nil，真错误 → 非 nil」——只在**真错误**且进程尚未
+// 进入关闭流程（ctx 仍存活）时告警，避免把优雅停机的握手中断/accept 退出误报为异常。
+func serveXferConn(ctx context.Context, conn xfer.Conn, xc xferListenerCtx, name string, sem chan struct{}) {
+	defer func() { <-sem }()
+	m := mux.NewWithOpts(conn, mux.RoleListener, server.MuxIdlePaddingOptions(xc.cfg)...)
+	tun := tunnel.NewTunnel(m, xc.key, tunnel.WithIdentity(xc.identity))
+	if sErr := tun.Serve(ctx, xc.tunnelHandler); sErr != nil && ctx.Err() == nil {
+		xc.logger.Warn("xfer 隧道 Serve 退出", "name", name, "error", sErr)
+	}
+	_ = m.Close()
 }
 
 // xferListenerAddr 从 xfer.Listener 提取实际监听地址（支持实现暴露 Addr() 的
@@ -1029,6 +475,16 @@ func writeBackActualAddr(addr string) {
 	}
 }
 
+// signalCtx 是信号处理循环的会话上下文（取消函数 + HTTP server + handlers + 日志
+// + 配置），收敛 runSignalLoop 的入参（避免 go:S107 参数爆炸）。
+type signalCtx struct {
+	cancel context.CancelFunc
+	s      *http.Server
+	h      *server.Handlers
+	logger *slog.Logger
+	cfg    *server.Config
+}
+
 // runSignalHandler 启动信号处理 goroutine，返回 stopSigCh（关闭后通知 goroutine 退出）和 shutdownDone（清理完成后关闭）。
 func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handlers, logger *slog.Logger, cfg *server.Config) (chan struct{}, chan struct{}) {
 	signalChan := make(chan os.Signal, 1)
@@ -1040,31 +496,34 @@ func runSignalHandler(cancel context.CancelFunc, s *http.Server, h *server.Handl
 
 	stopSigCh := make(chan struct{})
 	shutdownDone := make(chan struct{})
-	go func() {
-		defer close(shutdownDone)
-		defer signal.Stop(signalChan)
-		for {
-			select {
-			case <-stopSigCh:
-				return
-			case sig, ok := <-signalChan:
-				if !ok {
-					return
-				}
-				if sig == syscall.SIGHUP {
-					handleSighup(cfg, h)
-					continue
-				}
-				if isRestartSignal(sig) {
-					handleSignalRestart(cancel, s, h, logger, cfg)
-					return
-				}
-				handleSignalShutdown(cancel, s, h)
+	go runSignalLoop(signalChan, stopSigCh, shutdownDone, signalCtx{cancel: cancel, s: s, h: h, logger: logger, cfg: cfg})
+	return stopSigCh, shutdownDone
+}
+
+// runSignalLoop 处理信号扇循环：SIGHUP 热加载；USR2/重启信号走重启；其余走优雅关闭。
+func runSignalLoop(signalChan chan os.Signal, stopSigCh, shutdownDone chan struct{}, sc signalCtx) {
+	defer close(shutdownDone)
+	defer signal.Stop(signalChan)
+	for {
+		select {
+		case <-stopSigCh:
+			return
+		case sig, ok := <-signalChan:
+			if !ok {
 				return
 			}
+			if sig == syscall.SIGHUP {
+				handleSighup(sc.cfg, sc.h)
+				continue
+			}
+			if isRestartSignal(sig) {
+				handleSignalRestart(sc.cancel, sc.s, sc.h, sc.logger, sc.cfg)
+				return
+			}
+			handleSignalShutdown(sc.cancel, sc.s, sc.h)
+			return
 		}
-	}()
-	return stopSigCh, shutdownDone
+	}
 }
 
 // handleSignalShutdown 执行优雅关闭：取消 context、关闭 HTTP 服务器和 handlers。
@@ -1117,7 +576,7 @@ func handleSighup(oldCfg *server.Config, h *server.Handlers) {
 	if !maps.Equal(oldCfg.BucketLimits, newCfg.BucketLimits) {
 		slog.Warn("bucket_limits 修改在 SIGHUP 后不会生效（配额 Scope 不重建），需要重启进程")
 	}
-	if oldCfg.RateLimit != newCfg.RateLimit {
+	if !reflect.DeepEqual(oldCfg.RateLimit, newCfg.RateLimit) {
 		slog.Warn("rate_limit 修改在 SIGHUP 后不会生效，需要重启进程")
 	}
 	if oldCfg.ServerTimeouts != newCfg.ServerTimeouts {
@@ -1199,16 +658,16 @@ func formatString(s string) string {
 type xferMetricsProvider struct{}
 
 // XferMetrics 返回 WS/QUIC 连接级统计快照（/metrics 聚合）。
-func (xferMetricsProvider) XferMetrics() server.XferMetrics {
-	return server.XferMetrics{
+func (xferMetricsProvider) XferMetrics() metrics.XferMetrics {
+	return metrics.XferMetrics{
 		WS:   wsMetricsOf(wsxfer.Metrics()),
 		QUIC: quicMetricsOf(quic.Metrics()),
 	}
 }
 
-// wsMetricsOf 把 ws.WSMetrics 映射为 server.XferConnMetrics（同构字段）。
-func wsMetricsOf(m wsxfer.WSMetrics) server.XferConnMetrics {
-	return server.XferConnMetrics{
+// wsMetricsOf 把 ws.WSMetrics 映射为 metrics.XferConnMetrics（同构字段）。
+func wsMetricsOf(m wsxfer.WSMetrics) metrics.XferConnMetrics {
+	return metrics.XferConnMetrics{
 		ConnsOpened:  m.ConnsOpened,
 		ConnsClosed:  m.ConnsClosed,
 		MessagesSent: m.MessagesSent,
@@ -1218,9 +677,9 @@ func wsMetricsOf(m wsxfer.WSMetrics) server.XferConnMetrics {
 	}
 }
 
-// quicMetricsOf 把 quic.QUICMetrics 映射为 server.XferConnMetrics（同构字段）。
-func quicMetricsOf(m quic.QUICMetrics) server.XferConnMetrics {
-	return server.XferConnMetrics{
+// quicMetricsOf 把 quic.QUICMetrics 映射为 metrics.XferConnMetrics（同构字段）。
+func quicMetricsOf(m quic.QUICMetrics) metrics.XferConnMetrics {
+	return metrics.XferConnMetrics{
 		ConnsOpened:  m.ConnsOpened,
 		ConnsClosed:  m.ConnsClosed,
 		MessagesSent: m.MessagesSent,
@@ -1228,4 +687,915 @@ func quicMetricsOf(m quic.QUICMetrics) server.XferConnMetrics {
 		BytesSent:    m.BytesSent,
 		BytesRecv:    m.BytesRecv,
 	}
+}
+
+// runServerRuntime 汇总服务端装配期的运行时状态。cleanups 按「注册顺序」收集，
+// runTeardown 逆序执行（对应原 runServer 内按出现顺序注册、LIFO 执行的 defer 链，
+// 保证析构顺序与重构前一致）。
+type runServerRuntime struct {
+	//nolint:containedctx // S8242 已评估：长期驻留装配/测试底座生命周期 ctx，非请求作用域——与下行 NOSONAR 双抑制
+	ctx          context.Context // NOSONAR: S8242 — 长期驻留结构体持有 ctx（装配/测试底座生命周期），非请求作用域
+	cfg          *server.Config
+	logger       *slog.Logger
+	mux          *http.ServeMux
+	credRing     *accesskey.Ring
+	credStore    accesskey.CredentialStorer
+	tracer       telemetry.Tracer
+	routeTable   *hub.MeshRouteTable
+	persist      *hub.Persister
+	restoredMsgs []hub.MessageSnap
+	restoredSnap *hub.Snapshot
+	hubDHT       hub.DHT
+	fedClient    *hub.FederationClient
+	cloudDial    func(ctx context.Context, addr string) (net.Conn, error)
+	writeGuard   *leader.WriteGuard
+	h            *server.Handlers
+	cleanups     []func()
+}
+
+// addCleanup 按注册顺序追加一条析构闭包（nil 跳过）。
+func (rt *runServerRuntime) addCleanup(fn func()) {
+	if fn != nil {
+		rt.cleanups = append(rt.cleanups, fn)
+	}
+}
+
+// runTeardown 逆序执行全部已注册的析构闭包（模拟 defer LIFO）。
+func (rt *runServerRuntime) runTeardown() {
+	for _, v := range slices.Backward(rt.cleanups) {
+		v()
+	}
+}
+
+// runServerMain 完成服务端装配并启动 HTTP 服务的调度入口（runServer 的委托目标）。
+func runServerMain(cmd *cobra.Command, args []string) error {
+	cfg, err := buildServerConfig(cmd)
+	if err != nil {
+		return err
+	}
+	cfgPtr.Store(cfg)
+	logger := initLogger(cfg)
+	slog.Info("config loaded", "path", cfgFile, "log_level", levelString(cfg.LogLevel), "log_format", formatString(cfg.LogFormat))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := &runServerRuntime{ctx: ctx, cfg: cfg, logger: logger, mux: http.NewServeMux()}
+	defer rt.runTeardown()
+	if err := rt.assemble(); err != nil {
+		return err
+	}
+	return rt.boot(cancel)
+}
+
+// assemble 依次完成装配段：协议盐 → 凭据 Ring → telemetry → hub → 云端出口 →
+// 集群写面 → handlers/mux。各段把析构闭包按「注册顺序」收集进 rt.cleanups。
+func (rt *runServerRuntime) assemble() error {
+	if err := rt.setupProtocolSalt(); err != nil {
+		return err
+	}
+	if err := rt.setupCredentials(); err != nil {
+		return err
+	}
+	if err := rt.setupTelemetry(); err != nil {
+		return err
+	}
+	if err := rt.setupHub(); err != nil {
+		return err
+	}
+	if err := rt.setupCloudExit(); err != nil {
+		return err
+	}
+	if err := rt.setupClusterWriteGuard(); err != nil {
+		return err
+	}
+	return rt.setupServerCore()
+}
+
+// setupProtocolSalt 装配协议盐（防协议指纹识别）：配置 protocol_salt_key → 派生替换域分离盐。
+func (rt *runServerRuntime) setupProtocolSalt() error {
+	cfg := rt.cfg
+	// 协议盐自定义（防协议指纹识别）：配置 protocol_salt_key → 派生替换域分离盐。
+	// ⚠️ 与客户端/stealth 使用相同 key 才能握手（ECDH 会话密钥派生一致）。
+	if cfg.ProtocolSaltKey != "" {
+		if sk, derr := hex.DecodeString(cfg.ProtocolSaltKey); derr == nil && len(sk) == 32 {
+			tunnel.SetProtocolSalts(tunnel.DeriveProtocolSalts(sk))
+		} else {
+			return fmt.Errorf("protocol_salt_key 应为 64 hex（32B 密钥）")
+		}
+	}
+	return nil
+}
+
+// setupCredentials 装配 SproxySig 凭据 Ring（store 化）。U3 零凭据启动——
+// store 为空不生成 anonymous 凭据，系统以零凭据等 register 公开端点接入首个 admin。
+func (rt *runServerRuntime) setupCredentials() error {
+	credRing, credStore, err := credentials.BootstrapServerCredentials(rt.cfg, slog.Default())
+	if err != nil {
+		return fmt.Errorf("装配凭据 Ring 失败: %w", err)
+	}
+	rt.credRing = credRing
+	rt.credStore = credStore
+	return nil
+}
+
+// setupTelemetry 装配 OTel tracer provider（enabled=false 时返回 nil tracer，零回归）。
+func (rt *runServerRuntime) setupTelemetry() error {
+	cfg, logger := rt.cfg, rt.logger
+	var tracer telemetry.Tracer // nil = 关闭（默认）
+	if cfg.Telemetry.Enabled {
+		tp, terr := oteltracing.NewProvider(
+			oteltracing.WithSampleRatio(cfg.Telemetry.SampleRatio),
+			oteltracing.WithOTLPEndpoint(cfg.Telemetry.OTLPEndpoint),
+		)
+		if terr != nil {
+			return fmt.Errorf("初始化 telemetry provider 失败: %w", terr)
+		}
+		// 停服时冲刷并关闭 TracerProvider（幂等）。
+		rt.addCleanup(func() {
+			if cerr := tp.Shutdown(context.Background()); cerr != nil {
+				logger.Warn("telemetry provider 关停失败", "error", cerr)
+			}
+		})
+		tracer = tp.Tracer("sproxy")
+		logger.Info("telemetry 已启用", "sample_ratio", cfg.Telemetry.SampleRatio, "otlp_endpoint", cfg.Telemetry.OTLPEndpoint)
+	}
+	rt.tracer = tracer
+	return nil
+}
+
+// setupHub 装配 Hub 中继：MeshRouteTable + HubServer + 各传输（ws/tcp/quic/grpc），
+// 并把对应析构闭包按「注册顺序」收进 rt.cleanups。
+func (rt *runServerRuntime) setupHub() error {
+	cfg, logger := rt.cfg, rt.logger
+	if !cfg.Hub.Enabled {
+		return nil
+	}
+	rt.routeTable = hub.NewMeshRouteTable()
+	logger.Info("Hub 中继模式已启用", "node_id", cfg.Hub.NodeID)
+
+	if err := rt.setupHubPersistence(); err != nil {
+		return err
+	}
+	// 节点注册准入：SproxySig AccessKey + HMAC proof（共享 token 已废除）。
+	// hub 与 HTTP 面共用同一个凭据 Ring（credRing，单一事实源）。
+	hubSrv := hub.NewHubServer(rt.routeTable, hub.NewAuthenticator(rt.credRing), logger.With("component", "hub"), cfg.Hub.MaxConnections)
+	rt.setupHubAllocator(hubSrv)
+
+	hubDHT, dhtCleanup, err := rt.setupHubDHT(hubSrv)
+	if err != nil {
+		return err
+	}
+	rt.hubDHT = hubDHT
+	rt.addCleanup(dhtCleanup)
+
+	fedClient, fedCleanup, err := rt.setupHubFederation()
+	if err != nil {
+		return err
+	}
+	rt.fedClient = fedClient
+	rt.addCleanup(fedCleanup)
+
+	if err = rt.setupHubWSTransport(hubSrv); err != nil {
+		return err
+	}
+	tcpCleanup, err := rt.setupHubTCPTransport(hubSrv)
+	if err != nil {
+		return err
+	}
+	rt.addCleanup(tcpCleanup)
+	quicCleanup, err := rt.setupHubQUICTransport(hubSrv)
+	if err != nil {
+		return err
+	}
+	rt.addCleanup(quicCleanup)
+	grpcCleanup, err := rt.setupHubGRPCTransport(hubSrv)
+	if err != nil {
+		return err
+	}
+	rt.addCleanup(grpcCleanup)
+	return nil
+}
+
+// setupHubPersistence 加载 hub 状态持久化快照（缺失/损坏按空状态启动）。
+func (rt *runServerRuntime) setupHubPersistence() error {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.Hub.PersistFile == "" {
+		return nil
+	}
+	persist := hub.NewPersister(cfg.Hub.PersistFile)
+	if snap, err := persist.Load(); err != nil {
+		return fmt.Errorf("读取 hub 持久化文件失败: %w", err)
+	} else if snap != nil {
+		hub.RestoreFromSnapshot(rt.routeTable, snap)
+		rt.restoredMsgs = snap.Messages
+		rt.restoredSnap = snap
+		if len(snap.Nodes) > 0 || len(snap.Messages) > 0 {
+			logger.Info("hub 状态已从持久化恢复", "file", cfg.Hub.PersistFile, "nodes", len(snap.Nodes), "messages", len(snap.Messages))
+		}
+	}
+	rt.persist = persist
+	return nil
+}
+
+// setupHubAllocator 装配虚拟 IP 分配器并按持久化快照重建分配表。
+func (rt *runServerRuntime) setupHubAllocator(hubSrv *hub.HubServer) {
+	cfg, logger, restoredSnap := rt.cfg, rt.logger, rt.restoredSnap
+	// 虚拟 IP 分配：按 hub.virtual_subnet 配置的子网构建分配器（默认 CGNAT
+	// 100.64.0.0/10，config.Validate 已保证 IPv4）。
+	if prefix, perr := netip.ParsePrefix(cfg.Hub.VirtualSubnet); perr == nil {
+		if prefix.Addr().Is4() {
+			hubSrv.SetAllocator(hub.NewHubAllocator(prefix))
+		} else {
+			logger.Warn("hub.virtual_subnet 非 IPv4，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet)
+		}
+	} else {
+		logger.Warn("hub.virtual_subnet 非法，使用默认子网", "virtual_subnet", cfg.Hub.VirtualSubnet, "error", perr)
+	}
+	if restoredSnap != nil {
+		if perr := hub.PreloadAllocator(hubSrv.Allocator(), restoredSnap); perr != nil {
+			logger.Error("虚拟 IP 分配表快照重建冲突（冲突条目不保留；对应节点重启后可能拿到新虚拟 IP）", "error", perr)
+		}
+	}
+}
+
+// setupHubDHT 装配 Kademlia DHT 发现表（hub.dht: kad）。未启用时返回 (nil,nil,nil)。
+func (rt *runServerRuntime) setupHubDHT(hubSrv *hub.HubServer) (hub.DHT, func(), error) {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.Hub.DHT != "kad" {
+		return nil, nil, nil
+	}
+	dhtNodeID := cfg.Hub.NodeID
+	if dhtNodeID == "" {
+		dhtNodeID = "hub-dht"
+	}
+	kadDHT := kad.NewDHT(dhtNodeID, nil, logger.With("component", "dht"))
+	if cfg.Hub.DHTPersistFile != "" {
+		if perr := kadDHT.EnablePersistence(cfg.Hub.DHTPersistFile); perr != nil {
+			return nil, nil, fmt.Errorf("初始化 kad DHT 持久化失败: %w", perr)
+		}
+		logger.Info("kad DHT k-bucket 持久化已启用", "file", cfg.Hub.DHTPersistFile)
+	}
+	hub.RegisterDHT("kad", kadDHT, 10)
+	hubDHT := hub.DHTRegistry.Active()
+	if len(cfg.Hub.DHTSeeds) > 0 {
+		logger.Warn("hub.dht_seeds 预留（多 hub DHT 组网未实现），暂不引导", "seeds", cfg.Hub.DHTSeeds)
+	}
+	hubSrv.SetDHT(hubDHT)
+	logger.Info("Hub DHT 已启用", "impl", "kad", "node_id", dhtNodeID)
+	return hubDHT, func() {
+		if cerr := hubDHT.Close(); cerr != nil {
+			logger.Error("kad DHT 关停 flush 失败", "err", cerr)
+		}
+	}, nil
+}
+
+// setupHubFederation 装配 hub 联邦（hub-to-hub peering）。未启用时返回 (nil,nil,nil)。
+func (rt *runServerRuntime) setupHubFederation() (*hub.FederationClient, func(), error) {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	if !cfg.Hub.Federation.Enabled {
+		return nil, nil, nil
+	}
+	peers := make([]hub.FederationPeer, 0, len(cfg.Hub.Federation.Peers))
+	for _, p := range cfg.Hub.Federation.Peers {
+		peers = append(peers, hub.FederationPeer{
+			ID:                 p.ID,
+			URL:                p.URL,
+			AccessKey:          p.AccessKey,
+			AccessKeySecret:    p.AccessKeySecret,
+			AccessKeyID:        p.AccessKeyID,
+			CAFile:             p.CAFile,
+			InsecureSkipVerify: p.InsecureSkipVerify,
+		})
+	}
+	fedClient, ferr := hub.NewFederationClientWithPersist(peers, cfg.Hub.Federation.Interval, cfg.Hub.Federation.Timeout, logger.With("component", "hub_federation"), cfg.Hub.Federation.PersistFile)
+	if ferr != nil {
+		return nil, nil, fmt.Errorf("初始化 hub 联邦客户端: %w", ferr)
+	}
+	fedClient.Start(ctx)
+	logger.Info("Hub 联邦已启用", "peers", len(cfg.Hub.Federation.Peers), "interval", cfg.Hub.Federation.Interval, "persist_file", cfg.Hub.Federation.PersistFile)
+	return fedClient, func() { fedClient.Close() }, nil
+}
+
+// setupHubWSTransport 挂载 WebSocket 升级端点并启动 accept 循环。未启用时 no-op。
+func (rt *runServerRuntime) setupHubWSTransport(hubSrv *hub.HubServer) error {
+	ctx, cfg, logger, mux := rt.ctx, rt.cfg, rt.logger, rt.mux
+	if !cfg.Hub.Transports.WS.Enabled {
+		return nil
+	}
+	wsPath := cfg.Hub.Transports.WS.Path
+	if wsPath == "" {
+		wsPath = "/ws"
+	}
+	if !strings.HasPrefix(wsPath, "/") {
+		wsPath = "/" + wsPath
+	}
+	if wsPath != "/ws" {
+		logger.Info("WS 升级路径已自定义（形态对齐）", "path", wsPath)
+	}
+	hubNode := wsxfer.NewHandlerNode(wsxfer.WithUpgradeHeader(cfg.Hub.Transports.WS.UpgradeHeader))
+	hubNode.AddToMux(mux, wsPath)
+	go func() {
+		for {
+			conn, aerr := hubNode.Accept(ctx)
+			if aerr != nil {
+				return
+			}
+			if !hubSrv.TryHandleConn(ctx, conn) {
+				logger.Warn("Hub 连接数达到上限，拒绝新连接", "max", cfg.Hub.MaxConnections)
+				_ = conn.Close()
+				continue
+			}
+		}
+	}()
+	return nil
+}
+
+// setupHubTCPTransport 启动裸 TCP 中继（同步绑定，绑定失败 fail-fast）。未启用时 no-op。
+func (rt *runServerRuntime) setupHubTCPTransport(hubSrv *hub.HubServer) (func(), error) {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	if !cfg.Hub.Transports.TCP.Enabled {
+		return nil, nil
+	}
+	tcpListen := cfg.Hub.Transports.TCP.Listen
+	if tcpListen == "" {
+		tcpListen = server.DefaultHubTCPListen
+	}
+	tcpLn, lerr := hubSrv.ListenTCP(ctx, tcpListen)
+	if lerr != nil {
+		return nil, fmt.Errorf("hub TCP 中继监听失败: %w", lerr)
+	}
+	go func() {
+		if aerr := hubSrv.AcceptTCP(ctx, tcpLn); aerr != nil && ctx.Err() == nil {
+			logger.Error("Hub TCP 中继 accept 退出", "addr", tcpListen, "error", aerr)
+		}
+	}()
+	logger.Info("Hub TCP 中继已启用", "addr", tcpListen)
+	return func() { _ = tcpLn.Close() }, nil
+}
+
+// setupHubQUICTransport 启动 QUIC 中继（裸 UDP listener）。未启用时 no-op。
+func (rt *runServerRuntime) setupHubQUICTransport(hubSrv *hub.HubServer) (func(), error) {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	if !cfg.Hub.Transports.QUIC.Enabled {
+		return nil, nil
+	}
+	quicListen := cfg.Hub.Transports.QUIC.Listen
+	if quicListen == "" {
+		quicListen = server.DefaultHubQUICListen
+	}
+	quicTP := xfer.Get("quic")
+	if quicTP == nil {
+		return nil, fmt.Errorf("quic 传输层未注册（装配引入 ext/quic 触发 init 注册）")
+	}
+	qln, qerr := quicTP.Listen(ctx, quicListen)
+	if qerr != nil {
+		return nil, fmt.Errorf("hub QUIC 中继监听失败: %w", qerr)
+	}
+	go func() {
+		if aerr := hubSrv.AcceptTCP(ctx, qln); aerr != nil && ctx.Err() == nil {
+			logger.Error("Hub QUIC 中继 accept 退出", "addr", quicListen, "error", aerr)
+		}
+	}()
+	logger.Info("Hub QUIC 中继已启用", "addr", quicListen)
+	return func() { _ = qln.Close() }, nil
+}
+
+// setupHubGRPCTransport 启动 gRPC 传输（HTTP/2 形态）。未启用时 no-op。
+func (rt *runServerRuntime) setupHubGRPCTransport(hubSrv *hub.HubServer) (func(), error) {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	if !cfg.Hub.Transports.GRPC.Enabled {
+		return nil, nil
+	}
+	grpcListen := cfg.Hub.Transports.GRPC.Listen
+	if grpcListen == "" {
+		grpcListen = server.DefaultHubGRPCListen
+	}
+	grpcTP := xfer.Get("grpc")
+	if grpcTP == nil {
+		return nil, fmt.Errorf("grpc 传输层未注册（装配引入 ext/grpc 触发 init 注册）")
+	}
+	gln, gerr := grpcTP.Listen(ctx, grpcListen)
+	if gerr != nil {
+		return nil, fmt.Errorf("hub gRPC 中继监听失败: %w", gerr)
+	}
+	go func() {
+		if aerr := hubSrv.AcceptTCP(ctx, gln); aerr != nil && ctx.Err() == nil {
+			logger.Error("Hub gRPC 中继 accept 退出", "addr", grpcListen, "error", aerr)
+		}
+	}()
+	logger.Info("Hub gRPC 中继已启用", "addr", grpcListen)
+	return func() { _ = gln.Close() }, nil
+}
+
+// setupCloudExit 装配云端下载经 mesh 出口的拨号函数（失败回落本地直连下载）。
+func (rt *runServerRuntime) setupCloudExit() error {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.CloudDownloadExitNode != "" {
+		dial, derr := buildCloudExitDial(cfg)
+		if derr != nil {
+			logger.Warn("cloud_download_exit_node 装配失败，回落本地直连下载", "error", derr)
+		} else {
+			rt.cloudDial = dial
+		}
+	}
+	return nil
+}
+
+// setupClusterWriteGuard 装配集群写面门（LocalLeaderElector + WriteGuard）。
+// 未启用（cluster.enabled=false）= nil 零回归（写面全放行）。
+func (rt *runServerRuntime) setupClusterWriteGuard() error {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	if !cfg.Cluster.Enabled {
+		return nil
+	}
+	stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
+	elector := leader.NewLocalLeaderElector(stateDir)
+	rt.writeGuard = leader.NewWriteGuard(elector, cfg.Cluster.NodeID, logger)
+	if cfg.Cluster.Role == server.ClusterRoleReplica {
+		// 只读副本：不竞争主，恒 follower（写面 503）。
+		rt.writeGuard.SetLeader(false)
+	} else {
+		// master：TryAcquire 竞争主（本地 flock 单机恒成功）；失败（锁被占）
+		// 启动警告但继续（装配期 fail-open——运行期 Authorize 按 isLeader 拒）。
+		ctx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+		ok, err := elector.TryAcquire(ctx2, cfg.Cluster.NodeID, 30*time.Second)
+		cancel2()
+		switch {
+		case err != nil:
+			logger.Warn("leader 获取失败，回落 follower（写面 503）", "error", err)
+		case !ok:
+			logger.Warn("leader 已被其他节点持有，本节点为 follower（写面 503）")
+		default:
+			rt.writeGuard.SetLeader(true)
+		}
+	}
+	return nil
+}
+
+// setupServerCore 完成 RegisterRoutes 与全部 handler 级装配（StateStore/AI/集群注册表/
+// xfer/远端读写面/mesh node 角色/文件同步），并把对应析构闭包按「注册顺序」收进 rt.cleanups。
+func (rt *runServerRuntime) setupServerCore() error {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	// secret 加密卷后端类型注册：必须早于 RegisterRoutes → assembleVolumes（config 声明
+	// `type: secretdata/secrets` 卷时 assembleVolumes 会对它们调用 registry.NewBackend，
+	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
+	// sync 关闭时 secret 后端不再不可达）。
+	registerSecretVolumeBackends()
+	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
+	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
+	// （RegisterRoutes **之后**）才注册 ⇒ config 里静态声明 `type: baidupcs` 等外部卷时，
+	// `assembleVolumes → registry.NewBackend` 报「未注册后端」并 startup fail（用户实测：
+	// 只能运行期建卷绕过）。类型注册不依赖 sync 装配（baidupcs 默认工厂是
+	// `baidupcs.DefaultFactory()`），故全部前移；sync 侧 FS 工厂接线仍在 setupSync。
+	registerVolumeBackendTypes()
+	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
+	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
+	registerEnclosureWrappers()
+	// 封装卷的推迟装配不需要「按类型标记」：装配层按**声明**判据（enclosure.IsDeclared：
+	// 显式 type: enclosure 或 wrapper 类型 + extra.source）跳过 registry.NewBackend，
+	// 卷集就绪后由 enclosure.AttachAll 补装。
+	h := server.RegisterRoutes(ctx, server.RegisterRoutesOpts{
+		Mux:                 rt.mux,
+		CfgPtr:              &cfgPtr,
+		CloudExitDial:       rt.cloudDial,
+		WriteGuard:          rt.writeGuard,
+		Version:             Version,
+		BuildAt:             BuildAt,
+		Logger:              logger,
+		RouteTable:          rt.routeTable,
+		HubPersist:          rt.persist,
+		HubRestoredMessages: rt.restoredMsgs,
+		Tracer:              rt.tracer,
+		CredentialRing:      rt.credRing,
+		CredentialStore:     rt.credStore,
+		XferMetrics:         xferMetricsProvider{},
+		// 通用 URL 解析接口（/api/resolve）：注入下载器注册表（含 pikpak 分享解析
+		// 扩展——registerPikpakDownloader 在其内注册；未注册 pikpak 时回落通用结果）。
+		URLResolver: downloader.DefaultRegistry,
+	})
+	rt.h = h
+	// secret 加密卷装配（无条件，与 sync 开关解耦——Imp-1）。**四步装配序**（2026-10-15 修复
+	// 声明顺序限制，详见 cmd/sproxy/secret_register.go 文件内「装配序」注释）：
+	//   ① Store 已装配卷集（供 secretdata 工厂与封装 wrapper 懒解析密钥）；
+	//   ② 先行补装「不依赖封装声明卷」的 config 声明 secretdata 卷（封装卷的源可能是它们）；
+	//   ③ 封装声明卷补装（enclosure/secrets 嵌套链由此装配）；
+	//   ④ 后置补装「secret_url 指向封装声明卷」的 config 声明 secretdata 卷。
+	// 旧序（②④合一且整体早于 ③）令「config 同时声明嵌套 secrets 卷 + 引用它的 secretdata 卷」
+	// 必然 boot fail（密钥解析时源卷后端尚未装配）。
+	// 任一步失败即 boot fail（fail-closed，I1）：错误**仅**来自配置声明的加密/封装卷补装失败
+	// （operator 显式声明的加密封装不得静默消失——与本地卷 load failure 同层）。
+	if err := storeSecretDataSet(h.Volumes()); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
+	}
+	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsIndependent); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
+	}
+	// 封装卷后端补装（推迟装配，master 底座）：set 已就绪 → 按声明拓扑序构造 wrapper 后端
+	// 并挂回，源视图直接持有源 FS（封印注入在 assembleVolumes 阶段已完成，这里只做特权
+	// 读写视图）。失败即 boot fail（fail-closed）：operator 显式声明的封装卷不得静默消失。
+	if err := enclosure.AttachAll(ctx, h.Volumes(), logger, enclosure.AttachOptions{}); err != nil {
+		return fmt.Errorf("封装卷装配失败（配置声明的封装卷补装 boot fail）：%w", err)
+	}
+	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsEnclosure); err != nil {
+		return fmt.Errorf(errFmtSecretAssembly, err)
+	}
+	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
+	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
+	registerPikpakDownloader(cfg, h.Volumes())
+	// 视频关键帧分块注册（video-keyframe 提供者，解析器按环境二选一：ffprobe 优先、
+	// go-mp4 兜底；sync.Once 幂等）。注入 fMP4 统计 hook → /metrics 的
+	// sproxy_keyframe_fmp4_total（供「是否切 mp4ff」真实场景决策）。
+	media.RegisterKeyframeBackends()
+	if m := h.Metrics(); m != nil {
+		media.SetKeyframeMetricHooks(m.RecordKeyframeFragmented)
+	}
+	if err := rt.setupStateStore(h); err != nil {
+		return err
+	}
+	rt.setupHubInject(h)
+	rt.setupAIIntegrations(h)
+	if err := rt.setupClusterNodeRegistry(h); err != nil {
+		return err
+	}
+	// 先停 SyncManager（drain 同步任务）再关 Handlers：析构顺序见 runTeardown（LIFO）。
+	rt.addCleanup(func() {
+		if err := h.Close(); err != nil {
+			slog.Warn(logHandlersCloseErr, "error", err.Error())
+		}
+	})
+	if _, err := startXferListener(ctx, cfg, rt.credRing, h.LocalHandler(), logger); err != nil {
+		return err
+	}
+	if err := rt.setupRemoteListeners(h); err != nil {
+		return err
+	}
+	if err := rt.setupSync(h); err != nil {
+		return err
+	}
+	return nil
+}
+
+// setupStateStore 装配 StateStore（cluster.enabled 或 state_store.type != local 时）。
+func (rt *runServerRuntime) setupStateStore(h *server.Handlers) error {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.Cluster.Enabled || cfg.StateStore.Type != "" && cfg.StateStore.Type != "local" {
+		stateDir := cfg.StateStore.Dir
+		if stateDir == "" {
+			stateDir = filepath.Join(cfg.StorageRoot, "state")
+		}
+		st, serr := state.NewStateStore(cfg.StateStore.Type, state.StateStoreConfig{
+			Type:  cfg.StateStore.Type,
+			Dir:   stateDir,
+			Mongo: state.MongoConfig{URI: cfg.StateStore.Mongo.URI, Database: cfg.StateStore.Mongo.Database, Collection: cfg.StateStore.Mongo.Collection},
+		}, logger)
+		if serr != nil {
+			return fmt.Errorf("装配 StateStore 失败（集群模式分享/索引必选 StateStore）: %w", serr)
+		}
+		h.SetStateStore(st)
+		logger.Info("分享/索引后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
+	}
+	return nil
+}
+
+// setupHubInject 把 DHT/联邦候选注入 Handlers（/api/hub/nodes 合并候选节点）。
+func (rt *runServerRuntime) setupHubInject(h *server.Handlers) {
+	if rt.hubDHT != nil {
+		h.SetDHT(rt.hubDHT) // /api/hub/nodes 合并 DHT 候选节点（发现源：路由表权威 + DHT 候选）
+	}
+	if rt.fedClient != nil {
+		h.SetFederationClient(rt.fedClient) // /api/hub/nodes 合并联邦候选节点（发现源：+ 联邦候选）
+	}
+}
+
+// setupAIIntegrations 装配 AI 向量索引 / 洞察 / 隐私 / 事件流水线（各自 enabled=false → 零回归）。
+func (rt *runServerRuntime) setupAIIntegrations(h *server.Handlers) {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.Notify.AISearch.Enabled {
+		vs := files.NewVectorStore(h.InsightCacheDir())
+		h.SetVectorStore(vs)
+	}
+	if ai := server.NewAIInsightFromConfig(cfg.Notify.AIInsight, h.InsightCacheDir(), logger); ai != nil {
+		// AI 配额（roadmap 11.9-⑦；ai.quota.enabled=false → nil 零回归）。
+		ai.SetQuota(server.NewAIQuota(cfg.Notify.AIQuota, logger))
+		h.SetAIInsight(ai)
+	}
+	if cfg.Notify.AIPrivacy.Enabled {
+		if pr := server.NewAIPrivacy(true, h.PrivacyRoot(), logger); pr != nil {
+			h.SetAIPrivacy(pr)
+		}
+	}
+	if cfg.Notify.AIEvents.Enabled {
+		consumer := server.NewAIEventConsumer(h.EventsBus(),
+			func(owner, rel, op string) {
+				h.RecordAudit(server.BackgroundContext(), server.AuditEvent{
+					Action: "ai.events", ObjectType: "file", Object: owner + "/" + rel,
+					Result: "enqueued", Detail: op,
+				})
+			},
+			cfg.Notify.AIEvents, logger)
+		consumer.Start()
+		h.SetAIEventConsumer(consumer)
+	}
+}
+
+// setupClusterNodeRegistry 装配集群节点注册表（cluster.enabled=false → nil 零回归）。
+func (rt *runServerRuntime) setupClusterNodeRegistry(h *server.Handlers) error {
+	cfg, logger := rt.cfg, rt.logger
+	if !cfg.Cluster.Enabled {
+		return nil
+	}
+	stateDir := filepath.Join(filepath.Dir(cfg.StorageRoot), "cluster-state")
+	st := state.NewLocalStateStore(stateDir, logger)
+	h.SetNodeRegistry(server.NewNodeRegistry(st, logger))
+	server.NewEventIndexBridge(h.EventsBus(), h.FileService(), logger).Start()
+	return nil
+}
+
+// setupRemoteListeners 启动跨节点只读/写面 listener，并把关闭闭包收进 rt.cleanups。
+func (rt *runServerRuntime) setupRemoteListeners(h *server.Handlers) error {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	rrLn, rrErr := server.StartRemoteReadListener(ctx, cfg, h, logger)
+	if rrErr != nil {
+		return fmt.Errorf("remote_read 启动失败: %w", rrErr)
+	}
+	if rrLn != nil {
+		rt.addCleanup(func() { _ = rrLn.Close() })
+	}
+	rwLn, rwErr := server.StartRemoteWriteListener(ctx, cfg, h, logger)
+	if rwErr != nil {
+		return fmt.Errorf("remote_write 启动失败: %w", rwErr)
+	}
+	if rwLn != nil {
+		rt.addCleanup(func() { _ = rwLn.Close() })
+	}
+	rt.setupMeshRuntimeAndRole(rrLn, rwLn, h)
+	return nil
+}
+
+// setupMeshRuntimeAndRole 填充跨节点面运行态（listener 实际地址 + node 角色）并装配 B 侧 mesh node 角色。
+func (rt *runServerRuntime) setupMeshRuntimeAndRole(rrLn *server.RemoteReadListener, rwLn *server.RemoteWriteListener, h *server.Handlers) {
+	ctx, cfg, logger := rt.ctx, rt.cfg, rt.logger
+	nodeRoleRunning := &atomic.Bool{}
+	readFaceAddr, writeFaceAddr := "", ""
+	if rrLn != nil {
+		readFaceAddr = rrLn.Addr()
+	}
+	if rwLn != nil {
+		writeFaceAddr = rwLn.Addr()
+	}
+	h.SetMeshRuntimeInfo(newMeshRuntimeInfoProvider(readFaceAddr, writeFaceAddr, nodeRoleRunning.Load))
+
+	if cfg.Mesh.Node.Enabled {
+		readAddr, writeAddr := "", ""
+		if rrLn != nil {
+			readAddr = rrLn.Addr()
+		}
+		if rwLn != nil {
+			writeAddr = rwLn.Addr()
+		}
+		var creds *meshHubCreds
+		if ak, sk, skeyID, ok := h.SelfCredential(); ok {
+			creds = &meshHubCreds{AK: ak, SK: sk, SkeyID: skeyID}
+		}
+		if startMeshNodeRoleWithCreds(ctx, cfg, readAddr, writeAddr, creds, h.AlertEngine(), logger) {
+			nodeRoleRunning.Store(true)
+		}
+	}
+}
+
+// setupSync 装配文件同步 SyncManager（sync.max_concurrent > 0 或 sync_remotes 非空时）。
+func (rt *runServerRuntime) setupSync(h *server.Handlers) error {
+	cfg, logger := rt.cfg, rt.logger
+	if cfg.Sync.MaxConcurrent <= 0 && len(cfg.SyncRemotes) == 0 {
+		return nil
+	}
+	remotes := buildSyncRemotes(cfg)
+	exec := syncexec.NewExecutor(h.SyncTenantResolver(), logger.With("component", "sync_exec"))
+	// 本地侧 Root 感知（评审 P0）：sync push/pull 的本地 FS 经 storage.Root ⇒ at-rest
+	// 透明加解密 + 封印语义（此前裸 LocalFS 会在加密卷上落明文/传密文）。
+	exec.TenantRootFS = h.SyncTenantRootFS
+	// 记账口径与 TenantRootFS **同源**：本地目标经 NewRootFS 透明加密落盘 ⇒ 逐文件配额
+	// 必须按物理字节记（2026-10-16 高风险区审核修复：此前按逻辑 ⇒ owner Scope 少记）。
+	exec.TenantPhysSize = h.SyncTenantPhysSize
+	exec.SetTenantScopeResolver(h.SyncQuotaScope())
+	exec.SetScopeResolver(h.SyncScopeFor())
+	// 写保护（用户语义 #6，旁路闭环 2026-10-06）：同步本地写侧（pull/双向）直写默认卷 user
+	// 桶，不经 files 域 guard——注入默认卷占用写保护（命中被封装卷占用子目录 → 该文件失败）。
+	rt.setupSyncConflictIndex(exec, h, logger)
+	setupMeshFSFactory(exec, cfg, h, logger)
+	rt.setupSyncVolumeBackends(exec, h, logger)
+	uvStore := rt.setupSyncUserStore(h, logger)
+	return rt.buildSyncManager(h, remotes, exec, uvStore, logger)
+}
+
+// buildSyncRemotes 把 cfg.SyncRemotes 转换为 syncmgr.RemoteConfig 列表。
+func buildSyncRemotes(cfg *server.Config) []syncmgr.RemoteConfig {
+	remotes := make([]syncmgr.RemoteConfig, 0, len(cfg.SyncRemotes))
+	for _, r := range cfg.SyncRemotes {
+		remotes = append(remotes, syncmgr.RemoteConfig{
+			Name: r.Name, Kind: syncmgr.RemoteKind(r.Kind),
+			// direct 组
+			URL: r.URL, AccessKey: r.AccessKey, AccessKeySecret: r.AccessKeySecret,
+			AccessKeyID: r.AccessKeyID,
+			// mesh 组（写批次装配）
+			Node: r.Node, Volume: r.Volume, PeerPins: r.PeerPins, Transport: r.Transport,
+		})
+	}
+	return remotes
+}
+
+// setupSyncConflictIndex 装配 merge3 冲突索引（失败降级为仅内存标记文件）。
+func (rt *runServerRuntime) setupSyncConflictIndex(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
+	cfg := rt.cfg
+	conflictIdx, idxErr := syncmgr.NewConflictIndex(filepath.Join(cfg.StorageRoot, "anonymous", "meta", "sync"))
+	if idxErr != nil {
+		logger.Warn("冲突索引初始化失败（冲突登记降级为仅内存标记文件）", "error", idxErr)
+	} else {
+		exec.ConflictIndex = conflictIdx
+		h.SetConflictIndex(conflictIdx)
+	}
+}
+
+// registerVolumeBackendTypes 注册**外部卷后端类型**与建卷 schema（幂等；各 Register* 用
+// sync.Once 保护）。必须在 `RegisterRoutes → assembleVolumes` **之前**调用：config 静态声明
+// 的 `type: baidupcs/webdav/sftp/ftp/s3` 卷在装配期就要经 `registry.NewBackend` 构造
+// （缺陷修复，2026-10-21：此前这些注册在 RegisterRoutes 之后 ⇒ 静态声明外部卷启动失败）。
+func registerVolumeBackendTypes() {
+	registerBaidupcsBackend()
+	// **本地卷注册为普通后端**（统一存储卷模型 M1b）：`registry.NewBackend` 从此可统一分派
+	// 本地卷（`Type == ""` 归一为 `local`），装配层特例分支（M5）随后删除。
+	// 注册 ≠ 用户可创建：建卷 API/表单/预签名面由 `IsUserCreatableBackendType` 排除本地 ✓。
+	server.RegisterLocalBackend()
+	webdav.RegisterWebDAVBackend()
+	sftp.RegisterSFTPBackend()
+	ftp.RegisterFTPBackend()
+	s3ext.RegisterS3Backend()
+	// linked（外部）类型基础建卷 schema（D2）：这些后端未实现 SchemaProvider，登记静态
+	// **建卷表单** schema（url/凭据字段）使 Web UI「卷管理」建卷表单可提交（后端自带
+	// fail-fast 校验 extra）。与类型注册同步，/api/backends 恒先见类型后有正常表单。
+	registerLinkedBackendSchemas()
+}
+
+// setupSyncVolumeBackends 装配 V3 插件后端（baidupcs/webdav/sftp/ftp/s3/federated）。
+func (rt *runServerRuntime) setupSyncVolumeBackends(exec *syncexec.Executor, h *server.Handlers, logger *slog.Logger) {
+	cfg := rt.cfg
+	// 注：卷后端**类型**注册已前移到 setupServerCore（`registerVolumeBackendTypes`）——
+	// 否则 config 静态声明的外部卷在 assembleVolumes 时「后端未注册」而启动失败。
+	// 这里只做 sync 侧接线（需要 syncexec.Executor）。
+	setupBaidupcsFSFactory(exec, h.Volumes(), logger.With("component", "baidupcs_sync"), h.StagingQuotaTrackerFor, h.TrustedWrapOptions())
+	// 注：secret 加密卷装配已从本函数移出——见 setupServerCore（registerSecretVolumeBackends
+	// 早于 RegisterRoutes 注册后端类型 + RegisterRoutes 后无条件按四步装配序补装 config 声明的
+	// 加密/封装卷），不再被 setupSync 早退门控（Imp-1 装配门控修复）。
+	if hubC, err := newMeshHubClient(cfg, cfg.Mesh.AccessKey, cfg.Mesh.AccessKeySecret, cfg.Mesh.SkeyID); err == nil && hubC != nil {
+		// 联邦卷回写（roadmap P2）：写面走独立服务名 volwrite（#494 写面会话）。
+		federated.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName),
+			remote.WithWriteDialer(remote.NewRelayDialer(hubC, remote.ServiceNameWrite)))
+		// **集群出口（2026-10-05 用户裁定凭证下发）**：出口节点装配 type: egress 卷——
+		// 访问持有节点真实卷（本端 Ed25519 身份 + 持有指纹 pin）。凭证签发/验签仅
+		// 在持有节点本地（cluster.credentials + cluster.credential_sign_key），出口侧
+		// 不持有签发 SK（评审 I1：此前传 64-hex 串致装配恒失败，且扩大 SK 泄露面）。
+		if id, idErr := server.LoadXferIdentity(cfg); idErr == nil {
+			cluster.RegisterBackend(remote.NewRelayDialer(hubC, remote.ServiceName), id)
+		} else {
+			// **评审 I8（静默不注册）**：身份加载失败时 egress 后端不注册，随后任何
+			// `type: egress` 卷会在装配层以混乱错误失败——显式告警，避免运维把
+			// 「无出口能力」当成「未配置出口卷」。
+			slog.Error("集群出口装配失败：加载本端 xfer 身份失败（egress 卷后端未注册）",
+				"error", idErr)
+		}
+	}
+}
+
+// setupSyncUserStore 装配用户卷 store 并恢复重启前的用户卷（单卷失败跳过 + 告警）。
+func (rt *runServerRuntime) setupSyncUserStore(h *server.Handlers, logger *slog.Logger) *server.UserVolumeStore {
+	cfg := rt.cfg
+	var uvMasterKey []byte
+	if cfg.CredentialStore.Encrypt {
+		if mk, mkErr := credentials.ResolveCredentialMasterKey(cfg); mkErr == nil {
+			uvMasterKey = mk
+		} else {
+			logger.Warn("credential_store.encrypt=true 但解析 master key 失败，用户卷 Extra 保持明文（建议修复配置后重启）", "error", mkErr)
+		}
+	}
+	uvStore := server.NewUserVolumeStore(cfg.StorageRoot, uvMasterKey)
+	if rErr := restoreUserVolumes(h.Volumes(), uvStore, logger.With("component", "user_volumes")); rErr != nil {
+		logger.Warn("用户卷恢复扫描失败（用户卷功能降级为不可用）", "error", rErr)
+	}
+	h.SetUserVolumeStore(uvStore)
+	return uvStore
+}
+
+// buildSyncManager 构造 SyncManager 并装配配额/告警/用户卷归属校验（析构闭包收进 rt.cleanups）。
+func (rt *runServerRuntime) buildSyncManager(h *server.Handlers, remotes []syncmgr.RemoteConfig, exec *syncexec.Executor, uvStore *server.UserVolumeStore, logger *slog.Logger) error {
+	cfg := rt.cfg
+	syncMgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: h.SyncTenantResolver(), ListTenants: h.SyncTenantList(), Quota: nil, QuotaCat: int(capacity.CategoryUserFiles), Remotes: remotes, Executor: exec, Logger: logger.With("component", "sync"), Config: &syncmgr.Config{
+		MaxConcurrent:  cfg.Sync.MaxConcurrent,
+		TaskTTL:        cfg.Sync.TaskTTL,
+		MaxRetries:     cfg.Sync.MaxRetries,
+		RetryDelay:     cfg.Sync.RetryDelay,
+		RetryBackoff:   cfg.Sync.RetryBackoff,
+		PerFileReserve: true,
+	}})
+	syncMgr.SetQuotaResolver(h.SyncQuotaStore())
+	// 同步失败告警挂点（roadmap P1 阈值告警）：任务转 failed → 告警引擎（nil = 未启用）。
+	if h.AlertEngine() != nil {
+		syncMgr.OnTaskFailed = func(taskID, detail string) {
+			h.AlertEngine().OnSyncFailed(context.Background(), taskID, detail)
+		}
+	}
+	// 用户卷 owner 归属校验（U4）：remote.volume 是用户卷名时，task.Owner 必须匹配卷.Owner。
+	syncMgr.SetUserVolumeOwner(syncUserVolumeOwnerFunc(h.Volumes(), uvStore))
+	h.SetSyncMgr(syncMgr)
+	rt.addCleanup(syncMgr.Stop)
+	return nil
+}
+
+// syncUserVolumeOwnerFunc 构造 SyncManager 的用户卷 owner 归属校验闭包。
+func syncUserVolumeOwnerFunc(volSet *registry.Set, uvStore *server.UserVolumeStore) func(owner, volumeName string) bool {
+	return func(owner, volumeName string) bool {
+		// 1. 用户卷：store 有且 Owner == owner → 归属。
+		v, gErr := uvStore.Get(owner, volumeName)
+		if gErr == nil && v != nil && v.Owner == owner {
+			return true
+		}
+		// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**。
+		isUserVol := false
+		if allUVs, sErr := uvStore.ScanRestore(); sErr == nil {
+			for _, uv := range allUVs {
+				if uv.Name == volumeName {
+					isUserVol = true
+					break
+				}
+			}
+		}
+		if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
+			return true
+		}
+		// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
+		return false
+	}
+}
+
+// displayBanner 打印启动横幅。
+func displayBanner(cfg *server.Config) {
+	protocol := "http"
+	if cfg.TLS.Enabled {
+		protocol = "https"
+	}
+	displayHost, displayPort, _ := net.SplitHostPort(cfg.Addr)
+	if displayHost == "" {
+		displayHost = "127.0.0.1"
+	}
+	fmt.Printf("downserver start at: %s://%s:%s\n", protocol, displayHost, displayPort)
+	fmt.Printf("storage root: %s\n", cfg.StorageRoot)
+}
+
+// setupMetricsServer 装配独立指标端口（cfg.MetricsPort > 0 时；否则返回 (nil, nil)）。
+func (rt *runServerRuntime) setupMetricsServer() (*http.Server, func()) {
+	h := rt.h
+	if rt.cfg.MetricsPort <= 0 {
+		return nil, nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		h.MetricsHandler(w, r)
+	})
+	ms := &http.Server{
+		Addr:              fmt.Sprintf(":%d", rt.cfg.MetricsPort),
+		Handler:           h.MetricsAuth(http.Handler(mux)),
+		ReadHeaderTimeout: rt.cfg.ServerTimeouts.ReadHeader,
+		IdleTimeout:       rt.cfg.ServerTimeouts.Idle,
+	}
+	go func() {
+		slog.Info("独立指标端口启动", "addr", ms.Addr)
+		if err := ms.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("独立指标端口退出", "error", err)
+		}
+	}()
+	return ms, func() { ms.Close() }
+}
+
+// boot 打印横幅、启动 HTTP 服务与信号处理，并阻塞至优雅停机完成。
+func (rt *runServerRuntime) boot(cancel context.CancelFunc) error {
+	cfg, logger, h := rt.cfg, rt.logger, rt.h
+	displayBanner(cfg)
+	srv := createHTTPServer(cfg, h.Handler())
+	_, mCleanup := rt.setupMetricsServer()
+	rt.addCleanup(mCleanup)
+	stopSigCh, shutdownDone := runSignalHandler(cancel, srv, h, logger, cfg)
+	rt.addCleanup(func() { close(stopSigCh) })
+
+	if cfg.TLS.Enabled {
+		if err := startTLSListener(cfg, srv); err != nil {
+			return err
+		}
+	} else {
+		if err := startPlainListener(srv); err != nil {
+			return err
+		}
+	}
+
+	<-shutdownDone
+	slog.Info("downserver exit")
+	return nil
 }

@@ -40,19 +40,7 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 	const body = "rename-contract"
 	sum := sha256Hex([]byte(body))
 
-	cases := []struct {
-		name         string
-		from, to     string
-		checksum     string
-		explicitVol  string
-		multiVolume  bool
-		precreate    bool   // 预置源文件 user/a.txt
-		targetBody   string // 非空 = 预置目标文件（触发 409）
-		wantStatus   int
-		wantMessage  string
-		wantChecksum string
-		wantMoved    bool // 成功时源应消失、目标应出现
-	}{
+	cases := []renameContractTestCase{
 		{
 			name: "缺 from", from: "", to: "b.txt", checksum: "deadbeef",
 			wantStatus: http.StatusBadRequest, wantMessage: "from 和 to 都不能为空",
@@ -79,12 +67,12 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 			wantStatus: http.StatusBadRequest, wantMessage: errMsgMissingChecksum,
 		},
 		{
-			name: "源文件不存在", from: "nope.txt", to: "b.txt", checksum: sum,
-			wantStatus: http.StatusNotFound, wantMessage: "源文件不存在",
+			name: errMsgSrcNotExist, from: "nope.txt", to: "b.txt", checksum: sum,
+			wantStatus: http.StatusNotFound, wantMessage: errMsgSrcNotExist,
 		},
 		{
 			name: "目标已存在", from: "a.txt", to: "b.txt", checksum: sum, precreate: true, targetBody: "occupied",
-			wantStatus: http.StatusConflict, wantMessage: "目标路径已存在",
+			wantStatus: http.StatusConflict, wantMessage: errMsgDestExists,
 		},
 		{
 			name: "checksum 不匹配", from: "a.txt", to: "b.txt", checksum: "deadbeef", precreate: true,
@@ -93,7 +81,7 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 		{
 			name: "显式卷不在（fail-closed）", from: "a.txt", to: "b.txt", checksum: sum, precreate: true,
 			explicitVol: "disk2", multiVolume: true,
-			wantStatus: http.StatusNotFound, wantMessage: "源文件不存在",
+			wantStatus: http.StatusNotFound, wantMessage: errMsgSrcNotExist,
 		},
 		{
 			name: "成功", from: "a.txt", to: "sub/b.txt", checksum: sum, precreate: true,
@@ -104,48 +92,70 @@ func TestWriteContract_Rename_StatusAndMessage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newDirsEnv(t)
-			if tc.multiVolume {
-				env.enableVolumes(t, "main", "disk2")
-			}
-			env.enableWriteDefaults()
-
-			if tc.precreate {
-				writeUserFile(t, env, "alice", "user/a.txt", body)
-			}
-			if tc.targetBody != "" {
-				writeUserFile(t, env, "alice", "user/b.txt", tc.targetBody)
-			}
-
-			req := renameReq("alice", tc.from, tc.to, tc.checksum)
-			if tc.explicitVol != "" {
-				req = withVolume(req, tc.explicitVol)
-			}
-			rr := httptest.NewRecorder()
-			env.svc.Rename(rr, req)
-
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("状态码=%d want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			resp := decodeResp(t, rr)
-			if resp.Message != tc.wantMessage {
-				t.Fatalf("Message=%q want %q", resp.Message, tc.wantMessage)
-			}
-			if resp.Checksum != tc.wantChecksum {
-				t.Fatalf("Checksum=%q want %q（成功分支回显客户端 checksum；同源同目标不回显）",
-					resp.Checksum, tc.wantChecksum)
-			}
-			wantSuccess := tc.wantStatus == http.StatusOK
-			if resp.Success != wantSuccess {
-				t.Fatalf("Success=%v want %v", resp.Success, wantSuccess)
-			}
-			if tc.wantMoved {
-				if got := mustReadUserFile(t, env, "alice", "user/"+tc.to); got != body {
-					t.Fatalf("目标内容=%q want %q", got, body)
-				}
-				assertUserFileGone(t, env, "alice", "user/a.txt")
-			}
+			runRenameContractCase(t, tc, body, sum)
 		})
+	}
+}
+
+// renameContractTestCase 是 rename 每条可达分支的钉住用例（原为测试函数内匿名结构体）。
+type renameContractTestCase struct {
+	name         string
+	from, to     string
+	checksum     string
+	explicitVol  string
+	multiVolume  bool
+	precreate    bool   // 预置源文件 user/a.txt
+	targetBody   string // 非空 = 预置目标文件（触发 409）
+	wantStatus   int
+	wantMessage  string
+	wantChecksum string
+	wantMoved    bool // 成功时源应消失、目标应出现
+}
+
+// runRenameContractCase 执行 rename 表驱动用例的单轮：装配 env、预置文件、投递请求并断言
+// 状态码/文案/checksum 回显/Success/移动副作用（抽取自 Rename_StatusAndMessage 的子测试体）。
+func runRenameContractCase(t *testing.T, tc renameContractTestCase, body, sum string) {
+	t.Helper()
+	env := newDirsEnv(t)
+	if tc.multiVolume {
+		env.enableVolumes(t, "main", "disk2")
+	}
+	env.enableWriteDefaults()
+
+	if tc.precreate {
+		writeUserFile(t, env, "alice", "user/a.txt", body)
+	}
+	if tc.targetBody != "" {
+		writeUserFile(t, env, "alice", "user/b.txt", tc.targetBody)
+	}
+
+	req := renameReq("alice", tc.from, tc.to, tc.checksum)
+	if tc.explicitVol != "" {
+		req = withVolume(req, tc.explicitVol)
+	}
+	rr := httptest.NewRecorder()
+	env.svc.Rename(rr, req)
+
+	if rr.Code != tc.wantStatus {
+		t.Fatalf("状态码=%d want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
+	}
+	resp := decodeResp(t, rr)
+	if resp.Message != tc.wantMessage {
+		t.Fatalf("Message=%q want %q", resp.Message, tc.wantMessage)
+	}
+	if resp.Checksum != tc.wantChecksum {
+		t.Fatalf("Checksum=%q want %q（成功分支回显客户端 checksum；同源同目标不回显）",
+			resp.Checksum, tc.wantChecksum)
+	}
+	wantSuccess := tc.wantStatus == http.StatusOK
+	if resp.Success != wantSuccess {
+		t.Fatalf("Success=%v want %v", resp.Success, wantSuccess)
+	}
+	if tc.wantMoved {
+		if got := mustReadUserFile(t, env, "alice", "user/"+tc.to); got != body {
+			t.Fatalf("目标内容=%q want %q", got, body)
+		}
+		assertUserFileGone(t, env, "alice", "user/a.txt")
 	}
 }
 
@@ -156,18 +166,7 @@ func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
 	const body = "delete-contract"
 	sum := sha256Hex([]byte(body))
 
-	cases := []struct {
-		name        string
-		filename    string
-		checksum    string
-		explicitVol string
-		multiVolume bool
-		locked      bool // 文件级互斥被占用
-		precreate   bool // 预置 user/f.txt
-		wantStatus  int
-		wantMessage string
-		wantGone    bool // 成功时应已删除
-	}{
+	cases := []deleteContractTestCase{
 		{
 			name: "缺 filename", filename: "", checksum: "deadbeef",
 			wantStatus: http.StatusBadRequest, wantMessage: errMsgEmptyFilename,
@@ -186,7 +185,7 @@ func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
 		},
 		{
 			name: "checksum 不匹配", filename: "f.txt", checksum: "deadbeef", precreate: true,
-			wantStatus: http.StatusBadRequest, wantMessage: "文件校验失败",
+			wantStatus: http.StatusBadRequest, wantMessage: errMsgFileChecksum,
 		},
 		{
 			name: "文件级互斥被占用", filename: "f.txt", checksum: sum, precreate: true, locked: true,
@@ -205,45 +204,66 @@ func TestWriteContract_Delete_StatusAndMessage(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			env := newDirsEnv(t)
-			if tc.multiVolume {
-				env.enableVolumes(t, "main", "disk2")
-			}
-			env.enableWriteDefaults()
-			if tc.locked {
-				env.acquireFileLock = func(string, string) (func(), bool) { return nil, false }
-				env.rebuild()
-			}
-			if tc.precreate {
-				writeUserFile(t, env, "alice", "user/f.txt", body)
-			}
-
-			req := deleteReq("alice", tc.filename, tc.checksum)
-			if tc.explicitVol != "" {
-				req = withVolume(req, tc.explicitVol)
-			}
-			rr := httptest.NewRecorder()
-			env.svc.Delete(rr, req)
-
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("状态码=%d want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			resp := decodeResp(t, rr)
-			if resp.Message != tc.wantMessage {
-				t.Fatalf("Message=%q want %q", resp.Message, tc.wantMessage)
-			}
-			if wantSuccess := tc.wantStatus == http.StatusOK; resp.Success != wantSuccess {
-				t.Fatalf("Success=%v want %v", resp.Success, wantSuccess)
-			}
-			if tc.wantGone {
-				assertUserFileGone(t, env, "alice", "user/f.txt")
-			} else if tc.precreate {
-				// 所有拒绝分支都必须**保留**文件（含锁占用/checksum 不符/缺 checksum）。
-				if got := mustReadUserFile(t, env, "alice", "user/f.txt"); got != body {
-					t.Fatalf("拒绝分支不得改动文件, 内容=%q want %q", got, body)
-				}
-			}
+			runDeleteContractCase(t, tc, body, sum)
 		})
+	}
+}
+
+// deleteContractTestCase 是 delete 每条可达分支的钉住用例（原为测试函数内匿名结构体）。
+type deleteContractTestCase struct {
+	name        string
+	filename    string
+	checksum    string
+	explicitVol string
+	multiVolume bool
+	locked      bool // 文件级互斥被占用
+	precreate   bool // 预置 user/f.txt
+	wantStatus  int
+	wantMessage string
+	wantGone    bool // 成功时应已删除
+}
+
+// runDeleteContractCase 执行 delete 表驱动用例的单轮：装配 env、预置文件/锁、投递请求并断言
+// 状态码/文案/Success/删除副作用（抽取自 Delete_StatusAndMessage 的子测试体）。
+func runDeleteContractCase(t *testing.T, tc deleteContractTestCase, body, sum string) {
+	t.Helper()
+	env := newDirsEnv(t)
+	if tc.multiVolume {
+		env.enableVolumes(t, "main", "disk2")
+	}
+	env.enableWriteDefaults()
+	if tc.locked {
+		env.acquireFileLock = func(string, string) (func(), bool) { return nil, false }
+		env.rebuild()
+	}
+	if tc.precreate {
+		writeUserFile(t, env, "alice", "user/f.txt", body)
+	}
+
+	req := deleteReq("alice", tc.filename, tc.checksum)
+	if tc.explicitVol != "" {
+		req = withVolume(req, tc.explicitVol)
+	}
+	rr := httptest.NewRecorder()
+	env.svc.Delete(rr, req)
+
+	if rr.Code != tc.wantStatus {
+		t.Fatalf("状态码=%d want %d: %s", rr.Code, tc.wantStatus, rr.Body.String())
+	}
+	resp := decodeResp(t, rr)
+	if resp.Message != tc.wantMessage {
+		t.Fatalf("Message=%q want %q", resp.Message, tc.wantMessage)
+	}
+	if wantSuccess := tc.wantStatus == http.StatusOK; resp.Success != wantSuccess {
+		t.Fatalf("Success=%v want %v", resp.Success, wantSuccess)
+	}
+	if tc.wantGone {
+		assertUserFileGone(t, env, "alice", "user/f.txt")
+	} else if tc.precreate {
+		// 所有拒绝分支都必须**保留**文件（含锁占用/checksum 不符/缺 checksum）。
+		if got := mustReadUserFile(t, env, "alice", "user/f.txt"); got != body {
+			t.Fatalf("拒绝分支不得改动文件, 内容=%q want %q", got, body)
+		}
 	}
 }
 
@@ -359,7 +379,7 @@ func TestWriteContract_BatchRename_MissingSourceRecordsAudit(t *testing.T) {
 		t.Fatalf("批量重命名应 200, got %d: %s", rr.Code, rr.Body.String())
 	}
 	resp := decodeBatch(t, rr)
-	if len(resp.Results) != 1 || resp.Results[0].Message != "源文件不存在" {
+	if len(resp.Results) != 1 || resp.Results[0].Message != errMsgSrcNotExist {
 		t.Fatalf("文案不得变: %+v", resp.Results)
 	}
 	if _, ok := env.findAudit("rename", "nope.txt"); !ok {

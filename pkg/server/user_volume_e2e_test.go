@@ -29,11 +29,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/baidupcs"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
@@ -76,6 +76,22 @@ func (f *fakeUserVolE2EStorage) markDirs(key string) {
 	for i := strings.LastIndex(key, "/"); i > 0; i = strings.LastIndex(key[:i], "/") {
 		f.dirs[key[:i]] = struct{}{}
 	}
+}
+
+// PutFromStagedPath 实现 baidupcs.StorageAPI（staging 路径复用）：读暂存文件入内存，
+// 不删/不改调用方文件。hints 忽略（fake 无性能语义；签名对齐 StorageAPI）。
+func (f *fakeUserVolE2EStorage) PutFromStagedPath(_ context.Context, key, stagedPath string, size int64, hints *baidupcs.PutHints) (*baidupcs.ObjectMeta, error) {
+	data, err := os.ReadFile(stagedPath)
+	if err != nil {
+		return nil, err
+	}
+	if size > 0 && int64(len(data)) != size {
+		return nil, fmt.Errorf("staged 大小不符: %d != %d", len(data), size)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[key] = data
+	return &baidupcs.ObjectMeta{Key: key, Size: int64(len(data))}, nil
 }
 
 func (f *fakeUserVolE2EStorage) Put(_ context.Context, key string, r io.Reader) (*baidupcs.ObjectMeta, error) {
@@ -147,6 +163,19 @@ func (f *fakeUserVolE2EStorage) Copy(_ context.Context, srcKey, dstKey string) (
 		return nil, baidupcs.ErrNotFound
 	}
 	f.files[dstKey] = append([]byte(nil), data...)
+	f.markDirs(dstKey)
+	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
+}
+
+func (f *fakeUserVolE2EStorage) Move(_ context.Context, srcKey, dstKey string) (*baidupcs.ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.files[srcKey]
+	if !ok {
+		return nil, baidupcs.ErrNotFound
+	}
+	delete(f.files, srcKey)
+	f.files[dstKey] = data
 	f.markDirs(dstKey)
 	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }
@@ -238,19 +267,8 @@ func ioReadAll(r io.Reader) ([]byte, error) { return io.ReadAll(r) }
 // TestUserVolumeE2E_FullChain 全链路：创建 → push → 完成 → 删除。
 func TestUserVolumeE2E_FullChain(t *testing.T) {
 	t.Parallel()
-	registerUserVolE2EBackend()
+	h, store, volSet, cfg := newUserVolE2EEnv(t)
 
-	cfg := Default()
-	cfg.StorageRoot = t.TempDir()
-	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("cfg.Validate: %v", err)
-	}
-	h := buildVolSetHandlers(t, cfg)
-	store := NewUserVolumeStore(cfg.StorageRoot)
-	h.SetUserVolumeStore(store)
-
-	volSet := h.Volumes()
 	exec := &userVolE2EFakeExecutor{
 		volSet: volSet,
 		ownerRootFor: func(owner string) string {
@@ -264,33 +282,14 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	remotes := []syncmgr.RemoteConfig{
 		{Name: "alice-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "alice-disk1"},
 	}
-	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
-	mgr := syncmgr.NewManager(tenantRoot, nil, nil, 0, remotes, exec, nil, &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0})
+	// persistDir 必须是绝对路径（返回 owner 相对名会把任务 JSON 落到进程 cwd）。
+	persistRoot := t.TempDir()
+	tenantRoot := func(owner string) (string, string, bool) {
+		return cfg.StorageRoot, filepath.Join(persistRoot, owner), true
+	}
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
 	t.Cleanup(mgr.Stop)
-	mgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
-		// 1. 用户卷：store 有且 Owner == owner → 归属。
-		v, gErr := store.Get(owner, volumeName)
-		if gErr == nil && v != nil && v.Owner == owner {
-			return true
-		}
-		// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
-		//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
-		//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
-		isUserVol := false
-		if allUVs, sErr := store.ScanRestore(); sErr == nil {
-			for _, uv := range allUVs {
-				if uv.Name == volumeName {
-					isUserVol = true
-					break
-				}
-			}
-		}
-		if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
-			return true
-		}
-		// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
-		return false
-	})
+	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
 	h.SetSyncMgr(mgr)
 
 	mux := userVolWrap(h, "alice")
@@ -303,7 +302,7 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("创建用户卷: got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if be := volSet.External("alice-disk1"); be == nil {
+	if volSet.External("alice-disk1") == nil {
 		t.Fatal("Set.External(alice-disk1) = nil（创建后应注册）")
 	}
 
@@ -341,7 +340,7 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	if delRec.Code != http.StatusOK {
 		t.Fatalf("删除用户卷: got %d body=%s", delRec.Code, delRec.Body.String())
 	}
-	if be := volSet.External("alice-disk1"); be != nil {
+	if volSet.External("alice-disk1") != nil {
 		t.Fatal("删除后 Set.External(alice-disk1) 应清空")
 	}
 	if v, _ := store.Get("alice", "alice-disk1"); v != nil {
@@ -349,52 +348,76 @@ func TestUserVolumeE2E_FullChain(t *testing.T) {
 	}
 }
 
-// TestUserVolumeE2E_CrossOwnerDenied 跨 owner 创建任务 → 拒绝（U4 闭包）。
-func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
-	t.Parallel()
+// newUserVolE2EEnv 建立用户卷 e2e 测试环境（register backend + cfg + volset handlers + store）。
+func newUserVolE2EEnv(t *testing.T) (h *Handlers, store *UserVolumeStore, volSet *registry.Set, cfg *Config) {
+	t.Helper()
 	registerUserVolE2EBackend()
 
-	cfg := Default()
+	cfg = Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{{Name: "main", Root: cfg.StorageRoot}}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	h := buildVolSetHandlers(t, cfg)
-	store := NewUserVolumeStore(cfg.StorageRoot)
+	h = buildVolSetHandlers(t, cfg)
+	store = NewUserVolumeStore(cfg.StorageRoot)
 	h.SetUserVolumeStore(store)
-	volSet := h.Volumes()
+	return h, store, h.Volumes(), cfg
+}
 
-	remotes := []syncmgr.RemoteConfig{
-		{Name: "bob-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bob-disk1"},
-	}
-	tenantRoot := func(owner string) (string, string, bool) { return cfg.StorageRoot, owner, true }
-	mgr := syncmgr.NewManager(tenantRoot, nil, nil, 0, remotes, nil, nil, &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0})
-	t.Cleanup(mgr.Stop)
-	mgr.SetUserVolumeOwner(func(owner, volumeName string) bool {
+// newUserVolE2EOwnerClosure 构造 mgr.SetUserVolumeOwner 的归属性判定闭包：
+// 用户卷归属 / 系统盘 / 拒绝（404 防枚举语义）。
+func newUserVolE2EOwnerClosure(store *UserVolumeStore, volSet *registry.Set) func(owner, volumeName string) bool {
+	return func(owner, volumeName string) bool {
 		// 1. 用户卷：store 有且 Owner == owner → 归属。
-		v, gErr := store.Get(owner, volumeName)
-		if gErr == nil && v != nil && v.Owner == owner {
+		if userVolE2EStoreOwns(store, owner, volumeName) {
 			return true
 		}
 		// 2. 系统盘：Set.External 有，且该卷名**不属于任何用户卷**（排除用户卷——
 		//    Set.External 同时含系统盘与用户卷；动态 ScanRestore 取全局用户卷名，
 		//    任务创建低频可接受；优化空间：API 创建/删除时更新快照）。
-		isUserVol := false
-		if allUVs, sErr := store.ScanRestore(); sErr == nil {
-			for _, uv := range allUVs {
-				if uv.Name == volumeName {
-					isUserVol = true
-					break
-				}
-			}
-		}
-		if !isUserVol && volSet != nil && volSet.External(volumeName) != nil {
+		if !userVolE2EIsUserVol(store, volumeName) && volSet != nil && volSet.External(volumeName) != nil {
 			return true
 		}
 		// 3. 其它（未知卷/跨 owner 用户卷）→ 拒绝（404 防枚举语义）。
 		return false
-	})
+	}
+}
+
+// userVolE2EStoreOwns 报告该卷是否为 owner 名下的用户卷（store 有且 Owner 匹配）。
+func userVolE2EStoreOwns(store *UserVolumeStore, owner, volumeName string) bool {
+	v, gErr := store.Get(owner, volumeName)
+	return gErr == nil && v != nil && v.Owner == owner
+}
+
+// userVolE2EIsUserVol 报告 volumeName 是否属于任意用户卷（全局 ScanRestore）。
+func userVolE2EIsUserVol(store *UserVolumeStore, volumeName string) bool {
+	if allUVs, sErr := store.ScanRestore(); sErr == nil {
+		for _, uv := range allUVs {
+			if uv.Name == volumeName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestUserVolumeE2E_CrossOwnerDenied 跨 owner 创建任务 → 拒绝（U4 闭包）。
+func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
+	t.Parallel()
+	h, store, volSet, cfg := newUserVolE2EEnv(t)
+
+	remotes := []syncmgr.RemoteConfig{
+		{Name: "bob-disk1", Kind: syncmgr.RemoteKindBaidupcs, Volume: "bob-disk1"},
+	}
+	// persistDir 必须是绝对路径（返回 owner 相对名会把任务 JSON 落到进程 cwd）。
+	persistRoot := t.TempDir()
+	tenantRoot := func(owner string) (string, string, bool) {
+		return cfg.StorageRoot, filepath.Join(persistRoot, owner), true
+	}
+	mgr := syncmgr.NewManager(syncmgr.ManagerOptions{TenantRoot: tenantRoot, ListTenants: nil, Quota: nil, QuotaCat: 0, Remotes: remotes, Executor: nil, Logger: nil, Config: &syncmgr.Config{MaxConcurrent: 3, TaskTTL: 0}})
+	t.Cleanup(mgr.Stop)
+	mgr.SetUserVolumeOwner(newUserVolE2EOwnerClosure(store, volSet))
 	h.SetSyncMgr(mgr)
 
 	// bob 的用户卷存在，但 alice 用 bob 的卷名创建任务 → 拒绝（跨 owner 404 语义）。
@@ -407,8 +430,7 @@ func TestUserVolumeE2E_CrossOwnerDenied(t *testing.T) {
 		t.Fatalf("bob 创建: %d %s", rec.Code, rec.Body.String())
 	}
 	_, _, err := mgr.SubmitAndStart(syncmgr.CreateRequest{
-		Direction: "push", Remote: "bob-disk1", Src: "", Dst: "", Owner: "alice",
-	})
+		Direction: "push", Remote: "bob-disk1", Src: "", Dst: "", Owner: "alice"})
 	if err == nil {
 		t.Fatal("跨 owner 创建任务应被拒绝（ErrUserVolumeNotOwned）")
 	}

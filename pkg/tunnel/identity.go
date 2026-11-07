@@ -26,8 +26,6 @@ const (
 	identityFilePerm = 0600
 	// identityFileDirPerm 是身份文件所在目录的权限。
 	identityFileDirPerm = 0700
-	// identitySigDomain 是身份签名的域分离前缀，防止跨协议/跨消息重放。
-	identitySigDomain = "sproxy-identity-v1"
 	// ed25519PublicKeyLen 是 Ed25519 公钥长度（32B）。
 	ed25519PublicKeyLen = ed25519.PublicKeySize
 	// ed25519SignatureLen 是 Ed25519 签名长度（64B）。
@@ -35,6 +33,11 @@ const (
 )
 
 var (
+	// identitySigDomain 是身份签名的域分离前缀，防止跨协议/跨消息重放。
+	// const → var：配合 SetSaltPrefix 支持自定义前缀（防协议指纹识别）。
+	// SetSaltPrefix 同步更新，保证握手域分离一致。
+	identitySigDomain = "sproxy-identity-v1"
+
 	// ErrIdentityFileCorrupt 表示身份文件损坏或内容非法。
 	// 加载失败时 fail-closed 返回错误，绝不静默重建覆盖用户文件。
 	ErrIdentityFileCorrupt = errors.New("identity: 身份文件损坏")
@@ -61,6 +64,23 @@ type Identity struct {
 type identityFile struct {
 	PrivateKey string `json:"private_key"`
 	PublicKey  string `json:"public_key"`
+}
+
+// NewIdentityFromSeed 从 32B Ed25519 seed 构造身份（内存构造，无需磁盘文件）。
+// 用于凭据/身份加密内嵌场景（如 stealth-build 隐藏二进制把私钥 seed 加密打包进
+// 配置密文，运行时解密后直接构造，避免私钥明文落盘）。
+func NewIdentityFromSeed(seed []byte) (*Identity, error) {
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("identity: seed 长度 %d != %d", len(seed), ed25519.SeedSize)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	// 显式两值断言：errcheck(check-type-assertions) 要求检查类型断言结果。
+	pubAny := priv.Public()
+	pub, ok := pubAny.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("identity: 派生公钥类型异常: %T", pubAny)
+	}
+	return &Identity{privateKey: priv, publicKey: pub}, nil
 }
 
 // GenerateIdentity 生成一个新的 Ed25519 身份密钥对。

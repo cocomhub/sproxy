@@ -39,6 +39,12 @@ func ValidSegmentName(name string) bool {
 	if strings.ContainsAny(name, `<>:"|?*`) {
 		return false
 	}
+	// m3 修复：拒绝 NUL 与控制字符（C0 段）——`%00` 解码后可注入 rel（本地 OS 拒绝
+	// NUL，但外部卷/URL 解码路径可能放行；ValidSegmentName 是全仓路径安全单一权威，
+	// 在此统一拒，防段名含 \x00/\x01 等破坏下游字节校验/命名语义）。
+	if strings.IndexFunc(name, func(r rune) bool { return r < 0x20 }) >= 0 {
+		return false
+	}
 	if strings.HasPrefix(name, ".__") {
 		return false
 	}

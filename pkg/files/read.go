@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/storage"
 )
 
 // read.go 是文件服务**只读面**（列表 / 搜索 / 下载 / stat）的处理器与它们的私有辅助，
@@ -29,7 +32,7 @@ import (
 //
 // 留在装配层（pkg/server）的部分：`/download` 与 `/api/files/stat` 的**路径解析**
 // （resolveDownloadPath：kind 白名单 + 卷读定位 + 云任务归属校验，见接缝
-// DownloadPaths 能力）。本文件只消费解析结果，不自行解析请求路径。
+// DownloadPathResolver 能力）。本文件只消费解析结果，不自行解析请求路径。
 
 // headerFileMTime 是文件元信息响应头（下载 / stat 读，upload 写）。
 // 写面迁入后本包是本常量的**唯一定义**（pkg/server 侧的同名常量已随上传族删除，本包不再
@@ -46,6 +49,10 @@ type FileInfo struct {
 	// Volume 是条目所在卷名（多卷聚合列表新增字段；向后兼容——旧客户端忽略未知键。
 	// 目录条目为聚合视图下的逻辑目录（可跨卷并存），不绑定单卷，Volume 为空）。
 	Volume string `json:"volume"`
+	// VolumeCategory 是条目所在卷的展示分类（任务 9：外部卷 ListDir 透传时按卷类型标注，
+	// wrapper 加密/封装卷填 "wrapper"；本地卷/其余类型不填 = 零值 omitempty 不出现在 JSON）。
+	// 供 Web UI 文件行卷徽标按 category 细化（wrapper 显示 🔒）。
+	VolumeCategory string `json:"volume_category,omitempty"`
 }
 
 // ListResponse 是文件列表的响应结构（GET /api/files 与 GET /api/files/search 共用）。
@@ -126,7 +133,9 @@ func paginateEntries(entries []FileInfo, offset, limit int) []FileInfo {
 // 列表根在 user 桶内（功能桶与 .checksums.json 均不在其下），无需内部目录过滤。
 // csMap 来自 per-tenant store（key 为相对租户根的 rel，如 user/dir/f.txt）；
 // subdir 为相对 user 桶的子路径，checksum key = "user/" + subdir/entryName。
-func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]string, subdir string) []FileInfo {
+// root 为租户根（可为 nil：无卷上下文），**加密卷**下用 `LogicalSize` 报明文长度
+// （Stat 是密文长度，会让列表 size 与下载实际字节不一致——第 5 轮对抗评审）。
+func (s *Service) buildFileListEntries(entries []os.DirEntry, csAt func(rel string) string, subdir string, root *storage.Root) []FileInfo {
 	allFiles := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
@@ -146,21 +155,34 @@ func (s *Service) buildFileListEntries(entries []os.DirEntry, csMap map[string]s
 			s.rt.logger().Warn("读取文件信息失败，跳过", "name", e.Name(), "error", err)
 			continue
 		}
-		fi := FileInfo{
-			Name:    e.Name(),
-			Size:    info.Size(),
-			ModTime: info.ModTime().UnixNano(),
-		}
 		relName := e.Name()
 		if subdir != "" {
 			relName = filepath.ToSlash(filepath.Join(subdir, e.Name()))
 		}
-		if cs, ok := csMap["user/"+relName]; ok {
+		fi := FileInfo{
+			Name:    e.Name(),
+			Size:    logicalSizeFor(root, "user/"+relName, info),
+			ModTime: info.ModTime().UnixNano(),
+		}
+		if cs := csAt(relName); cs != "" {
 			fi.Checksum = cs
 		}
 		allFiles = append(allFiles, fi)
 	}
 	return allFiles
+}
+
+// logicalSizeFor 返回条目的**用户可见**大小：at-rest 加密卷取明文长度（`info.Size()`
+// 是密文长度，会让列表/X-File-Size/分块总量与 `/download` 实际下发字节不一致）。
+// 探测失败回落盘上大小（保持旧行为，不因元信息探测失败拒绝服务）。
+func logicalSizeFor(root *storage.Root, rel string, info os.FileInfo) int64 {
+	if root == nil || info.IsDir() || !root.IsEncrypted() {
+		return info.Size()
+	}
+	if ls, lerr := root.LogicalSize(rel); lerr == nil {
+		return ls
+	}
+	return info.Size()
 }
 
 // ListFiles 处理 GET /api/files。
@@ -174,7 +196,7 @@ func (s *Service) ListFiles(w http.ResponseWriter, r *http.Request) {
 	if sortOrder != "desc" {
 		sortOrder = "asc"
 	}
-	res, err := s.List(ListQuery{
+	res, err := s.List(r.Context(), ListQuery{
 		Owner:     s.rt.actorOf(r),
 		VolName:   r.URL.Query().Get("volume"),
 		Subdir:    r.URL.Query().Get("subdir"),
@@ -233,10 +255,18 @@ func (s *Service) listRelForOwner(owner, subdir string) (string, bool) {
 // 目录条目为逻辑目录（可跨卷并存）只列一次、Volume 空。默认卷被 ACL 排除则不搜默认卷
 // （不泄默认卷遗留元数据）。
 func (s *Service) SearchFiles(w http.ResponseWriter, r *http.Request) {
-	res, err := s.Search(SearchQuery{
-		Owner: s.rt.actorOf(r),
-		Query: r.URL.Query().Get("q"),
-		Tag:   r.URL.Query().Get("tag"),
+	// 分页为**可选**（审计 2026-10-29 P3）：仅在显式传 offset/limit 时启用（List 同语义，
+	// 默认 limit 1000 上限）；不传则保持「返回全部」的既有契约。
+	offset, limit := 0, 0
+	if r.URL.Query().Get("offset") != "" || r.URL.Query().Get("limit") != "" {
+		offset, limit = parsePagination(r)
+	}
+	res, err := s.Search(r.Context(), SearchQuery{
+		Owner:  s.rt.actorOf(r),
+		Query:  r.URL.Query().Get("q"),
+		Tag:    r.URL.Query().Get("tag"),
+		Offset: offset,
+		Limit:  limit,
 	})
 	if err != nil {
 		// 既有形状：搜索失败一律只回 files:[]（search 路径没有 404 分支）。
@@ -293,7 +323,7 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 }
 
 // Download 处理 GET /download（整文件下载，Range 由 http.ServeContent 处理）。
-// 路径解析（kind 白名单 / 跨卷读定位 / 云任务归属校验）由装配层经 DownloadPaths 能力
+// 路径解析（kind 白名单 / 跨卷读定位 / 云任务归属校验）由装配层经 DownloadPathResolver 能力
 // 完成后交进来，本处理器只消费解析结果。
 func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -306,7 +336,17 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	of, err := s.OpenPath(dp)
+	// **302 直链（2026-10-05 B 态）**：装配层已判定明文外部卷未私密 → RedirectURL
+	// 非空。流量不经服务端，直接 302 到后端直链；指标按卷记成功。
+	if dp.RedirectURL != "" {
+		if mr := s.rt.metricsRecorder(); mr != nil {
+			mr.RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+		}
+		http.Redirect(w, r, dp.RedirectURL, http.StatusFound)
+		return
+	}
+
+	of, err := s.OpenPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			s.sendJSON(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
@@ -315,7 +355,6 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 		s.sendJSON(w, UploadResponse{Success: false, Message: errMsgOpenFileFailed}, http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = of.File.Close() }()
 
 	w.Header().Set("Content-Disposition", formatContentDisposition(dp.Filename))
 	w.Header().Set(headerContentType, contentTypeOctetStream)
@@ -345,11 +384,127 @@ func (s *Service) Download(w http.ResponseWriter, r *http.Request) {
 	owner := normalizeOwner(s.rt.actorOf(r))
 	cw := &countingWriter{ResponseWriter: w}
 	limited := limitResponseWriter(s.rt.bandwidthLimiter(), owner, cw)
-	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), seeker)
-	if s.rt.metricsRecorder() != nil {
-		s.rt.metricsRecorder().RecordDownload(cw.count.Load())
-		s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+	// 第 5 轮对抗评审 P1：`meta.VerifyReadSeeker` 在损坏时于 Read 返回错误，但
+	// `http.ServeContent` **吞掉** io.Copy 错误且响应头（含 Content-Length）已发出 →
+	// 客户端只收到短包，监控还硬编码 success=true、无任何日志。此处记录首个非 EOF
+	// 读取错误，随后**主动中断连接**（对齐 s3_server.go 的 ErrAbortHandler）。
+	// Range 端点提示（第 10 轮评审 P1）：块边界对齐且不读到 EOF 的 Range 此前整段零校验，
+	// 现由 Close 收尾补验尾部半块（多区间/非法 Range → 不设提示，维持既有行为不误报）。
+	closeErrIsVerify := armRangeVerify(of.File, r.Header.Get("Range"), of.Info.Size())
+	tracked := &firstErrReadSeeker{inner: seeker}
+	http.ServeContent(limited, r, of.Info.Name(), of.Info.ModTime(), tracked)
+	cerr := of.File.Close()
+	if !closeErrIsVerify {
+		cerr = nil // 非校验流的 Close 错误与完整性无关，不得触发中断（避免误杀正常下载）
 	}
+	s.finishDownload(r, dp, start, cw, tracked, cerr)
+}
+
+// armRangeVerify 为**校验流**装配 Range 端点提示并报告其 Close 是否承载校验语义：
+// 仅 meta.RangeVerifier（读时逐分块校验流）才把 Close 错误视为「收尾补验失败」；其它形态
+// （含加密解密流）的 Close 错误与完整性无关（第 10 轮评审 P1）。
+func armRangeVerify(f io.Reader, rangeHeader string, size int64) bool {
+	rv, ok := f.(meta.RangeVerifier)
+	if !ok {
+		return false
+	}
+	if end, ok2 := singleRangeEnd(rangeHeader, size); ok2 {
+		rv.SetExpectedEnd(end)
+	}
+	return true
+}
+
+// singleRangeEnd 解析**单区间** Range 头（`bytes=start-end` / `bytes=start-`），返回独占结束
+// 偏移；多区间/非法/通配 → ok=false（不设端点提示 ⇒ Close 不补验，避免误报）。
+func singleRangeEnd(header string, size int64) (int64, bool) {
+	raw, ok := strings.CutPrefix(strings.TrimSpace(header), "bytes=")
+	if !ok || strings.Contains(raw, ",") || size <= 0 {
+		return 0, false
+	}
+	startS, endS, ok := strings.Cut(raw, "-")
+	if !ok {
+		return 0, false
+	}
+	if startS == "" { // suffix range（bytes=-N）：结束即文件尾，EOF 路径已覆盖
+		return 0, false
+	}
+	start, serr := strconv.ParseInt(strings.TrimSpace(startS), 10, 64)
+	if serr != nil || start < 0 || start >= size {
+		return 0, false
+	}
+	if strings.TrimSpace(endS) == "" {
+		return size, true
+	}
+	end, eerr := strconv.ParseInt(strings.TrimSpace(endS), 10, 64)
+	if eerr != nil || end < start {
+		return 0, false
+	}
+	if end >= size-1 {
+		return size, true
+	}
+	return end + 1, true
+}
+
+// finishDownload 收尾 /download：校验/读取失败 → 中断连接 + 记录失败（第 5 轮对抗评审
+// P1：ServeContent 吞掉错误，响应头已发只会静默截断且指标恒 true）；成功 → 记录计量。
+func (s *Service) finishDownload(r *http.Request, dp DownloadPath, start time.Time, cw *countingWriter, tracked *firstErrReadSeeker, closeErr error) {
+	// closeErr：Range 在块中间结束时的**收尾补验**失败（RangeVerifier，第 10 轮评审 P1）。
+	// 与读错误同口径处理：已知下发内容源自损坏分块 → 中断连接（客户端看到截断而非「完整成功」）。
+	if tracked.err == nil && closeErr != nil {
+		tracked.err = closeErr
+	}
+	if tracked.err != nil {
+		s.rt.logger().Warn("下载流校验失败：中断连接（不发损坏内容）",
+			"file_name", dp.Filename, "volume", dp.VolumeName, "written", cw.count.Load(), "error", tracked.err.Error())
+		if s.rt.metricsRecorder() != nil {
+			s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), false)
+		}
+		panic(http.ErrAbortHandler)
+	}
+	if s.rt.metricsRecorder() == nil {
+		return
+	}
+	s.rt.metricsRecorder().RecordDownload(cw.count.Load())
+	// 计量报告 owner 维度（roadmap 11.10-⑩ 片 2）：整文件下载按请求主体记 per-owner 字节。
+	if owner := s.rt.actorOf(r); owner != "" {
+		s.rt.metricsRecorder().RecordDownloadForOwner(owner, cw.count.Load())
+	}
+	s.rt.metricsRecorder().RecordVolumeIO(dp.VolumeName, "download", time.Since(start), true)
+}
+
+// serveVerifiedFallback 以 /download 主链**同口径**下发原文件（评审 P1：transform 回退分支
+// 此前直接 http.ServeContent(seeker) —— 未包 firstErrReadSeeker、不调 finishDownload，
+// 而 ServeContent 吞掉 io.Copy 错误 ⇒ 损坏内容被静默截断 200（无 Warn、无失败指标、不中断
+// 连接）。回退路径必须与主链一致：首错记录 → 失败可观测 → 主动中断连接。
+func (s *Service) serveVerifiedFallback(w http.ResponseWriter, r *http.Request, dp DownloadPath, seeker io.ReadSeeker, name string, modTime time.Time) {
+	owner := normalizeOwner(s.rt.actorOf(r))
+	cw := &countingWriter{ResponseWriter: w}
+	limited := limitResponseWriter(s.rt.bandwidthLimiter(), owner, cw)
+	start := time.Now()
+	tracked := &firstErrReadSeeker{inner: seeker}
+	http.ServeContent(limited, r, name, modTime, tracked)
+	s.finishDownload(r, dp, start, cw, tracked, nil)
+}
+
+// firstErrReadSeeker 记录底层读的**首个非 EOF 错误**并原样返回（Read/Seek 直透）。
+// 供 /download 在 ServeContent 返回后判定「是否因校验/读错而截断」，从而中断连接并
+// 把指标记为失败（ServeContent 本身不暴露该错误）。
+// 并发安全：ServeContent 对同一 seeker 串行 Read（单 goroutine），无需锁。
+type firstErrReadSeeker struct {
+	inner io.ReadSeeker
+	err   error
+}
+
+func (f *firstErrReadSeeker) Read(p []byte) (int, error) {
+	n, err := f.inner.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) && f.err == nil {
+		f.err = err
+	}
+	return n, err
+}
+
+func (f *firstErrReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	return f.inner.Seek(offset, whence)
 }
 
 // Stat 处理 HEAD /api/files/stat?filename=<name>[&kind=cloud_archive]。
@@ -362,7 +517,7 @@ func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 		s.writeHTTPPathError(w, err)
 		return
 	}
-	st, err := s.StatPath(dp)
+	st, err := s.StatPath(r.Context(), dp)
 	if err != nil {
 		if he := asHTTPError(err); he != nil {
 			http.Error(w, he.Message, he.Status)

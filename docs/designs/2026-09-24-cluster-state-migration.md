@@ -11,7 +11,7 @@
 
 | 状态 | 源码 | 落盘 |
 |---|---|---|
-| 凭据 Ring | `pkg/accesskey/storer.go`（CredentialStorer.Load/Save）+ `pkg/server/credentials.go`（BootstrapServerCredentials） | `<默认卷根>/anonymous/meta/credentials.json`（AD-5：meta 归属默认卷不变式） |
+| 凭据 Ring | `pkg/accesskey/storer.go`（CredentialStorer.Load/Save）+ `pkg/server/credentials`（BootstrapServerCredentials，T3-a 后） | `<默认卷根>/anonymous/meta/credentials.json`（AD-5：meta 归属默认卷不变式） |
 | dedup 台账 | `pkg/files/dedup.go`（DedupStore：checksum→refs，saveMu+tmp+rename+Windows 回退+失败重试一次） | `<meta>/dedup.json` |
 | 索引快照 | `pkg/files/search_index.go`（searchIndex 内存 copy-on-write；ensureOwner/saveAll 落盘快照） | `<meta>/index/<owner>.json` |
 | 分享 | `pkg/server/share.go`（statestore.md §1.1 已列） | `<share>/<token>.json` |

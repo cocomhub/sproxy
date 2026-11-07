@@ -326,68 +326,90 @@ type miniSignalHub struct {
 func (h *miniSignalHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/api/signal/poll/"):
-		peer := strings.TrimPrefix(r.URL.Path, "/api/signal/poll/")
-		kind := r.URL.Query().Get("kind")
-		h.mu.Lock()
-		if h.inbox == nil {
-			h.inbox = map[string][]map[string]any{}
-		}
-		// 按 ?kind= 过滤（对齐真实 hub I9）。每次 poll 只消费**一条**匹配消息，
-		// 其余保留给下次 poll——否则同一 peer 的多个并发 offer（full-mesh 下 node-a
-		// 与 node-b 同时拨 node-c）会在一次 poll 中一起返回、客户端只取一条，其余
-		// 丢失导致对端 WaitAnswer 超时。
-		inbox := h.inbox[peer]
-		var msgs, kept []map[string]any
-		for _, m := range inbox {
-			mkind, _ := m["kind"].(string)
-			if kind == "" || mkind == kind {
-				msgs = append(msgs, m)
-			} else {
-				kept = append(kept, m)
-			}
-		}
-		if len(msgs) > 1 {
-			kept = append(kept, msgs[1:]...)
-			msgs = msgs[:1]
-		}
-		if msgs == nil {
-			msgs = []map[string]any{}
-		}
-		h.inbox[peer] = kept
-		h.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(msgs)
+		h.miniSignalServePoll(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/signal/"):
-		var msg map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-			http.Error(w, "bad body", http.StatusBadRequest)
-			return
-		}
-		to, _ := msg["to"].(string)
-		h.mu.Lock()
-		if h.inbox == nil {
-			h.inbox = map[string][]map[string]any{}
-		}
-		h.inbox[to] = append(h.inbox[to], msg)
-		h.mu.Unlock()
-		w.WriteHeader(http.StatusAccepted)
+		h.miniSignalServeSend(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
+// miniSignalServePoll 处理信令轮询：按 ?kind= 过滤，每次只消费**一条**匹配消息，
+// 其余保留给下次 poll（否则同一 peer 的多个并发 offer 会在一次 poll 中全部返回、
+// 客户端只取一条，其余丢失导致对端 WaitAnswer 超时）。
+func (h *miniSignalHub) miniSignalServePoll(w http.ResponseWriter, r *http.Request) {
+	peer := strings.TrimPrefix(r.URL.Path, "/api/signal/poll/")
+	kind := r.URL.Query().Get("kind")
+	h.mu.Lock()
+	if h.inbox == nil {
+		h.inbox = map[string][]map[string]any{}
+	}
+	inbox := h.inbox[peer]
+	var msgs, kept []map[string]any
+	for _, m := range inbox {
+		mkind, _ := m["kind"].(string)
+		if kind == "" || mkind == kind {
+			msgs = append(msgs, m)
+		} else {
+			kept = append(kept, m)
+		}
+	}
+	if len(msgs) > 1 {
+		kept = append(kept, msgs[1:]...)
+		msgs = msgs[:1]
+	}
+	if msgs == nil {
+		msgs = []map[string]any{}
+	}
+	h.inbox[peer] = kept
+	h.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(msgs)
+}
+
+// miniSignalServeSend 处理信令投递：POST body 解码失败返回 400，否则把消息
+// 追加到目标 peer 的收件箱（供后续 poll 消费）。
+func (h *miniSignalHub) miniSignalServeSend(w http.ResponseWriter, r *http.Request) {
+	var msg map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	to, _ := msg["to"].(string)
+	h.mu.Lock()
+	if h.inbox == nil {
+		h.inbox = map[string][]map[string]any{}
+	}
+	h.inbox[to] = append(h.inbox[to], msg)
+	h.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // TestRunNode_RegistersServicesAndRelays：mesh node 单进程注册 + 服务宣告 +
 // 中继路径（hub 侧 mux Open 流写 dial 帧 → 出口拨号 echo）。EnableWebRTC=false。
 func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
-	// echo 后端（127.0.0.1 回环）。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	echoAddr := runNodeTestEcho(t)
+	rt, ts, _ := runNodeTestHub(t, false)
+	nodeID := "mesh-node-relay"
+	runErr, nodeCancel := runNodeTestStartRelayNode(t, rt, ts, nodeID, echoAddr)
+	defer nodeCancel()
+	runNodeTestRelayDialEcho(t, rt, nodeID, echoAddr, nodeCancel)
+	nodeCancel()
+	runNodeTestExpectExit(t, runErr)
+}
+
+// runNodeTestEcho 起一个 loopback echo 后端（accept 后 io.Copy 回显），返回监听地址。
+// listener 生命周期注册到 t.Cleanup，随测试结束关闭。
+func runNodeTestEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer echoLn.Close()
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
-			c, aerr := echoLn.Accept()
+			c, aerr := ln.Accept()
 			if aerr != nil {
 				return
 			}
@@ -397,12 +419,14 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 			}(c)
 		}
 	}()
-	echoAddr := echoLn.Addr().String()
+	return ln.Addr().String()
+}
 
-	rt, ts, _ := runNodeTestHub(t, false)
-	nodeID := "mesh-node-relay"
+// runNodeTestStartRelayNode 以 EnableWebRTC=false 启动 mesh node（宣告 echo 服务），
+// 等待注册 + 服务宣告就绪后返回 runErr 通道与 nodeCancel（仅中继路径）。
+func runNodeTestStartRelayNode(t *testing.T, rt *hub.MeshRouteTable, ts *httptest.Server, nodeID, echoAddr string) (chan error, context.CancelFunc) {
+	t.Helper()
 	nodeCtx, nodeCancel := context.WithCancel(context.Background())
-	defer nodeCancel()
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- RunNode(nodeCtx, NodeConfig{
@@ -412,23 +436,31 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 			EnableWebRTC: false,
 		})
 	}()
-
-	// 等注册 + 服务宣告。
-	deadline := time.Now().Add(5 * time.Second)
-	for rt.Lookup(hub.NodeID(nodeID)) == nil && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if rt.Lookup(hub.NodeID(nodeID)) == nil {
-		nodeCancel()
-		t.Fatal("mesh node 未注册")
-	}
+	runNodeTestWaitRegistered(t, rt, nodeID)
 	svcs := rt.Table("").ServicesOf(hub.NodeID(nodeID))
 	if len(svcs) != 1 || svcs[0].Name != "echo" || svcs[0].Addr != echoAddr {
 		nodeCancel()
 		t.Fatalf("服务宣告不对: %+v", svcs)
 	}
+	return runErr, nodeCancel
+}
 
-	// 中继路径：hub 侧 mux Open 流 + 写 dial 帧 → mesh node relay.Serve 出口拨 echo。
+// runNodeTestWaitRegistered 轮询路由表直到 nodeID 注册成功（5s 上限）。
+func runNodeTestWaitRegistered(t *testing.T, rt *hub.MeshRouteTable, nodeID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for rt.Lookup(hub.NodeID(nodeID)) == nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if rt.Lookup(hub.NodeID(nodeID)) == nil {
+		t.Fatal("mesh node 未注册")
+	}
+}
+
+// runNodeTestRelayDialEcho 经 mesh node 的 hub 侧 mux 流写入 dial 帧 + "ping"，
+// 再读回 echo 回显：先消费拨号结果帧，再断言读到 "ping"。
+func runNodeTestRelayDialEcho(t *testing.T, rt *hub.MeshRouteTable, nodeID, echoAddr string, nodeCancel context.CancelFunc) {
+	t.Helper()
 	hubMux := rt.Lookup(hub.NodeID(nodeID))
 	stream, err := hubMux.Open(context.Background())
 	if err != nil {
@@ -451,8 +483,11 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 		nodeCancel()
 		t.Fatal(err)
 	}
+	runNodeTestExpectEcho(t, stream, 5*time.Second, "中继 echo 未回显", "中继 echo 超时")
+}
 
-	// 读回：先消费拨号结果帧，再读 echo 回显。
+// runNodeTestReadEchoCh 后台读流直至积累到 "ping" 或读到错误，把结果经通道返回。
+func runNodeTestReadEchoCh(stream io.Reader) <-chan string {
 	gotCh := make(chan string, 1)
 	go func() {
 		var all []byte
@@ -472,18 +507,27 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 			}
 		}
 	}()
+	return gotCh
+}
+
+// runNodeTestExpectEcho 等待读到 echo 回显（读到 "ping" 即成功），否则按调用点
+// 原始文案报错。failMsg/timeoutMsg 保留各调用点原始断言文案。
+func runNodeTestExpectEcho(t *testing.T, stream io.Reader, timeout time.Duration, failMsg, timeoutMsg string) {
+	t.Helper()
+	gotCh := runNodeTestReadEchoCh(stream)
 	select {
 	case got := <-gotCh:
 		if !bytes.Contains([]byte(got), []byte("ping")) {
-			nodeCancel()
-			t.Fatalf("中继 echo 未回显: %q", got)
+			t.Fatalf("%s: %q", failMsg, got)
 		}
-	case <-time.After(5 * time.Second):
-		nodeCancel()
-		t.Fatal("中继 echo 超时")
+	case <-time.After(timeout):
+		t.Fatal(timeoutMsg)
 	}
+}
 
-	nodeCancel()
+// runNodeTestExpectExit 取消 nodeCtx 并等待 RunNode 返回 nil（5s 上限）。
+func runNodeTestExpectExit(t *testing.T, runErr chan error) {
+	t.Helper()
 	select {
 	case err := <-runErr:
 		if err != nil {
@@ -497,36 +541,31 @@ func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
 // TestRunNode_WebRTCDirect：mesh node webrtc 直连环接受拨号方打洞直连，
 // 直连数据面（dial 帧→出口拨号 echo）经 relay.Serve 分发。EnableWebRTC=true。
 func TestRunNode_WebRTCDirect(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
+	runNodeTestSetupWebRTC(t)
+	echoAddr := runNodeTestEcho(t)
+	rt, ts, _ := runNodeTestHub(t, true)
+	nodeID := "mesh-node-direct"
+	runErr := runNodeTestStartWebRTCNode(t, rt, ts, nodeID, echoAddr)
+	runNodeTestWebRTCDialEcho(t, ts, nodeID, echoAddr)
+	_ = runErr
+}
+
+// runNodeTestSetupWebRTC 收敛 webrtc 测试环境：UDP 候选收敛到 loopback 单端口、
+// 放宽信令超时，全部经 t.Cleanup 还原（Windows 下避免反复弹防火墙授权框）。
+func runNodeTestSetupWebRTC(t *testing.T) {
+	t.Helper()
 	env := webrtctest.New(t)
-	defer env.Close()
+	t.Cleanup(func() { env.Close() })
 	webrtc.SetHostOnly(true)
 	t.Cleanup(func() { webrtc.SetHostOnly(false) })
 	webrtc.SetSignalingTimeout(60 * time.Second)
 	t.Cleanup(webrtc.ResetSignalingTimeout)
+}
 
-	// echo 后端。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
-
-	rt, ts, _ := runNodeTestHub(t, true)
-	nodeID := "mesh-node-direct"
+// runNodeTestStartWebRTCNode 以 EnableWebRTC=true 启动 mesh node（宣告 echo 服务 +
+// 本机信令环），等待注册就绪后返回 runErr 通道（webrtc 环依赖注册 + secret）。
+func runNodeTestStartWebRTCNode(t *testing.T, rt *hub.MeshRouteTable, ts *httptest.Server, nodeID, echoAddr string) chan error {
+	t.Helper()
 	nodeCtx := t.Context()
 	runErr := make(chan error, 1)
 	go func() {
@@ -537,17 +576,14 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 			EnableWebRTC: true, SignalAddr: "127.0.0.1:0",
 		})
 	}()
+	runNodeTestWaitRegistered(t, rt, nodeID)
+	return runErr
+}
 
-	// 等 mesh node 注册（webrtc 环依赖注册 + secret）。
-	deadline := time.Now().Add(5 * time.Second)
-	for rt.Lookup(hub.NodeID(nodeID)) == nil && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
-	if rt.Lookup(hub.NodeID(nodeID)) == nil {
-		t.Fatal("mesh node 未注册")
-	}
-
-	// 拨号方：临时节点注册拿 signaler → webrtc 直连 nodeID → mux 流写 dial 帧 → echo。
+// runNodeTestWebRTCDialEcho 以临时拨号方身份注册（拿 signaler）→ webrtc 直连
+// nodeID → mux 流写 dial 帧 + "ping" → 断言直连 echo 回显。
+func runNodeTestWebRTCDialEcho(t *testing.T, ts *httptest.Server, nodeID, echoAddr string) {
+	t.Helper()
 	dialer, err := AutoRegister(context.Background(), AutoRegisterParams{
 		HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
 		NodeID: "dialer", Prefix: "p2p", ExactNode: false,
@@ -577,36 +613,7 @@ func TestRunNode_WebRTCDirect(t *testing.T) {
 	if _, err := stream.Write([]byte("ping")); err != nil {
 		t.Fatal(err)
 	}
-
-	gotCh := make(chan string, 1)
-	go func() {
-		var all []byte
-		buf := make([]byte, 64)
-		for {
-			n, rerr := stream.Read(buf)
-			if n > 0 {
-				all = append(all, buf[:n]...)
-				if bytes.Contains(all, []byte("ping")) {
-					gotCh <- string(all)
-					return
-				}
-			}
-			if rerr != nil {
-				gotCh <- string(all)
-				return
-			}
-		}
-	}()
-	select {
-	case got := <-gotCh:
-		if !bytes.Contains([]byte(got), []byte("ping")) {
-			t.Fatalf("直连 echo 未回显: %q", got)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("直连 echo 超时")
-	}
-
-	_ = runErr
+	runNodeTestExpectEcho(t, stream, 10*time.Second, "直连 echo 未回显", "直连 echo 超时")
 }
 
 // TestListHubNodes：解析 /api/hub/nodes 返回的节点列表 + Bearer 头 + 401 分支。
@@ -849,72 +856,52 @@ func TestGateway_Status(t *testing.T) {
 // 网关、B→A 经 B 的网关 accept 侧注册链路回拨），数据面端到端就绪（mesh connect
 // --gateway 双向全覆盖）。
 func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
-	// Windows 下收敛 UDP 候选收集到 loopback 单端口，避免测试反复弹防火墙授权框。
-	env := webrtctest.New(t)
-	defer env.Close()
-	webrtc.SetHostOnly(true)
-	t.Cleanup(func() { webrtc.SetHostOnly(false) })
-	webrtc.SetSignalingTimeout(60 * time.Second)
-	t.Cleanup(webrtc.ResetSignalingTimeout)
-
-	// 两个 echo 后端（node-svc 与 node-ap 各一个）。
-	startEcho := func(t *testing.T) string {
-		t.Helper()
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = ln.Close() })
-		go func() {
-			for {
-				c, aerr := ln.Accept()
-				if aerr != nil {
-					return
-				}
-				go func(cn net.Conn) {
-					defer cn.Close()
-					_, _ = io.Copy(cn, cn)
-				}(c)
-			}
-		}()
-		return ln.Addr().String()
-	}
-	echoSvcAddr := startEcho(t)
-	echoApAddr := startEcho(t)
-
+	runNodeTestSetupWebRTC(t)
+	echoSvcAddr := runNodeTestEcho(t)
+	echoApAddr := runNodeTestEcho(t)
 	_, ts, _ := runNodeTestHub(t, true)
 
 	// node-svc：宣告 echo-svc（服务宿主，被 node-ap 自动拨号），本地网关。
 	gatewaySvc := make(chan string, 1)
-	ctxSvc := t.Context()
-	go func() {
-		_ = RunNode(ctxSvc, NodeConfig{
-			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-svc", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
-			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
-			Services:     []hub.Service{{Name: "echo-svc", Addr: echoSvcAddr}},
-			ServiceAddrs: []string{echoSvcAddr}, DialAllow: true,
-			GatewayAddr: "127.0.0.1:0", GatewayNotify: gatewaySvc,
-		})
-	}()
+	runNodeTestStartGatewayNode(t, ts, "node-svc", hub.Service{Name: "echo-svc", Addr: echoSvcAddr}, echoSvcAddr, nil, gatewaySvc)
 
 	// node-ap：低 ID 自动拨 node-svc，宣告 echo-ap，本地网关。
 	peersA := make(chan string, 4)
 	gatewayA := make(chan string, 1)
-	ctxA := t.Context()
-	go func() {
-		_ = RunNode(ctxA, NodeConfig{
-			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
-			NodeID: "node-ap", EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
-			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
-			DiscoveryPeers: peersA,
-			Services:       []hub.Service{{Name: "echo-ap", Addr: echoApAddr}},
-			ServiceAddrs:   []string{echoApAddr}, DialAllow: true,
-			GatewayAddr: "127.0.0.1:0", GatewayNotify: gatewayA,
-		})
-	}()
+	runNodeTestStartGatewayNode(t, ts, "node-ap", hub.Service{Name: "echo-ap", Addr: echoApAddr}, echoApAddr, peersA, gatewayA)
 
 	// 等两节点网关就绪 + node-ap 自动直连 node-svc。
+	addrA, addrSvc := runNodeTestWaitGatewaysAndPeer(t, gatewayA, gatewaySvc, peersA)
+
+	// 双向 echo 往返（经各自本地网关复用同一条已建链路）。B→A 方向依赖 accept 侧
+	// 链路注册，注册在拨号建立后同步完成；对 ErrNoPeerLink 短重试容忍注册时序。
+	// 方向 1（A→B）：node-ap 网关复用已建链路路由到 node-svc 的 echo-svc。
+	runNodeTestEchoRoundTrip(t, addrA, "node-svc", echoSvcAddr)
+	// 方向 2（B→A）：node-svc 网关（accept 侧注册链路）回拨 node-ap 的 echo-ap。
+	runNodeTestEchoRoundTrip(t, addrSvc, "node-ap", echoApAddr)
+}
+
+// runNodeTestStartGatewayNode 以常驻 mesh node 方式启动一个宣告指定服务、本地网关
+// + 自动对等发现开启的节点（discovery 发现的 peer 写入 peers，网关地址写入 gateway）。
+func runNodeTestStartGatewayNode(t *testing.T, ts *httptest.Server, nodeID string, svc hub.Service, svcAddr string, peers chan<- string, gateway chan<- string) {
+	t.Helper()
+	go func() {
+		_ = RunNode(t.Context(), NodeConfig{
+			HubURL: ts.URL, AccessKey: testAccessKey, AccessKeySecret: testSecret,
+			NodeID: nodeID, EnableWebRTC: true, SignalAddr: "127.0.0.1:0", Discover: true,
+			DiscoveryInterval: 100 * time.Millisecond, DiscoveryProbeTimeout: 5 * time.Second,
+			DiscoveryPeers: peers,
+			Services:       []hub.Service{svc},
+			ServiceAddrs:   []string{svcAddr}, DialAllow: true,
+			GatewayAddr: "127.0.0.1:0", GatewayNotify: gateway,
+		})
+	}()
+}
+
+// runNodeTestWaitGatewaysAndPeer 等待两节点网关地址就绪并确认 node-ap 自动直连
+// node-svc（A<B 半拨号），返回 (node-ap 网关, node-svc 网关)。
+func runNodeTestWaitGatewaysAndPeer(t *testing.T, gatewayA, gatewaySvc, peersA chan string) (string, string) {
+	t.Helper()
 	var addrA, addrSvc string
 	select {
 	case addrA = <-gatewayA:
@@ -934,45 +921,48 @@ func TestRunNode_ServiceAccessViaGateway(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("node-ap 未自动直连 node-svc")
 	}
+	return addrA, addrSvc
+}
 
-	// 双向 echo 往返（经各自本地网关复用同一条已建链路）。B→A 方向依赖 accept 侧
-	// 链路注册，注册在拨号建立后同步完成；对 ErrNoPeerLink 短重试容忍注册时序。
-	echoRoundTrip := func(t *testing.T, gatewayAddr, peer, addr string) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, testSecret)
-			if err == nil {
-				defer conn.Close()
-				payload := []byte("ping")
-				if _, werr := conn.Write(payload); werr != nil {
-					t.Fatalf("写 echo（%s→%s）失败: %v", peer, addr, werr)
-				}
-				got := make([]byte, len(payload))
-				if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
-					t.Fatal(rerr)
-				}
-				if _, rerr := io.ReadFull(conn, got); rerr != nil {
-					t.Fatalf("echo 未回显（%s→%s）: %v", peer, addr, rerr)
-				}
-				if string(got) != string(payload) {
-					t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
-				}
-				return
-			}
-			if !errors.Is(err, ErrNoPeerLink) {
-				t.Fatalf("GatewayConnect(%s→%s) 失败: %v", peer, addr, err)
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("GatewayConnect(%s→%s) 无已建链路超时: %v", peer, addr, err)
-			}
-			time.Sleep(20 * time.Millisecond)
+// runNodeTestEchoRoundTrip 经本地网关复用已建链路路由到对端服务并做一次端到端
+// echo 往返；对 ErrNoPeerLink（accept 侧链路注册时序）短重试，5s 上限。
+func runNodeTestEchoRoundTrip(t *testing.T, gatewayAddr, peer, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := GatewayConnect(context.Background(), gatewayAddr, peer, addr, testSecret)
+		if err == nil {
+			defer conn.Close()
+			runNodeTestWriteEchoTrip(t, conn, peer, addr)
+			return
 		}
+		if !errors.Is(err, ErrNoPeerLink) {
+			t.Fatalf("GatewayConnect(%s→%s) 失败: %v", peer, addr, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GatewayConnect(%s→%s) 无已建链路超时: %v", peer, addr, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	// 方向 1（A→B）：node-ap 网关复用已建链路路由到 node-svc 的 echo-svc。
-	echoRoundTrip(t, addrA, "node-svc", echoSvcAddr)
-	// 方向 2（B→A）：node-svc 网关（accept 侧注册链路）回拨 node-ap 的 echo-ap。
-	echoRoundTrip(t, addrSvc, "node-ap", echoApAddr)
+}
+
+// runNodeTestWriteEchoTrip 在已建连接上写 "ping" 并读回完整回显，断言内容一致。
+func runNodeTestWriteEchoTrip(t *testing.T, conn net.Conn, peer, addr string) {
+	t.Helper()
+	payload := []byte("ping")
+	if _, werr := conn.Write(payload); werr != nil {
+		t.Fatalf("写 echo（%s→%s）失败: %v", peer, addr, werr)
+	}
+	got := make([]byte, len(payload))
+	if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
+		t.Fatal(rerr)
+	}
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		t.Fatalf("echo 未回显（%s→%s）: %v", peer, addr, rerr)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo 内容不匹配: got %q want %q", got, payload)
+	}
 }
 
 // TestGateway_RejectsWrongToken：mesh node 配置了信令 token 时，网关拒绝未携带
@@ -1045,74 +1035,17 @@ func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
 // TestGateway_ConcurrentConnectionsOnSameLink：多个连接并发经同一网关复用同一条
 // 已建链路（mux 多路复用），各自 echo 端到端成功。
 func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
-	// echo 后端。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
+	echoAddr := runNodeTestEcho(t)
+	gatewayAddr := runNodeTestGatewayEnv(t, echoAddr)
 
-	a, b := xfertest.Pipe()
-	defer a.Close()
-	defer b.Close()
-	serveMux := mux.New(a, mux.RoleListener)
-	defer serveMux.Close()
 	ctx := t.Context()
-	go func() {
-		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
-			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr})})
-	}()
-
-	links := newLinkPool()
-	dMux := mux.New(b, mux.RoleDialer)
-	defer dMux.Close()
-	links.set("peer", dMux)
-	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
-	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("gateway serve: %v", err)
-	}
-
 	const n = 8
 	var wg sync.WaitGroup
 	errCh := make(chan error, n)
 	for range n {
 		wg.Go(func() {
-			conn, gerr := GatewayConnect(ctx, gatewayAddr, "peer", echoAddr, "")
-			if gerr != nil {
+			if gerr := runNodeTestGatewayEchoOnce(ctx, gatewayAddr, "peer", echoAddr); gerr != nil {
 				errCh <- gerr
-				return
-			}
-			defer conn.Close()
-			payload := []byte("ping")
-			if _, werr := conn.Write(payload); werr != nil {
-				errCh <- werr
-				return
-			}
-			got := make([]byte, len(payload))
-			if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
-				errCh <- rerr
-				return
-			}
-			if _, rerr := io.ReadFull(conn, got); rerr != nil {
-				errCh <- rerr
-				return
-			}
-			if string(got) != string(payload) {
-				errCh <- fmt.Errorf("echo mismatch: got %q want %q", got, payload)
 			}
 		})
 	}
@@ -1121,6 +1054,58 @@ func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
 	for gerr := range errCh {
 		t.Errorf("并发复用已建链路失败: %v", gerr)
 	}
+}
+
+// runNodeTestGatewayEnv 在内存 pipe 的两端建立 serve 侧（relay.Serve 出口拨 echo，
+// 精确放行 echoAddr）+ 拨号侧（网关持有已建链路池），返回网关监听地址。
+// 所有连接/会话资源经 t.Cleanup 随测试结束关闭。
+func runNodeTestGatewayEnv(t *testing.T, echoAddr string) string {
+	t.Helper()
+	a, b := xfertest.Pipe()
+	t.Cleanup(func() { _ = a.Close() })
+	t.Cleanup(func() { _ = b.Close() })
+	serveMux := mux.New(a, mux.RoleListener)
+	t.Cleanup(func() { _ = serveMux.Close() })
+	ctx := t.Context()
+	go func() {
+		_ = relay.Serve(ctx, serveMux, "http://127.0.0.1:1", true, nil, nil,
+			relay.ServeOptions{DialPolicy: relay.NewServiceDialPolicy(nil, []string{echoAddr})})
+	}()
+	links := newLinkPool()
+	dMux := mux.New(b, mux.RoleDialer)
+	t.Cleanup(func() { _ = dMux.Close() })
+	links.set("peer", dMux)
+	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
+	gatewayAddr, err := gw.Serve(ctx, "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("gateway serve: %v", err)
+	}
+	return gatewayAddr
+}
+
+// runNodeTestGatewayEchoOnce 经网关复用同一条已建链路路由到对端 echo 服务，做一次
+// 端到端 echo 往返；出错返回该错误，成功返回 nil。
+func runNodeTestGatewayEchoOnce(ctx context.Context, gatewayAddr, peer, addr string) error {
+	conn, gerr := GatewayConnect(ctx, gatewayAddr, peer, addr, "")
+	if gerr != nil {
+		return gerr
+	}
+	defer conn.Close()
+	payload := []byte("ping")
+	if _, werr := conn.Write(payload); werr != nil {
+		return werr
+	}
+	got := make([]byte, len(payload))
+	if rerr := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); rerr != nil {
+		return rerr
+	}
+	if _, rerr := io.ReadFull(conn, got); rerr != nil {
+		return rerr
+	}
+	if string(got) != string(payload) {
+		return fmt.Errorf("echo mismatch: got %q want %q", got, payload)
+	}
+	return nil
 }
 
 // TestParseDiscoveryPeerID：discovery 拨号临时身份（disc-<base>-<unixnano>）恢复真实

@@ -34,8 +34,10 @@ import (
 
 const (
 	errFmtRequestFailed = "请求失败: %w"
-	errFmtParseResponse = "解析响应失败: %w"
-	headerFileChecksum  = "X-File-Checksum"
+	// DefaultDownloadProxy 是下载直连失败时的默认回退代理地址（本地常驻 sproxy 代理）。
+	DefaultDownloadProxy = "http://127.0.0.1:1080"
+	errFmtParseResponse  = "解析响应失败: %w"
+	headerFileChecksum   = "X-File-Checksum"
 	// headerAutoChunk 是服务端 413 超限标记头（跨层值契约：服务端 files 包同值）。
 	headerAutoChunk   = "X-Auto-Chunked"
 	headerFileMTime   = "X-File-MTime"
@@ -45,6 +47,11 @@ const (
 
 // ErrNotFound 表示请求的资源不存在（HTTP 404）。
 var ErrNotFound = errors.New("not found")
+
+// ErrUnauthorized 表示请求未经认证（HTTP 401）。
+// 供调用方 errors.Is 精确判断签名失效 / 凭据过期，仅 401 才触发 SK 轮换（避免
+// 5xx/网络错误误触发凭据轮换风暴）。
+var ErrUnauthorized = errors.New("unauthorized")
 
 // UploadResult 表示上传操作的响应结果。
 type UploadResult struct {
@@ -101,6 +108,7 @@ type FileClient struct {
 	tunnelMux              *mux.Mux
 	tunnelInst             *tunnel.Tunnel // 缓存的 xfer 隧道实例（复用同一 mux，避免二次握手）
 	tunnelMuxMu            sync.Mutex
+	credentialsMu          sync.RWMutex // 保护 accessKeySecret/accessKeyID（RenewAccessKey 热替换）
 	progressFn             func(label string, read, total int64)
 	chunkSize              int64
 	maxChunkSize           int64
@@ -117,6 +125,7 @@ type FileClient struct {
 	identity               *tunnel.Identity // 本端长时身份（P1 身份 pinning，可选）
 	peerFingerprints       []string         // 对端身份指纹 pinning 列表（可选，非空时握手 fail-closed 校验）
 	logger                 *slog.Logger
+	downloadProxy          string           // 下载直连失败时的回退代理地址（空=关闭回退）
 	uploadCache            sync.Map         // key = absFilePath, value = *uploadCacheEntry
 	cacheCleanCounter      atomic.Int64     // checksum 缓存清理计数器，每 Store 10 次触发一次 Range 清理
 	maxCacheEntries        int              // checksum 缓存最大条目数，在 calcFileChecksum 的 Range 清理时统计并淘汰
@@ -160,6 +169,10 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		// 竞态表现为本实例请求「transport connection broken」。Clone 保留默认代理/
 		// HTTP2/TLS 配置语义。
 		httpClient: &http.Client{
+			// Timeout 是**通用兜底**（防连接彻底挂死）。慢操作不走它：`/upload/complete`
+			// 转存大文件经 WithNoClientTimeout(ctx) 临时去掉客户端级超时
+			// （2026-10-23 实测：2.1GB 上传 complete 需 8-10 分钟，旧 300s 会让客户端先
+			// 超时断开而服务端仍在写）。
 			Timeout:   300 * time.Second,
 			Transport: defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
 		},

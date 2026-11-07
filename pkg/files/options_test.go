@@ -25,10 +25,13 @@ import (
 )
 
 // newMinimalService 用租户解析 + 可选 Option 构造服务，并装配测试 actor 解析。
+// newMinimalService 构造最小 files.Service（测试用）：默认单卷 + 可选 Option 注入。
 func newMinimalService(t *testing.T, env *dirsEnv, opts ...Option) *Service {
 	t.Helper()
 	actor := actorResolverFunc(func(r *http.Request) string { return r.Header.Get("X-Test-Actor") })
 	all := append([]Option{WithActor(actor)}, opts...)
+	// 测试瞬态：配额排队等待上限压到最小（配额不足的用例不白等 30s；生产恒 nil = 30s 默认）。
+	all = append(all, WithQuotaWait(func() time.Duration { return 50 * time.Millisecond }))
 	svc, err := New(tenantResolverFunc(env.tenantFor), all...)
 	if err != nil {
 		t.Fatalf("New 失败: %v", err)
@@ -153,8 +156,9 @@ func TestNew_Options_QuotaLedgerMetricsAudit(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("删除应 200, got %d: %s", w.Code, w.Body.String())
 	}
-	if len(audits) != 1 || audits[0] != "delete|f.txt|success" {
-		t.Fatalf("审计应为 delete|f.txt|success, got %v", audits)
+	// 本轮补齐「upload 成功」审计（此前只记 overwrite/error）⇒ 期望 = 上传成功 + 删除成功两行。
+	if len(audits) != 2 || audits[0] != "upload|f.txt|success" || audits[1] != "delete|f.txt|success" {
+		t.Fatalf("审计应为 upload|f.txt|success + delete|f.txt|success, got %v", audits)
 	}
 	if metrics.deleteCalls != 1 {
 		t.Fatalf("删除计量应 1 次, got %d", metrics.deleteCalls)
@@ -224,7 +228,7 @@ func TestNew_WiringOnlyOptions(t *testing.T) {
 		}),
 	)
 
-	if got := env.svc.rt.logger(); got != logger {
+	if env.svc.rt.logger() != logger {
 		t.Fatal("WithLogger 未生效")
 	}
 	if got := env.svc.rt.chunkSize(); got != 8 {
@@ -274,7 +278,7 @@ func TestNew_MinimalDefaults_DefaultCapabilities(t *testing.T) {
 	if got := svc.rt.actorOf(readReq("alice", "GET", "/api/files")); got != "" {
 		t.Fatalf("默认 actor 应为空（anonymous）, got %q", got)
 	}
-	if tnt := svc.rt.volumeTenant("", "alice"); tnt == nil {
+	if svc.rt.volumeTenant("", "alice") == nil {
 		t.Fatal("单卷默认 Tenant 应委托 TenantResolver")
 	}
 	if svc.rt.quotaScope("alice", "user/f.txt") != nil {
@@ -326,7 +330,7 @@ type testVolumes struct {
 	set    VolumeSet
 	tenant func(volName, owner string) *storage.Tenant
 	locate func(owner, rel string) (FileLocation, bool)
-	route  func(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	route  func(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
 }
 
 func (v testVolumes) Volumes() VolumeSet { return v.set }
@@ -334,8 +338,13 @@ func (v testVolumes) Tenant(volName, owner string) *storage.Tenant {
 	return v.tenant(volName, owner)
 }
 func (v testVolumes) Locate(owner, rel string) (FileLocation, bool) { return v.locate(owner, rel) }
-func (v testVolumes) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	return v.route(owner, rel, explicitVol, size, forceHomeVol)
+func (v testVolumes) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	return v.route(context.Background(), owner, rel, explicitVol, size, forceHomeVol)
+}
+
+// RouteTarget 显式卷（不查重）：回落 v.route（测试替身 route 钩子不查重）。
+func (v testVolumes) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return v.route(context.Background(), owner, rel, volName, size, "")
 }
 
 // testChunked 是 ChunkedUploads 能力的测试实现。

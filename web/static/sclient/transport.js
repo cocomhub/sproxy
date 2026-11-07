@@ -92,20 +92,34 @@
     return err;
   }
 
-  // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error 字段（统一 {error: msg} 格式），
-  // 有则拼进错误信息（如 "type 未注册或 extra 非法: ..."）；解析失败（非 JSON/空 body）
-  // fallback 到传入的原始信息（"请求失败（HTTP xxx）"）。
+  // serverErrorMessage 尝试从非 2xx 响应体解析服务端 error/message 字段（统一 {error: msg}
+  // 与文件写面 {success, message: msg} 两种契约），有则拼进错误信息（如 "type 未注册或 extra
+  // 非法: ..." 或 "目录已被封装卷占用，只读（…）"）；非 JSON 但非空**平文本**响应体也透传
+  // （评审 B4 Minor #4：api_keys role-forbidden 的 "permission denied" 平文本此前被泛化为
+  // 「请求被拒绝（HTTP 403）」，用户拿不到真实信息）；空 body / body 已消费 → fallback 原始
+  // 信息（"请求失败（HTTP xxx）"）。401 在调用前已单独保留「认证失败」，不落到这里。
   async function serverErrorMessage(resp, fallback) {
     try {
       const text = await resp.text();
       if (!text) return fallback;
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed.error === 'string' && parsed.error) {
-        return fallback + ': ' + parsed.error;
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      if (parsed) {
+        const msg = (typeof parsed.error === 'string' && parsed.error) ? parsed.error
+          : (typeof parsed.message === 'string' && parsed.message) ? parsed.message : '';
+        if (msg) {
+          return fallback + ': ' + msg;
+        }
+        return fallback;
+      }
+      const plain = text.trim();
+      if (plain) {
+        // 长度上限防日志/UI 注入（服务端平文本错误通常一行）。
+        return fallback + ': ' + (plain.length > 200 ? plain.slice(0, 200) + '…' : plain);
       }
       return fallback;
     } catch (e) {
-      return fallback; // 非 JSON 响应体 / body 已消费
+      return fallback; // body 已消费
     }
   }
 
@@ -333,8 +347,13 @@
       if (err.code) { err.cause = e; }
       throw err;
     }
-    if (resp.status === 401 || resp.status === 403) {
-      throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
+    if (resp.status === 401) {
+      throw SclientError('E_AUTH', '认证失败（HTTP 401）', resp.status);
+    }
+    if (resp.status === 403) {
+      // 403 可能是业务拒绝（写保护/占用目录只读）——走 serverErrorMessage 透传 body 真实文案
+      // （与 409 同路径），仅 401 保留「认证失败」（评审 C2/Important 2 修复）。
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '隧道请求被拒绝（HTTP 403）'), resp.status);
     }
     if (!resp.ok) {
       throw SclientError('E_SERVER', await serverErrorMessage(resp, '隧道请求失败（HTTP ' + resp.status + '）'), resp.status);
@@ -465,8 +484,13 @@
       if (err.code) { err.cause = e; }
       throw err;
     }
-    if (resp.status === 401 || resp.status === 403) {
-      throw SclientError('E_AUTH', '认证失败（HTTP ' + resp.status + '）', resp.status);
+    if (resp.status === 401) {
+      throw SclientError('E_AUTH', '认证失败（HTTP 401）', resp.status);
+    }
+    if (resp.status === 403) {
+      // 403 可能是业务拒绝（写保护/占用目录只读）——走 serverErrorMessage 透传 body 真实文案
+      // （与 409 同路径），仅 401 保留「认证失败」（评审 C2/Important 2 修复）。
+      throw SclientError('E_SERVER', await serverErrorMessage(resp, '请求被拒绝（HTTP 403）'), resp.status);
     }
     if (!resp.ok) {
       throw SclientError('E_SERVER', await serverErrorMessage(resp, '请求失败（HTTP ' + resp.status + '）'), resp.status);

@@ -390,17 +390,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	if err != nil {
 		return nil, err
 	}
-	base := p.NodeID
-	if base == "" {
-		base = iostream.LocalHostname("mesh-node")
-	}
-	nodeID := base
-	if !p.ExactNode {
-		// 临时 node-id：<prefix>-<base>-<随机 hex>。用随机后缀而非仅 unixnano——
-		// 并发拨号（discovery 并行）下 UnixNano 可能碰撞，导致对端 Answer 交叉路由
-		// （node-a 拨 b/c 的临时身份若相同，b/c 的 Answer 会互相串到对方 inbox）。
-		nodeID = fmt.Sprintf("%s-%s-%s", p.Prefix, base, newTempSuffix())
-	}
+	nodeID := autoRegisterNodeID(p)
 
 	// 注册准入：hub 已废除共享 token，改用 SproxySig AccessKey + HMAC proof
 	// （hub.ComputeRegisterProof 绑定 nodeID + ts/nonce，防串用/重放）。
@@ -416,49 +406,22 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		return nil, fmt.Errorf("register: 计算注册证明失败: %w", err)
 	}
 
-	// 注册 WS 拨号：CAFile 非空 → CA 严格校验；否则按 insecure 语义（insecure=false 走系统根池）。
-	var conn xfer.Conn
-	var signalerHTTP *http.Client
-	if p.CAFile != "" {
-		conn, err = HubWSDialCA(ctx, wsURL, p.CAFile)
-		if err != nil {
-			return nil, fmt.Errorf("连接 Hub 注册端点失败（CA）: %w", err)
-		}
-		signalerHTTP, err = client.CAHTTPClient(p.CAFile)
-		if err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("加载 CA 文件 %s: %w", p.CAFile, err)
-		}
-	} else {
-		conn, err = HubWSDial(ctx, wsURL, p.Insecure, p.UpgradeHeader)
-		if err != nil {
-			return nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
-		}
+	conn, signalerHTTP, err := dialRegisterWS(ctx, p, wsURL)
+	if err != nil {
+		return nil, err
 	}
 	// 注册帧：声明 per-node-secret 能力（hub 回 REG_OK:<secret>，B1）与 virtual-ip
 	// 能力（hub 回 REG_OK:<secret>:<vip>，本节点虚拟 IP；不感知该能力的旧 hub 忽略
 	// 未知能力位，回旧格式），并携带服务宣告（mesh node 常驻）与标签（如 exit）。
 	// mesh discovery 临时注册（disc-）另带 real_node_id + real_node_proof（hub 强制
 	// 校验防冒充）。mesh/p2p 拨号方不传则 Meta{}。
-	if err := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); err != nil {
+	if sendErr := conn.Send(ctx, hub.NewRegisterFrame(nodeID, p.AccessKey, proof, ts, nonce, hub.Meta{Services: p.Services, Tags: p.Tags, RealNodeID: p.RealNodeID, RealNodeProof: p.RealNodeProof}, hub.CapabilityPerNodeSecret, hub.CapabilityVirtualIP)); sendErr != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("发送注册帧失败: %w", err)
+		return nil, fmt.Errorf("发送注册帧失败: %w", sendErr)
 	}
-	ackCtx, ackCancel := context.WithTimeout(ctx, RegisterAckTimeout)
-	ack, ackErr := conn.Receive(ackCtx)
-	ackCancel()
-	if ackErr != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
-	}
-	ackFull, ackErr := hub.ParseRegisterAckFull(string(ack))
-	if ackErr != nil {
-		_ = conn.Close()
-		return nil, ackErr
-	}
-	if ackFull.Secret == "" {
-		_ = conn.Close()
-		return nil, fmt.Errorf("hub 未下发 per-node secret（未声明能力或能力不被支持）")
+	ackFull, err := awaitRegisterAck(ctx, conn)
+	if err != nil {
+		return nil, err
 	}
 	// mux 保活：自动跑 readLoop/writeLoop/pingLoop 处理心跳，注册连接存活到命令退出。
 	m := mux.New(conn, mux.RoleListener)
@@ -466,14 +429,7 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 	signaler.SetAccessKeySecret(p.AccessKeySecret)
 	signaler.SetAccessKeyID(p.AccessKeyID)
 	signaler.SetContext(ctx)
-	if p.CAFile != "" {
-		// CA 严格校验：注册 WS 走 HubWSDialCA（上方已拨号），信令 HTTP 注入带 RootCAs 的 client。
-		if signalerHTTP != nil {
-			signaler.SetHTTPClient(signalerHTTP)
-		}
-	} else if p.Insecure {
-		signaler.SetHTTPClient(client.InsecureHTTPClient())
-	}
+	applySignalerHTTP(signaler, p, signalerHTTP)
 	return &TempRegistration{
 		Signaler:  signaler,
 		Closer:    func() error { return m.Close() },
@@ -482,6 +438,75 @@ func AutoRegister(ctx context.Context, p AutoRegisterParams) (*TempRegistration,
 		VirtualIP: ackFull.VirtualIP,
 		Mux:       m,
 	}, nil
+}
+
+// autoRegisterNodeID 计算注册 nodeID：ExactNode 原样返回 NodeID；否则临时
+// node-id <prefix>-<base>-<随机 hex>。用随机后缀而非仅 unixnano——并发拨号
+// （discovery 并行）下 UnixNano 可能碰撞，导致对端 Answer 交叉路由。
+func autoRegisterNodeID(p AutoRegisterParams) string {
+	base := p.NodeID
+	if base == "" {
+		base = iostream.LocalHostname("mesh-node")
+	}
+	if !p.ExactNode {
+		return fmt.Sprintf("%s-%s-%s", p.Prefix, base, newTempSuffix())
+	}
+	return base
+}
+
+// dialRegisterWS 拨号 hub 注册端点：CAFile 非空 → CA 严格校验；否则按 insecure 语义
+// （insecure=false 走系统根池）。返回 conn 与信令 HTTP client（CA 校验用）。
+func dialRegisterWS(ctx context.Context, p AutoRegisterParams, wsURL string) (xfer.Conn, *http.Client, error) {
+	if p.CAFile != "" {
+		conn, err := HubWSDialCA(ctx, wsURL, p.CAFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("连接 Hub 注册端点失败（CA）: %w", err)
+		}
+		hc, err := client.CAHTTPClient(p.CAFile)
+		if err != nil {
+			_ = conn.Close()
+			return nil, nil, fmt.Errorf("加载 CA 文件 %s: %w", p.CAFile, err)
+		}
+		return conn, hc, nil
+	}
+	conn, err := HubWSDial(ctx, wsURL, p.Insecure, p.UpgradeHeader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("连接 Hub 注册端点失败: %w", err)
+	}
+	return conn, nil, nil
+}
+
+// awaitRegisterAck 等待注册 ACK：解析 REG_OK:<secret>:<vip>，校验 per-node secret 已下发。
+func awaitRegisterAck(ctx context.Context, conn xfer.Conn) (hub.RegisterAck, error) {
+	ackCtx, ackCancel := context.WithTimeout(ctx, RegisterAckTimeout)
+	ack, ackErr := conn.Receive(ackCtx)
+	ackCancel()
+	if ackErr != nil {
+		_ = conn.Close()
+		return hub.RegisterAck{}, fmt.Errorf("等待注册 ACK 失败: %w", ackErr)
+	}
+	ackFull, ackErr := hub.ParseRegisterAckFull(string(ack))
+	if ackErr != nil {
+		_ = conn.Close()
+		return hub.RegisterAck{}, ackErr
+	}
+	if ackFull.Secret == "" {
+		_ = conn.Close()
+		return hub.RegisterAck{}, fmt.Errorf("hub 未下发 per-node secret（未声明能力或能力不被支持）")
+	}
+	return ackFull, nil
+}
+
+// applySignalerHTTP 按配置为信令器注入 HTTP client：CA 严格校验用带 RootCAs 的 client；
+// insecure 用跳过证书校验的 client；均未配置则保持默认。
+func applySignalerHTTP(s *hub.HubSignaler, p AutoRegisterParams, caClient *http.Client) {
+	if p.CAFile != "" {
+		if caClient != nil {
+			s.SetHTTPClient(caClient)
+		}
+	} else if p.Insecure {
+		s.SetHTTPClient(client.InsecureHTTPClient())
+	}
 }
 
 // newTempSuffix 生成临时 node-id 的随机后缀（8B hex）。随机而非仅时间戳——

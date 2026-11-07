@@ -67,7 +67,14 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 
 	var all []*CloudTask
 	for _, t := range m.tasks {
-		if (status == "" || t.Status == status) && ownerVisible(t.Owner, owner) {
+		// damaged 是完整性状态过滤（completed 任务的子集），非任务状态：
+		// status=="damaged" 匹配 IntegrityStatus==damaged（含未完成态？不——damaged
+		// 只在完成态写入，见 resolveIntegrityTaskErr/handleIntegrityExhausted）。
+		match := status == "" || t.Status == status
+		if status == "damaged" {
+			match = t.Status == "completed" && t.IntegrityStatus == "damaged"
+		}
+		if match && ownerVisible(t.Owner, owner) {
 			c := *t
 			c.account = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
 			all = append(all, &c)
@@ -141,7 +148,11 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 	// 的存储账本一致——否则 partial 残留但账本释放，可累计突破 max_storage_bytes
 	// 配额。goroutine 可能仍在响应 cancel 收尾（Windows 下删除被占用文件会失败），
 	// 删除失败时由 executeDownload 的取消路径（removeTaskDir）兜底。
-	m.removeTaskDir(t.Owner, id)
+	// 兜底清理：失败不阻断取消（executeDownload 的取消路径会重试），但**不得静默**（可观测）。
+	if rerr := m.removeTaskDir(t.Owner, id); rerr != nil {
+		m.logger.Warn("cancel: remove task dir failed (executeDownload 取消路径会兜底重试)",
+			"task_id", id, "error", rerr)
+	}
 
 	// 终态持久化失败会丢失 cancelled 状态（重启后可能被当作 downloading 重启），必须显式报错
 	if err := m.saveTask(t); err != nil {
@@ -171,6 +182,11 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 
 	delete(m.tasks, id)
 
+	// M2：删除必须同步置 cancelled（与 CancelTask 一致）——transferTaskAborted 在任务
+	// 已从 map 删除后，靠 task.Status=="cancelled" 才能判定中止转存（防孤儿写卷）；否则
+	// 删除期间转存仍照常写目标卷，产物成为孤儿残留。
+	t.Status = "cancelled"
+
 	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）。
 	// 必须在锁内释放：failTask 在持有 m.mu 期间读取 ReservedSize 并执行 I/O，
 	// 若 DeleteTask 在锁外释放，failTask 可能读到已释放的旧值并再次释放（double release）。
@@ -185,48 +201,83 @@ func (m *CloudDownloadManager) DeleteTask(id, owner string) error {
 	delStatus := t.Status
 	m.mu.Unlock()
 
-	if reserved > 0 {
-		m.storage.ReleaseCloud(reserved)
-		m.logger.Debug("storage released", "task_id", id, "size", reserved)
-	}
-	// P4 租户配额：删除即放弃。goroutine 仍存活时由 releaseAbandonedTaskScope（任务已从
-	// m.tasks 删除 ⇒ 判定为已放弃）在退出时回拨；否则立即回拨（含下载中边写边记字节）。
-	if !running {
-		m.releaseTaskScope(t)
-	}
-
 	m.logger.Info("deleting cloud download task", "task_id", id, "filename", t.Filename, "status", delStatus)
-
-	// 删除云端文件（按任务 owner 落租户 cloud 桶）
-	taskDir := m.TaskDirFor(t.Owner, t.ID)
-	if taskDir != "" {
-		filePath := filepath.Join(taskDir, t.Filename)
-		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-			m.logger.Warn("failed to remove cloud file", "task_id", id, "path", filePath, "error", err)
+	m.deleteTaskFiles(t, id)
+	// **产物确认消失后才归还配额**（独立审核 P2，2026-10-18）：此前先释放后删除，而删除失败
+	// （Windows 共享违规/杀软持句柄，重试耗尽）只 Warn ⇒ 文件仍在盘、账本已归还 ⇒ 租户在下次
+	// 扫描（≤30min）前可越过 max_storage_bytes / owner 配额（**fail-open**），且对用户仍返回成功。
+	// 改为「删除确认 ⇒ 才释放」：确认失败 ⇒ **保留**预留（偏高是 fail-closed 方向，由周期扫描
+	// 收敛）并显式告警；同时把删除改为走可注入接缝 + 有界重试（见 deleteTaskFiles）。
+	if m.taskPayloadLeft(t.Owner, id) {
+		m.logger.Warn("云任务产物未确认删除：保留配额预留（防 fail-open），待周期扫描收敛",
+			"task_id", id, "reserved", reserved)
+	} else {
+		if reserved > 0 {
+			m.storage.ReleaseCloud(reserved)
+			m.logger.Debug("storage released", "task_id", id, "size", reserved)
 		}
-		if err := os.Remove(taskDir); err != nil && !os.IsNotExist(err) {
-			// 目录可能非空（有其他文件），使用 RemoveAll
-			if err := os.RemoveAll(taskDir); err != nil {
-				m.logger.Warn("failed to remove task dir", "task_id", id, "path", taskDir, "error", err)
-			}
+		// P4 租户配额：删除即放弃。goroutine 仍存活时由 releaseAbandonedTaskScope（任务已从
+		// m.tasks 删除 ⇒ 判定为已放弃）在退出时回拨；否则立即回拨（含下载中边写边记字节）。
+		// 锁纪律（NM1 同款）：releaseTaskScope 会写 t.account/t.ReservedSize，与
+		// SnapshotTask/ListTasks 的 RLock 读取构成数据竞争——与其他调用点一致在 m.mu 持锁
+		// 下完成（此分支任务已从 map 删除，goroutine 判定为已放弃不在此路径并发写）。
+		if !running {
+			m.mu.Lock()
+			m.releaseTaskScope(t)
+			m.mu.Unlock()
 		}
-	}
-
-	// 删除持久化文件（按任务 owner 落租户 meta/cloud）
-	if persistDir := m.PersistDirFor(t.Owner); persistDir != "" {
-		persistFile := filepath.Join(persistDir, t.ID+".json")
-		if err := os.Remove(persistFile); err != nil && !os.IsNotExist(err) {
-			m.logger.Warn("failed to remove persist file", "task_id", id, "error", err)
-		}
-	}
-
-	// 清理 checksum（per-tenant store + 相对租户根 key，与写入端一致；ToSlash 归一见写端注释）
-	if cs := m.checksumStoreFor(t.Owner); cs != nil {
-		relKey := filepath.ToSlash(filepath.Join("cloud", t.ID, t.Filename))
-		cs.Delete(relKey)
-		m.logger.Debug("checksum deleted", "task_id", id, "rel", relKey)
 	}
 
 	m.logger.Info("cloud download task deleted and cleaned up", "task_id", id)
 	return nil
+}
+
+// taskPayloadLeft 报告任务产物目录是否仍存在（删除未确认 ⇒ 不得归还配额）。
+// 用于把「先释放后删除」的 fail-open 改成「删除确认 ⇒ 才释放」。
+func (m *CloudDownloadManager) taskPayloadLeft(owner, taskID string) bool {
+	dir := m.TaskDirFor(owner, taskID)
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(dir)
+	return err == nil
+}
+
+// deleteTaskFiles 删除任务的云端文件、持久化文件与 checksum 记录（按 task owner 落租户桶）。
+func (m *CloudDownloadManager) deleteTaskFiles(t *CloudTask, taskID string) {
+	// 删除云端文件（按任务 owner 落租户 cloud 桶）
+	taskDir := m.TaskDirFor(t.Owner, t.ID)
+	if taskDir != "" {
+		filePath := filepath.Join(taskDir, t.Filename)
+		// 走可注入接缝（与 removeDiscardedTaskFiles 同一实现）⇒ 删除失败可被测试确定性注入；
+		// 生产默认即 os.Remove，行为不变。
+		fileGone := true
+		if err := m.removeFileOrDefault()(filePath); err != nil && !os.IsNotExist(err) {
+			fileGone = false
+			m.logger.Warn("failed to remove cloud file", "task_id", taskID, "path", filePath, "error", err)
+		}
+		// **仅当主文件已删（或本就不存在）才清目录**（独立审核 P2）：文件被占用而删不掉时，
+		// RemoveAll 会连文件一起抹掉 ⇒ 掩盖失败 ⇒ 上层误判「产物已清」⇒ 归还配额 = fail-open。
+		// 带界重试（瞬时占用：Windows 共享违规/杀软持句柄）；失败不再静默。
+		if fileGone {
+			if err := m.removeTaskDirWithRetry(t.Owner, t.ID); err != nil {
+				m.logger.Warn("failed to remove task dir", "task_id", taskID, "path", taskDir, "error", err)
+			}
+		}
+	}
+	// 删除持久化文件（按任务 owner 落租户 meta/cloud；经 Root ⇒ 封印区间同样被拒）
+	if root := m.cloudStateRootFor(t.Owner); root != nil {
+		persistRel := cloudStateRel + "/" + t.ID + ".json"
+		if err := root.Remove(persistRel); err != nil && !os.IsNotExist(err) {
+			m.logger.Warn("failed to remove persist file", "task_id", taskID, "error", err)
+		}
+	}
+	// 清理 checksum（per-tenant store + 相对租户根 key，与写入端一致；ToSlash 归一见写端注释）
+	if cs := m.checksumStoreFor(t.Owner); cs != nil {
+		relKey := filepath.ToSlash(filepath.Join("cloud", t.ID, t.Filename))
+		cs.Delete(relKey)
+		m.logger.Debug("checksum deleted", "task_id", taskID, "rel", relKey)
+	}
+	// 清理审计 sink 文件（R1：任务删除即清，防 <用户缓存目录>/sproxy/audit/ 无限累积）。
+	m.removeTaskAuditFile(taskID)
 }

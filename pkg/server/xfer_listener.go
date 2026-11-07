@@ -11,6 +11,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
+	"github.com/cocomhub/sproxy/pkg/server/credentials"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 )
 
@@ -57,7 +58,7 @@ func XferListenerConfigFromRing(cfg *Config, ring *accesskey.Ring) XferListenerC
 		xc.CertFile = cfg.TLS.CertFile
 		xc.KeyFile = cfg.TLS.KeyFile
 	}
-	if ak, sk, ok := bestFirstCredential(ring); ok {
+	if ak, sk, ok := credentials.BestFirstCredential(ring); ok {
 		xc.AccessKey = ak
 		xc.AccessKeySecret = sk
 		xc.MeshID = accesskey.ParseMesh(ak)
@@ -136,7 +137,7 @@ func BuildXferTLSConfig(cfg *Config) (*tls.Config, error) {
 // 对端不同，首个加密帧 AES-GCM 解密失败即被拒——拒绝匿名接入由密钥绑定保证，而非
 // 仅靠"无 key 无法完成 ECDH"（后者在旧实现中不成立）。
 func HubXferKey(cfg *Config, ring *accesskey.Ring) ([]byte, error) {
-	ak, sk, ok := bestFirstCredential(ring)
+	ak, sk, ok := credentials.BestFirstCredential(ring)
 	if !ok {
 		return nil, fmt.Errorf("hub xfer key: 凭据 Ring 为空（xfer listener 需要有效 AK/SK 派生隧道密钥；fail-closed）")
 	}

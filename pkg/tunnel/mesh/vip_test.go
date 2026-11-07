@@ -106,7 +106,7 @@ func TestDeterministicAllocator_ReleaseNoop(t *testing.T) {
 // TestDeterministicAllocator_RejectsIPv6 校验 IPv6 子网被拒绝（虚拟 IP 仅支持 IPv4）。
 func TestDeterministicAllocator_RejectsIPv6(t *testing.T) {
 	defer func() {
-		if r := recover(); r == nil {
+		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
 		}
 	}()

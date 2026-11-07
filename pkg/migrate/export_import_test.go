@@ -61,7 +61,7 @@ func (s *srcMock) handler() http.Handler {
 			info, _ := e.Info()
 			fi := client.FileInfo{Name: e.Name(), Size: info.Size(), ModTime: info.ModTime().UnixNano(), IsDir: e.IsDir()}
 			if !e.IsDir() {
-				data, _ := os.ReadFile(filepath.Join(base, e.Name()))
+				data, _ := os.ReadFile(filepath.Join(base, e.Name())) // NOSONAR: S2083 — mock 列举 os.ReadDir 返回的真实目录项，非用户输入
 				sum := sha256.Sum256(data)
 				fi.Checksum = hex.EncodeToString(sum[:])
 				if s.listCSOverride != "" {
@@ -75,7 +75,7 @@ func (s *srcMock) handler() http.Handler {
 	mux.HandleFunc("GET /download", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		s.record("download:" + name)
-		data, err := os.ReadFile(filepath.Join(s.dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(s.dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 /download 路由（生产经 pathguard 校验），输入为测试自控 filename
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -111,6 +111,54 @@ func (d *dstMock) steps() []string {
 	return append([]string(nil), d.order...)
 }
 
+// uploadHandler 处理 POST /upload：模拟失败/损坏开关、落盘并复核 checksum。
+func (d *dstMock) uploadHandler(w http.ResponseWriter, r *http.Request) {
+	remote := r.Header.Get("X-File-Path")
+	d.record("upload:" + remote)
+	if d.uploadFail[remote] {
+		http.Error(w, `{"success":false,"message":"simulated failure"}`, http.StatusInternalServerError)
+		return
+	}
+	cs := r.Header.Get("X-File-Checksum")
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer f.Close()
+	outPath := filepath.Join(d.dir, filepath.FromSlash(remote))
+	if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil { // NOSONAR: S2083 — mock 镜像生产 /upload 路由，remote 头为测试自控
+		http.Error(w, mkErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	out, err := os.Create(outPath) // NOSONAR: S2083 — 同 MkdirAll：outPath 来自测试自控 remote 头
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer out.Close()
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	serverCS := hex.EncodeToString(h.Sum(nil))
+	if serverCS != cs {
+		http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
+		return
+	}
+	// 目标端写坏：上传成功后立即覆写为错误内容（模拟目标存储篡改）。
+	if d.uploadCorrupt[remote] {
+		_ = os.WriteFile(outPath, []byte("corrupted"), 0o644) // NOSONAR: S2083 — 故意覆写测试产物模拟目标存储篡改（测试自控路径）
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "ok", "file_checksum": serverCS})
+}
+
 func (d *dstMock) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -118,56 +166,11 @@ func (d *dstMock) handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("OK"))
 	})
-	mux.HandleFunc("POST /upload", func(w http.ResponseWriter, r *http.Request) {
-		remote := r.Header.Get("X-File-Path")
-		d.record("upload:" + remote)
-		if d.uploadFail[remote] {
-			http.Error(w, `{"success":false,"message":"simulated failure"}`, http.StatusInternalServerError)
-			return
-		}
-		cs := r.Header.Get("X-File-Checksum")
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		f, _, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		defer f.Close()
-		outPath := filepath.Join(d.dir, filepath.FromSlash(remote))
-		if mkErr := os.MkdirAll(filepath.Dir(outPath), 0o755); mkErr != nil {
-			http.Error(w, mkErr.Error(), http.StatusInternalServerError)
-			return
-		}
-		out, err := os.Create(outPath)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		defer out.Close()
-		h := sha256.New()
-		if _, err := io.Copy(io.MultiWriter(out, h), f); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		serverCS := hex.EncodeToString(h.Sum(nil))
-		if serverCS != cs {
-			http.Error(w, `{"success":false,"message":"checksum mismatch"}`, http.StatusBadRequest)
-			return
-		}
-		// 目标端写坏：上传成功后立即覆写为错误内容（模拟目标存储篡改）。
-		if d.uploadCorrupt[remote] {
-			_ = os.WriteFile(outPath, []byte("corrupted"), 0o644)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "ok", "file_checksum": serverCS})
-	})
+	mux.HandleFunc("POST /upload", d.uploadHandler)
 	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("filename")
 		d.record("stat:" + name)
-		data, err := os.ReadFile(filepath.Join(d.dir, filepath.FromSlash(name)))
+		data, err := os.ReadFile(filepath.Join(d.dir, filepath.FromSlash(name))) // NOSONAR: S2083 — mock 镜像生产 stat 路由，输入为测试自控 filename
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -257,6 +260,14 @@ func TestExportImport_FullFlow(t *testing.T) {
 	if sum.ImportedBytes != int64(len("hello")+len("0123456789")) {
 		t.Errorf("导入字节 = %d, want 15", sum.ImportedBytes)
 	}
+	assertImportedContents(t, dstDir, want)
+	got := append(append([]string{}, src.steps()...), dst.steps()...)
+	assertImportStepSequence(t, dst, got)
+}
+
+// assertImportedContents 校验导入后的每个目标文件内容与源一致。
+func assertImportedContents(t *testing.T, dstDir string, want map[string]string) {
+	t.Helper()
 	for rel, content := range want {
 		data, err := os.ReadFile(filepath.Join(dstDir, filepath.FromSlash(rel)))
 		if err != nil {
@@ -266,9 +277,13 @@ func TestExportImport_FullFlow(t *testing.T) {
 			t.Errorf("目标文件 %s 内容 = %q, want %q", rel, data, content)
 		}
 	}
+}
+
+// assertImportStepSequence 校验导出/导入的步骤序列与 upload/recheck 复核出现。
+func assertImportStepSequence(t *testing.T, dst *dstMock, got []string) {
+	t.Helper()
 	// 步骤序列：导出（list 根 → list dir → 下载 a → 下载 b），导入（探活 → stat → upload → stat 复核）
 	wantOrder := []string{"list:/", "list:/dir", "download:a.txt", "download:dir/b.bin", "healthz", "stat:a.txt", "upload:a.txt", "stat:a.txt"}
-	got := append(append([]string{}, src.steps()...), dst.steps()...)
 	for i, w := range wantOrder {
 		if i >= len(got) || got[i] != w {
 			t.Fatalf("步骤顺序不符: got %v, want prefix %v", got, wantOrder)

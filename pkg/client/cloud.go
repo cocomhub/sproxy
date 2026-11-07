@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,23 +15,56 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cloudfilename"
 )
 
+// TransferSpec 是云端下载转存目标（与服务端 /api/cloud/download 请求 transfer 对齐）。
+type TransferSpec struct {
+	Volume string `json:"volume"`
+	Path   string `json:"path,omitempty"`
+}
+
 // CloudTask 表示一个云端下载任务。
 type CloudTask struct {
-	ID         string    `json:"id"`
-	URL        string    `json:"url"`
-	Method     string    `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
-	Filename   string    `json:"filename"`
-	Status     string    `json:"status"`
-	TotalSize  int64     `json:"total_size"`
-	Downloaded int64     `json:"downloaded"`
-	Checksum   string    `json:"checksum"`
-	ETag       string    `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
-	Error      string    `json:"error"`
-	GroupID    string    `json:"group_id,omitempty"` // 所属下载组 ID（可选）
-	FileMTime  int64     `json:"file_mtime,omitempty"`
-	CreatedAt  time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
-	UpdatedAt  time.Time `json:"updated_at"` // 更新时间（同上）
-	ExpiresAt  time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	ID         string `json:"id"`
+	URL        string `json:"url"`
+	Method     string `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
+	Filename   string `json:"filename"`
+	Status     string `json:"status"`
+	TotalSize  int64  `json:"total_size"`
+	Downloaded int64  `json:"downloaded"`
+	Checksum   string `json:"checksum"`
+	ETag       string `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
+	Error      string `json:"error"`
+	GroupID    string `json:"group_id,omitempty"` // 所属下载组 ID（可选）
+	// IntegrityStatus 完整性校验状态（R3-I3）："" 未校验 / verified 通过 / damaged 损坏。
+	// 客户端透传供链式/CLI 识别损坏文件（默认放行时 completed+damaged 不应被当可靠成功）。
+	IntegrityStatus string    `json:"integrity_status,omitempty"`
+	FileMTime       int64     `json:"file_mtime,omitempty"`
+	CreatedAt       time.Time `json:"created_at"` // 创建时间（服务端始终设置，零值仅出现于持久化恢复前）
+	UpdatedAt       time.Time `json:"updated_at"` // 更新时间（同上）
+	ExpiresAt       time.Time `json:"expires_at"` // 过期时间（同上，与 TaskTTL 关联）
+	// TransferURL 转存成功后的目标引用（<scheme>://<卷>/<rel>，服务端填写；
+	// 客户端可经卷协议取用）。仅 transfer 任务有值。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 转存失败原因（重试耗尽；服务端填写）。
+	TransferErr string `json:"transfer_err,omitempty"`
+	// CleanupStatus 服务端 cloud 桶清理状态（审计：cleaned 已删 / failed 删失败）。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupErr 清理失败原因（CleanupStatus=failed 时）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
+	// DownloadStats 是下载实测统计（耗时/起止/分通道字节/带宽/源文件时间；服务端填写，
+	// 零值 = 下载器未统计）。供客户端审计与统计下载情况（用户裁定 2026-10-28）。
+	DownloadStats *DownloadStats `json:"download_stats,omitempty"`
+}
+
+// DownloadStats 是下载实测统计（服务端下载器上报）。
+type DownloadStats struct {
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
+	DurationMs     int64     `json:"duration_ms,omitempty"`
+	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"`
+	AccountBytes   int64     `json:"account_bytes,omitempty"`
+	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at"`
+	SourceModified time.Time `json:"source_modified_at"`
 }
 
 // CloudTask 状态常量。
@@ -46,8 +80,13 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename     string
-	maxBatchURLs int
+	filename       string
+	maxBatchURLs   int
+	transfer       *TransferSpec
+	save           *bool
+	downloadLocal  bool
+	forceIntegrity bool
+	metaExtra      map[string]any // 转存产物的自定义 meta（服务端叠加来源信息后写目标卷）
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -62,6 +101,54 @@ func WithCloudDownloadFilename(name string) CloudDownloadOption {
 // 发送超过服务端上限的请求会收到 400 错误并使创建失败。
 // 传入 n>0 时作为客户端本地护栏，在发送前拦截；传入 n<=0 表示不限制（交给服务端），
 // 且可覆盖此前设置的任何值（复位为"不预检"）。
+// WithCloudDownloadTransfer 设置云端下载转存目标（下载完成后转存到指定卷，
+// secretdata 加密卷自动加密 / 普通卷纯上传）。nil = 不转存（仅下载）。
+func WithCloudDownloadTransfer(t *TransferSpec) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.transfer = t
+	}
+}
+
+// WithCloudDownloadSave 设置是否保留 cloud 桶副本（服务端化 keep-files；nil = 默认 true）。
+// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件。
+func WithCloudDownloadSave(save bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.save = &save
+	}
+}
+
+// WithCloudDownloadLocal 设置客户端是否下载本地（链式拉取 cloud 桶文件）。
+// false = 服务端可转存后即删（无需保留给客户端拉取）。
+func WithCloudDownloadLocal(local bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.downloadLocal = local
+	}
+}
+
+// WithCloudDownloadIntegrityMustPass 强制源文件完整性校验（透传服务端 TaskParams.IntegrityMustPass）。
+// true = 下载内容语义校验失败（如有）时任务直接失败阻断，不放行；
+// false（默认） = 服务端默认处置（两次校验一致的损坏文件放行标记 damaged）。
+// 客户端仅在 true 时发送 integrity_must_pass 字段（零回归：默认 false 不发）。
+func WithCloudDownloadIntegrityMustPass(v bool) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		o.forceIntegrity = v
+	}
+}
+
+// WithCloudDownloadMetaExtra 设置转存产物的自定义元数据（仅 Transfer 非空有意义；
+// 服务端与来源信息合并写入目标卷 meta.Extra）。nil/空 = 不发送（零回归）。
+func WithCloudDownloadMetaExtra(extra map[string]any) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) {
+		if len(extra) == 0 {
+			o.metaExtra = nil
+			return
+		}
+		cp := make(map[string]any, len(extra))
+		maps.Copy(cp, extra)
+		o.metaExtra = cp
+	}
+}
+
 func WithCloudDownloadMaxBatchURLs(n int) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		o.maxBatchURLs = n
@@ -97,9 +184,26 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	body := map[string]string{"url": urlStr}
+	body := map[string]any{"url": urlStr}
 	if cfg.filename != "" {
 		body["filename"] = cfg.filename
+	}
+	// C1/M6：单 URL 入口同样透传四参（transfer/save/download_local/integrity_must_pass）——此前 body 为
+	// map[string]string 丢三参，与批量入口不一致（服务端收不到 → 三行为此处不成立）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
+	}
+	if len(cfg.metaExtra) > 0 {
+		body["meta_extra"] = cfg.metaExtra
 	}
 
 	var task CloudTask
@@ -140,6 +244,21 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 
 	body := map[string]any{"urls": entries}
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
+	}
+	if len(cfg.metaExtra) > 0 {
+		body["meta_extra"] = cfg.metaExtra
+	}
 
 	var result struct {
 		Tasks []CloudTask `json:"tasks"`
@@ -201,7 +320,7 @@ func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTas
 	if taskID == "" {
 		return nil, fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID)
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &task); err != nil {
 		return nil, fmt.Errorf("获取云端任务: %w", err)
@@ -214,7 +333,7 @@ func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
 		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/cancel"
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
@@ -223,20 +342,77 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {
 		return fmt.Errorf("云端下载: taskID 不能为空")
 	}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID)
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
+// CloudArchiveOption 配置云端归档行为（转存目标等）。
+type CloudArchiveOption func(*cloudArchiveOptions)
+
+type cloudArchiveOptions struct {
+	target      *TransferSpec
+	encrypt     bool
+	cipher      string
+	compression string
+}
+
+// WithCloudArchiveTarget 设置归档转存目标：打包后转存到外部卷的指定路径（统一转存）。
+// Path 为目标卷 **user 桶内**相对路径（可含子目录；空 = 服务端默认 archive/<归档名>）。
+// 服务端协议只收 volume+path（不解析 URI）；壳层（CLI）负责把卷 URI `<卷名>:/<路径>`
+// 归一为这两个字段（与 cd/mv 同规约）。nil/未设 = 落租户 archive 桶。
+func WithCloudArchiveTarget(t *TransferSpec) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.target = t }
+}
+
+// WithCloudArchiveEncrypt 归档转存时流式加密（tar.<ext>.aes）；密钥来自服务端
+// archive.key_file（未配置 → 400 fail-closed）。cipher 空 = aes-256-gcm；仅与
+// WithCloudArchiveTarget 同用（未设 target 时服务端 400，防静默忽略）。
+func WithCloudArchiveEncrypt(cipher string) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.encrypt = true; o.cipher = cipher }
+}
+
+// WithCloudArchiveCompression 归档转存压缩算法选型（gzip 默认 / zstd / brotli；
+// 非法值服务端 400，不静默回退）。仅与 WithCloudArchiveTarget 同用。
+func WithCloudArchiveCompression(algo string) CloudArchiveOption {
+	return func(o *cloudArchiveOptions) { o.compression = algo }
+}
+
+// buildArchiveBody 组装归档请求体（archive_name + 可选 target/encrypt/compression）。
+func buildArchiveBody(archiveName string, opts []CloudArchiveOption) map[string]any {
+	var o cloudArchiveOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	body := map[string]any{"archive_name": archiveName}
+	if o.target != nil {
+		body["target_volume"] = o.target.Volume
+		if o.target.Path != "" {
+			body["target_path"] = o.target.Path
+		}
+	}
+	if o.encrypt {
+		body["encrypt"] = true
+		if o.cipher != "" {
+			body["cipher"] = o.cipher
+		}
+	}
+	if o.compression != "" {
+		body["compression"] = o.compression
+	}
+	return body
+}
+
 // ArchiveCloudTask 将单任务文件打包为 tar.gz 并存放到 uploads 目录。
-func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if taskID == "" {
 		return nil, fmt.Errorf("云端打包: taskID 不能为空")
 	}
 	if archiveName == "" {
 		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
-	body := map[string]string{"archive_name": archiveName}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/archive"
+	body := buildArchiveBody(archiveName, opts)
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
 		return nil, fmt.Errorf("云端打包: %w", err)
@@ -245,17 +421,16 @@ func (c *FileClient) ArchiveCloudTask(ctx context.Context, taskID, archiveName s
 }
 
 // ArchiveCloudTasks 将多个任务的文件打包为一个 tar.gz。
-func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) ArchiveCloudTasks(ctx context.Context, taskIDs []string, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if len(taskIDs) == 0 {
 		return nil, fmt.Errorf("云端打包: taskIDs 不能为空")
 	}
 	if archiveName == "" {
 		return nil, fmt.Errorf("云端打包: 归档名称不能为空")
 	}
-	body := map[string]any{
-		"task_ids":     taskIDs,
-		"archive_name": archiveName,
-	}
+	body := buildArchiveBody(archiveName, opts)
+	body["task_ids"] = taskIDs
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/archive", body, &result); err != nil {
 		return nil, fmt.Errorf("云端打包: %w", err)
@@ -319,6 +494,20 @@ func (c *FileClient) CloudCreateGroupEntries(ctx context.Context, name string, e
 		"name": name,
 		"urls": entries,
 	}
+	// M6：组创建透传四参（transfer/save/download_local/integrity_must_pass）——此前 cfg 已解析但 body 未带，
+	// 死参数面：组下载无法声明转存目标（语义与单条/batch 对齐）。
+	if cfg.transfer != nil {
+		body["transfer"] = cfg.transfer
+	}
+	if cfg.save != nil {
+		body["save"] = *cfg.save
+	}
+	if cfg.downloadLocal {
+		body["download_local"] = true
+	}
+	if cfg.forceIntegrity {
+		body["integrity_must_pass"] = true
+	}
 	var group CloudGroup
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/groups", body, &group); err != nil {
 		return nil, fmt.Errorf("创建下载组: %w", err)
@@ -331,7 +520,7 @@ func (c *FileClient) CloudGetGroup(ctx context.Context, groupID string) (*CloudG
 	if groupID == "" {
 		return nil, fmt.Errorf("获取下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID)
 	var detail CloudGroupDetail
 	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &detail); err != nil {
 		return nil, fmt.Errorf("获取下载组: %w", err)
@@ -377,7 +566,7 @@ func (c *FileClient) CloudCancelGroup(ctx context.Context, groupID string) error
 	if groupID == "" {
 		return fmt.Errorf("取消下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/cancel"
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/cancel"
 	return c.doJSON(ctx, http.MethodPost, apiPath, nil, nil)
 }
 
@@ -386,17 +575,18 @@ func (c *FileClient) CloudDeleteGroup(ctx context.Context, groupID string) error
 	if groupID == "" {
 		return fmt.Errorf("删除下载组: groupID 不能为空")
 	}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID)
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
 // CloudArchiveGroup 将组内所有文件打包为 tar.gz。
-func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string) (*CloudArchiveResult, error) {
+// 传 WithCloudArchiveTarget 时改为转存到外部卷（不落 archive 桶）。
+func (c *FileClient) CloudArchiveGroup(ctx context.Context, groupID, archiveName string, opts ...CloudArchiveOption) (*CloudArchiveResult, error) {
 	if groupID == "" {
 		return nil, fmt.Errorf("打包下载组: groupID 不能为空")
 	}
-	body := map[string]string{"archive_name": archiveName}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/archive"
+	body := buildArchiveBody(archiveName, opts)
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/archive"
 	var result CloudArchiveResult
 	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &result); err != nil {
 		return nil, fmt.Errorf("打包下载组: %w", err)
@@ -410,7 +600,7 @@ func (c *FileClient) CloudResumeTask(ctx context.Context, taskID string, force b
 		return fmt.Errorf("恢复下载任务: taskID 不能为空")
 	}
 	body := map[string]bool{"force": force}
-	apiPath := "/api/cloud/tasks/" + url.PathEscape(taskID) + "/resume"
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/resume"
 	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
 }
 
@@ -420,6 +610,6 @@ func (c *FileClient) CloudResumeGroup(ctx context.Context, groupID string, force
 		return fmt.Errorf("恢复下载组: groupID 不能为空")
 	}
 	body := map[string]bool{"force": force}
-	apiPath := "/api/cloud/groups/" + url.PathEscape(groupID) + "/resume"
+	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/resume"
 	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
 }

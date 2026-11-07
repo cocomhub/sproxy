@@ -32,7 +32,8 @@ git config tag.gpgsign false
 git symbolic-ref HEAD refs/heads/master
 
 commit_at() { # <iso-date> <msg>
-  GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" git commit -q --allow-empty -m "$2"
+  local date="$1" msg="$2"
+  GIT_AUTHOR_DATE="$date" GIT_COMMITTER_DATE="$date" git commit -q --allow-empty -m "$msg"
 }
 
 commit_at "2026-01-01T10:00:00" "feat: a"

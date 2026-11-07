@@ -71,6 +71,10 @@ func TestConfig_GetConfig(t *testing.T) {
 	if cfg.ChunkSize <= 0 {
 		t.Errorf("expected chunk_size > 0, got %d", cfg.ChunkSize)
 	}
+	// B1：cloud_transfer_concurrency 可观测须暴露实际生效值（默认 0 → cloud_max_concurrent）。
+	if cfg.CloudTransferConcurrency <= 0 {
+		t.Errorf("expected cloud_transfer_concurrency 实际生效值 > 0（默认归一为 max_concurrent），got %d", cfg.CloudTransferConcurrency)
+	}
 }
 
 func TestConfig_UpdateLogLevel(t *testing.T) {
@@ -82,7 +86,7 @@ func TestConfig_UpdateLogLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +110,7 @@ func TestConfig_UpdateLogFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +134,7 @@ func TestConfig_UpdateMaxStorageBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +160,7 @@ func TestConfig_UpdateMaxUploadBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +197,7 @@ func TestConfig_UpdateRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +240,7 @@ func TestConfig_UpdateInvalidInput(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(headerContentType, contentTypeJSON)
 			resp, err := testHTTPClient(t).Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -257,7 +261,7 @@ func TestConfig_UpdateEmptyBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -301,34 +305,10 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	}
 	tc.HTTPClient.Transport = &tunnelSignTransport{base: tc.HTTPClient.Transport, ak: testAccessKey, sk: testAccessSecret}
 
-	// okStatus 视为隧道正常往返：200 或 429（内层限流）。
-	okStatus := func(code int) bool {
-		return code == http.StatusOK || code == http.StatusTooManyRequests
-	}
-	allOK := func() {
-		for i := range 6 {
-			if code := doTunnelGet(t, tc); !okStatus(code) {
-				t.Fatalf("request %d: unexpected status %d", i, code)
-			}
-		}
-	}
 	// 灌满：低配额（limit=2, window=1h）下多请求 → 出现 429（限流已挂载）。
-	allOK()
-	saw429 := func() bool {
-		for range 6 {
-			if doTunnelGet(t, tc) == http.StatusTooManyRequests {
-				return true
-			}
-		}
-		return false
-	}
-	// 若始终未撞 429（每请求新 TCP 源连接 → per-IP 令牌桶独立，可能不撞全局窗口），
-	// 继续多打几个请求确保触发。
-	for range 10 {
-		if doTunnelGet(t, tc) == http.StatusTooManyRequests {
-			break
-		}
-	}
+	// okStatus 视为隧道正常往返：200 或 429（内层限流）。
+	assertTunnelAllOK(t, tc)
+	floodTunnel(t, tc)
 
 	// PUT /api/config 立即生效：改远高于已灌注请求数的配额，后续请求恒放行。
 	// PUT 带 JSON body，需按 body 哈希签名（signBodyRequest）。
@@ -337,7 +317,7 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(headerContentType, contentTypeJSON)
 		signBodyRequest(req, testAccessKey, testAccessSecret, []byte(body))
 		resp, err := testHTTPClient(t).Do(req)
 		if err != nil {
@@ -361,9 +341,45 @@ func TestConfig_UpdateRateLimit_AuthTunnelImmediate(t *testing.T) {
 	}
 	// 收紧后应迅速出现 429（limit=1 且窗口内有大量时间戳）。
 	// 触发器：任一请求 429 即证明生效——热更新立即回到限流。
-	if !saw429() {
+	if !tunnelSaw429(t, tc) {
 		t.Fatalf("tighten to 1: 未观察到 429（限流应立即生效）")
 	}
+}
+
+// assertTunnelAllOK 断言隧道正常往返 6 次（200 或 429 均可，429 = 内层限流）。
+func assertTunnelAllOK(t *testing.T, tc *tunnel.Client) {
+	t.Helper()
+	okStatus := func(code int) bool {
+		return code == http.StatusOK || code == http.StatusTooManyRequests
+	}
+	for i := range 6 {
+		if code := doTunnelGet(t, tc); !okStatus(code) {
+			t.Fatalf("request %d: unexpected status %d", i, code)
+		}
+	}
+}
+
+// floodTunnel 继续多打请求直到看到 429（确保限流行已被触发，上限 10 次）。
+func floodTunnel(t *testing.T, tc *tunnel.Client) {
+	t.Helper()
+	// 若始终未撞 429（每请求新 TCP 源连接 → per-IP 令牌桶独立，可能不撞全局窗口），
+	// 继续多打几个请求确保触发。
+	for range 10 {
+		if doTunnelGet(t, tc) == http.StatusTooManyRequests {
+			break
+		}
+	}
+}
+
+// tunnelSaw429 报告隧道在至多 6 次请求内是否出现 429。
+func tunnelSaw429(t *testing.T, tc *tunnel.Client) bool {
+	t.Helper()
+	for range 6 {
+		if doTunnelGet(t, tc) == http.StatusTooManyRequests {
+			return true
+		}
+	}
+	return false
 }
 
 // TestConfig_UpdateRateLimit_DisabledViaTunnel 验证 enabled=false 短路径在真实
@@ -483,7 +499,7 @@ func TestConfig_UpdateRateLimit_SignalPostImmediate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	signBodyRequest(req, testAccessKey, testAccessSecret, []byte(bodyStr))
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -531,7 +547,7 @@ func doSignalPost(t *testing.T, url string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(headerContentType, contentTypeJSON)
 	// 已注册节点身份 + per-node secret，且与 testAccessKey mesh 一致。
 	r.Header.Set(signalNodeHeader, "peer-a")
 	r.Header.Set(signalNodeSecretHeader, "sec-a")

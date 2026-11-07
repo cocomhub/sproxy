@@ -67,7 +67,7 @@ func NewCmdRelayDial(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 }
 
 // relayDialOnce 单次模式：本地 stdin/stdout ⇄ 远端。
-func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string, ios cli.IOStreams) error {
+func relayDialOnce(cmd *cobra.Command, svc relayDialer, node, tcpAddr string, ios cli.IOStreams) error {
 	ctx := cmd.Context()
 	conn, err := svc.RelayStream(ctx, node, tcpAddr)
 	if err != nil {
@@ -99,7 +99,7 @@ func relayDialOnce(cmd *cobra.Command, svc relayDialClient, node, tcpAddr string
 }
 
 // relayDialListen 本地端口转发模式。
-func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, listenAddr string, ios cli.IOStreams) error {
+func relayDialListen(cmd *cobra.Command, svc relayDialer, node, tcpAddr, listenAddr string, ios cli.IOStreams) error {
 	// 裸 :port 归一为 127.0.0.1:port（loopback 安全默认，防 LAN 暴露 +
 	// Windows Defender 防火墙弹窗）；需 LAN 访问时显式通配地址:port 或具体 IP
 	// （S56 同款 normalizeListenAddr）。
@@ -117,7 +117,7 @@ func relayDialListen(cmd *cobra.Command, svc relayDialClient, node, tcpAddr, lis
 
 // relayDialListenOn 在已注入的 listener 上运行端口转发，每连接建立一条中继流。
 // 拆出独立函数以便测试注入 127.0.0.1:0 动态端口 listener（S59）。
-func relayDialListenOn(ctx context.Context, svc relayDialClient, node, tcpAddr string, ln net.Listener, ios cli.IOStreams) error {
+func relayDialListenOn(ctx context.Context, svc relayDialer, node, tcpAddr string, ln net.Listener, ios cli.IOStreams) error {
 	// ctx 取消时关闭 listener，使 Accept 立即返回（优雅停止端口转发，S58）。
 	// 若无此行，Accept 在 ln 关闭前永不返回，accept 循环里 ctx.Err() 分支是死代码。
 	go func() {
@@ -148,9 +148,9 @@ func relayDialListenOn(ctx context.Context, svc relayDialClient, node, tcpAddr s
 	}
 }
 
-// relayDialClient 抽象，便于测试注入 mock。
-type relayDialClient interface {
+// relayDialer 抽象，便于测试注入 mock。
+type relayDialer interface {
 	RelayStream(ctx context.Context, target, addr string) (net.Conn, error)
 }
 
-var _ relayDialClient = (*client.FileClient)(nil)
+var _ relayDialer = (*client.FileClient)(nil)

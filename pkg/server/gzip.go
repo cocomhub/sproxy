@@ -81,7 +81,7 @@ func (w *gzipResponseWriter) Flush() {
 // gzipContentTypes 是可自动 gzip 的 Content-Type 白名单（前缀匹配，文本/JSON 类）。
 var gzipContentTypes = []string{
 	"text/",
-	"application/json",
+	contentTypeJSON,
 	"application/xml",
 	"application/javascript",
 	"application/x-javascript",
@@ -108,24 +108,8 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 	log := slogutil.Default(logger)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致
-			// 升级失败（101→501，e2e relay ws 实测）；普通文件下载不受影响。
-			if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// SSE 流式跳过（/api/events）：gzip 缓冲断流挂起（Content-Type 在
-			// handler 内才设置，前置白名单判断看不到 text/event-stream）。
-			if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
-				next.ServeHTTP(w, r)
-				return
-			}
-			// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
-			if ct := w.Header().Get("Content-Type"); ct != "" && !gzipEligible(ct) {
+			if gzipSkipRequest(w, r) {
+				// 客户端不支持 gzip / WebSocket/SSE 升级面 / Content-Type 白名单外 → 透传。
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -144,4 +128,49 @@ func GzipMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// gzipSkipRequest 判断请求是否应跳过 gzip 压缩：客户端不支持 gzip、WebSocket 升级面
+// （/ws）、SSE 流式（/api/events）、或 Content-Type 不在白名单（非文本类）。
+func gzipSkipRequest(w http.ResponseWriter, r *http.Request) bool {
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		return true
+	}
+	// WebSocket 升级面跳过（/ws 路径）：gzip writer 吞掉 Hijacker 会致升级失败
+	// （101→501，e2e relay ws 实测）；普通文件下载不受影响。
+	if r.URL.Path == "/ws" || strings.HasPrefix(r.URL.Path, "/ws/") {
+		return true
+	}
+	// SSE 流式跳过（/api/events）：gzip 缓冲断流挂起（Content-Type 在 handler 内才设置，
+	// 前置白名单判断看不到 text/event-stream）。
+	if r.URL.Path == "/api/events" || strings.HasPrefix(r.URL.Path, "/api/events/") {
+		return true
+	}
+	// 文件响应强跳过（/download、/download/chunk、S3 网关、WebDAV）：这些响应的
+	// Content-Type 在 handler 内才设置（前置白名单看不到），若不跳过会被 gzip；当可信卷
+	// 读校验在 200 头之后失败时，gzip 会把「已通过校验的前缀」打成**格式完整合法**且
+	// 无 Content-Length 的 gzip 流（无截断信号）→ 客户端静默拿到不完整文件，fail-closed
+	// 承诺被中间件击穿（P1 对抗评审）。跳过后二进制响应原样透传（Content-Length 保留）。
+	if fileResponsePath(r.URL.Path) {
+		return true
+	}
+	// Content-Type 白名单（按内容类型自动 gzip；非文本类不压缩）。
+	if ct := w.Header().Get(headerContentType); ct != "" && !gzipEligible(ct) {
+		return true
+	}
+	return false
+}
+
+// fileResponsePath 报告路径是否为二进制文件响应面（跳过 gzip，保证 Content-Length
+// 可判截断与校验失败可被客户端感知）。
+func fileResponsePath(p string) bool {
+	switch {
+	case p == "/download", strings.HasPrefix(p, "/download/"):
+		return true
+	case strings.HasPrefix(p, "/s3/"):
+		return true
+	case p == "/dav", strings.HasPrefix(p, "/dav/"):
+		return true
+	}
+	return false
 }

@@ -1056,70 +1056,83 @@ func TestHTTPDownloader_QuotaSink_FinishCalledOnSuccessAndFailure(t *testing.T) 
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	t.Run("success_finish_true_once", func(t *testing.T) {
-		content := []byte("quota sink success content")
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
-			w.Write(content)
-		}))
-		defer srv.Close()
-
-		rec := &quotaSinkRecorder{}
-		dl := &downloader.HTTPDownloader{}
-		dest := filepath.Join(t.TempDir(), "sink-ok.bin")
-		result, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
-		if err != nil {
-			t.Fatalf("DownloadWithWriter: %v", err)
-		}
-		if result.Size != int64(len(content)) {
-			t.Fatalf("size=%d want %d", result.Size, len(content))
-		}
-		if got := rec.finishTrue.Load(); got != 1 {
-			t.Fatalf("成功路径 Finish(true) 次数=%d want 1", got)
-		}
-		if got := rec.finishFalse.Load(); got != 0 {
-			t.Fatalf("成功路径 Finish(false) 次数=%d want 0", got)
-		}
-		got, _ := os.ReadFile(dest)
-		if string(got) != string(content) {
-			t.Fatalf("内容=%q want %q", got, content)
-		}
+		runQuotaSinkSuccessFinishSubtest(t)
 	})
 
 	t.Run("interrupted_write_finish_false_once", func(t *testing.T) {
-		// Content-Length 谎报 100，只发 10 字节后断流 → 读中断 → Finish(false) 一次 + 保留 .partial。
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Length", "100")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(make([]byte, 10))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			// handler 返回 → 连接关闭 → unexpected EOF
-		}))
-		defer srv.Close()
-
-		rec := &quotaSinkRecorder{}
-		dl := &downloader.HTTPDownloader{}
-		dest := filepath.Join(t.TempDir(), "sink-interrupt.bin")
-		_, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
-		if err == nil {
-			t.Fatal("中断写入应返回错误")
-		}
-		if got := rec.finishFalse.Load(); got != 1 {
-			t.Fatalf("中断路径 Finish(false) 次数=%d want 1", got)
-		}
-		if got := rec.finishTrue.Load(); got != 0 {
-			t.Fatalf("中断路径 Finish(true) 次数=%d want 0", got)
-		}
-		// .partial 保留 10 字节供续传；最终文件不存在。
-		partial := dest + ".partial"
-		if fi, err := os.Stat(partial); err != nil || fi.Size() != 10 {
-			t.Fatalf(".partial 应保留 10 字节, stat=%v size=%d", err, fi.Size())
-		}
-		if _, err := os.Stat(dest); !os.IsNotExist(err) {
-			t.Fatalf("中断后最终文件不应存在, stat err=%v", err)
-		}
+		runQuotaSinkInterruptedFinishSubtest(t)
 	})
+}
+
+// runQuotaSinkSuccessFinishSubtest 覆盖成功路径：Finish(true) 恰一次、Finish(false) 零次、
+// 最终文件内容与远端一致。
+func runQuotaSinkSuccessFinishSubtest(t *testing.T) {
+	t.Helper()
+	content := []byte("quota sink success content")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+		w.Write(content)
+	}))
+	defer srv.Close()
+
+	rec := &quotaSinkRecorder{}
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "sink-ok.bin")
+	result, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
+	if err != nil {
+		t.Fatalf("DownloadWithWriter: %v", err)
+	}
+	if result.Size != int64(len(content)) {
+		t.Fatalf("size=%d want %d", result.Size, len(content))
+	}
+	if got := rec.finishTrue.Load(); got != 1 {
+		t.Fatalf("成功路径 Finish(true) 次数=%d want 1", got)
+	}
+	if got := rec.finishFalse.Load(); got != 0 {
+		t.Fatalf("成功路径 Finish(false) 次数=%d want 0", got)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != string(content) {
+		t.Fatalf("内容=%q want %q", got, content)
+	}
+}
+
+// runQuotaSinkInterruptedFinishSubtest 覆盖写入中断路径：Content-Length 谎报 100，只发
+// 10 字节后断流 → 读中断 → Finish(false) 恰一次、Finish(true) 零次、.partial 保留供续传。
+func runQuotaSinkInterruptedFinishSubtest(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(make([]byte, 10))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// handler 返回 → 连接关闭 → unexpected EOF
+	}))
+	defer srv.Close()
+
+	rec := &quotaSinkRecorder{}
+	dl := &downloader.HTTPDownloader{}
+	dest := filepath.Join(t.TempDir(), "sink-interrupt.bin")
+	_, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec))
+	if err == nil {
+		t.Fatal("中断写入应返回错误")
+	}
+	if got := rec.finishFalse.Load(); got != 1 {
+		t.Fatalf("中断路径 Finish(false) 次数=%d want 1", got)
+	}
+	if got := rec.finishTrue.Load(); got != 0 {
+		t.Fatalf("中断路径 Finish(true) 次数=%d want 0", got)
+	}
+	// .partial 保留 10 字节供续传；最终文件不存在。
+	partial := dest + ".partial"
+	if fi, err := os.Stat(partial); err != nil || fi.Size() != 10 {
+		t.Fatalf(".partial 应保留 10 字节, stat=%v size=%d", err, fi.Size())
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("中断后最终文件不应存在, stat err=%v", err)
+	}
 }
 
 // TestHTTPDownloader_QuotaSink_ReportsDiscardedPartialOnFullRedownload 锁定 F1 的下载器侧契约：
@@ -1132,88 +1145,109 @@ func TestHTTPDownloader_QuotaSink_ReportsDiscardedPartialOnFullRedownload(t *tes
 	full := bytes.Repeat([]byte("x"), 100)
 	const partialBytes = 10
 
-	// writePartial 在 dest 旁造出既有 .partial（回退路径会丢弃它）。
-	writePartial := func(t *testing.T, dest string, n int) {
-		t.Helper()
-		if err := os.WriteFile(dest+".partial", bytes.Repeat([]byte("p"), n), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	t.Run("200_服务端不支持_Range", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// 忽略 Range：始终 200 全量（existingSize>0 时下载器会丢弃 .partial 全量重写）
-			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(full)
-		}))
-		defer srv.Close()
-
-		dest := filepath.Join(t.TempDir(), "norange.bin")
-		writePartial(t, dest, partialBytes)
-		rec := &quotaSinkRecorder{}
-		dl := &downloader.HTTPDownloader{}
-		if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
-			t.Fatalf("DownloadWithWriter: %v", err)
-		}
-		if got := rec.lastOldSize.Load(); got != partialBytes {
-			t.Fatalf("Finish(oldSize)=%d want %d（被丢弃的 .partial 未上报）", got, partialBytes)
-		}
+		runRedownloadNoRangeSubtest(t, full, partialBytes)
 	})
 
 	t.Run("206_起始位置不符回退全量", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Range") != "" {
-				// 起始字节与本地 .partial 不一致 ⇒ errRangeMismatch ⇒ 回退全量
-				w.Header().Set("Content-Range", "bytes 5-99/100")
-				w.WriteHeader(http.StatusPartialContent)
-				_, _ = w.Write(full[5:])
-				return
-			}
-			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(full)
-		}))
-		defer srv.Close()
-
-		dest := filepath.Join(t.TempDir(), "mismatch.bin")
-		writePartial(t, dest, partialBytes)
-		rec := &quotaSinkRecorder{}
-		dl := &downloader.HTTPDownloader{}
-		if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
-			t.Fatalf("DownloadWithWriter: %v", err)
-		}
-		if got := rec.lastOldSize.Load(); got != partialBytes {
-			t.Fatalf("Finish(oldSize)=%d want %d（回退全量前丢弃的 .partial 未上报）", got, partialBytes)
-		}
+		runRedownloadMismatchSubtest(t, full, partialBytes)
 	})
 
 	t.Run("416_陈旧_partial_大于远端回退全量", func(t *testing.T) {
-		const staleBytes = 150
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Range") != "" {
-				// 416 + 远端总大小（100）≠ 本地 .partial（150）⇒ 丢弃陈旧 partial 回退全量
-				w.Header().Set("Content-Range", "bytes */100")
-				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			w.Header().Set("Content-Length", strconv.Itoa(len(full)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(full)
-		}))
-		defer srv.Close()
-
-		dest := filepath.Join(t.TempDir(), "stale.bin")
-		writePartial(t, dest, staleBytes)
-		rec := &quotaSinkRecorder{}
-		dl := &downloader.HTTPDownloader{}
-		if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
-			t.Fatalf("DownloadWithWriter: %v", err)
-		}
-		if got := rec.lastOldSize.Load(); got != staleBytes {
-			t.Fatalf("Finish(oldSize)=%d want %d（陈旧 .partial 字节数未上报）", got, staleBytes)
-		}
+		runRedownloadStale416Subtest(t, full)
 	})
+}
+
+// writeTestPartial 在 dest 旁造出既有 .partial（回退路径会丢弃它）。
+func writeTestPartial(t *testing.T, dest string, n int) {
+	t.Helper()
+	if err := os.WriteFile(dest+".partial", bytes.Repeat([]byte("p"), n), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runRedownloadNoRangeSubtest 覆盖 200 全量回退：existingSize>0 时下载器丢弃 .partial 全量重写，
+// 被丢弃的字节数必须作为 Finish(success=true, oldSize) 上报。
+func runRedownloadNoRangeSubtest(t *testing.T, full []byte, partialBytes int) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 忽略 Range：始终 200 全量（existingSize>0 时下载器会丢弃 .partial 全量重写）
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "norange.bin")
+	writeTestPartial(t, dest, partialBytes)
+	rec := &quotaSinkRecorder{}
+	dl := &downloader.HTTPDownloader{}
+	if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
+		t.Fatalf("DownloadWithWriter: %v", err)
+	}
+	if got := rec.lastOldSize.Load(); got != int64(partialBytes) {
+		t.Fatalf("Finish(oldSize)=%d want %d（被丢弃的 .partial 未上报）", got, partialBytes)
+	}
+}
+
+// runRedownloadMismatchSubtest 覆盖 206 起始位置不符：Range 请求返回与本地 .partial 起始
+// 不一致的 Content-Range ⇒ errRangeMismatch ⇒ 回退全量，丢弃字节数上报 oldSize。
+func runRedownloadMismatchSubtest(t *testing.T, full []byte, partialBytes int) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 起始字节与本地 .partial 不一致 ⇒ errRangeMismatch ⇒ 回退全量
+			w.Header().Set("Content-Range", "bytes 5-99/100")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(full[5:])
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "mismatch.bin")
+	writeTestPartial(t, dest, partialBytes)
+	rec := &quotaSinkRecorder{}
+	dl := &downloader.HTTPDownloader{}
+	if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
+		t.Fatalf("DownloadWithWriter: %v", err)
+	}
+	if got := rec.lastOldSize.Load(); got != int64(partialBytes) {
+		t.Fatalf("Finish(oldSize)=%d want %d（回退全量前丢弃的 .partial 未上报）", got, partialBytes)
+	}
+}
+
+// runRedownloadStale416Subtest 覆盖 416 陈旧 partial：远端总大小（100）≠ 本地 .partial（150）
+// ⇒ 丢弃陈旧 partial 回退全量，150 字节必须作为 oldSize 上报。
+func runRedownloadStale416Subtest(t *testing.T, full []byte) {
+	t.Helper()
+	const staleBytes = 150
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			// 416 + 远端总大小（100）≠ 本地 .partial（150）⇒ 丢弃陈旧 partial 回退全量
+			w.Header().Set("Content-Range", "bytes */100")
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(full)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(full)
+	}))
+	defer srv.Close()
+
+	dest := filepath.Join(t.TempDir(), "stale.bin")
+	writeTestPartial(t, dest, staleBytes)
+	rec := &quotaSinkRecorder{}
+	dl := &downloader.HTTPDownloader{}
+	if _, err := dl.DownloadWithWriter(t.Context(), srv.URL, dest, nil, newRecorderFactory(rec)); err != nil {
+		t.Fatalf("DownloadWithWriter: %v", err)
+	}
+	if got := rec.lastOldSize.Load(); got != staleBytes {
+		t.Fatalf("Finish(oldSize)=%d want %d（陈旧 .partial 字节数未上报）", got, staleBytes)
+	}
 }
 
 // TestHTTPDownloader_QuotaSink_CreationErrorAborts 锁定审查 C 缺口 5：

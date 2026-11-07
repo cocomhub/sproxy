@@ -1,0 +1,413 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package remotefs
+
+import (
+	"errors"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
+	"github.com/cocomhub/sproxy/pkg/clustercred"
+	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/pathguard"
+	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/server/ops"
+	"github.com/cocomhub/sproxy/pkg/volume"
+)
+
+// Peer 抽象「已认证对端指纹」的来源。
+//
+// 生产接线在 remote_read_listener.go / remote_write_listener.go 完成：listener 对每条
+// 连接建 mux + *tunnel.Tunnel（真握手，双向 pin），把该 Tunnel 注入本接口。
+// *tunnel.Tunnel.PeerFingerprint() 的契约（pkg/tunnel/tunnel_mux.go）即为本接口的
+// 语义：返回**握手后已认证**的对端指纹（签名校验过，可作授权输入）；**空串 = 未认证**
+// （未握手 / 握手失败 / 对端无身份），调用方必须先判空、不得据此授权——authorize 即
+// 按此实现。单元测试仍可用 fake（fakePeerFingerprint）注入任意指纹，无需起真隧道。
+type Peer interface {
+	PeerFingerprint() string
+}
+
+// remoteReadHandler 是跨节点只读面（Y 一期，AD-7/AD-8）。
+//
+// 只读强制：路由表是手写白名单，仅注册四条 GET/HEAD（list/stat/download/meta）；写方法
+// 由 http.ServeMux 的方法模式天然 405，写 handler 从不出现在这张表上（非黑名单法）。
+//
+// 授权：owner 恒由配置（mesh_readers 条目）决定，绝不接受请求方指定；卷名必须命中
+// 本节点已配置的卷，且该卷 mesh_readers 中存在指纹命中的条目。
+type remoteReadHandler struct {
+	d    Deps
+	peer Peer
+	// creds 是集群出口凭证池（2026-10-05 用户裁定凭证下发）：持有节点签发、装配注入；
+	// authorize 在静态 mesh_readers 未命中时按对端指纹验签授权（时效/scope 下发端控制）。
+	creds CredentialSource
+}
+
+// remoteTarget 是一次已授权远程读的目标上下文。
+type remoteTarget struct {
+	vol   volume.Volume
+	node  string // 审计用：对端 mesh 节点 ID（来自命中的 mesh_readers 条目）
+	owner string // 受限 context 中注入的 owner（来自命中的 mesh_readers 条目）
+	path  string // owner user 桶内相对路径
+}
+
+// NewReadHandler 构造只读路由表（每连接一个：指纹是连接级属性）。
+// creds 是集群出口凭证池（可 nil = 未装配凭证，仅静态 mesh_readers 授权，零回归）。
+func NewReadHandler(d Deps, peer Peer, creds CredentialSource) http.Handler {
+	rh := &remoteReadHandler{d: d, peer: peer, creds: creds}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /remote/list", rh.handleList)
+	mux.HandleFunc("HEAD /remote/stat", rh.handleStat)
+	mux.HandleFunc("GET /remote/download", rh.handleDownload)
+	// meta 面（评审 P2-10 修复）：持有侧 sidecar 的跨节点读取——参数是**用户相对路径**
+	// （与 list/stat/download 同语义），sidecar 由持有侧自身可信栈解析；故凭证范围
+	// （PathPrefix）仍作用在用户路径上，不引入「meta 桶可达」越权面。
+	mux.HandleFunc("GET /remote/meta", rh.handleMeta)
+	mux.HandleFunc("GET /remote/stats", rh.handleStats)
+	return mux
+}
+
+// handleStats 返回本卷配额水位（roadmap P2 联邦卷回写残余：本地配额统计）——
+// 授权同读面（volume + mesh_readers 三元组），配额归属对端 hub，只读展示。
+// 响应 JSON = server.QuotaStatus{usage,max_bytes,watermark}；无配额（nil scope 或
+// MaxBytes<=0）→ 空对象（客户端 Quota=nil）。
+func (rh *remoteReadHandler) handleStats(w http.ResponseWriter, r *http.Request) {
+	tgt, ok := rh.authorize(w, r)
+	if !ok {
+		return
+	}
+	var scope *quota.Scope
+	if rh.d.Quota != nil {
+		scope = rh.d.Quota(tgt.owner)
+	}
+	qs := ops.QuotaStatusOf(scope)
+	httpjson.Send(w, http.StatusOK, qs)
+}
+
+func (rh *remoteReadHandler) handleList(w http.ResponseWriter, r *http.Request) {
+	rh.serve(w, r, "list")
+}
+
+func (rh *remoteReadHandler) handleStat(w http.ResponseWriter, r *http.Request) {
+	rh.serve(w, r, "stat")
+}
+
+func (rh *remoteReadHandler) handleDownload(w http.ResponseWriter, r *http.Request) {
+	rh.serve(w, r, "download")
+}
+
+// handleMeta 返回持有侧 sidecar 原始 JSON（出口卷的可信校验双分块读取源）。
+func (rh *remoteReadHandler) handleMeta(w http.ResponseWriter, r *http.Request) {
+	rh.serve(w, r, "meta")
+}
+
+// serve 统一走「授权 → 委派 → 审计」三步；拒绝路径在 authorize 内记审计后直接返回。
+func (rh *remoteReadHandler) serve(w http.ResponseWriter, r *http.Request, op string) {
+	tgt, ok := rh.authorize(w, r)
+	if !ok {
+		return
+	}
+	sw := &remoteStatusWriter{ResponseWriter: w}
+	rh.delegate(sw, r, tgt, op)
+	rh.d.Audit.Record(r.Context(), Event{
+		Action: "mesh_read", Owner: tgt.owner, Mesh: tgt.node,
+		ObjectType: "file", Object: tgt.path,
+		Result: remoteAuditResult(sw.status),
+		Detail: "volume=" + tgt.vol.Name + " path=" + tgt.path + " status=" + strconv.Itoa(sw.status),
+	})
+}
+
+// authorize 解析并校验授权；不通过时写错误响应并记审计，返回 ok=false。
+//
+// 授权判定必须同时调用两个方法，二者缺一不可：
+//   - MeshReaderFor(fp) 只做指纹反查，取回 (node, owner) 绑定——owner 由此而来，
+//     绝不由请求参数决定（防越权枚举的红线）；
+//   - AuthorizeMeshRead(node, fp, owner) 施加**第二重约束**：三元组命中且该 owner
+//     本身过本卷 ACL。
+//
+// 特别注意：MeshReaderFor **不得**作为唯一授权依据——它只查指纹，可能返回一个
+// owner 已被本卷 ACL 拉黑的绑定条目（AuthorizeMeshRead 文档同此结论）。
+func (rh *remoteReadHandler) authorize(w http.ResponseWriter, r *http.Request) (*remoteTarget, bool) {
+	volName := strings.TrimSpace(r.URL.Query().Get("volume"))
+	// path 允许远端「以 / 开头的绝对写法」（如 /docs/a.txt，与 sclient `cd /` 的
+	// 根语义一致）；此处归一为 owner user 桶内相对路径。
+	rawPath := r.URL.Query().Get("path")
+	relPath := strings.TrimLeft(strings.TrimSpace(rawPath), "/")
+
+	// deny 记审计 + 写错误响应。status 区分「授权类拒绝」（404/401，一律不泄露卷与
+	// 文件存在性）与服务端自身错误（500）——后者若冒充 404 会误导排障。
+	deny := func(status int, result, detail string) (*remoteTarget, bool) {
+		rh.d.Audit.Record(r.Context(), Event{
+			Action: "mesh_read", ObjectType: "file", Object: relPath,
+			Result: result, Detail: "volume=" + volName + " path=" + relPath + ": " + detail,
+		})
+		writeRemoteError(w, status, remoteErrorMessage(status))
+		return nil, false
+	}
+
+	// **评审 C1 修复（凭证 PathPrefix `..` 顶穿）**：授权与读取必须用**同一清洗后路径**。
+	// 此前 authorize 对原始 relPath 做凭证 Authorizes 前缀判定，而 delegate 内部
+	// pathguard 先 Clean 消融 `..`（docs/../secret → secret）——PathPrefix=docs 的出口
+	// 节点可越权读卷内任意文件。此处统一清洗（normalizeRemoteRelPath），授权路径 ==
+	// 实际读路径，前缀判定与读取键一致。空 path（list/stats 不依赖文件路径）跳过清洗。
+	if cleaned, cerr := normalizeRemoteRelPath(rawPath); cerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "路径非法")
+	} else {
+		relPath = cleaned
+	}
+
+	fp := ""
+	if rh.peer != nil {
+		fp = strings.TrimSpace(rh.peer.PeerFingerprint())
+	}
+	if fp == "" {
+		// 未完成身份握手（防御性拒绝；理论上不可达，见 peerFingerprintProvider 注释）。
+		// 不泄露任何卷/文件存在性。
+		return deny(http.StatusUnauthorized, AuditResultDenied, "对端无已认证身份指纹")
+	}
+	if volName == "" {
+		return deny(http.StatusNotFound, AuditResultDenied, "缺少 volume 参数")
+	}
+	if rh.d.Volumes == nil {
+		// 服务端装配错误（RegisterRoutes 装配失败会 panic，正常不可达），非「对象不存在」：
+		// 回 500 而非 404。此处不存在任何卷，故回 500 不泄露对象存在性。
+		return deny(http.StatusInternalServerError, AuditResultError, "卷集合未装配")
+	}
+	vol, ok := rh.d.Volumes.ByName(volName)
+	if !ok {
+		return deny(http.StatusNotFound, AuditResultDenied, "卷不存在")
+	}
+	if mr, ok := vol.MeshReaderFor(fp); ok {
+		if !vol.AuthorizeMeshRead(mr.Node, fp, mr.Owner) {
+			return deny(http.StatusNotFound, AuditResultDenied, "授权三元组未通过 node="+mr.Node)
+		}
+		return &remoteTarget{vol: vol, node: mr.Node, owner: mr.Owner, path: relPath}, true
+	}
+	// 静态 mesh_readers 未命中 → 集群出口凭证授权分支（2026-10-05 用户裁定凭证下发）。
+	return rh.authorizeCredential(deny, vol, volName, relPath, fp)
+}
+
+// normalizeRemoteRelPath 归一远端 path：剥前导斜杠（TrimLeft：//docs 与 /docs 一致）
+// + **C1 清洗**（authorize 与读取用同一清洗后路径，防凭证 PathPrefix 被 `..` 顶穿——
+// 此前 authorize 对原始 relPath 做前缀判定而读取侧 Clean 消融 `..`，docs/../secret 可
+// 越权读卷内任意文件）。空 path（list/stats 等不依赖文件路径的操作）保留原样——拒绝
+// 会把 quota 查询打成 404（回归）。
+func normalizeRemoteRelPath(raw string) (string, error) {
+	relPath := strings.TrimLeft(strings.TrimSpace(raw), "/")
+	if relPath == "" {
+		return "", nil
+	}
+	cleaned, cerr := pathguard.ValidateFilePath(relPath)
+	if cerr != nil {
+		return "", cerr
+	}
+	return cleaned, nil
+}
+
+// authorizeCredential 是 authorize 的凭证授权分支（静态 mesh_readers 未命中时）：
+// 持有节点签发的短效凭证替代静态指纹绑定——白名单（AuthorizedFor）+ 范围
+// （Authorizes 卷/path 双校验，评审 C2）+ 映射 (node=cred.Node, owner=cred.Owner)。
+func (rh *remoteReadHandler) authorizeCredential(
+	deny func(int, string, string) (*remoteTarget, bool),
+	vol volume.Volume, volName, relPath, fp string,
+) (*remoteTarget, bool) {
+	cred, ok := rh.credentialFor(volName, fp)
+	if !ok {
+		return deny(http.StatusNotFound, AuditResultDenied, "指纹未列入本卷 mesh_readers 且无有效凭证")
+	}
+	// 白名单：连接对端指纹 == 凭证 Recipient（只对签发的出口节点有效）。
+	if aerr := cred.AuthorizedFor(fp); aerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "凭证白名单未命中对端指纹")
+	}
+	// 范围校验（评审 C2 修复）：凭证限定的 Volume / PathPrefix 必须生效——此前凭证
+	// 分支不调用 Authorizes，凭证授 (volume,path_prefix) 的出口节点可读同持有节点
+	// 任意卷/任意路径（越权读）。此处强制：请求卷==凭证卷、路径落在 PathPrefix 内。
+	if aerr := cred.Authorizes(cred.Node, volName, cred.Owner, relPath); aerr != nil {
+		return deny(http.StatusNotFound, AuditResultDenied, "凭证授权范围未命中（volume/path）")
+	}
+	return &remoteTarget{vol: vol, node: cred.Node, owner: cred.Owner, path: relPath}, true
+}
+
+// credentialFor 按对端指纹在凭证池中验签并返回有效凭证（目标节点侧集群出口授权）。
+// creds nil（未装配凭证）→ (zero, false)（仅静态 mesh_readers，零回归）。
+func (rh *remoteReadHandler) credentialFor(volName, fingerprint string) (clustercred.Credential, bool) {
+	if rh.creds == nil {
+		return clustercred.Credential{}, false
+	}
+	return rh.creds.CredentialFor(volName, fingerprint)
+}
+
+// delegate 在**已完成授权**的前提下执行读操作：**直调 pkg/files 的域操作**，自行写响应。
+//
+// 这里曾是过渡形态（把请求改写为内部 HTTP 请求 + 用受限 context 伪造 actor 再打回既有
+// handler）。D-2 之后不再需要：域方法 `List`/`StatPath`/`OpenPath` 的入参出参里没有 HTTP
+// 类型，owner 是**显式入参**（这正是"远程面不该伪造 actor"的结构性修正），路径解析由装配层
+// 的 `downloadPathForRemote` 显式完成。
+//
+// 远程面的响应契约是**它自己的**（消费者是 pkg/remote 客户端）：list 复用 files.ListResponse
+// JSON；stat 用 X-File-* 头；download 走 http.ServeContent（Range/206 由它承担）。
+func (rh *remoteReadHandler) delegate(w http.ResponseWriter, r *http.Request, tgt *remoteTarget, op string) {
+	svc := rh.d.Files()
+	switch op {
+	case "list":
+		rh.delegateList(w, r, svc, tgt)
+	case "stat":
+		rh.delegateStat(w, r, svc, tgt)
+	case "download":
+		rh.delegateDownload(w, r, svc, tgt)
+	case "meta":
+		rh.delegateMeta(w, r, tgt)
+	default:
+		writeRemoteError(w, http.StatusNotFound, remoteErrorMessage(http.StatusNotFound))
+	}
+}
+
+// delegateList 执行远端 list：复用 files.List 域操作，回 ListResponse JSON。
+func (rh *remoteReadHandler) delegateList(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
+	res, err := svc.List(r.Context(), files.ListQuery{
+		Owner:   tgt.owner,
+		VolName: tgt.vol.Name,
+		Subdir:  tgt.path,
+	})
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	httpjson.Send(w, http.StatusOK, files.ListResponse(res))
+}
+
+// delegateStat 执行远端 stat：元信息用 X-File-* 头回传。
+func (rh *remoteReadHandler) delegateStat(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
+	dp, err := rh.d.Meta.RemoteDownloadPath(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	st, err := svc.StatPath(r.Context(), dp)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	if st.IsDir {
+		w.Header().Set("X-File-IsDir", "true")
+	}
+	w.Header().Set("X-File-Size", strconv.FormatInt(st.Size, 10))
+	w.Header().Set(headerFileMTime, strconv.FormatInt(st.MTime, 10))
+	if st.Checksum != "" {
+		w.Header().Set(headerFileChecksum, st.Checksum)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// delegateDownload 执行远端下载：走 http.ServeContent（Range/206 由它承担）。
+func (rh *remoteReadHandler) delegateDownload(w http.ResponseWriter, r *http.Request, svc *files.Service, tgt *remoteTarget) {
+	dp, err := rh.d.Meta.RemoteDownloadPath(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	of, err := svc.OpenPath(r.Context(), dp)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	defer func() { _ = of.File.Close() }()
+
+	w.Header().Set(headerContentType, contentTypeOctetStream)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set(headerFileMTime, strconv.FormatInt(of.Info.ModTime().UnixNano(), 10))
+	if of.Checksum != "" {
+		w.Header().Set(headerFileChecksum, of.Checksum)
+	}
+	// Range/206 由 ServeContent 承担（与本地下载同一处 HTTP 语义）。
+	seeker, ok := of.File.(io.ReadSeeker)
+	if !ok {
+		writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
+		return
+	}
+	http.ServeContent(w, r, of.Info.Name(), of.Info.ModTime(), seeker)
+}
+
+// delegateMeta 回持有侧 sidecar 原始 JSON（出口卷可信校验的元数据面）。
+//
+// **不泄露敏感数据**：sidecar 只含总/分块 SHA-256+MD5、原文件大小与时间（无内容），
+// 而且调用方已过同一道授权（凭证的卷/path 范围按**用户路径**判定——`tgt.path` 就是
+// 用户相对路径，而非 meta 键）。无 sidecar/不可用 → 404（出口侧据此降级为不校验，
+// 与既有外部卷口径一致）。
+func (rh *remoteReadHandler) delegateMeta(w http.ResponseWriter, r *http.Request, tgt *remoteTarget) {
+	raw, err := rh.d.Meta.ReadRemoteMeta(r.Context(), tgt.owner, tgt.vol.Name, tgt.path)
+	if err != nil {
+		writeRemoteFilesError(w, err)
+		return
+	}
+	// Content-Length 必须显式设置（meta 原始字节，出口侧据此读定长）；
+	// httpjson.WriteBody 只补 Content-Type + 状态码，不覆盖已设头。
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	httpjson.WriteBody(w, http.StatusOK, raw)
+}
+
+// writeRemoteFilesError 把域操作的失败映射为远程面的状态码。
+//
+// 远程面的拒绝语义不变：**4xx 只回通用文案**（不泄露卷/文件存在性），5xx 回内部错误；
+// 与 authorize 的 deny 路径同一原则。域侧的 HTTPError 只取其状态码。
+func writeRemoteFilesError(w http.ResponseWriter, err error) {
+	if he, ok := errors.AsType[*files.HTTPError](err); ok {
+		switch he.Status {
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusUnauthorized,
+			http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusConflict:
+			writeRemoteError(w, he.Status, remoteErrorMessage(he.Status))
+			return
+		}
+	}
+	writeRemoteError(w, http.StatusInternalServerError, remoteErrorMessage(http.StatusInternalServerError))
+}
+
+// remoteStatusWriter 记录响应状态码，供审计落「放行/不存在/错误」。
+type remoteStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *remoteStatusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *remoteStatusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// remoteAuditResult 把响应状态映射为既有审计结果常量。
+func remoteAuditResult(status int) string {
+	switch status {
+	case 0, http.StatusOK, http.StatusPartialContent:
+		return AuditResultSuccess
+	default:
+		return AuditResultError
+	}
+}
+
+func writeRemoteError(w http.ResponseWriter, code int, msg string) {
+	http.Error(w, msg, code)
+}
+
+// remoteErrorMessage 返回按状态码的通用错误文案。文案刻意只随状态码变化（不含卷名/
+// 文件名/失败原因），保证拒绝响应不泄露任何对象存在性。
+func remoteErrorMessage(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusInternalServerError:
+		return "internal error"
+	default:
+		return msgNotFound
+	}
+}

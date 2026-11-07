@@ -50,21 +50,27 @@ func TestValidateChunkPlan_Bounds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateChunkPlan(tc.totalSize, tc.chunkSize, tc.totalChunks)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("total_size=%d chunk_size=%d total_chunks=%d 应被拒绝",
-						tc.totalSize, tc.chunkSize, tc.totalChunks)
-				}
-				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-					t.Fatalf("错误文案 %q 应含 %q", err.Error(), tc.wantSubstr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("合法计划被拒绝: %v", err)
-			}
+			checkValidateChunkPlanCase(t, tc.totalSize, tc.chunkSize, tc.totalChunks, tc.wantErr, tc.wantSubstr)
 		})
+	}
+}
+
+// checkValidateChunkPlanCase 抽出的单用例断言 helper（降低 TestValidateChunkPlan_Bounds 复杂度）。
+func checkValidateChunkPlanCase(t *testing.T, totalSize, chunkSize int64, totalChunks int, wantErr bool, wantSubstr string) {
+	t.Helper()
+	err := validateChunkPlan(totalSize, chunkSize, totalChunks)
+	if wantErr {
+		if err == nil {
+			t.Fatalf("total_size=%d chunk_size=%d total_chunks=%d 应被拒绝",
+				totalSize, chunkSize, totalChunks)
+		}
+		if wantSubstr != "" && !strings.Contains(err.Error(), wantSubstr) {
+			t.Fatalf("错误文案 %q 应含 %q", err.Error(), wantSubstr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("合法计划被拒绝: %v", err)
 	}
 }
 

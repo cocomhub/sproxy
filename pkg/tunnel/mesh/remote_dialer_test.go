@@ -72,6 +72,60 @@ func svcEntry(node, name, addr string) client.MeshService {
 	return client.MeshService{Node: node, Name: name, Addr: addr}
 }
 
+// carrierTestAssertNoReport 断言「打洞失败且不回落」场景：Dial 必须报错且无任何载体上报。
+func carrierTestAssertNoReport(t *testing.T, err error, got []CarrierReport) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("应报错")
+	}
+	if len(got) != 0 {
+		t.Fatalf("失败时不应上报载体, got %v", got)
+	}
+}
+
+// carrierTestAssertReported 断言成功链路的上报内容：载体、目标 (node, service) 与 FellBack。
+func carrierTestAssertReported(t *testing.T, got []CarrierReport, wantCarry string, wantFall bool) {
+	t.Helper()
+	if len(got) != 1 || got[0].Carrier != wantCarry {
+		t.Fatalf("上报载体=%v want [%s]", got, wantCarry)
+	}
+	if got[0].Node != "nodeB" || got[0].Service != "volread" {
+		t.Errorf("上报目标不符: node=%q service=%q（want nodeB/volread）", got[0].Node, got[0].Service)
+	}
+	// W4：带标签指标需要 node/service；FellBack 必须准确（打洞成功/纯直连为 false）。
+	if got[0].FellBack != wantFall {
+		t.Errorf("FellBack=%v want %v（只有「打洞失败后回落」才为 true）", got[0].FellBack, wantFall)
+	}
+}
+
+// carrierTestRunCase 执行单条载体回传用例：构造替身 hub 与注入 Punch 后拨号 nodeB，按
+// 期望断言（wantErr=应报错且无上报；否则应上报指定载体/目标/FellBack）。
+func carrierTestRunCase(t *testing.T, punch PunchFunc, fallback bool, wantCarry string, wantFall, wantErr bool) {
+	t.Helper()
+	relayConn := pipeConn(t)
+	hub := &fakeHubClient{
+		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
+		relayConn: relayConn,
+	}
+	var got []CarrierReport
+	d := NewRemoteDialer(RemoteDialerConfig{
+		Client:             hub,
+		Service:            "volread",
+		Punch:              punch,
+		AllowRelayFallback: fallback,
+		OnCarrier:          func(rep CarrierReport) { got = append(got, rep) },
+	})
+	_, err := d.Dial(context.Background(), "nodeB")
+	if wantErr {
+		carrierTestAssertNoReport(t, err, got)
+		return
+	}
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	carrierTestAssertReported(t, got, wantCarry, wantFall)
+}
+
 // TestRemoteDialer_PunchFirst 钉住打洞优先：成功即返回，**不碰中继**。
 func TestRemoteDialer_PunchFirst(t *testing.T) {
 	punchConn := pipeConn(t)
@@ -275,42 +329,7 @@ func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			relayConn := pipeConn(t)
-			hub := &fakeHubClient{
-				services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
-				relayConn: relayConn,
-			}
-			var got []CarrierReport
-			d := NewRemoteDialer(RemoteDialerConfig{
-				Client:             hub,
-				Service:            "volread",
-				Punch:              tc.punch,
-				AllowRelayFallback: tc.fallback,
-				OnCarrier:          func(rep CarrierReport) { got = append(got, rep) },
-			})
-			_, err := d.Dial(context.Background(), "nodeB")
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("应报错")
-				}
-				if len(got) != 0 {
-					t.Fatalf("失败时不应上报载体, got %v", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Dial: %v", err)
-			}
-			if len(got) != 1 || got[0].Carrier != tc.wantCarry {
-				t.Fatalf("上报载体=%v want [%s]", got, tc.wantCarry)
-			}
-			// W4：带标签指标需要 node/service；FellBack 必须准确（打洞成功/纯直连为 false）。
-			if got[0].Node != "nodeB" || got[0].Service != "volread" {
-				t.Errorf("上报目标不符: node=%q service=%q（want nodeB/volread）", got[0].Node, got[0].Service)
-			}
-			if got[0].FellBack != tc.wantFall {
-				t.Errorf("FellBack=%v want %v（只有「打洞失败后回落」才为 true）", got[0].FellBack, tc.wantFall)
-			}
+			carrierTestRunCase(t, tc.punch, tc.fallback, tc.wantCarry, tc.wantFall, tc.wantErr)
 		})
 	}
 }

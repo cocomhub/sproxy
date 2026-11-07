@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"net"
@@ -15,6 +16,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 
 	"github.com/cocomhub/sproxy/cmd/sproxy/internal/sproxycfg"
 	"github.com/cocomhub/sproxy/pkg/server"
@@ -227,3 +231,45 @@ func assertLogOutput(t *testing.T, output string, format string) {
 }
 
 // ---- initLogger tests ----
+
+// TestRegisterVolumeBackendTypes_EnablesExternalVolumeAssembly 外部卷后端类型注册后，
+// `registry.NewBackend` 必须能构造 config 静态声明的外部卷（缺陷修复，2026-10-21：
+// 此前类型注册在 RegisterRoutes 之后 ⇒ `assembleVolumes` 报「未注册后端」启动失败）。
+//
+// 接线级判据：本用例直接调用**生产注册函数**（`registerVolumeBackendTypes`）再走
+// registry，覆盖「注册函数漏了某类型」这类回归；顺序由 archcheck R45 门禁覆盖。
+func TestRegisterVolumeBackendTypes_EnablesExternalVolumeAssembly(t *testing.T) {
+	registerVolumeBackendTypes()
+	ctx := context.Background()
+
+	cases := []struct {
+		typ   string
+		extra map[string]any
+	}{
+		{"webdav", map[string]any{"url": "http://127.0.0.1:1/dav", "username": "u", "password": "p"}},
+		{"sftp", map[string]any{"url": "sftp://u@127.0.0.1:1", "password": "p"}},
+		{"ftp", map[string]any{"url": "ftp://u@127.0.0.1:1", "password": "p"}},
+		{"s3", map[string]any{"endpoint": "127.0.0.1:1", "access_key": "a", "secret_key": "b", "bucket": "bkt"}},
+		{"baidupcs", map[string]any{"bduss": "fake-bduss", "local_root": t.TempDir()}},
+	}
+	for _, c := range cases {
+		v := volume.Volume{Name: "probe-" + c.typ, Type: c.typ, Extra: c.extra}
+		// 注意：sftp/ftp 的构造函数**在构造期就拨号**（无服务即失败）——故判据是
+		// 「后端类型已注册、工厂确实被调用」，而不是「构造成功」：
+		//   ① 未注册 ⇒ 错误含 `未注册后端`（本用例的失败形态）；
+		//   ② 已注册 ⇒ 错误来自该后端自身的校验/连接（含类型前缀如 `sftp backend:`）。
+		be, err := registry.NewBackend(ctx, v)
+		if err != nil {
+			if strings.Contains(err.Error(), "未注册后端") || strings.Contains(err.Error(), "未注册") {
+				t.Fatalf("type=%s 未注册（类型注册未前移 ⇒ config 静态声明该卷会启动失败）: %v", c.typ, err)
+			}
+			if !strings.Contains(err.Error(), c.typ+" backend:") {
+				t.Fatalf("type=%s 的失败不是来自该后端自身（工厂未执行？）: %v", c.typ, err)
+			}
+			continue // 类型已注册、工厂已执行；构造失败在断言范围外（无真实远端服务）
+		}
+		if be == nil {
+			t.Fatalf("type=%s 构造返回 nil backend", c.typ)
+		}
+	}
+}

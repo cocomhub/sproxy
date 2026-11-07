@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +89,36 @@ func TestFileClient_RebalanceVolumeServerFalse(t *testing.T) {
 	svc := NewFileClient(ts.URL)
 	if _, err := svc.RebalanceVolume(context.Background(), "a", "b", 0); err == nil {
 		t.Fatal("RebalanceVolume 期望 success=false 错误，got nil")
+	}
+}
+
+// TestFileClient_CopyFile_AutoVolume 锁「空源卷 = 让服务端按文件实际所在卷解析」。
+//
+// CLI `cp a.txt b.txt`（默认上下文未 cd 到卷）曾因客户端硬校验 fromVol 非空而必然失败
+// 「源卷与源路径不能为空」。现在空卷不再拒绝，而是**不发送**该参数（服务端用
+// volume.Router.Locate 解析）。
+func TestFileClient_CopyFile_AutoVolume(t *testing.T) {
+	t.Parallel()
+	var gotQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "copied"})
+	}))
+	defer ts.Close()
+
+	svc := NewFileClient(ts.URL)
+	if err := svc.CopyFile(context.Background(), "", "a.txt", "", "b.txt", false); err != nil {
+		t.Fatalf("CopyFile(自动卷): %v", err)
+	}
+	if strings.Contains(gotQuery, "from_volume=") || strings.Contains(gotQuery, "to_volume=") {
+		t.Fatalf("空卷不应发送卷参数，query = %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "filename=a.txt") || !strings.Contains(gotQuery, "to=b.txt") {
+		t.Fatalf("query 缺参数: %q", gotQuery)
+	}
+	// 源路径为空仍是客户端错误（不浪费一次往返）。
+	if err := svc.CopyFile(context.Background(), "", "", "", "b.txt", false); err == nil {
+		t.Fatal("空源路径应报错")
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"io"
 	"testing"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/minio/minio-go/v7"
 )
 
@@ -32,8 +34,12 @@ func newTestMultipartS3FS(t *testing.T, threshold int64) *S3FS {
 		t.Fatalf("BucketExists: %v", err)
 	}
 	if !exists {
-		if err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{}); err != nil {
-			t.Fatalf("MakeBucket: %v", err)
+		err := fs.client.MakeBucket(context.Background(), cfg.Bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			// 并发用例已抢先创建（TOCTOU）→ 容忍；其余错误真实失败。
+			if respErr := minio.ToErrorResponse(err); respErr.Code != minio.BucketAlreadyOwnedByYou {
+				t.Fatalf("MakeBucket: %v", err)
+			}
 		}
 	}
 	return fs
@@ -46,7 +52,7 @@ func TestS3FS_Multipart_LargeFile(t *testing.T) {
 	ctx := context.Background()
 	// 3MiB 内容（> 阈值；分片 5MiB 下限 → minio 仍自动 multipart）。
 	content := bytes.Repeat([]byte("x"), 3<<20)
-	if err := fs.WriteFile(ctx, "mp/big.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "mp/big.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(大文件): %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "mp/big.bin")
@@ -69,7 +75,7 @@ func TestS3FS_Multipart_SmallFileZeroRegression(t *testing.T) {
 	fs := newTestS3FS(t) // 默认阈值 64MiB：小文件单 PutObject
 	ctx := context.Background()
 	content := []byte("small file")
-	if err := fs.WriteFile(ctx, "small/x.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "small/x.txt", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(小文件): %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "small/x.txt")
@@ -99,7 +105,7 @@ func TestS3FS_Multipart_Retry(t *testing.T) {
 	fs.putter = &failingPutter{inner: orig, failTimes: 1, attempt: &attempt}
 	defer func() { fs.putter = orig }()
 
-	if err := fs.WriteFile(ctx, "mp/retry.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "mp/retry.bin", bytes.NewReader(content), int64(len(content)), 0); err != nil {
 		t.Fatalf("WriteFile(重试): %v", err)
 	}
 	if attempt < 2 {
@@ -117,6 +123,9 @@ type failingPutter struct {
 func (c *failingPutter) PutObject(ctx context.Context, bucket, object string, reader io.Reader, size int64, opts minio.PutObjectOptions) (minio.UploadInfo, error) {
 	*c.attempt++
 	if *c.attempt <= c.failTimes {
+		// 消费 reader 再失败——模拟真实网络在传输中段中断（P0-3：重试必须 Seek(0)
+		// 重置，否则复用已耗尽流会把目标写成空/截断）。
+		_, _ = io.Copy(io.Discard, reader)
 		return minio.UploadInfo{}, fmt.Errorf("注入失败: attempt %d", *c.attempt)
 	}
 	return c.inner.PutObject(ctx, bucket, object, reader, size, opts)

@@ -1,4 +1,4 @@
-go 1.27
+go 1.27.1
 
 use (
 	.
@@ -6,8 +6,13 @@ use (
 	./cmd/sproxy
 	./cmd/sproxy-mcp
 	./pkg/authn/ext/oidcldap
-	./pkg/baidupcs
+	./pkg/integrity/ext/video
+	./pkg/media/ext/mp4
+	./pkg/volume/ext/baidupcs
+	./pkg/volume/ext/pikpak
+	./tool/pikpak-hybrid
 	./pkg/certmgr/ext/dnspod
+	./pkg/state/ext/mongo
 	./pkg/telemetry/ext/otel
 	./pkg/tunnel/hub/ext/kad
 	./pkg/tunnel/mesh
@@ -17,4 +22,5 @@ use (
 	./pkg/tunnel/xfer/ext/ws
 	./pkg/volume/ext/s3
 	./web/e2e
+	./tools/kfbench
 )

@@ -57,7 +57,26 @@ func TestStreamWrite_SplitsAtMaxFramePayload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	// 对端接受流并把收到的字节累积起来
+	// 对端接受流并把收到的字节累积起来。
+	gotCh := streamWriteSplitsCollectBytes(ctx, mListener)
+
+	s, err := mDialer.Open(ctx)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// 一次写满窗口（65536 = DefaultWindowSize），修复前这一步会丢 1 字节。
+	payload := bytes.Repeat([]byte{0x5a}, DefaultWindowSize)
+	streamWriteSplitsWritePayload(t, s, payload)
+	if err := s.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+
+	streamWriteSplitsAssertReceived(t, ctx, gotCh, payload)
+}
+
+// streamWriteSplitsCollectBytes 在 goroutine 里接受流并把收到的字节累积起来。
+func streamWriteSplitsCollectBytes(ctx context.Context, mListener *Mux) <-chan []byte {
 	gotCh := make(chan []byte, 1)
 	go func() {
 		s, err := mListener.Accept(ctx)
@@ -78,14 +97,12 @@ func TestStreamWrite_SplitsAtMaxFramePayload(t *testing.T) {
 		}
 		gotCh <- buf
 	}()
+	return gotCh
+}
 
-	s, err := mDialer.Open(ctx)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-
-	// 一次写满窗口（65536 = DefaultWindowSize），修复前这一步会丢 1 字节。
-	payload := bytes.Repeat([]byte{0x5a}, DefaultWindowSize)
+// streamWriteSplitsWritePayload 把 payload 全部写入流（容忍窗口受限的短写）。
+func streamWriteSplitsWritePayload(t *testing.T, s Stream, payload []byte) {
+	t.Helper()
 	written := 0
 	for written < len(payload) {
 		n, wErr := s.Write(payload[written:])
@@ -97,10 +114,11 @@ func TestStreamWrite_SplitsAtMaxFramePayload(t *testing.T) {
 		}
 		written += n
 	}
-	if err := s.CloseWrite(); err != nil {
-		t.Fatalf("CloseWrite: %v", err)
-	}
+}
 
+// streamWriteSplitsAssertReceived 断言对端收到完整且一致的 payload。
+func streamWriteSplitsAssertReceived(t *testing.T, ctx context.Context, gotCh <-chan []byte, payload []byte) {
+	t.Helper()
 	select {
 	case got := <-gotCh:
 		if len(got) != len(payload) {

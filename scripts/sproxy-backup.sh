@@ -70,7 +70,7 @@ cat > "$MANIFEST_DIR/manifest.json" <<JSON
   "version": "$VERSION",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "storage_root": "$(cd "$STORAGE_ROOT" && pwd)",
-  "include_audit": $([ $INCLUDE_AUDIT -eq 1 ] && echo true || echo false)
+  "include_audit": $([[ $INCLUDE_AUDIT -eq 1 ]] && echo true || echo false)
 }
 JSON
 

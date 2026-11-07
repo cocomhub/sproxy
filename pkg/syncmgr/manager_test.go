@@ -53,7 +53,7 @@ func newTestManager(t *testing.T, quota *mockQuota, remotes []RemoteConfig, exec
 		remotes = []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}
 	}
 	tenantRoot, listTenants := newTestTenantRoot(t.TempDir())
-	mgr := NewManager(tenantRoot, listTenants, quota, 0, remotes, exec, discardLogger(), cfg)
+	mgr := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: quota, QuotaCat: 0, Remotes: remotes, Executor: exec, Logger: discardLogger(), Config: cfg})
 	t.Cleanup(mgr.Stop)
 	return mgr
 }
@@ -571,8 +571,7 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 	blocking := newBlockingMockExecutor()
 
 	// 第一个管理器：创建 pull 任务，人为置 syncing 并落盘
-	mgr1 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
-		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr1 := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: newMockQuota(0), QuotaCat: 0, Remotes: []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}, Executor: blocking, Logger: discardLogger(), Config: &Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	task, _, err := mgr1.CreateTask(CreateRequest{Direction: "pull", Remote: "r1", Src: "", Dst: "restored"})
 	if err != nil {
 		t.Fatal(err)
@@ -585,8 +584,7 @@ func TestRecoverTasks_RestartSyncing(t *testing.T) {
 	mgr1.Stop()
 
 	// 第二个管理器：recoverTasks 只重启 syncing 任务
-	mgr2 := NewManager(tenantRoot, listTenants, newMockQuota(0), 0, []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
-		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: time.Hour})
+	mgr2 := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: newMockQuota(0), QuotaCat: 0, Remotes: []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}, Executor: blocking, Logger: discardLogger(), Config: &Config{MaxConcurrent: 3, TaskTTL: time.Hour}})
 	t.Cleanup(mgr2.Stop)
 
 	// 恢复的 syncing 任务应重启执行：用 started 信号确定性等 executor.Run 被调用。
@@ -728,9 +726,7 @@ func TestRecoveredPullTask_NoDoubleReserve(t *testing.T) {
 	}
 
 	quota := newMockQuota(0)
-	mgr := NewManager(tenantRoot, listTenants, quota, 0,
-		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
-		newMockExecutor(completedResult()), discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour})
+	mgr := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: quota, QuotaCat: 0, Remotes: []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}, Executor: newMockExecutor(completedResult()), Logger: discardLogger(), Config: &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour}})
 	defer mgr.Stop()
 
 	waitForStatus(t, mgr, persisted.ID, StatusCompleted, 5*time.Second)
@@ -1038,9 +1034,7 @@ func TestRetry_RetriesPersisted(t *testing.T) {
 	}
 
 	blocking := newBlockingMockExecutor()
-	mgr := NewManager(tenantRoot, listTenants, newMockQuota(0), 0,
-		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
-		blocking, discardLogger(), &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2})
+	mgr := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: newMockQuota(0), QuotaCat: 0, Remotes: []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}, Executor: blocking, Logger: discardLogger(), Config: &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, MaxRetries: 3, RetryDelay: 10 * time.Millisecond, RetryBackoff: 2}})
 	defer mgr.Stop()
 
 	// 恢复的 retrying 任务应重启执行（用 started 信号确定性等待，对齐恢复 syncing 的模式）
@@ -1091,9 +1085,7 @@ func newTestManagerPF(t *testing.T, quota *mockQuota) *Manager {
 	}
 	cfg := &Config{MaxConcurrent: 3, TaskTTL: 24 * time.Hour, PerFileReserve: true}
 	tenantRoot, listTenants := newTestTenantRoot(t.TempDir())
-	mgr := NewManager(tenantRoot, listTenants, quota, 0,
-		[]RemoteConfig{testRemote("r1", "http://127.0.0.1:1")},
-		newMockExecutor(completedResult()), discardLogger(), cfg)
+	mgr := NewManager(ManagerOptions{TenantRoot: tenantRoot, ListTenants: listTenants, Quota: quota, QuotaCat: 0, Remotes: []RemoteConfig{testRemote("r1", "http://127.0.0.1:1")}, Executor: newMockExecutor(completedResult()), Logger: discardLogger(), Config: cfg})
 	t.Cleanup(mgr.Stop)
 	return mgr
 }

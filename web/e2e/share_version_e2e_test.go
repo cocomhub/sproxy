@@ -5,7 +5,7 @@ package e2e
 
 // share_version_e2e_test.go — 分享 / 公链 / 版本管理 Web UI 真交互 E2E（PR-F2 任务 3）。
 //
-// 分享链路：UI 创建（POST /api/share，断言 body 四字段）→ 列表行取 token → Go 侧直取
+// 分享链路：UI 创建（POST /api/shares，断言 body 四字段）→ 列表行取 token → Go 侧直取
 // /s/{token} 断言字节与 Content-Disposition → UI 撤销（DELETE /api/shares/{token}）。
 // 版本链路：同文件名两次真上传产版本 → UI 加载（GET /api/versions）→ 表格行（非
 // .empty-msg 假绿）→ 恢复（POST /api/versions/restore）。
@@ -26,20 +26,34 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	defer cleanup()
 
 	sharedBody := []byte("shareable body")
-	if status, body := seedUploadToVolume(t, baseURL, "default", "share-src.txt", sharedBody); status != http.StatusOK {
-		t.Fatalf("seed share src status=%d body=%s", status, body)
-	}
+	seedVolumeFile(t, baseURL, "default", "share-src.txt", sharedBody)
 
 	page, stop := pageFixture(t)
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
-	if err := waitLoc(page, ".file-share-btn[data-filename='share-src.txt']", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+	// 打开分享弹窗：文件名被预填（showShareModal 接线）。
+	openShareModal(t, page)
+	// 创建：POST /api/shares，body 四字段逐项断言。
+	createShareFromModal(t, page)
+	// 列表行出现 → 取 token（复制按钮 data-token）。
+	token := readShareToken(t, page)
+	// 公链（Go 侧最强行证）：GET /s/{token} 无认证返回文件字节 + attachment。
+	assertPublicShare(t, baseURL, token, sharedBody)
+	// 撤销：切到「管理分享」面板（列表行可见才可点）→ confirm → DELETE /api/shares/{token}。
+	revokeShareFromList(t, page, token)
+	// DOM：撤销后列表回到空态。
+	waitTextVisible(t, page, "#share-list-body", "暂无分享链接", 8000)
+}
+
+// openShareModal 打开分享弹窗并断言文件名被预填（showShareModal 接线）。
+func openShareModal(t *testing.T, page playwright.Page) {
+	t.Helper()
+	sel := ".file-share-btn[data-filename='share-src.txt']"
+	if err := waitLoc(page, sel, playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("分享按钮未渲染: %v", err)
 	}
-
-	// 打开分享弹窗：文件名被预填（showShareModal 接线）。
-	if err := page.Locator(".file-share-btn[data-filename='share-src.txt']").Click(); err != nil {
+	if err := page.Locator(sel).Click(); err != nil {
 		t.Fatalf("click share btn: %v", err)
 	}
 	if err := waitLoc(page, "#share-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
@@ -50,13 +64,25 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	} else if v != "share-src.txt" {
 		t.Fatalf("#share-filename = %q, want share-src.txt（showShareModal 未预填文件名）", v)
 	}
+	// 分享源卷必须来自**文件行**的 data-volume（外部/加密卷分享靠它定位；缺失会退化为
+	// 服务端自动定位，多卷同名时可能分享错文件）。
+	hint, herr := page.Locator("#share-source-hint").InnerText()
+	if herr != nil {
+		t.Fatalf("读取 #share-source-hint: %v", herr)
+	}
+	if !strings.Contains(hint, "default") {
+		t.Fatalf("#share-source-hint = %q，应显示行卷 default（data-volume 未接线）", hint)
+	}
+}
 
-	// 创建：POST /api/share，body 四字段逐项断言。
-	req, err := page.ExpectRequest("**/api/share", func() error {
+// createShareFromModal 点创建按钮 → 捕获 POST /api/shares，断言 body 四字段。
+func createShareFromModal(t *testing.T, page playwright.Page) {
+	t.Helper()
+	req, err := page.ExpectRequest("**/api/shares", func() error {
 		return page.Locator("#share-create-btn").Click()
 	}, playwright.PageExpectRequestOptions{Timeout: playwright.Float(8000)})
 	if err != nil {
-		t.Fatalf("未观察到 POST /api/share（分享创建未接线？）: %v", err)
+		t.Fatalf("未观察到 POST /api/shares（分享创建未接线？）: %v", err)
 	}
 	if got := req.Method(); got != "POST" {
 		t.Errorf("share method = %q, want POST", got)
@@ -66,13 +92,21 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 		TTL          string `json:"ttl"`
 		MaxDownloads int    `json:"max_downloads"`
 		OneTime      bool   `json:"one_time"`
+		Volume       string `json:"volume"`
 	}
 	requestJSON(t, req, &shareReq)
 	if shareReq.Filename != "share-src.txt" || shareReq.TTL != "24h" || shareReq.MaxDownloads != 0 || shareReq.OneTime {
 		t.Fatalf("share body = %+v, want {share-src.txt 24h 0 false}", shareReq)
 	}
+	// 卷必须随请求发出（外部/加密卷分享的正确性依赖它；缺省=自动定位）。
+	if shareReq.Volume != "default" {
+		t.Fatalf("share body volume = %q, want default（文件行的卷未接入创建请求）", shareReq.Volume)
+	}
+}
 
-	// 列表行出现 → 取 token（复制按钮 data-token）。
+// readShareToken 等分享列表行出现并从复制按钮 data-token 读取 token。
+func readShareToken(t *testing.T, page playwright.Page) string {
+	t.Helper()
 	if werr := waitLoc(page, "#share-list-body .share-copy-btn", playwright.WaitForSelectorStateAttached, 8000); werr != nil {
 		t.Fatalf("分享列表未渲染 token 行（refreshShareList 未接线？）: %v", werr)
 	}
@@ -83,8 +117,12 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	if token == "" {
 		t.Fatal("分享 token 为空")
 	}
+	return token
+}
 
-	// 公链（Go 侧最强行证）：GET /s/{token} 无认证返回文件字节 + attachment。
+// assertPublicShare Go 侧最强行证：GET /s/{token} 无认证返回文件字节 + Content-Disposition。
+func assertPublicShare(t *testing.T, baseURL, token string, wantBody []byte) {
+	t.Helper()
 	sresp, err := http.Get(baseURL + "/s/" + token)
 	if err != nil {
 		t.Fatalf("公链请求失败: %v", err)
@@ -100,11 +138,14 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取公链响应体: %v", err)
 	}
-	if string(gotBody) != string(sharedBody) {
-		t.Errorf("公链返回字节 = %q, want %q", gotBody, sharedBody)
+	if string(gotBody) != string(wantBody) {
+		t.Errorf("公链返回字节 = %q, want %q", gotBody, wantBody)
 	}
+}
 
-	// 撤销：切到「管理分享」面板（列表行可见才可点）→ confirm → DELETE /api/shares/{token}。
+// revokeShareFromList 切管理分享面板 → confirm → 捕获 DELETE /api/shares/{token}。
+func revokeShareFromList(t *testing.T, page playwright.Page, token string) {
+	t.Helper()
 	if tabErr := page.Locator("#share-list-tab").Click(); tabErr != nil {
 		t.Fatalf("切换到管理分享面板: %v", tabErr)
 	}
@@ -121,9 +162,6 @@ func TestShare_CreateAndPublicAccess(t *testing.T) {
 	if !strings.Contains(req2.URL(), token) {
 		t.Errorf("revoke URL = %q, want 含 token %q", req2.URL(), token)
 	}
-
-	// DOM：撤销后列表回到空态。
-	waitTextVisible(t, page, "#share-list-body", "暂无分享链接", 8000)
 }
 
 // TestVersioning_UploadCreatesVersions 两次真上传产版本 → UI 加载 → 表格行 → 恢复请求。
@@ -148,22 +186,38 @@ func TestVersioning_UploadCreatesVersions(t *testing.T) {
 	defer stop()
 
 	page.Goto(baseURL + "/ui/")
+	openVersionModal(t, page)
+	// 反 false-green：初始化占位文案存在，加载后必须被表格替换。
+	placeholder, _ := page.Locator("#version-body").InnerText()
+	if !strings.Contains(placeholder, "输入文件名查看版本历史") {
+		t.Fatalf("版本弹窗初始占位缺失: %q", placeholder)
+	}
+	if n := loadVersions(t, page, "versioned.txt"); n < 1 {
+		t.Fatalf("覆盖写后版本数 = %d, want >= 1（覆盖写未产版本？）", n)
+	}
+	// DOM（非 .empty-msg）：表格行 + 恢复按钮 + 「共 N 个版本」头部文案。
+	assertVersionsTable(t, page)
+	// 恢复：confirm → POST /api/versions/restore?filename=&version_id=。
+	restoreFirstVersion(t, page, "versioned.txt")
+}
+
+// openVersionModal 打开版本弹窗并等待可见。
+func openVersionModal(t *testing.T, page playwright.Page) {
+	t.Helper()
 	if err := page.Locator("#version-btn").Click(); err != nil {
 		t.Fatalf("click version-btn: %v", err)
 	}
 	if err := waitLoc(page, "#version-modal", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("版本弹窗未打开: %v", err)
 	}
-	// 反 false-green：初始化占位文案存在，加载后必须被表格替换。
-	placeholder, _ := page.Locator("#version-body").InnerText()
-	if !strings.Contains(placeholder, "输入文件名查看版本历史") {
-		t.Fatalf("版本弹窗初始占位缺失: %q", placeholder)
-	}
+}
 
-	if err := page.Locator("#version-filename").Fill("versioned.txt"); err != nil {
+// loadVersions 填文件名 → 点加载 → 捕获 GET /api/versions 响应，断言 200 并返回版本数。
+func loadVersions(t *testing.T, page playwright.Page, filename string) int {
+	t.Helper()
+	if err := page.Locator("#version-filename").Fill(filename); err != nil {
 		t.Fatalf("fill version-filename: %v", err)
 	}
-
 	resp, err := page.ExpectResponse("**/api/versions?*", func() error {
 		return page.Locator("#version-load-btn").Click()
 	}, playwright.PageExpectResponseOptions{Timeout: playwright.Float(8000)})
@@ -181,11 +235,12 @@ func TestVersioning_UploadCreatesVersions(t *testing.T) {
 	if jerr := resp.JSON(&verPayload); jerr != nil {
 		t.Fatalf("解析版本响应: %v", jerr)
 	}
-	if len(verPayload.Versions) < 1 {
-		t.Fatalf("覆盖写后版本数 = %d, want >= 1（覆盖写未产版本？）", len(verPayload.Versions))
-	}
+	return len(verPayload.Versions)
+}
 
-	// DOM（非 .empty-msg）：表格行 + 恢复按钮 + 「共 N 个版本」头部文案。
+// assertVersionsTable 断言版本表格渲染：tbody 行 + 恢复按钮 + 「共 N 个版本」头部文案。
+func assertVersionsTable(t *testing.T, page playwright.Page) {
+	t.Helper()
 	if werr := waitLoc(page, "#version-body table tbody tr", playwright.WaitForSelectorStateVisible, 8000); werr != nil {
 		body, _ := page.Locator("#version-body").InnerText()
 		t.Fatalf("版本表格未渲染（loadVersions 未接线？）: %v；body=%q", werr, body)
@@ -197,8 +252,11 @@ func TestVersioning_UploadCreatesVersions(t *testing.T) {
 	if !strings.Contains(bodyText, "共 ") {
 		t.Errorf("版本表头文案缺「共 N 个版本」:\n%s", bodyText)
 	}
+}
 
-	// 恢复：confirm → POST /api/versions/restore?filename=&version_id=。
+// restoreFirstVersion 恢复首个版本：confirm → 捕获 POST /api/versions/restore 并断言 URL。
+func restoreFirstVersion(t *testing.T, page playwright.Page, filename string) {
+	t.Helper()
 	acceptDialog(page, "")
 	req, err := page.ExpectRequest("**/api/versions/restore?*", func() error {
 		return page.Locator("#version-body .version-restore-btn").First().Click()
@@ -206,10 +264,11 @@ func TestVersioning_UploadCreatesVersions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("未观察到 POST /api/versions/restore（恢复未接线？）: %v", err)
 	}
-	if u := req.URL(); !strings.Contains(u, "filename=versioned.txt") || !strings.Contains(u, "version_id=") {
-		t.Errorf("restore URL = %q, want 含 filename=versioned.txt 与 version_id=", u)
+	u := req.URL()
+	if !strings.Contains(u, "filename="+filename) || !strings.Contains(u, "version_id=") {
+		t.Errorf("restore URL = %q, want 含 filename=%s 与 version_id=", u, filename)
 	}
-	if u := req.URL(); strings.Contains(u, "version_id=&") || strings.HasSuffix(u, "version_id=") {
+	if strings.Contains(u, "version_id=&") || strings.HasSuffix(u, "version_id=") {
 		t.Errorf("restore URL = %q, version_id 为空", u)
 	}
 }

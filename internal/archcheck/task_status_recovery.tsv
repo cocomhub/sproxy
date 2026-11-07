@@ -1,0 +1,12 @@
+# 门禁 R43：云任务状态机 × 重启恢复覆盖（deny-by-default）。
+#
+# 每行：<status>	<terminal|non-terminal>	<restart|fail|keep>	<备注>
+#   - 代码里**写入**的每个 task.Status 都必须在此登记（新增状态不登记 ⇒ 红）；
+#   - **non-terminal 不得 keep**（重启后原地不动 = 永久卡住，评审 R14 C1 的原缺陷形态）；
+#   - restart/fail 的状态字面量必须出现在 pkg/cloud/manager_persist.go（恢复实现里覆盖到）。
+#
+pending	non-terminal	restart	CreateTask 后由 SubmitAndStart 接管（Submitted 落盘）；重启时已提交的排队任务必须继续，未提交的才转 failed（C1）
+downloading	non-terminal	restart	崩溃前正在下载 ⇒ 重启走 executeDownload（.partial 续传 / 已完整产物复用 C2）
+completed	terminal	keep	终态不动（TTL 清理）；damaged 自愈经显式 ResumeTask 触发
+failed	terminal	keep	终态不动（FailedTaskTTL 清理）
+cancelled	terminal	keep	用户已取消，重启不得复活

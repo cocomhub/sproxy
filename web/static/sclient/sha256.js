@@ -10,6 +10,21 @@
 // 走了 concatBytes 拼接整文件的路径 → `new ArrayBuffer(total)` RangeError
 // (Array buffer allocation failed)。此处改为 UMD：浏览器挂 sclientSha256（符合 sclient 命名空间），Node 走
 // require 导出，测试可直接引入。算法本体逐字节不变。
+
+// ---- 算法本体（模块级，供工厂返回）----
+// rot / Sha256 不捕获工厂闭包，置于模块级（S7721）。
+
+function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
+
+function Sha256() {
+  this.h = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+  this._buf = [];
+  this._len = 0;
+}
+
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
     module.exports = factory();
@@ -17,8 +32,6 @@
     root.sclientSha256 = factory();
   }
 })(typeof self !== 'undefined' ? self : this, function () {
-  function rot(x, n) { return ((x >>> n) | (x << (32 - n))) >>> 0; }
-
   const K = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
     0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -38,20 +51,11 @@
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ];
 
-  function Sha256() {
-    this.h = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-    ];
-    this._buf = [];
-    this._len = 0;
-  }
-
   Sha256.prototype.update = function(data) {
-    if (!data || !data.length) return this;
+    if (!(data?.length)) return this;
     this._len += data.length * 8;
-    for (let i = 0; i < data.length; i++) {
-      this._buf[this._buf.length] = data[i];
+    for (const byte of data) {
+      this._buf[this._buf.length] = byte;
       if (this._buf.length === 64) {
         this._transform(this._buf);
         this._buf = [];
@@ -67,14 +71,8 @@
     let buf = this._buf.slice();
     buf.push(0x80);
     while (buf.length % 64 !== 56) { buf.push(0x00); }
-    buf.push((hi >>> 24) & 0xff);
-    buf.push((hi >>> 16) & 0xff);
-    buf.push((hi >>> 8) & 0xff);
-    buf.push(hi & 0xff);
-    buf.push((lo >>> 24) & 0xff);
-    buf.push((lo >>> 16) & 0xff);
-    buf.push((lo >>> 8) & 0xff);
-    buf.push(lo & 0xff);
+    buf.push((hi >>> 24) & 0xff, (hi >>> 16) & 0xff, (hi >>> 8) & 0xff, hi & 0xff,
+      (lo >>> 24) & 0xff, (lo >>> 16) & 0xff, (lo >>> 8) & 0xff, lo & 0xff);
 
     for (let di = 0; di < buf.length; di += 64) {
       this._transform(buf.slice(di, di + 64));

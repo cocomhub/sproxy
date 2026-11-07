@@ -224,7 +224,8 @@ func (a *deterministicAllocator) Alloc(mesh, nodeID string) (netip.Addr, error) 
 }
 
 // Release 是 no-op（无状态分配器，无需回收）。
-func (a *deterministicAllocator) Release(mesh, nodeID string) {}
+func (a *deterministicAllocator) Release(mesh, nodeID string) { /* 无状态分配器：无需回收 */
+}
 
 // Subnet 返回分配器使用的虚拟子网。
 func (a *deterministicAllocator) Subnet() netip.Prefix {

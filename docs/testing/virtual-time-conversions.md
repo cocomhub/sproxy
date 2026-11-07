@@ -16,6 +16,7 @@
 | TestMuxFramePingPong（mux） | 0.05s | 0.00s | 气泡：50ms → `synctest.Wait()` |
 | TestStream_Abort_ConcurrentWithPushData（mux） | 0.01s | 0.01s | 气泡：10ms → Wait（窗口构建更快更确定，计时不变因测试体极短） |
 | TestKademliaPersistence_AsyncDebouncedSave（kad） | 0.21s | 0.00s | 气泡：去抖虚拟时钟，`<-time.After(2s)` 推进后单次断言 |
+| TestKademliaPersistence_FlushJoinsInFlightDebounce（kad） | 0.20s+CI可flake | 0.00s | 气泡：join 在途回调回归；`<-time.After(debounce+10ms)` 推进使回调触发，FlushPersist 必须 join（R18 登记：synctest 气泡禁止 T.Parallel） |
 | TestMeshTargetRefresher_SingleFlight（client） | 0.07s | 0.07s | 5ms 轮询 → WaitFor（消竞争窗口；计时不变，主体为真实 HTTP） |
 | TestRateLimiter_RecoversAfterWindow（server） | 0.05s | 0.05s | 5ms 窗口滑动轮询 → WaitForBool（时间由真实限流窗口决定，不变） |
 | TestRateLimiter_UpdateConfig_WindowChange（server） | 0.01s | 0.01s | 同上（2ms → WaitForBool） |
@@ -140,3 +141,107 @@
   / `TestGracefulRestart_NoListenerNoSpawn`：操作包级 `restartListener`
   （`storeRestartListener`/`getRestartListener`），与其它优雅重启用例互斥；函数体含
   `// sproxy:serial:` 标记。
+
+## 2026-09-27 协议盐测试串行登记
+
+- `pkg/tunnel/ecdh_test.go`（TestSetSaltPrefix_Custom/DefaultReset、TestSetProtocolSalts_Apply、
+  TestDeriveProtocolSalts_Deterministic）：**共享全局盐变量**（SetProtocolSalts/SetSaltPrefix 全局副作用），
+  并行会相互污染派生结果——登记不可并发。
+- `cmd/sclient/root_test.go`（TestPersistentPreRun_ProtocolSaltKey_*）：同样因全局盐副作用，不可并行。
+
+## 2026-10-02 PikPak 账号子命令串行登记
+
+- `cmd/sproxy/pikpak_account_cmd_test.go`（TestNewCmdPikpakAccount_Manage /
+  TestNewCmdPikpakAccount_AddDuplicateCrossProcess）：覆盖包级全局 `pikpakSecretsDirOverride`
+  （指向不同临时 secrets 目录），两条用例与本身/其它用包级变量互斥——登记不可并发，
+  函数体含 `// sproxy:serial:` 标记。
+
+## 2026-10-04 PikPak hybrid 测试串行登记
+
+- `pkg/volume/ext/pikpak/hybrid_test.go`：`TestHybridDownload_ParallelPools`（**绝对时序断言**
+  <600ms）并行下受 `-race`/并发负载影响会 flake——登记串行（预算 1；time.Sleep 2 处经
+  sleep 棘轮登记）。
+- `cmd/sproxy/keyframe_register_test.go`（#733 并入，2026-10-05 补登记）：`TestRegisterKeyframeBackend_Unregister`
+  与 `TestRegisterKeyframeBackend_DualRegistration` 写**共享 blocklet provider 注册表**（包级全局）——
+  并行会交叉污染注册状态，登记串行（预算 2）。
+
+## 2026-10-05 全局能力可测试化策略落地（#734 CI 修复）
+
+背景：#734 首次合入时把 30+ 新 pikpak 测试一次性登记串行，棘轮基线被顶到 1810；
+CI 的 `pull_request` merge 树（分支并入 master 后）又带进 master 侧未显式登记的串行
+（keyframe 2 例），slack 被吃光 → `TestSerialRatchet` 红灯（1812 > 1810）。
+
+处置（落实用户 2026-10-05 指示「新测试必须思考是否真的要串行」）：
+- 逐用例分析并行安全性：hybrid_test.go 21 例（自建 httptest + t.TempDir，无全局依赖）、
+  hybrid_register_test.go 2 例、hybrid_resume/scratch_concurrent/probe_boundary/resolver 各例、
+  pikpak_test.go `TestAPI_DeletePermanent`——全部加 `t.Parallel()`；
+- 全局依赖用例改用**本地实例注入**（全局能力可测试化三件套）：`TestHybridDownloader_RegisterPriority`
+  从写全局 `downloader.DefaultRegistry` 改为 `downloader.NewRegistry()` 本地实例；
+  新增 `pikpak.RegisterHybridDownloader(reg, cfg)` 注册入口（生产传全局、测试传本地）；
+- 保留串行仅 2 处：ParallelPools（绝对时序）+ keyframe 2 例（共享 provider 注册表）；
+- 基线归位 1781，与 master 同步（rebase），CI merge 树自洽。
+
+
+<!-- 2026-10-12 封装卷 wrapper 生产装配用例（#772） -->
+
+## 2026-10-12：封装卷 wrapper 生产装配用例（`cmd/sproxy/secret_register_test.go`，串行 +1）
+
+`TestEnclosureWrapper_Secretdata_ProductionAssembly` 钉住「wrapper 类型（`type: secretdata`）+
+`extra.source` 的生产装配路径可用」（wrapper 注册 / 声明解析 / 补装 / 写读往返 / 真值报告）。
+> 历史注：该用例早期夹具写作 `type: enclosure` + `wrapper: secretdata`；`type: enclosure` 已
+> **纯内部化**（不是可写卷类型），夹具随之改为 wrapper 类型声明。
+**不可并行的理由（与既有 `TestRegisterSecretVolumeBackends_Unconditional` 同类）**：
+它必须走**生产注册路径**，因此触及两个进程级单例——① `enclosure` wrapper 注册表（全局，
+`RegisterWrapper` 重复注册 panic，只能进程内注册一次）；② `secretDataSet`（`atomic.Pointer`，
+`setupSecretBackends` 会把**本用例的卷集**存入、收尾再清空）。与同包用例并行时，两者的
+`Store/Load` 会互踩（读到对方的卷集 → 密钥解析到不存在的 secrets 卷），故显式串行。
+注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（总数 1784 → 1785，无新增 slack）。
+
+## 2026-10-13 卷感知工作目录用例（`cmd/sclient/cd_test.go` 5 → 8）
+
+新增 3 个**串行**用例（`TestCd_VolumeURI_SwitchesVolumeAndDir`、`TestCd_LeadingSlashReturnsToLocalVolume`、
+`TestCd_Pwd`）。**不可并行的理由**：`cd` 的工作目录（含所在卷）落在 **XDG 缓存**里，用例必须用
+`setCacheDirForTest`（内部 `t.Setenv("XDG_CACHE_HOME", tmp)` + `xdg.Reload()`）把缓存隔离到临时目录，
+否则会读写**真实用户缓存**；`t.Setenv` 与 `t.Parallel` 互斥（Go 测试框架限制），故显式串行。
+注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（`cmd/sclient/cd_test.go 5 → 8`）。
+
+## 2026-10-20 审计面板筛选 e2e（`web/e2e/audit_export_notify_test_e2e_test.go` 2 → 3）
+
+新增 1 个串行用例 `TestAudit_FilterRows`（S4 审计面板筛选的真浏览器验证：筛选栏渲染 / 输错动作
+收敛为 0 条 / 清除恢复）。**不可并行的理由**：与同文件既有 2 例同因 —— ① Playwright 真浏览器夹具
+（`pageFixture`）每次都要启 chromium；② 用例依赖「**先播种审计事件、后读面板**」的时序，而审计服务是
+进程内共享状态（播种的 `POST /api/notify/test` 与面板读取都落在同一个 `audit.Service`）⇒ 并发会互相
+干扰（读到对方/读到空表）。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`（该文件 2 → 3，
+总数 +1，无其它文件 slack 变化）。
+
+## 串行 Test 登记理由（R14 新增）
+
+| 文件 | 串行数 | 理由 |
+| --- | --- | --- |
+| `pkg/cloud/recovery_queued_test.go` | 4 | 三个用例都直接操作**同一个** `CloudDownloadManager` 的 `m.tasks`/磁盘状态（恢复路径会启动下载 goroutine 并读写共享 map）⇒ 并行会互相污染状态；且恢复语义本身依赖「单进程内唯一一次 RecoverAll」。已用**唯一 URL + 独立 tempdir** 降低耦合，但不满足 `t.Parallel()` 的隔离前提。第 4 个（`TestSubmitAndStart_PersistsSubmitted`）验证「提交时是否把 submitted 落盘」，同样操作共享 manager 状态。 |
+| `test/e2e_restart_cloud_test.go` | 2 | 每个用例都要**构建并启动真实 sproxy 子进程**、占用固定端口与独立存储根，并做 kill -9 / 重启；端口与进程生命周期是全局资源，不能并行。 |
+| `test/e2e_restart_quota_test.go` | 3 | 同上（真实进程 + 固定端口 + 存储根）；其中配额用例还需控制「等待/释放」时序。 |
+| `test/e2e_restart_matrix_test.go` | 2 | 状态矩阵用例：每个子用例都构建/启动真实 sproxy 子进程并独占存储根与端口（全局资源，不可并行）。 |
+| `test/e2e_restart_upload_test.go` | 1 | 分块上传中断用例：真实进程 kill -9 + 同根重启，端口/进程生命周期独占。 |
+| `pkg/audit/prod_hardening_test.go` | 3 | 审计读面/冷段/续号：需构造多段大文件与真实 FileJournal（段文件 O(size) 写盘），无固定等待、收益为零。 |
+| `pkg/cloud/prod_hardening_test.go` | 2 | 孤儿组恢复 / 启动恢复取消：依赖 CloudDownloadManager 内部状态机（含幂等守卫）与共享持久化目录，不可并行。 |
+| `pkg/cloud/prod_hardening_transfer_test.go` | 1 | 转存残骸自清：注入式 FS 状态机（armed/重试）与用例一一对应，不可并行共享。 |
+| `pkg/server/prod_hardening_test.go` | 2 | 归档 checksum / 组归档删除配额：需真实 storage.Root、临时根与 owner 配额池（共享 `h.globalPool`），用例级独占。 |
+| `pkg/volume/secretdata/prod_hardening_test.go` | 4 | 卷锁/在途写并发/目录 meta 仲裁/Eof 校验：均在**同一时间轴**上构造真实卷状态（死锁用例带 10s 超时断言、仲裁用例需真实 mtime 次序），并行会互相干扰计时与全局 slog 输出。 |
+| `cmd/sproxy/root_extra_test.go` | 5 | 进程级装配/启动用例（注册全局后端类型、信号停机等），共享包级全局状态，不可并行。 |
+| `cmd/sclient/share_test.go` | 3 | CLI 集成（httptest 捕获 POST body）：需独占测试服务器与 cobra 命令状态，不可并行。 |
+| `cmd/sclient/trash_test.go` | 6 | CLI 集成（httptest 捕获请求 URL）：同上，且断言「请求路径参数」需串行采集。 |
+
+## 2026-10-27 云下载 meta_extra e2e（`web/e2e/cloud_audit_e2e_test.go` 4 → 5）
+
+新增 1 个串行用例 `TestCloudDownload_MetaExtra`（云端下载预览填自定义元数据 JSON → 确认提交 →
+断言请求体 meta_extra 与输入一致）。**不可并行的理由**：与同文件既有 4 例同因 —— Playwright 真浏览器
+夹具（`pageFixture`）每次都要启 chromium 且依赖「先播种 → 后读面板/任务」的进程内共享时序（cloud
+任务服务为进程内共享状态），并发会互相干扰。注册表已同步登记 `internal/archcheck/serial_budgets.tsv`
+（该文件 4 → 5，总数 +1）。
+
+## cmd/sclient/cd_scope_test.go（+3 串行，2026-11-04）
+
+漫游目录按 context 隔离的用例。**必须串行**：用例通过包级 `resolvedContext` 指定「当前
+context」并改写 `XDG_CACHE_HOME`（`setCacheDirForTest` 用 `t.Setenv`），两者都是进程级
+可变状态，并行会互相污染。已按 R18 登记 `serial_budgets.tsv`（3 条）。

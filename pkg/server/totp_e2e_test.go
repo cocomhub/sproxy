@@ -132,9 +132,9 @@ func totpCodeAt(t *testing.T, base32Secret string, now time.Time) string {
 // wrongTotpCode 返回一个与当前时刻真实 code 不同的 6 位码（排除极小概率相同）。
 func wrongTotpCode(t *testing.T, base32Secret string) string {
 	t.Helper()
-	real := totpCodeNow(t, base32Secret)
+	realCode := totpCodeNow(t, base32Secret)
 	for _, c := range []string{"000000", "111111", "222222"} {
-		if c != real {
+		if c != realCode {
 			return c
 		}
 	}
@@ -160,7 +160,7 @@ func doRegisterToURL(t *testing.T, url, owner string) (int, registerRespH) {
 	if owner != "" {
 		body = `{"owner":"` + owner + `"}`
 	}
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(body))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("register POST: %v", err)
 	}
@@ -178,7 +178,7 @@ func registerHTTP(url, owner string) (int, registerRespH, error) {
 	if owner != "" {
 		body = `{"owner":"` + owner + `"}`
 	}
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(body))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(body))
 	if err != nil {
 		return 0, registerRespH{}, err
 	}
@@ -297,7 +297,7 @@ func TestTOTPLogin_RegisterPublicExempt_BadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(headerContentType, contentTypeJSON)
 	signRequestEntry(req, "ak-zz-totpwrong00000000", testEntryID("ak-zz-totpwrong00000000"), strings.Repeat("ab", 32))
 	resp, err := testHTTPClient(t).Do(req)
 	if err != nil {
@@ -390,9 +390,19 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
 
 	const n = 2 // 并发双注册（D2）：恰一 pending；>5 并发会误触 5/min 注册限频 → 429
-	results := make([]registerRespH, n)
-	errs := make([]error, n)
-	var ok200, conflicts atomic.Int64
+	results, errs, ok200, conflicts := totpForkConcurrentRegisters(url, n)
+
+	// pending 语义：并发双注册 → 恰一个 200（pending 成功），另一个 409（单槽拒绝）；
+	// 注册本身不授 admin，ring 无凭据。
+	assertTotpFirstAdminOutcome(t, results, errs, ok200, conflicts, ring.Len())
+}
+
+// totpForkConcurrentRegisters 并发发起 n 个注册并等待全部完成，返回各结果/错误与 200/409 计数。
+func totpForkConcurrentRegisters(url string, n int) (results []registerRespH, errs []error, ok200, conflicts *atomic.Int64) {
+	results = make([]registerRespH, n)
+	errs = make([]error, n)
+	ok200 = new(atomic.Int64)
+	conflicts = new(atomic.Int64)
 	var wg sync.WaitGroup
 	for i := range n {
 		wg.Add(1)
@@ -420,8 +430,13 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	return results, errs, ok200, conflicts
+}
 
-	for i := range n {
+// assertTotpFirstAdminOutcome 断言并发双注册的 pending 语义：恰一 200 + 恰一 409，ring 为空。
+func assertTotpFirstAdminOutcome(t *testing.T, results []registerRespH, errs []error, ok200, conflicts *atomic.Int64, ringLen int) {
+	t.Helper()
+	for i := range results {
 		if errs[i] != nil {
 			t.Fatalf("并发注册 #%d: %v", i, errs[i])
 		}
@@ -429,16 +444,14 @@ func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
 			t.Fatalf("pending 注册不应授 admin（并发）")
 		}
 	}
-	// pending 语义：并发双注册 → 恰一个 200（pending 成功），另一个 409（单槽拒绝）；
-	// 注册本身不授 admin，ring 无凭据。
 	if ok200.Load() != 1 {
 		t.Fatalf("并发注册成功数 = %d, want 1（首 admin 单槽）", ok200.Load())
 	}
 	if conflicts.Load() != 1 {
 		t.Fatalf("并发注册拒绝数 = %d, want 1（单槽 409）", conflicts.Load())
 	}
-	if ring.Len() != 0 {
-		t.Fatalf("pending 阶段 ring 应为空, len=%d", ring.Len())
+	if ringLen != 0 {
+		t.Fatalf("pending 阶段 ring 应为空, len=%d", ringLen)
 	}
 }
 
@@ -567,7 +580,7 @@ func TestSessionExpiry_Request401(t *testing.T) {
 func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	url, _, _ := newRealTOTPServer(t, func(c *Config) { c.Registration.ForceTOTP = false }, nil, nil)
 	// 简单模式注册：响应含 sk/skey_id，无 base32_secret/TOTPSecret。
-	resp, err := http.Post(url+"/api/credentials/register", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("简单模式注册 POST: %v", err)
 	}
@@ -583,8 +596,8 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 		t.Fatalf("简单注册响应缺 AK")
 	}
 	// 该 AK 无 TOTPSecret → 完整登录（有效 nonce + 任意 code）→ 404，且响应体为
-	// 固定文案 `{"error":"not found"}`（M16；handler register_handler.go 887 行唯一
-	// 404 分支 sendJSONResponse(w, map[string]any{"error": "not found"}, 404)）。
+	// 固定文案 `{"error":msgNotFound}`（M16；handler register_handler.go 887 行唯一
+	// 404 分支 sendJSONResponse(w, map[string]any{"error": msgNotFound}, 404)）。
 	noAuth := newNoCredentialTOTPClient(t, url)
 	nonce, err := noAuth.RequestTOTPNonce(context.Background())
 	if err != nil {
@@ -604,7 +617,7 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 		t.Fatalf("RequestTOTPNonce(#2): %v", err)
 	}
 	loginBody, _ := json.Marshal(map[string]any{"ak": simple.AK, "nonce": nonce2.Nonce, "code": "000000"})
-	lresp, lerr := http.Post(url+"/api/credentials/login", "application/json", strings.NewReader(string(loginBody)))
+	lresp, lerr := http.Post(url+"/api/credentials/login", contentTypeJSON, strings.NewReader(string(loginBody)))
 	if lerr != nil {
 		t.Fatalf("login POST: %v", lerr)
 	}
@@ -619,8 +632,8 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 	if jerr := json.Unmarshal(ldata, &ldec); jerr != nil {
 		t.Fatalf("404 响应体非 JSON: %v (%s)", jerr, ldata)
 	}
-	if ldec.Error != "not found" {
-		t.Errorf("404 响应体 error = %q, want %q（M16 固定文案）", ldec.Error, "not found")
+	if ldec.Error != msgNotFound {
+		t.Errorf("404 响应体 error = %q, want %q（M16 固定文案）", ldec.Error, msgNotFound)
 	}
 }
 

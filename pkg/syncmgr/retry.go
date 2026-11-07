@@ -67,27 +67,7 @@ func (m *Manager) RetryFiles(ctx context.Context, id, owner string, files []stri
 	}
 
 	// 决定重试清单：空 files = 全部失败；否则只取失败清单内的（其余跳过）。
-	retryPaths := make([]string, 0, len(failed))
-	var skipped []string
-	if len(files) == 0 {
-		for p := range failed {
-			retryPaths = append(retryPaths, p)
-		}
-		sort.Strings(retryPaths)
-	} else {
-		seen := make(map[string]bool, len(files))
-		for _, f := range files {
-			if seen[f] {
-				continue // 去重
-			}
-			seen[f] = true
-			if _, ok := failed[f]; ok {
-				retryPaths = append(retryPaths, f)
-			} else {
-				skipped = append(skipped, f)
-			}
-		}
-	}
+	retryPaths, skipped := buildRetryPlan(failed, files)
 	if len(retryPaths) == 0 {
 		return &RetryResult{Skipped: skipped}, nil
 	}
@@ -119,11 +99,42 @@ func (m *Manager) RetryFiles(ctx context.Context, id, owner string, files []stri
 	// 回写原任务 Results：子任务结果含该 path → 更新条目；否则保留原条目（兜底 retried）。
 	m.backfillRetryResults(task.ID, final)
 
-	retried := make([]RetryItem, 0, len(retryPaths))
+	retried := buildRetriedItems(retryPaths, final)
+	return &RetryResult{Retried: retried, Skipped: skipped}, nil
+}
+
+// buildRetryPlan 决定重试清单：空 files = 全部失败；否则只取失败清单内的（其余幂等跳过、去重）。
+func buildRetryPlan(failed map[string]SyncFileResult, files []string) (retryPaths []string, skipped []string) {
+	retryPaths = make([]string, 0, len(failed))
+	if len(files) == 0 {
+		for p := range failed {
+			retryPaths = append(retryPaths, p)
+		}
+		sort.Strings(retryPaths)
+		return retryPaths, nil
+	}
+	seen := make(map[string]bool, len(files))
+	for _, f := range files {
+		if seen[f] {
+			continue // 去重
+		}
+		seen[f] = true
+		if _, ok := failed[f]; ok {
+			retryPaths = append(retryPaths, f)
+		} else {
+			skipped = append(skipped, f)
+		}
+	}
+	return retryPaths, skipped
+}
+
+// buildRetriedItems 组合重试明细：子任务结果含该 path → 回填其动作/错误；否则兜底 retried。
+func buildRetriedItems(retryPaths []string, final *SyncTask) []RetryItem {
 	byPath := make(map[string]SyncFileResult, len(final.Results))
 	for _, r := range final.Results {
 		byPath[r.Path] = r
 	}
+	retried := make([]RetryItem, 0, len(retryPaths))
 	for _, p := range retryPaths {
 		if r, ok := byPath[p]; ok {
 			retried = append(retried, RetryItem{Path: p, Action: r.Action, Error: r.Error})
@@ -131,7 +142,7 @@ func (m *Manager) RetryFiles(ctx context.Context, id, owner string, files []stri
 			retried = append(retried, RetryItem{Path: p, Action: resultActionRetried})
 		}
 	}
-	return &RetryResult{Retried: retried, Skipped: skipped}, nil
+	return retried
 }
 
 // waitTaskTerminal 轮询任务直到终态（completed/failed/cancelled）或有界超时/ctx 取消。

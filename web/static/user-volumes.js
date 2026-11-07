@@ -69,7 +69,13 @@
   // 空列表 → 空字符串（调用方保留静态默认下拉）。
   function backendOptionsHtml(types) {
     const t = types || [];
-    return t.map(function (x) { return '<option value="' + escHtml(x) + '">' + escHtml(x) + '</option>'; }).join('');
+    return t.map(function (x) {
+      // V4 适配（Task 5 破坏性变更）：/api/backends 现返回 {type, category, fields}
+      // 对象数组（此前为 []string）——对对象取 x.type；兼容字符串形态（默认回落与
+      // 历史调用零回归），保证下拉 value/text 恒为类型字符串而非 "[object Object]"。
+      const name = (x && typeof x === 'object' && !Array.isArray(x)) ? (x.type || '') : x;
+      return '<option value="' + escHtml(name) + '">' + escHtml(name) + '</option>';
+    }).join('');
   }
 
   function createUserVolumeFormHtml(types) {
@@ -78,10 +84,10 @@
     return '<div style="margin-bottom:12px;padding:12px;border:1px solid var(--border-color);border-radius:6px;">'
       + '<div style="font-weight:600;margin-bottom:8px;">创建用户卷</div>'
       + '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">'
-      + '<input type="text" id="uv-name" placeholder="卷名（唯一）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, #fff);color:var(--text-primary);" />'
-      + '<select id="uv-type" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, #fff);color:var(--text-primary);">' + opts + '</select>'
-      + '<input type="text" id="uv-capacity" placeholder="容量（如 100GiB，留空不限）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, #fff);color:var(--text-primary);" />'
-      + '<input type="text" id="uv-extra" placeholder="extra JSON（如 {&quot;bduss&quot;:&quot;...&quot;}）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, #fff);color:var(--text-primary);flex:1 1 220px;" />'
+      + '<input type="text" id="uv-name" placeholder="卷名（唯一）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, var(--bg-container));color:var(--text-primary);" />'
+      + '<select id="uv-type" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, var(--bg-container));color:var(--text-primary);">' + opts + '</select>'
+      + '<input type="text" id="uv-capacity" placeholder="容量（如 100GiB，留空不限）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, var(--bg-container));color:var(--text-primary);" />'
+      + '<input type="text" id="uv-extra" placeholder="extra JSON（如 {&quot;bduss&quot;:&quot;...&quot;}）" style="padding:6px 8px;border:1px solid var(--border-color);border-radius:4px;background:var(--bg-input, var(--bg-container));color:var(--text-primary);flex:1 1 220px;" />'
       + '<button type="button" id="uv-create-btn" class="btn btn-primary" style="padding:6px 12px;">创建</button>'
       + '</div>'
       + '<div id="uv-create-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'

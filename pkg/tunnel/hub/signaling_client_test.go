@@ -69,16 +69,11 @@ func TestHubSignaler_OfferAnswerRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	// B 先开始等 offer（listener）
-	type listenResult struct {
-		from string
-		sdp  string
-		err  error
-	}
-	listenDone := make(chan listenResult, 1)
+	// B 先开始等 offer（listener）。
+	listenDone := make(chan signalRoundResult, 1)
 	go func() {
 		from, sdp, err := sigB.WaitOffer(ctx)
-		listenDone <- listenResult{from: from, sdp: sdp, err: err}
+		listenDone <- signalRoundResult{from: from, sdp: sdp, err: err}
 	}()
 
 	// 稍后 A 发 offer
@@ -87,8 +82,32 @@ func TestHubSignaler_OfferAnswerRoundTrip(t *testing.T) {
 	if err := sigA.SendOffer("node-B", "offer-sdp-123"); err != nil {
 		t.Fatalf("SendOffer: %v", err)
 	}
+	assertOfferReturnSignal(t, ctx, listenDone)
 
-	// B 应等到 offer，from == A
+	// B 回 answer 给 A；A 侧 goroutine 通过 channel 回传断言（I50：
+	// 避免 goroutine 内 t.Errorf 与主 goroutine 提前 t.Fatal 竞态）。
+	answerDone := make(chan signalRoundResult, 1)
+	go func() {
+		from, sdp, err := sigA.WaitAnswer(ctx)
+		answerDone <- signalRoundResult{from: from, sdp: sdp, err: err}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := sigB.SendAnswer("node-A", "answer-sdp-456"); err != nil {
+		t.Fatalf("SendAnswer: %v", err)
+	}
+	assertAnswerReturnSignal(t, ctx, answerDone)
+}
+
+// signalRoundResult 承载一次信令往返等待的结果（from/sdp/err，跨 goroutine 回传）。
+type signalRoundResult struct {
+	from string
+	sdp  string
+	err  error
+}
+
+// assertOfferReturnSignal 校验 listener 等到 offer 且 from/sdp 正确（C1 死锁回归核心）。
+func assertOfferReturnSignal(t *testing.T, ctx context.Context, listenDone <-chan signalRoundResult) {
+	t.Helper()
 	select {
 	case r := <-listenDone:
 		if r.err != nil {
@@ -103,23 +122,11 @@ func TestHubSignaler_OfferAnswerRoundTrip(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("WaitOffer 未在超时前返回（C1 死锁回归）")
 	}
+}
 
-	// B 回 answer 给 A；A 侧 goroutine 通过 channel 回传断言（I50：
-	// 避免 goroutine 内 t.Errorf 与主 goroutine 提前 t.Fatal 竞态）。
-	type answerResult struct {
-		from string
-		sdp  string
-		err  error
-	}
-	answerDone := make(chan answerResult, 1)
-	go func() {
-		from, sdp, err := sigA.WaitAnswer(ctx)
-		answerDone <- answerResult{from: from, sdp: sdp, err: err}
-	}()
-	time.Sleep(100 * time.Millisecond)
-	if err := sigB.SendAnswer("node-A", "answer-sdp-456"); err != nil {
-		t.Fatalf("SendAnswer: %v", err)
-	}
+// assertAnswerReturnSignal 校验 A 等到 answer 且 from==node-B、sdp 匹配。
+func assertAnswerReturnSignal(t *testing.T, ctx context.Context, answerDone <-chan signalRoundResult) {
+	t.Helper()
 	select {
 	case r := <-answerDone:
 		if r.err != nil {

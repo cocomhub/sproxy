@@ -13,6 +13,7 @@ package files
 // `SaveVersion` 接口方法，也不提供 `WithSaveVersion` Option。
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -110,7 +111,7 @@ func VersionIDTime(versionID int64, fallback time.Time) time.Time {
 //
 // 导出理由：本包 SaveVersionBeforeOverwrite（供装配层上传覆盖写调用）与装配层的版本恢复
 // （恢复前备份）都调它；版本存储在本包内，故不再是接缝项。
-func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string) (int64, error) {
+func (s *Service) SaveVersion(ctx context.Context, userRel string, tnt *storage.Tenant, owner string) (int64, error) {
 	if tnt == nil || tnt.Root() == nil {
 		return 0, fmt.Errorf("保存版本: 租户不可用")
 	}
@@ -126,6 +127,15 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 		return 0, fmt.Errorf("检查源文件失败: %w", statErr)
 	}
 	srcSize := srcInfo.Size()
+	// 记账口径（与写路径 `settleSize` **同源**）：**卷自报实测足迹优先**——secretdata 的 meta
+	// blob pad 与 XOR parity 无法由 Stat/公式推出（其 Stat 只含内容容器）。能力缺失 ⇒ 回落
+	// Stat 尺寸（明文/加密本地两口径本就一致）。
+	// 版本是源文件的**同内容拷贝**（同卷同内容 ⇒ 同足迹），故预留直接取源文件足迹。
+	volName := volumeNameForTenant(s.rt.volSet(), tnt)
+	reserveSize := srcSize
+	if n, hasFoot := s.physChargeFor(volName, owner, userRel); hasFoot {
+		reserveSize = n
+	}
 
 	versionID := newVersionID()
 	verDir, ok := tnt.FeatureRel("version", userRel)
@@ -135,7 +145,6 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	if err := root.MkdirAll(verDir, 0o755); err != nil {
 		return 0, fmt.Errorf("创建版本目录失败: %w", err)
 	}
-
 	verRel := verDir + "/" + strconv.FormatInt(versionID, 10)
 
 	// P5 版本桶配额（双账本 reserve-then-commit，AD-7）：写版本文件前在 owner 全局 version 桶
@@ -144,26 +153,52 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	// 拒绝保存版本（调用方语义与单卷 owner 全局 version Scope 满一致：覆盖写 best-effort 跳过
 	// 版本、恢复路径 500 中止）——卷容量对版本字节由预留封顶（T6c 安全②：不再事后 Adjust
 	// fail-open，防借版本反复写把卷堆满）。
+	// srcSize 来自 Stat（加密卷上已是**物理**长度），而版本文件是源文件的同内容拷贝 ⇒ 物理大小相同
+	// ⇒ 预留直接用 srcSize（不再折算）；提交侧 written 是**明文**字节 ⇒ 由 commitVersionQuota 折算。
+	scopeRes, poolRes, release, err := s.reserveVersionQuota(ctx, owner, tnt, reserveSize)
+	if err != nil {
+		return 0, err
+	}
+	written, err := s.copyVersionFile(root, fullRel, verRel, userRel, owner, release)
+	if err != nil {
+		return 0, err
+	}
+
+	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+	// 提交量按**与写入侧同源**的口径取（版本文件自身路径的卷自报足迹优先）。
+	commitVersionQuota(scopeRes, poolRes, s.versionCommitCharge(volName, owner, verRel, root, written))
+
+	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
+	s.cleanupOldVersions(userRel, tnt, owner)
+
+	s.rt.logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
+	return versionID, nil
+}
+
+// reserveVersionQuota 在 version 桶 Scope 与卷容量池**同时预留**版本字节（双账本，
+// reserve-then-commit，AD-7）。任一侧配额不足即释放已预留的另一侧并返回错误。返回
+// release 供调用方在失败/放弃时双 Release。
+func (s *Service) reserveVersionQuota(ctx context.Context, owner string, tnt *storage.Tenant, srcSize int64) (*quota.Reservation, *quota.Reservation, func(), error) {
 	pool := volumePoolForTenant(s.rt.volSet(), tnt)
 	var scopeRes, poolRes *quota.Reservation
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
-		rr, reserveErr := scope.TryReserve(srcSize)
+		rr, reserveErr := scope.WaitReserve(ctx, srcSize, s.rt.waitTimeout())
 		if reserveErr != nil {
-			return 0, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
+			return nil, nil, nil, fmt.Errorf("保存版本: 存储配额不足: %w", reserveErr)
 		}
 		scopeRes = rr
 	}
 	if pool != nil {
-		rr, reserveErr := pool.TryReserve(srcSize)
+		rr, reserveErr := pool.WaitReserve(ctx, srcSize, s.rt.waitTimeout())
 		if reserveErr != nil {
 			if scopeRes != nil {
 				scopeRes.Release()
 			}
-			return 0, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
+			return nil, nil, nil, fmt.Errorf("保存版本: 卷容量不足: %w", reserveErr)
 		}
 		poolRes = rr
 	}
-	releaseRes := func() {
+	release := func() {
 		if scopeRes != nil {
 			scopeRes.Release()
 		}
@@ -171,17 +206,25 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 			poolRes.Release()
 		}
 	}
+	return scopeRes, poolRes, release, nil
+}
 
-	src, err := root.Open(fullRel)
+// copyVersionFile 复制源文件到版本文件（O_EXCL 防覆盖）并流式计算 SHA-256，写入
+// checksumStore 后 fsync。失败时删除半成品版本文件并经 release 释放预留配额。
+// 保持原顺序：复制 → checksum 记录 → fsync（崩溃时版本不丢，checksum 先行）。
+func (s *Service) copyVersionFile(root *storage.Root, fullRel, verRel, userRel, owner string, release func()) (int64, error) {
+	// 用户可见语义：加密卷源读**明文**、版本目标写**透明加密**（raw Open/OpenFile 会把
+	// 密文版本存进 version 桶，恢复回原 rel 时又写一次明文 ⇒ 版本内容不可用/错位）。
+	src, err := root.OpenDecrypted(fullRel)
 	if err != nil {
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("打开源文件失败: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := root.OpenFile(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	dst, err := root.OpenFileEncrypted(verRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("创建版本文件失败: %w", err)
 	}
 	defer dst.Close()
@@ -196,41 +239,58 @@ func (s *Service) SaveVersion(userRel string, tnt *storage.Tenant, owner string)
 	written, err := io.Copy(multiWriter, src)
 	if err != nil {
 		_ = root.Remove(verRel)
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("复制版本文件失败: %w", err)
 	}
 	checksum := hex.EncodeToString(hasher.Sum(nil))
 
 	// 写入 checksumStore（per-tenant store，key = version/<userRel>/<id>，无 owner 前缀）
-	csKey := verRel
 	if cs := s.rt.checksumStore(owner); cs != nil {
-		cs.Set(csKey, checksum)
+		cs.Set(verRel, checksum)
 	} else {
 		s.rt.logger().Warn("per-tenant checksum store 不可用，跳过版本 checksum 记录", "file_name", userRel)
 	}
 
 	// 显式 fsync 版本文件，确保崩溃时不会丢失已保存的版本
-	if err := dst.Sync(); err != nil {
+	// （encWriteCloser 已补 Sync：透传底层文件 fsync）。
+	if syncer, ok := dst.(interface{ Sync() error }); ok && syncer.Sync() != nil {
 		_ = root.Remove(verRel)
-		releaseRes()
+		release()
 		return 0, fmt.Errorf("同步版本文件失败: %w", err)
 	}
+	return written, nil
+}
 
-	// P5 配额对账：双 Commit(actual)（多预留部分自动归还，预留转 committed）。
+// commitVersionQuota 写盘成功后按实际字节双 Commit（多预留部分自动归还，预留转 committed）。
+// charge 由调用方按**与写路径同源**的口径算好（`Service.versionCommitCharge`：卷自报足迹优先、
+// 公式回落）——本函数**不再折算**：折算只允许发生在单一入口，否则「谁折算了」不可知 ⇒
+// 双重折算（过度释放/幽灵占用）或漏折算（配额虚低 ⇒ 超限写入通过）都是静默错。
+func commitVersionQuota(scopeRes, poolRes *quota.Reservation, charge int64) {
 	if scopeRes != nil {
-		scopeRes.Commit(written)
-		scopeRes = nil
+		scopeRes.Commit(charge)
 	}
 	if poolRes != nil {
-		poolRes.Commit(written)
-		poolRes = nil
+		poolRes.Commit(charge)
 	}
+}
 
-	// 清理超出上限的旧版本（删除的旧版本按文件大小释放 version 桶 Scope + 卷容量池）。
-	s.cleanupOldVersions(userRel, tnt, owner)
+// versionCommitCharge 返回版本文件提交时应记账的字节（口径与写路径 `settleSize` 同源）：
+// ① 卷自报实测足迹（版本文件**自身路径**——与预留同源、与释放同源）；② 回落公式折算。
+func (s *Service) versionCommitCharge(volName, owner, remotePath string, root *storage.Root, written int64) int64 {
+	if n, ok := s.physChargeFor(volName, owner, remotePath); ok {
+		return n
+	}
+	return physicalCharge(root, written)
+}
 
-	s.rt.logger().Info("文件版本已保存", "file_name", userRel, "version_id", versionID)
-	return versionID, nil
+// ReleaseChargeFor 返回对象在**释放时**应归还的记账字节：卷自报**实测足迹**优先（与写入/结算
+// `settleSize` 同源），能力缺失/对象不可测 ⇒ 回落 fallback。
+//
+// **装配层必须在删除/改名之前调用**（对象存在 ⇒ 足迹可测）——否则对 `footprint ≠ 公式` 的卷
+// （secretdata 的 parity + meta pad）会**少释放** ⇒ 幽灵占用/假 507（独立复审「释放≠结算」类
+// 根治，2026-10-18：pkg/server 的版本删除/回收清理此前直接用 `root.Stat` 尺寸）。
+func (s *Service) ReleaseChargeFor(tnt *storage.Tenant, owner, rel string, fallback int64) int64 {
+	return s.releaseChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, rel, fallback)
 }
 
 // ReleaseVersionUsage 释放 version 桶 Scope 中已确认占用的版本文件字节（P5）。
@@ -241,6 +301,8 @@ func (s *Service) ReleaseVersionUsage(tnt *storage.Tenant, owner string, size in
 	if size <= 0 {
 		return
 	}
+	// size 由调用方从版本文件 Stat 取得（加密卷上已是**物理**长度）⇒ 与写入侧物理口径一致，
+	// **不再折算**（折算会双重计数）。
 	if scope := s.rt.quotaScope(owner, "version"); scope != nil {
 		scope.ReleaseUsage(size)
 	}
@@ -270,59 +332,79 @@ func (s *Service) cleanupOldVersions(userRel string, tnt *storage.Tenant, owner 
 	if !ok {
 		return
 	}
-	// 边界（本文件唯一不经 os.Root 的位置之一）：Abs 派生绝对路径后由 os.ReadDir/Stat 直接
-	// 访问，不再受 os.Root 的符号链接防护。入参 verDir 由 tnt.FeatureRel 派生（非攻击者可控），
-	// 故当前无可利用面；**但若版本目录内出现符号链接**，此处即可越出租户根——后人若要把
-	// 版本目录交给外部输入，必须先改回经 root 的读写。
-	abs, ok := root.Abs(verDir)
+	entries, ok := s.readVersionDirEntries(root, verDir)
 	if !ok {
-		return
-	}
-	entries, err := os.ReadDir(abs)
-	if err != nil {
 		return
 	}
 
 	// 按文件名（版本 ID 为单调递增数值）排序，删除最旧的
 	// 使用 ParseInt 解析为 int64 后做数值比较，消除字符串字典序与数值序不一致的隐患。
 	// 使用 SliceStable 保持相等元素的原始顺序，避免排序不稳定带来的不确定性。
-	sort.SliceStable(entries, func(i, j int) bool {
-		vi, erri := strconv.ParseInt(entries[i].Name(), 10, 64)
-		vj, errj := strconv.ParseInt(entries[j].Name(), 10, 64)
-		if erri != nil && errj != nil {
-			return false
-		}
-		if erri != nil {
-			return false
-		}
-		if errj != nil {
-			return true
-		}
-		return vi < vj
-	})
+	sort.SliceStable(entries, func(i, j int) bool { return versionEntryIDLess(entries[i].Name(), entries[j].Name()) })
 
 	// 第一维：保留期清理（retention>0 时启用）。版本 ID = 毫秒时间戳×1000+随机后缀，
 	// VersionIDTime 还原创建时间；早于 cutoff 的视为过期删除。
 	// 非正/巨值（历史回绕遗留）由 VersionIDTime 回落 fallback（零值）——早于任何 cutoff，
 	// 落入删除集合（损坏数据不占保留名额，与 CollectVersionEntries 的过滤语义互补）。
 	if retention > 0 {
-		cutoff := time.Now().Add(-retention)
-		kept := entries[:0]
-		for _, e := range entries {
-			vid, valid := parseVersionID(e.Name())
-			if !valid || VersionIDTime(vid, time.Time{}).Before(cutoff) {
-				s.removeVersionEntry(verDir, root, e.Name(), tnt, owner)
-				continue
-			}
-			kept = append(kept, e)
-		}
-		entries = kept
+		entries = s.cleanupVersionsByRetention(entries, verDir, root, tnt, owner, retention)
 		if len(entries) == 0 {
 			return
 		}
 	}
 
 	// 第二维：上限截断（原有逻辑）。entries 已按 ID 升序，删除最旧的多余部分。
+	s.truncateVersionsByMax(entries, verDir, root, tnt, owner, maxVersions)
+}
+
+// readVersionDirEntries 读取版本目录项（边界说明见 cleanupOldVersions：Abs 派生后由
+// os.ReadDir 直接访问，不经 os.Root 防护；verDir 由租户派生，非攻击者可控）。
+func (s *Service) readVersionDirEntries(root *storage.Root, verDir string) ([]os.DirEntry, bool) {
+	abs, ok := root.Abs(verDir)
+	if !ok {
+		return nil, false
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, false
+	}
+	return entries, true
+}
+
+// versionEntryIDLess 按版本 ID 数值序比较两个目录项名（ParseInt 失败项排后）。
+func versionEntryIDLess(a, b string) bool {
+	vi, erri := strconv.ParseInt(a, 10, 64)
+	vj, errj := strconv.ParseInt(b, 10, 64)
+	if erri != nil && errj != nil {
+		return false
+	}
+	if erri != nil {
+		return false
+	}
+	if errj != nil {
+		return true
+	}
+	return vi < vj
+}
+
+// cleanupVersionsByRetention 删除任一 hint 目录项（非正/巨值或早于 cutoff 的过期版本），
+// 返回剩余条目；损坏数据不占保留名额（与 CollectVersionEntries 过滤语义互补）。
+func (s *Service) cleanupVersionsByRetention(entries []os.DirEntry, verDir string, root *storage.Root, tnt *storage.Tenant, owner string, retention time.Duration) []os.DirEntry {
+	cutoff := time.Now().Add(-retention)
+	kept := entries[:0]
+	for _, e := range entries {
+		vid, valid := parseVersionID(e.Name())
+		if !valid || VersionIDTime(vid, time.Time{}).Before(cutoff) {
+			s.removeVersionEntry(verDir, root, e.Name(), tnt, owner)
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
+}
+
+// truncateVersionsByMax 删除超出 maxVersions 的最旧版本（entries 已按 ID 升序）。
+func (s *Service) truncateVersionsByMax(entries []os.DirEntry, verDir string, root *storage.Root, tnt *storage.Tenant, owner string, maxVersions int) {
 	if maxVersions > 0 && len(entries) > maxVersions {
 		excess := len(entries) - maxVersions
 		for i := range excess {
@@ -338,6 +420,12 @@ func (s *Service) removeVersionEntry(verDir string, root *storage.Root, name str
 	var delSize int64
 	if info, sErr := root.Stat(delRel); sErr == nil {
 		delSize = info.Size()
+	}
+	// 释放口径必须与**提交同源**（见 versionCommitCharge）：卷自报实测足迹优先——否则
+	// secretdata 卷提交按足迹、释放按 Stat/公式 ⇒ 每次版本回收都泄漏 (足迹 − 公式) 的幽灵占用。
+	// 仍在 `root.Remove` **之前**取（对象存在 ⇒ 足迹可测）。
+	if n, ok := s.physChargeFor(volumeNameForTenant(s.rt.volSet(), tnt), owner, delRel); ok {
+		delSize = n
 	}
 	if err := root.Remove(delRel); err != nil {
 		s.rt.logger().Warn("删除旧版本文件失败", "path", delRel, "error", err)
@@ -468,40 +556,49 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 	var out []VersionEntry
 	seen := make(map[int64]bool)
 	for _, loc := range s.versionDirLocations(owner, remotePath) {
-		verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
-		if !ok {
-			continue
-		}
-		// 边界：同 cleanupOldVersions——Abs 派生后由 os.ReadDir 直接访问，不经 os.Root 的符号
-		// 链接防护；verDir 由租户句柄派生（非攻击者可控），故当前无可利用面。
-		abs, ok := loc.Tenant.Root().Abs(verDir)
-		if !ok {
-			continue
-		}
-		dirEntries, err := os.ReadDir(abs)
-		if os.IsNotExist(err) {
-			continue // 目录不存在 → 空目录（容忍「Stat 之后被删」竞态；VolSet 未装配旧装配 Get 不退化 500）
-		}
+		entries, err := collectVolumeVersionEntries(loc, remotePath, seen)
 		if err != nil {
-			return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.VolumeName, err)
+			return nil, err
 		}
-		for _, e := range dirEntries {
-			// 与操作侧共用 parseVersionID：非十进制或 **<= 0** 的目录项是无效/损坏数据
-			// （version > 0 是领域不变量），两侧**过滤器一致**（同一判据 ⇒ 对同一 id，"是否被
-			// 承认"两侧同判）。注意这不等于"列出 ⇔ 可操作"：**对写侧产出的规范名**两者精确
-			// 一致，对盘上被外部篡改的**非规范名**（`+5`/`007`）本列表仍按其解析出的 id 报告，
-			// 而操作侧只按生成值定位（取舍说明见 FindVersionFile 文档）。
-			versionID, ok := parseVersionID(e.Name())
-			if !ok || seen[versionID] {
-				continue
-			}
-			info, ierr := e.Info()
-			if ierr != nil {
-				continue
-			}
-			seen[versionID] = true
-			out = append(out, VersionEntry{VersionID: versionID, Name: e.Name(), Info: info})
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
+// collectVolumeVersionEntries 读取单个卷 version/<remotePath> 目录的全部有效条目
+// （parseVersionID 过滤 + seen 去重；同一 version id 重复时首次命中胜出）。目录不存在
+// （IsNotExist，路径被并发删除/从不存在的探查残留）→ 空；其它错误（权限/IO）→ 返回错误
+// （调用方 500 fail-closed，不把「读不到」当「无版本」静默给空列表）。
+func collectVolumeVersionEntries(loc *VersionLocation, remotePath string, seen map[int64]bool) ([]VersionEntry, error) {
+	verDir, ok := loc.Tenant.FeatureRel("version", remotePath)
+	if !ok {
+		return nil, nil
+	}
+	// 边界：同 cleanupOldVersions——Abs 派生后由 os.ReadDir 直接访问，不经 os.Root 的符号
+	// 链接防护；verDir 由租户句柄派生（非攻击者可控），故当前无可利用面。
+	abs, ok := loc.Tenant.Root().Abs(verDir)
+	if !ok {
+		return nil, nil
+	}
+	dirEntries, err := os.ReadDir(abs)
+	if os.IsNotExist(err) {
+		return nil, nil // 目录不存在 → 空目录（容忍「Stat 之后被删」竞态；VolSet 未装配旧装配 Get 不退化 500）
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取卷 %q 版本目录失败: %w", loc.VolumeName, err)
+	}
+	var out []VersionEntry
+	for _, e := range dirEntries {
+		versionID, ok := parseVersionID(e.Name())
+		if !ok || seen[versionID] {
+			continue
 		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		seen[versionID] = true
+		out = append(out, VersionEntry{VersionID: versionID, Name: e.Name(), Info: info})
 	}
 	return out, nil
 }
@@ -510,12 +607,12 @@ func (s *Service) CollectVersionEntries(owner, remotePath string) ([]VersionEntr
 // 在 upload handler 中调用，如果版本管理启用则保存当前版本。tnt 为旧文件实际所在卷的租户
 // （覆盖写 stay-home 定位后的 home 卷；单卷 = 默认租户）。version/ 桶随 user/ 文件同卷（AD-5）。
 func (s *Service) SaveVersionBeforeOverwrite(r *http.Request, remotePath string, tnt *storage.Tenant) {
-	s.saveVersionBeforeOverwrite(s.rt.actorOf(r), remotePath, tnt)
+	s.saveVersionBeforeOverwrite(r.Context(), s.rt.actorOf(r), remotePath, tnt)
 }
 
 // saveVersionBeforeOverwrite 是 owner **显式**的域内实现：写面域操作（WriteFile）不需要
 // HTTP 请求，只需 owner。保留上面的 request 形状包装以兼容既有调用方（装配层与测试）。
-func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *storage.Tenant) {
+func (s *Service) saveVersionBeforeOverwrite(ctx context.Context, owner, remotePath string, tnt *storage.Tenant) {
 	if !s.rt.versioningEnabled() {
 		return
 	}
@@ -536,7 +633,7 @@ func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *stor
 		return
 	}
 	userRel := strings.TrimPrefix(fullRel, tnt.UserRoot()+"/")
-	if _, err := s.SaveVersion(userRel, tnt, owner); err != nil {
+	if _, err := s.SaveVersion(ctx, userRel, tnt, owner); err != nil {
 		s.rt.logger().Warn("保存文件版本失败", "file_name", remotePath, "error", err)
 	}
 }
@@ -551,6 +648,36 @@ func (s *Service) saveVersionBeforeOverwrite(owner, remotePath string, tnt *stor
 // 下沉为本地实现——它只读**同一个**注入的卷集合、返回**同一个** `*quota.Pool` 对象
 // （不持第二份缓存/状态），并由 `pkg/server/helper_impl_drift_test.go` 的源码级等价断言
 // 守卫两份实现。
+// volumeNameForTenant 返回租户根所在卷的卷名（无卷集合/租户不可用/租户根不在任何卷根下 ⇒ ""）。
+//
+// 为什么单独一份（不复用 `volumePoolForTenant`）：后者与 `pkg/server.volumePoolForTenant`
+// 由 `helper_impl_drift_test.go` 的**源码体等价断言**守卫（两份实现必须逐字同构），改动其体
+// 会连带破坏该守卫；而「取卷名」是版本记账的独立需求。
+func volumeNameForTenant(vs VolumeSet, tnt *storage.Tenant) string {
+	if vs == nil || tnt == nil || tnt.Root() == nil {
+		return ""
+	}
+	tenantAbs, ok := tnt.Root().Abs("")
+	if !ok {
+		return ""
+	}
+	tenantAbs = filepath.Clean(tenantAbs)
+	for _, v := range vs.All() {
+		rt := vs.Root(v.Name)
+		if rt == nil {
+			continue
+		}
+		volOwnerAbs, ok2 := rt.Abs(tnt.ID)
+		if !ok2 {
+			continue
+		}
+		if filepath.Clean(volOwnerAbs) == tenantAbs {
+			return v.Name
+		}
+	}
+	return ""
+}
+
 func volumePoolForTenant(vs VolumeSet, tnt *storage.Tenant) *quota.Pool {
 	if vs == nil || tnt == nil || tnt.Root() == nil {
 		return nil

@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
+
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -152,31 +154,26 @@ func (s *fakeWebDAVServer) childrenOf(p string) []string {
 		prefix += "/"
 	}
 	seen := map[string]bool{}
-	var out []string
-	for f := range s.files {
-		if after, ok := strings.CutPrefix(f, prefix); ok {
-			rest := after
-			if !strings.Contains(rest, "/") {
-				seen[f] = true
-			}
-		}
-	}
-	for d := range s.dirs {
-		if d == p {
-			continue
-		}
-		if after, ok := strings.CutPrefix(d, prefix); ok {
-			rest := after
-			if !strings.Contains(rest, "/") {
-				seen[d] = true
-			}
-		}
-	}
+	collectChildKeys(prefix, s.files, seen, "")
+	collectChildKeys(prefix, s.dirs, seen, p)
+	out := make([]string, 0, len(seen))
 	for k := range seen {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// collectChildKeys 把 keys 中直接位于 prefix 下的条目记入 seen（exclude 精确排除一个 key）。
+func collectChildKeys[V any](prefix string, keys map[string]V, seen map[string]bool, exclude string) {
+	for k := range keys {
+		if k == exclude {
+			continue
+		}
+		if after, ok := strings.CutPrefix(k, prefix); ok && !strings.Contains(after, "/") {
+			seen[k] = true
+		}
+	}
 }
 
 func (s *fakeWebDAVServer) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +282,7 @@ func TestWebDAVFS_WriteRead(t *testing.T) {
 	fs := newClient(t, ts.URL)
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "dir/file.txt", strings.NewReader("hello webdav"), 12, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "dir/file.txt", strings.NewReader("hello webdav"), 12, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	rc, err := fs.OpenRead(ctx, "dir/file.txt")
@@ -482,7 +479,7 @@ func TestWebDAVFS_Auth_Bearer(t *testing.T) {
 	fs := newClient(t, ts.URL, WithBearerToken("tok-123"))
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "tok.txt", strings.NewReader("t"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "tok.txt", strings.NewReader("t"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	srv.mu.Lock()
@@ -501,7 +498,7 @@ func TestWebDAVFS_PathJoin(t *testing.T) {
 	fs := newClient(t, ts.URL+"/remote.php/webdav")
 
 	ctx := context.Background()
-	if err := fs.WriteFile(ctx, "nested/deep/file.txt", strings.NewReader("x"), 1, 0); err != nil {
+	if err := fs.WriteFile(ctx, storagepkg.LogicalKey{}, "nested/deep/file.txt", strings.NewReader("x"), 1, 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	srv.mu.Lock()

@@ -10,6 +10,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,14 +21,6 @@ import (
 const (
 	ecdhPublicKeyLen = 32 // X25519 public key 长度
 	sessionKeyLen    = 32 // AES-256 会话密钥长度
-	ecdhSalt         = "sproxy-ecdh-salt-v1"
-	// ecdhInfo 是 ECDH 会话密钥派生的 HKDF info（域分离，防止跨协议/跨用途重放）。
-	ecdhInfo = "sproxy-tunnel-ecdh-v1"
-	// ecdhStaticSalt 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 salt 前缀（域分离）。
-	// 与 ecdhSalt/ecdhInfo 区分，确保绑定静态密钥的派生与纯 ECDH 派生互不重叠。
-	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
-	// ecdhInfoStatic 是 C-1 修复中"静态密钥绑定"阶段（第二层 HKDF）的 info（域分离）。
-	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
 
 	// identityFlagPresent 表示握手身份扩展中"对端提供了身份公钥"。
 	// 身份扩展帧结构：[1B flag][Ed25519 pub 32B][Ed25519 sig 64B] 或 [1B flag=0x00]。
@@ -37,6 +30,99 @@ const (
 	// identityFlagAbsent 表示握手身份扩展中"对端无身份密钥"。
 	identityFlagAbsent = 0x00
 )
+
+// 协议域分离盐（默认 sproxy 前缀）。const → var 支持运行时自定义前缀：
+// stealth-build 隐藏二进制用 SetSaltPrefix 注入非 sproxy 前缀，使 strings 扫描
+// 二进制时无 "sproxy-*" 协议指纹（防识别）。⚠️ 握手双方必须使用相同前缀
+// （盐参与 HKDF 密钥派生，前缀不同 → 会话密钥不同 → 握手失败），
+// 自定义部署需两端（stealth + 标准 sclient/sproxy）同步配置。
+var (
+	ecdhSalt       = "sproxy-ecdh-salt-v1"
+	ecdhInfo       = "sproxy-tunnel-ecdh-v1"
+	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
+	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
+)
+
+// ProtocolSalts 是 5 个协议域分离盐的集合（防协议指纹识别用）。
+// 盐本身不保密（域分离标签），但默认 sproxy 前缀可被 strings 识别协议。
+// 自定义部署用 DeriveProtocolSalts(共享 key) 或 SetProtocolSalts(显式) 替换——
+// 使二进制无 "sproxy-*" 协议指纹。⚠️ 握手双方必须使用**相同盐集**，
+// 否则密钥派生不一致 → 握手失败。
+type ProtocolSalts struct {
+	ECDH        string
+	Info        string
+	Static      string
+	InfoStatic  string
+	IdentitySig string
+}
+
+// defaultSalts 是默认 sproxy 前缀盐集。
+func defaultSalts() ProtocolSalts {
+	return ProtocolSalts{
+		ECDH:        ecdhSalt,
+		Info:        ecdhInfo,
+		Static:      ecdhStaticSalt,
+		InfoStatic:  ecdhInfoStatic,
+		IdentitySig: "sproxy-identity-v1",
+	}
+}
+
+// DeriveProtocolSalts 用共享密钥确定性派生 5 个盐（同 key 同盐，两端一致）。
+// 派生 = HKDF-SHA256(key, salt="protocol-salt-v1", info=<用途域>)。
+// 用于：sclient --protocol-salt-key 启动时派生；stealth 构建时本地派生后写死。
+// key 为 32B（64 hex）；nil/短 → 默认 sproxy 盐（零回归）。
+func DeriveProtocolSalts(key []byte) ProtocolSalts {
+	if len(key) != 32 {
+		return defaultSalts()
+	}
+	der := func(info string) string {
+		out, err := hkdf.Key(sha256.New, key, []byte("protocol-salt-v1"), info, 16)
+		if err != nil {
+			return ""
+		}
+		return hex.EncodeToString(out)
+	}
+	return ProtocolSalts{
+		ECDH:        der("ecdh-salt"),
+		Info:        der("ecdh-info"),
+		Static:      der("ecdh-static-salt"),
+		InfoStatic:  der("ecdh-info-static"),
+		IdentitySig: der("identity-sig-domain"),
+	}
+}
+
+// SetProtocolSalts 应用盐集到全局（进程启动时调用，任何握手前）。
+// nil → 复位默认 sproxy 盐。
+func SetProtocolSalts(s ProtocolSalts) {
+	if s.ECDH == "" && s.Info == "" && s.Static == "" && s.InfoStatic == "" && s.IdentitySig == "" {
+		SetSaltPrefix("")
+		return
+	}
+	ecdhSalt = s.ECDH
+	ecdhInfo = s.Info
+	ecdhStaticSalt = s.Static
+	ecdhInfoStatic = s.InfoStatic
+	identitySigDomain = s.IdentitySig
+}
+
+// SetSaltPrefix 替换全部协议域分离前缀为自定义前缀（防协议指纹识别）。
+// prefix 为空 = 复位默认 sproxy 前缀。**调用方必须保证握手对端使用相同前缀**，
+// 否则会话密钥派生不一致导致握手失败。应在任何握手/拨号前调用（进程启动时）。
+func SetSaltPrefix(prefix string) {
+	ecdhSalt = "sproxy-ecdh-salt-v1"
+	ecdhInfo = "sproxy-tunnel-ecdh-v1"
+	ecdhStaticSalt = "sproxy-ecdh-static-salt-v1"
+	ecdhInfoStatic = "sproxy-tunnel-ecdh-v1-static"
+	identitySigDomain = "sproxy-identity-v1"
+	if prefix == "" {
+		return // 空 = 复位默认
+	}
+	ecdhSalt = prefix + "-ecdh-salt-v1"
+	ecdhInfo = prefix + "-tunnel-ecdh-v1"
+	ecdhStaticSalt = prefix + "-ecdh-static-salt-v1"
+	ecdhInfoStatic = prefix + "-tunnel-ecdh-v1-static"
+	identitySigDomain = prefix + "-identity-v1"
+}
 
 var (
 	// ErrPeerFingerprintMismatch 表示对端身份指纹不匹配本端配置的 pinning 列表（fail-closed）。
@@ -81,66 +167,19 @@ func PerformHandshakeConn(ctx context.Context, rw io.ReadWriteCloser, dialer boo
 	}
 	publicKey := privateKey.PublicKey()
 
-	var peerPublic []byte
-	if dialer {
-		// 阶段 1：dialer 先写自己的 X25519 公钥（32B），再读对端公钥。
-		if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
-			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
-		}
-		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
-			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
-		}
-		peerPublic = peerPub
-	} else {
-		// 阶段 1（listener）：先读对端公钥，再写自己的。
-		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
-			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
-		}
-		peerPublic = peerPub
-		if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
-			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
-		}
+	peerPublic, err := connExchangePubKey(rw, publicKey, dialer)
+	if err != nil {
+		return nil, "", err
+	}
+	sessionKey, err := handshakeECDHKey(curve, privateKey, peerPublic, staticKey)
+	if err != nil {
+		return nil, "", err
 	}
 
-	peerKey, pErr := curve.NewPublicKey(peerPublic)
-	if pErr != nil {
-		return nil, "", fmt.Errorf("ecdh: invalid peer public key: %w", pErr)
-	}
-	sharedSecret, eErr := privateKey.ECDH(peerKey)
-	if eErr != nil {
-		return nil, "", fmt.Errorf("ecdh: compute shared secret: %w", eErr)
-	}
-
-	sessionKey, kErr := deriveSessionKey(sharedSecret, staticKey)
-	if kErr != nil {
-		return nil, "", kErr
-	}
-
-	// 阶段 2：身份交换（listener 先写、dialer 先读，固定方向避免死锁）。
-	// 签名消息绑定双方临时 ECDH 公钥（固定顺序 dialer||listener）+ 域分离前缀。
-	var dialerPub, listenerPub []byte
-	if dialer {
-		dialerPub = publicKey.Bytes()
-		listenerPub = peerPublic
-	} else {
-		dialerPub = peerPublic
-		listenerPub = publicKey.Bytes()
-	}
-	sigMsg := identitySigMessage(dialerPub, listenerPub)
-
-	var peerFP string
-	var idErr error
-	if dialer {
-		peerFP, idErr = handshakeIdentityDialer(rw, id, peerFingerprints, sigMsg)
-	} else {
-		peerFP, idErr = handshakeIdentityListener(rw, id, peerFingerprints, sigMsg)
-	}
+	peerFP, idErr := connIdentityExchange(rw, dialer, publicKey, peerPublic, id, peerFingerprints)
 	if idErr != nil {
 		return nil, "", idErr
 	}
-
 	return sessionKey, peerFP, nil
 }
 
@@ -155,15 +194,6 @@ func PerformHandshakeConn(ctx context.Context, rw io.ReadWriteCloser, dialer boo
 // deriveSessionKey）。**同步发布协议变更**：一端混 key 而另一端不混时，两端派生出的
 // sessionKey 不同，首个加密帧 AES-GCM 解密失败即被拒（fail-closed）。
 // 返回会话密钥与对端身份指纹（对端未提供身份时为空字符串）。
-//
-// 握手流程：
-//  1. 阶段 1（不变）：交换临时 ECDH X25519 公钥（各 32B），HKDF 派生会话密钥。
-//  2. 阶段 2（可选身份扩展，向后兼容）：listener 先写 1 字节身份标志（0x01=带身份公钥，
-//     0x00=无身份），dialer 读标志后响应自己的身份标志。旧对端（无扩展）读完 32B ECDH
-//     即关闭流，对端读到 EOF 视为"对端未提供身份"。未配置 pin 时不因对端无身份失败。
-//
-// 旧对端兼容：新端与旧端握手时，身份扩展静默跳过；仅当本端配置了 peerFingerprints 时，
-// 对端未提供身份会导致 fail-closed 拒绝（ErrPeerFingerprintRequired）。
 func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, id *Identity, peerFingerprints []string, staticKey []byte) ([]byte, string, error) {
 	curve := ecdh.X25519()
 	privateKey, gErr := curve.GenerateKey(rand.Reader)
@@ -172,122 +202,132 @@ func performHandshakeWithIdentity(ctx context.Context, m *mux.Mux, dialer bool, 
 	}
 	publicKey := privateKey.PublicKey()
 
-	var peerPublic []byte
-	var stream mux.Stream
+	stream, peerPublic, err := handshakeExchangePubKey(ctx, m, publicKey, dialer)
+	if err != nil {
+		return nil, "", err
+	}
+	defer stream.Close()
 
-	if dialer {
-		s, openErr := m.Open(ctx)
-		if openErr != nil {
-			return nil, "", fmt.Errorf("ecdh: open stream: %w", openErr)
-		}
-		defer s.Close()
-
-		ourPub := publicKey.Bytes()
-		// M5：忽略返回的 n（mux.Stream 的短写语义），此处**实际不可达**——本流此前从未
-		// 写过任何字节（发送窗口只被本端写入消耗，对端的写入消耗的是本端接收预算），
-		// 初始窗口恒为满值 DefaultWindowSize=65536 ≫ 公钥 32 B，故 n 恒等于 len(ourPub)。
-		// 若日后把握手挪到流中段（窗口可能已被占用或本端已写过），必须改为循环写足
-		// （iostream.WriteFull）。
-		if _, wErr := s.Write(ourPub); wErr != nil {
-			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
-		}
-
-		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
-			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
-		}
-		peerPublic = peerPub
-		stream = s
-	} else {
-		s, acceptErr := m.Accept(ctx)
-		if acceptErr != nil {
-			return nil, "", fmt.Errorf("ecdh: accept stream: %w", acceptErr)
-		}
-		defer s.Close()
-
-		peerPub := make([]byte, ecdhPublicKeyLen)
-		if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
-			return nil, "", fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
-		}
-
-		ourPub := publicKey.Bytes()
-		// M5：同 dialer 分支——本流首次写入，发送窗口恒为满值 65536 ≫ 32 B，n 必然
-		// 等于 len(ourPub)，忽略返回的 n 实际不可达。
-		if _, wErr := s.Write(ourPub); wErr != nil {
-			return nil, "", fmt.Errorf("ecdh: write pubkey: %w", wErr)
-		}
-		peerPublic = peerPub
-		stream = s
+	sessionKey, err := handshakeECDHKey(curve, privateKey, peerPublic, staticKey)
+	if err != nil {
+		return nil, "", err
 	}
 
-	peerKey, pErr := curve.NewPublicKey(peerPublic)
-	if pErr != nil {
-		return nil, "", fmt.Errorf("ecdh: invalid peer public key: %w", pErr)
-	}
-	sharedSecret, eErr := privateKey.ECDH(peerKey)
-	if eErr != nil {
-		return nil, "", fmt.Errorf("ecdh: compute shared secret: %w", eErr)
-	}
-
-	sessionKey, kErr := deriveSessionKey(sharedSecret, staticKey)
-	if kErr != nil {
-		return nil, "", kErr
-	}
-
-	// 身份交换：listener 先写、dialer 先读（固定方向避免死锁）。
-	// 签名消息绑定双方临时 ECDH 公钥（固定顺序 dialer||listener）+ 域分离前缀，
-	// 使身份签名成为本次握手的 proof of possession：对端必须持有身份私钥才能签名。
-	var dialerPub, listenerPub []byte
-	if dialer {
-		dialerPub = publicKey.Bytes()
-		listenerPub = peerPublic
-	} else {
-		dialerPub = peerPublic
-		listenerPub = publicKey.Bytes()
-	}
-	sigMsg := identitySigMessage(dialerPub, listenerPub)
-
-	// 身份阶段流读取不感知 ctx：恶意对端完成阶段 1 后可在身份阶段停滞，
-	// 无限占住 dialer 的 ensureHandshake / listener 的 Serve goroutine（资源耗尽 DoS）。
-	// 用 context.AfterFunc 在 ctx 超时/取消时 abort 握手流，使 io.ReadFull 立即返回，
-	// 使 handshakeTimeout 对身份阶段真正兜底。
-	// 注：Abort 会**注销**该流的表项并递减 activeStreams（不再残留在 mux.streams）；`defer Close`
-	// 因 done 已关不发关闭帧。dialer 侧握手失败后 mux 整体关闭；listener 侧无 pin 时 Serve
-	// 继续运行，滞留量受并发握手数上限约束。
-	stopAbort := context.AfterFunc(ctx, func() { _ = stream.Abort() })
-	defer stopAbort()
-
-	var peerFP string
-	var idErr error
-	if dialer {
-		peerFP, idErr = handshakeIdentityDialer(stream, id, peerFingerprints, sigMsg)
-	} else {
-		peerFP, idErr = handshakeIdentityListener(stream, id, peerFingerprints, sigMsg)
-	}
+	peerFP, idErr := handshakeIdentityExchange(ctx, stream, dialer, publicKey, peerPublic, id, peerFingerprints)
 	if idErr != nil {
 		return nil, "", idErr
 	}
-
 	return sessionKey, peerFP, nil
 }
 
-// deriveSessionKey 从 ECDH 共享密钥派生 32 字节会话密钥（AES-256）。
-//
-// C-1 修复：静态隧道密钥必须参与会话密钥派生，握手才是**非匿名**的——攻击者能完成
-// 匿名 ECDH（双方都知道 sharedSecret），但不知静态密钥，派生出的 sessionKey 与合法
-// 对端不同，首个加密帧 AES-GCM 解密失败即被拒（fail-closed），零凭据访问被阻断。
-//
-//   - staticKey == nil：纯 ECDH 派生（旧行为，字节级不变）。无密钥模式（nil key）
-//     由 Tunnel 在 key==nil 时短路保证（不握手、明文传输），此处 nil 仅服务于
-//     performHandshake / 测试直呼的原始握手路径。
-//   - staticKey != nil：先按旧派生得到 baseKey（绑定 ECDH 共享密钥），再做第二层
-//     HKDF：以 baseKey 为 IKM、staticKey 混入 salt（PSK 绑定，salt 域分离防跨协议），
-//     info 用独立域标签。任何 staticKey 变化都改变最终 sessionKey；两层输出均恒为
-//     32 字节。
-//
-// **同步发布协议变更**：一端混 key（staticKey != nil）而另一端不混（nil）时，两端
-// sessionKey 不一致，首个加密帧解密失败。这是刻意设计——服务端配置了密钥即必须混，
-// 不接受降级到匿名 ECDH（否则 C-1 回归）。请确保 sclient/sproxy 同版本发布。
+// handshakeExchangePubKey 在 mux 流上执行阶段 1：打开/接受一条流并交换临时 ECDH 公钥。
+// dialer 先写自己的 X25519 公钥再读对端；listener 先读对端再写自己。返回流与对端公钥。
+// 中间出错时关闭已打开流（避免泄漏）；成功时交由调用方 defer Close。
+func handshakeExchangePubKey(ctx context.Context, m *mux.Mux, publicKey *ecdh.PublicKey, dialer bool) (mux.Stream, []byte, error) {
+	if dialer {
+		s, openErr := m.Open(ctx)
+		if openErr != nil {
+			return nil, nil, fmt.Errorf("ecdh: open stream: %w", openErr)
+		}
+		if _, wErr := s.Write(publicKey.Bytes()); wErr != nil {
+			_ = s.Close()
+			return nil, nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
+		}
+		peerPub := make([]byte, ecdhPublicKeyLen)
+		if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
+			_ = s.Close()
+			return nil, nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+		}
+		return s, peerPub, nil
+	}
+	s, acceptErr := m.Accept(ctx)
+	if acceptErr != nil {
+		return nil, nil, fmt.Errorf("ecdh: accept stream: %w", acceptErr)
+	}
+	peerPub := make([]byte, ecdhPublicKeyLen)
+	if _, rErr := io.ReadFull(s, peerPub); rErr != nil {
+		_ = s.Close()
+		return nil, nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+	}
+	if _, wErr := s.Write(publicKey.Bytes()); wErr != nil {
+		_ = s.Close()
+		return nil, nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
+	}
+	return s, peerPub, nil
+}
+
+// connExchangePubKey 在裸连接（net.Conn / io.ReadWriteCloser）上执行阶段 1 公钥交换
+// （dialer 先写后读，listener 先读后写），返回对端公钥。
+func connExchangePubKey(rw io.ReadWriteCloser, publicKey *ecdh.PublicKey, dialer bool) ([]byte, error) {
+	if dialer {
+		if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
+			return nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
+		}
+		peerPub := make([]byte, ecdhPublicKeyLen)
+		if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
+			return nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+		}
+		return peerPub, nil
+	}
+	peerPub := make([]byte, ecdhPublicKeyLen)
+	if _, rErr := io.ReadFull(rw, peerPub); rErr != nil {
+		return nil, fmt.Errorf("ecdh: read peer pubkey: %w", rErr)
+	}
+	if _, wErr := rw.Write(publicKey.Bytes()); wErr != nil {
+		return nil, fmt.Errorf("ecdh: write pubkey: %w", wErr)
+	}
+	return peerPub, nil
+}
+
+// handshakeECDHKey 基于对端公钥计算 ECDH 共享密钥并派生出会话密钥（分层 HKDF，
+// 供相参阶段 2 使用）。对端公钥非法 / 共享密钥计算失败 / 派生失败均返回 error。
+func handshakeECDHKey(curve ecdh.Curve, privateKey *ecdh.PrivateKey, peerPublic, staticKey []byte) ([]byte, error) {
+	peerKey, pErr := curve.NewPublicKey(peerPublic)
+	if pErr != nil {
+		return nil, fmt.Errorf("ecdh: invalid peer public key: %w", pErr)
+	}
+	sharedSecret, eErr := privateKey.ECDH(peerKey)
+	if eErr != nil {
+		return nil, fmt.Errorf("ecdh: compute shared secret: %w", eErr)
+	}
+	return deriveSessionKey(sharedSecret, staticKey)
+}
+
+// handshakeIdentityExchange 在 mux 流上执行阶段 2 身份交换：签名消息绑定双方临时 ECDH
+// 公钥（固定顺序 dialer||listener）+ 域分离前缀，listener 先写、dialer 先读（避免死锁）。
+// 用 context.AfterFunc 在 ctx 超时/取消时 abort 握手流，使 io.ReadFull 立即返回（身份阶段
+// 阻塞兜底），对端指纹 pinning 校验在 handshakeIdentityDialer/Listener 内部完成。
+func handshakeIdentityExchange(ctx context.Context, stream mux.Stream, dialer bool, publicKey *ecdh.PublicKey, peerPublic []byte, id *Identity, peerFingerprints []string) (string, error) {
+	dialerPub, listenerPub := signedECDHPubs(dialer, publicKey, peerPublic)
+	sigMsg := identitySigMessage(dialerPub, listenerPub)
+	stopAbort := context.AfterFunc(ctx, func() { _ = stream.Abort() })
+	defer stopAbort()
+	if dialer {
+		return handshakeIdentityDialer(stream, id, peerFingerprints, sigMsg)
+	}
+	return handshakeIdentityListener(stream, id, peerFingerprints, sigMsg)
+}
+
+// connIdentityExchange 在裸连接上执行阶段 2 身份交换（无 mux，故无 Abort 语义；
+// 阻塞由调用方 ctx 兜底——超时则关闭底层 conn 解除 io.ReadFull）。其余与
+// handshakeIdentityExchange 一致。
+func connIdentityExchange(rw io.ReadWriteCloser, dialer bool, publicKey *ecdh.PublicKey, peerPublic []byte, id *Identity, peerFingerprints []string) (string, error) {
+	dialerPub, listenerPub := signedECDHPubs(dialer, publicKey, peerPublic)
+	sigMsg := identitySigMessage(dialerPub, listenerPub)
+	if dialer {
+		return handshakeIdentityDialer(rw, id, peerFingerprints, sigMsg)
+	}
+	return handshakeIdentityListener(rw, id, peerFingerprints, sigMsg)
+}
+
+// signedECDHPubs 返回身份签名的消息公钥对（固定顺序 dialer||listener）。
+func signedECDHPubs(dialer bool, publicKey *ecdh.PublicKey, peerPublic []byte) (dialerPub, listenerPub []byte) {
+	if dialer {
+		return publicKey.Bytes(), peerPublic
+	}
+	return peerPublic, publicKey.Bytes()
+}
+
 func deriveSessionKey(sharedSecret, staticKey []byte) ([]byte, error) {
 	baseKey, err := hkdf.Key(sha256.New, sharedSecret, []byte(ecdhSalt), ecdhInfo, sessionKeyLen)
 	if err != nil {

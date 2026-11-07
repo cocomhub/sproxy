@@ -116,7 +116,7 @@ TIMING_DATA_DIR := $(BUILD_DIR)/timing/data
 TIMING_WEB_DIR := $(BUILD_DIR)/timing/web
 REPORT_DIR := $(BUILD_DIR)/report
 TOOLS := \
-    github.com/google/addlicense@latest \
+    github.com/google/addlicense \
     golang.org/x/perf/cmd/benchstat@latest
 
 .DEFAULT_GOAL := help
@@ -153,12 +153,33 @@ build-ci: prepare
 	@$(foreach name,$(CMD_NAMES),echo "Building $(name)"; cd ./cmd/$(name) && GOWORK=off $(GO) build $(GOBUILD_EXTRA) $(GO_LDFLAGS) -o ../../$(BIN_DIR)/$(name)$(EXE) . && cd $(CURDIR);)
 
 .PHONY: test
+# NOTE：不加 -parallel 上限（与 test-cover 对齐）——CI runner 2 核下 -parallel 8 只多付
+# 调度开销，且与 test-cover 的 -parallel 默认值不同会**破坏覆盖与测试的编译缓存复用**。
+# TEST_COVER_PROFILE=<path>（CI 用）：把覆盖并入**这一遍**测试（-race 与 -cover 同进程），
+# 免去第二遍全量；本地不设 ⇒ 行为不变（不带 -coverprofile）。
+# TEST_EXCLUDE=<包模式>（CI 用）：从 ./... 剔除（go list | grep -v）——如 archcheck（其门禁
+# 已在 Lint job 非 race 跑，race 全量在 Test job 里纯耗时）。本地不设 ⇒ 行为不变。
 test: prepare
-	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) ./...
+	@if [ -n "$(TEST_EXCLUDE)" ]; then \
+		echo "=== make test（排除 $(TEST_EXCLUDE)）==="; \
+		pkgs=$$($(RAW_GO) list ./... | grep -vE '^github[.]com/cocomhub/sproxy/$(TEST_EXCLUDE)$$' | tr '\n' ' '); \
+		$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) $$pkgs; \
+	else \
+		$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(if $(TEST_COVER_PROFILE),-coverprofile=$(TEST_COVER_PROFILE)) $(GOTAGS) ./...; \
+	fi
 
 .PHONY: test-ci test-cover
 test-ci test-cover: prepare
 	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) $(GOTAGS) -coverprofile=$(BUILD_DIR)/cover.out ./...
+
+# cover-test：落入与 test-cover 相同的覆盖文件（build/cover.out），但**可复用 make test
+# 的 -count=1 编译/测试缓存**——CI 的 Test (ubuntu) job 用它在跑完 make test 后不再重跑
+# 全量测试即得到覆盖率（旧流程 cover-check → test-cover 是第二遍全量 ≈ +7min/run）。
+# 阈值校验仍由 cover-check 做（此处只产出覆盖文件）。
+# 注：-parallel 与 make test 保持默认（不显式指定）⇒ 两者命令行一致，缓存可交叉复用。
+.PHONY: cover-test
+cover-test: prepare
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile=$(BUILD_DIR)/cover.out ./...
 
 .PHONY: notest
 notest:
@@ -206,9 +227,14 @@ web-test:
 	@node --check web/static/events.js
 	@node --check web/static/notify-format.js
 	@node --check web/static/audit-export.js
+	@node --check web/static/audit-rows-format.js
 	@node --check web/static/image-preview.js
+	@node --check web/static/video-player.js
 	@node --check web/static/volume-ops.js
 	@node --check web/static/credentials-format.js
+	@node --check web/static/secrets-format.js
+	@node --check web/static/vol-manage-format.js
+	@node --check web/static/quota-format.js
 	@node --check web/static/sync-conflicts-format.js
 	@node --check web/static/mesh-status-format.js
 	@node --check web/static/trash-format.js
@@ -230,9 +256,17 @@ web-test:
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js
 	node --test web/static/audit-export.test.js
+	node --test web/static/quota-format.test.js
+	node --test web/static/audit-rows-format.test.js
+	node --test web/static/audit-filter.test.js
+	node --check web/static/audit-filter.js
 	node --test web/static/image-preview.test.js
+	node --test web/static/app-preview-wiring.test.js
+	node --test web/static/video-player.test.js
 	node --test web/static/volume-ops.test.js
 	node --test web/static/credentials-format.test.js
+	node --test web/static/secrets-format.test.js
+	node --test web/static/vol-manage-format.test.js
 	node --test web/static/sync-conflicts-format.test.js
 	node --test web/static/mesh-status-format.test.js
 	node --test web/static/trash-format.test.js
@@ -247,7 +281,13 @@ web-test:
 	node --test web/static/sclient/sclient.test.js
 
 .PHONY: cover-check
-cover-check: test-cover
+# COVER_REUSE=1 ⇒ 跳过 test-cover 提交步骤（不重跑测试），只对**已有**的 build/cover.out
+# 做阀值校验。CI 的 Test (ubuntu) job 用 `make cover-test` 做唯一一次 -race 全覆盖测试
+# （既出建/断言信号又出 build/cover.out），随后 `make cover-check COVER_REUSE=1` 只算阀值
+# → 省掉旧流程的**第二遍全量测试**（每一遍 ≈ 7min）。本地 `make cover-check`（无变量）
+# 行为不变（依赖 test-cover 先跑）。cover.out 缺失时 go tool cover 报错→ total 空 → 下方
+# 空值守卫 fail-closed 退出 1（不会静默 PASS）。
+cover-check: $(if $(filter 1,$(COVER_REUSE)),,test-cover)
 	@total=$$(go tool cover -func=$(BUILD_DIR)/cover.out | tail -1 | awk '{print $$NF}' | sed 's/%//'); \
 	if [ -z "$$total" ]; then \
 		echo "FAIL: could not compute coverage"; \
@@ -275,6 +315,9 @@ cover-check: test-cover
 #     ASCII 即此因），故不做中文化；由 gate_wiring_test.go 断言不得出现非 ASCII。
 #   * `go run` 的下载/编译日志走 stderr（**不捕获**），只把 stdout 的发现当判定。
 .PHONY: deadcode-check
+# 注意：.deadcodeignore 是 grep -f 的模式清单，不支持注释行（理由写在本注释）；
+# clientfactory.Factory.New 是公开构造器（测试/外部嵌入用，产线走 NewWithContext），
+# 行号用 [0-9]+ 通配，避免源码注释增减导致行号移位后门禁误红。
 deadcode-check: prepare
 	@out=$$(go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/sproxy ./cmd/sclient); \
 	if [ -n "$$out" ]; then out=$$(printf '%s\n' "$$out" | grep -v -E -f .deadcodeignore || true); fi; \
@@ -324,6 +367,13 @@ lint-web-e2e: prepare
 .PHONY: lint-e2e
 lint-e2e: prepare
 	golangci-lint run --build-tags=e2e ./test/...
+
+# 子 module 的 e2e-tagged 测试文件编译门禁（CI 的 e2e lint/test 只覆盖 ./test/...，
+# 子 module 里带 //go:build e2e 的文件在默认 build tags 下既不编译也不 lint——外部依赖/
+# 接口变更后可能静默腐化）。当前唯一此类文件：pkg/volume/ext/baidupcs 的真实网盘对比 e2e。
+.PHONY: vet-e2e-submodules
+vet-e2e-submodules: prepare
+	cd pkg/volume/ext/baidupcs && GOWORK=off $(GO) vet -tags=e2e ./...
 
 .PHONY: bench
 bench: prepare
@@ -399,7 +449,7 @@ check-loopback:
 	issues=0; \
 	# Check non-test source files for 0.0.0.0 (excluding pkg/server/config.go which has intentional defaults); \
 	# 注释行（`:行号: //`）一律跳过：注释绑不了端口，命中它们纯属误报（例：pkg/tunnel/mesh/mdns.go 的说明文字）； \
-	if grep -rn '0\.0\.0\.0' --include='*.go' . \
+	if grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 		| grep -vE ':[0-9]+:[[:space:]]*//' \
 		| grep -v 'pkg/server/downloader/ssrf.go' \
 		| grep -v '_test.go' \
@@ -412,7 +462,7 @@ check-loopback:
 		| grep -v 'pkg/server/config.go' \
 		| grep '.' > /dev/null 2>&1; then \
 		echo "FAIL: found potential unsafe listen addresses (0.0.0.0) in source:"; \
-		grep -rn '0\.0\.0\.0' --include='*.go' . \
+		grep -rnE '\b0\.0\.0\.0\b' --include='*.go' . \
 			| grep -vE ':[0-9]+:[[:space:]]*//' \
 			| grep -v '_test.go' \
 			| grep -v 'vendor/' \
@@ -442,29 +492,38 @@ gofix:
 	$(RAW_GO) fix ./...
 
 # go fix + gofmt + addlicense 遍历所有子 module（SUB_MODULE_DIRS 同 lint-all/test-all，web/e2e 除外）
+# 并行化（2026-10-27）：各 module 的 go fix 互相独立，串行在 CI 冷缓存下 ≈120s（Lint job 的
+# check-format 大头）；xargs -P2 并行实测 -25%。保留**全量**语义（CI 兜底未登记新文件），仅执行并行。
 .PHONY: gofix-all
 gofix-all: prepare
 	@$(MAKE) gofix
-	@for dir in $(SUB_MODULE_DIRS); do \
-		echo "=== go fix $$dir =="; \
-		cd $$dir && GOWORK=off $(RAW_GO) fix ./... || exit 1; \
-		cd $(CURDIR); \
-	done
+	@echo $(SUB_MODULE_DIRS) | tr ' ' '\n' | xargs -P2 -I{} sh -c 'cd {} && GOWORK=off $(RAW_GO) fix ./... || exit 1'
 
 .PHONY: addlicense
+# 默认（无参数）：全量扫描（CI make check-format / fmt-all 用）。
 addlicense:
 	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only -ignore ".claude/**" -ignore ".trae/**" -ignore ".cursor/**" -ignore "web/static/vendor/**" .
+
+# addlicense FILES=<file...>（空格分隔）：**只对指定文件**做 SPDX 头注入（本地增量用）。
+# 本地 pre-commit 只检查本次 commit 涉及文件，因此无需全量扫描仓库（Windows 上全量
+# addlicense 约 4-8s、make check-format 约 1min，多 agent worktree 并行时每次全量纯属浪费）；
+# CI 的 check-format / fmt-all 保留全量以兜底未登记的新文件。
+.PHONY: addlicense-files
+addlicense-files:
+	addlicense -c "The Cocomhub Authors. All rights reserved." -s=only $(FILES)
 
 .PHONY: fmt
 fmt: gofix addlicense
 	@echo "Running gofmt on ALL_SRC ..."
-	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+	@go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}}{{println}}{{end}}' ./... | tr '\\' '/' | xargs -r -n 100 $(GOFMT) -e -s -l -w
 
 # 全部子 module 的 go fix + addlicense + gofmt（web/e2e 由 CI 的 web-test 管）
+# 分块 + 正斜杠：Windows CreateProcess 32K 命令行上限 + MSYS xargs 会吞反斜杠，
+# 深路径 worktree 下单条 gofmt 全量路径必挂（2026-09-28 基础设施修复）。
 .PHONY: fmt-all
 fmt-all: gofix-all addlicense
 	@echo "Running gofmt on ALL_SRC (root)..."
-	@$(GOFMT) -e -s -l -w $(ALL_SRC)
+	@go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}}{{println}}{{end}}' ./... | tr '\\' '/' | xargs -r -n 100 $(GOFMT) -e -s -l -w
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== gofmt $$dir =="; \
 		cd $$dir && $(GOFMT) -e -s -l -w . && cd $(CURDIR); \
@@ -496,6 +555,30 @@ test-all: prepare
 	@for dir in $(SUB_MODULE_DIRS); do \
 		echo "=== Testing $$dir ==="; \
 		cd $$dir && GOWORK=off $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) ./... || exit 1; \
+		cd $(CURDIR); \
+	done
+
+# 全量覆盖率收集：根 module + 全部子 module 各自产出独立 cover.out，供 Sonar 聚合读取。
+# - 从子 module 目录内执行（GOWORK=off 下 `./...` 只认当前 module；coverprofile 写绝对路径
+#   → 覆盖记录为完整 import path `github.com/cocomhub/sproxy/<module>/...`，与根覆盖同构，
+#   Sonar 剥离模块前缀后匹配 `sonar.sources=.` 的仓库根相对路径）。
+# - 文件名 slug：`./pkg/tunnel/mesh` → `pkg_tunnel_mesh.out`。
+# - SKIP_ROOT_COVER=true 跳过根（CI 的 test job 以 vault service 版产出 root.out，避免重复）。
+COVER_OUT_DIR ?= $(BUILD_DIR)/coverage
+SKIP_ROOT_COVER ?= false
+
+.PHONY: test-cover-all
+test-cover-all: prepare
+	@mkdir -p $(COVER_OUT_DIR)
+ifeq ($(SKIP_ROOT_COVER),true)
+	@echo "=== SKIP_ROOT_COVER=true：跳过根覆盖（由 test job 产出 root.out）==="
+else
+	$(GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile=$(COVER_OUT_DIR)/root.out ./...
+endif
+	@for dir in $(SUB_MODULE_DIRS); do \
+		name=$$(echo "$$dir" | sed 's|^\./||; s|/|_|g'); \
+		echo "=== cover $$dir -> $(COVER_OUT_DIR)/$$name.out ==="; \
+		cd $$dir && GOWORK=off $(RAW_GO) test $(GORACE) $(GOTEST_COUNT) $(GOTEST_TIMEOUT) -coverprofile="$(CURDIR)/$(COVER_OUT_DIR)/$$name.out" ./... || exit 1; \
 		cd $(CURDIR); \
 	done
 
@@ -537,7 +620,10 @@ deadcode: prepare ## 列出从 main 不可达的函数（信息性输出，不�
 	$(RAW_GO) run $(DEADCODE_TOOL) ./cmd/sproxy ./cmd/sclient
 
 .PHONY: check-ci
-check-ci: vet lint lint-all lint-web-e2e lint-e2e check-loopback notest archcheck deadcode build-ci test-cover cover-check test-all build-all
+# 注意：此处用 deadcode-check（失败门禁，带 .deadcodeignore 豁免）而非信息性 deadcode——
+# 两者行为不同（2026-10-02 核查：此前用 deadcode 导致本地/ pre-push 的 check-ci 对死代码
+# 静默放行，CI Lint job 的 deadcode-check 才能拦；保持一致见 .golangci.yml / ci.yml）。
+check-ci: vet lint lint-all lint-web-e2e lint-e2e vet-e2e-submodules check-loopback notest archcheck deadcode-check build-ci test-cover cover-check test-all build-all
 
 .PHONY: sonar-analyze
 sonar-analyze:
@@ -574,6 +660,7 @@ help:
 	@echo "  lint            Run golangci-lint"
 	@echo "  lint-all        Run golangci-lint for every sub-module (cmd + ext + hub + mesh)"
 	@echo "  lint-e2e        Run golangci-lint for e2e-tagged test suites"
+	@echo "  vet-e2e-submodules  Compile-check sub-module e2e-tagged tests (go vet -tags=e2e)"
 	@echo "  lint-web-e2e    Run golangci-lint for the nested web/e2e module"
 	@echo "  bench-local     Run benchmarks with metadata (local use)"
 	@echo "  bench           Run benchmarks (CI, output to build/bench/output.txt)"
@@ -585,6 +672,7 @@ help:
 	@echo "  fmt             Format code (gofix + addlicense + gofmt)"
 	@echo "  clean           Clean build artifacts"
 	@echo "  test-all        Test all sub-modules"
+	@echo "  test-cover-all  Test all sub-modules with coverage (build/coverage/*.out)"
 	@echo "  test-e2e        Run real-binary e2e tests (build-tag e2e)"
 	@echo "  build-all       Build all sub-modules"
 	@echo "  check-ci        Full CI pipeline"

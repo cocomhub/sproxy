@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/sync"
@@ -33,16 +34,18 @@ func (f *completeTestFS) Stat(_ context.Context, rel string) (*sync.Entry, error
 	if f.entries[rel] {
 		return &sync.Entry{Name: rel}, nil
 	}
-	return nil, os.ErrNotExist
+	return nil, nil // 全仓 Stat 契约：不存在返回 (nil, nil)
 }
 func (*completeTestFS) ListDir(context.Context, string) ([]sync.Entry, error) { return nil, nil }
 func (*completeTestFS) OpenRead(context.Context, string) (io.ReadCloser, error) {
 	return nil, os.ErrNotExist
 }
-func (*completeTestFS) WriteFile(context.Context, string, io.Reader, int64, int64) error { return nil }
-func (*completeTestFS) Rename(context.Context, string, string) error                     { return nil }
-func (*completeTestFS) Delete(context.Context, string) error                             { return nil }
-func (*completeTestFS) MakeDir(context.Context, string) error                            { return nil }
+func (*completeTestFS) WriteFile(context.Context, sync.LogicalKey, string, io.Reader, int64, int64) error {
+	return nil
+}
+func (*completeTestFS) Rename(context.Context, string, string) error { return nil }
+func (*completeTestFS) Delete(context.Context, string) error         { return nil }
+func (*completeTestFS) MakeDir(context.Context, string) error        { return nil }
 
 func (b *completeTestBackend) FS() sync.FS  { return &completeTestFS{entries: b.entries} }
 func (b *completeTestBackend) Close() error { return nil }
@@ -51,7 +54,7 @@ func (b *completeTestBackend) Close() error { return nil }
 func TestBackendsPresignComplete(t *testing.T) {
 	t.Parallel()
 	registry.RegisterBackend(completeTestType, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
-		return &completeTestBackend{entries: map[string]bool{"dir/a.txt": true}}, nil
+		return &completeTestBackend{entries: map[string]bool{"anonymous/user/dir/a.txt": true}}, nil
 	})
 	defer registry.UnregisterBackendForTest(completeTestType)
 
@@ -59,12 +62,35 @@ func TestBackendsPresignComplete(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/backends/"+completeTestType+"/presign/complete?path=dir/a.txt", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/backends/"+completeTestType+"/presign/complete?path=dir/a.txt&size=9&sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// TestBackendsPresignComplete_MissingParams 缺 size/sha256 → 400（2026-10-14 P0：登记必须
+// 声明 size 与 sha256，否则对象对账本/元数据不可见 = 容量旁路）。
+func TestBackendsPresignComplete_MissingParams(t *testing.T) {
+	t.Parallel()
+	registry.RegisterBackend(completeTestType3, func(_ context.Context, v volume.Volume) (registry.ExternalBackend, error) {
+		return &completeTestBackend{entries: map[string]bool{"anonymous/user/dir/a.txt": true}}, nil
+	})
+	defer registry.UnregisterBackendForTest(completeTestType3)
+
+	h := &Handlers{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
+
+	for _, q := range []string{"", "&size=9", "&sha256=" + strings.Repeat("a", 64), "&size=abc&sha256=" + strings.Repeat("a", 64), "&size=-1&sha256=" + strings.Repeat("a", 64), "&size=9&sha256=short"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/backends/"+completeTestType3+"/presign/complete?path=dir/a.txt"+q, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q: status = %d, want 400", q, rec.Code)
+		}
 	}
 }
 
@@ -80,7 +106,7 @@ func TestBackendsPresignComplete_NotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/backends/"+completeTestType2+"/presign/complete?path=dir/nope.txt", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/backends/"+completeTestType2+"/presign/complete?path=dir/nope.txt&size=9&sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -96,7 +122,7 @@ func TestBackendsPresignComplete_Unregistered(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/backends/{type}/presign/complete", h.backendPresignCompleteHandler)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/backends/no-such/presign/complete?path=a.txt", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/backends/no-such/presign/complete?path=a.txt&size=9&sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -108,4 +134,5 @@ func TestBackendsPresignComplete_Unregistered(t *testing.T) {
 const (
 	completeTestType  = "backends-complete-test"
 	completeTestType2 = "backends-complete-test2"
+	completeTestType3 = "backends-complete-test3"
 )

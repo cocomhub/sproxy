@@ -4,25 +4,18 @@
 package server
 
 import (
-	"encoding/json"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
-	"sync/atomic"
+
+	"github.com/cocomhub/sproxy/internal/httpjson"
+	"github.com/cocomhub/sproxy/pkg/server/cloudtasks"
 )
 
-// responseLogger 是 sendJSONResponse 使用的日志记录器，默认使用 slog.Default()。
-// 可通过 SetResponseLogger 替换，用于测试或自定义日志输出。
-var responseLogger atomic.Pointer[slog.Logger]
-
-func init() {
-	SetResponseLogger(slog.Default())
-}
-
-// SetResponseLogger 设置 sendJSONResponse 使用的日志记录器。
+// SetResponseLogger 设置 JSON 响应写出失败时的告警日志器（委托 internal/httpjson）。
 func SetResponseLogger(l *slog.Logger) {
-	responseLogger.Store(l)
+	httpjson.SetLogger(l)
 }
 
 // UploadResponse 是通用响应结构。
@@ -36,17 +29,12 @@ type UploadResponse struct {
 // ChunkSessionsResponse / ChunkUploadResponse / ChunkCompleteResponse）随分块处理器迁入
 // pkg/files（DTO 定义在写出它的包里，见该包 service.go 的 HTTP 契约小节）。
 
+// sendJSONResponse 写 JSON 响应（Content-Type + 序列化 + 状态码 + 序列化失败兜底）。
+//
+// 实现已收敛到 internal/httpjson（全仓唯一实现）：此前 pkg/files 与
+// pkg/server/ratelimit 各持一份等价副本，收敛后只保留这一处装配层入口。
 func sendJSONResponse(w http.ResponseWriter, response any, statusCode int) {
-	w.Header().Set(headerContentType, contentTypeJSON)
-	buf, err := json.Marshal(response)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		responseLogger.Load().Warn("Encode JSON response failed", "error", err)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
-		return
-	}
-	w.WriteHeader(statusCode)
-	_, _ = w.Write(buf)
+	httpjson.Send(w, statusCode, response)
 }
 
 // formatContentDisposition 使用标准库安全地构造 Content-Disposition 头。
@@ -69,11 +57,7 @@ func formatContentDisposition(filename string) string {
 // 本包测试直接引用 `files.*`。
 
 // CloudBatchTaskResult 批量下载单个任务结果。
-type CloudBatchTaskResult struct {
-	ID       string `json:"id"`
-	Owner    string `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
-	URL      string `json:"url"`
-	Filename string `json:"filename"`
-	Status   string `json:"status"`
-	Error    string `json:"error,omitempty"`
-}
+//
+// DTO 随写出它的处理器走（P1-c S2a 迁入 pkg/server/cloudtasks）；此处保留同名
+// **类型别名**，让既有装配层测试与调用点零改动引到同一类型（同一语义只留一份定义）。
+type CloudBatchTaskResult = cloudtasks.BatchTaskResult

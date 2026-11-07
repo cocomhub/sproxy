@@ -1,0 +1,17 @@
+# 门禁 R34：**释放/放宽可用额度的公开入口**必须在根等待锁（Pool.withWaitLock）内执行。
+# 理由（独立复审 P2，2026-10-18 根因修复）：等待侧在 root.cond.L（即 root.waitMu）下做
+# double-check 与 Wait；若释放侧在不同锁下广播，广播可能落在「已判定不足 → 尚未 Wait」窗口内
+# 被丢弃 ⇒ 等待者只能睡到超时（WaitReserve ≤30s）才重试。运行时用例对该竞态无判别力
+# （交错窗口过窄，变异验证显示仍绿）⇒ 用结构门禁锁死。
+# 格式：<方法签名前缀>\t<理由>；方法体（到下一个顶层 func 为止）必须出现 withWaitLock(
+func (p *Pool) SetMaxBytes(	放宽上限即释放额度，须唤醒等待者
+func (p *Pool) ReleaseCommitted(	释放已确认占用
+func (p *Pool) ReleaseCommittedAndUnmount(	删封装卷归还配额
+func (p *Pool) Adjust(	reconcile 收敛（可降 ⇒ 释放）
+func (p *Pool) SetOperationalReserve(	下调运维余量即释放额度
+func (p *Pool) EnsureChild(	改分配账本 ⇒ 改变可用额度
+func (s *Scope) ReleaseUsage(	文件删除释放
+func (s *Scope) Adjust(	覆盖写尺寸下降释放
+func (r *Reservation) Release(	放弃预留
+func (a *Allocation) Release(	归还分配额度
+func (a *Allocation) Set(	缩额释放

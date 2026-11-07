@@ -21,12 +21,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
+	"github.com/cocomhub/sproxy/pkg/tempclean"
 )
 
 // 直连模式下拼接 serverURL + urlPath 构造完整 URL。
@@ -43,21 +46,17 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		return c.sendUnsigned(ctx, method, urlPath, body, headers)
 	}
 	if c.requestSigner != nil {
-		req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+		req, err := c.newRequest(ctx, method, urlPath, body, headers)
 		if err != nil {
-			return nil, fmt.Errorf("创建请求失败: %w", err)
-		}
-		for k, vals := range headers {
-			for _, v := range vals {
-				req.Header.Add(k, v)
-			}
+			return nil, err
 		}
 		if serr := c.requestSigner.Sign(ctx, req); serr != nil {
 			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
 		}
 		return c.doRequestPrepared(ctx, req)
 	}
-	if c.accessKeySecret != "" {
+	_, sk, _ := c.credentialsSnapshot()
+	if sk != "" {
 		sigAuth, signedBody, cleanup, serr := c.signRequest(method, urlPath, body)
 		if serr != nil {
 			return nil, fmt.Errorf("SproxySig 签名失败: %w", serr)
@@ -72,6 +71,31 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 		headers.Set("Authorization", sigAuth)
 	}
 
+	req, err := c.newRequest(ctx, method, urlPath, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	return c.doRequestPrepared(ctx, req)
+}
+
+// noClientTimeoutKey 是 ctx 中的私有键：标记「本次请求不要客户端级超时」
+// （2026-10-23：/upload/complete 大文件转存可达 8-10 分钟，300s 客户端超时会先断）。
+type noClientTimeoutKey struct{}
+
+// WithNoClientTimeout 让本次请求**跳过 http.Client.Timeout**（仍保留 ctx deadline 与
+// 全部签名/认证/追踪装配）。仅用于已知慢操作（complete 转存）。
+func WithNoClientTimeout(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noClientTimeoutKey{}, true)
+}
+
+// noClientTimeoutFrom 报告本次请求是否要跳过客户端级超时。
+func noClientTimeoutFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(noClientTimeoutKey{}).(bool)
+	return v
+}
+
+// newRequest 构造带请求头的 http.Request（doRequest / sendUnsigned 各签名分支共用）。
+func (c *FileClient) newRequest(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
@@ -81,21 +105,16 @@ func (c *FileClient) doRequest(ctx context.Context, method, urlPath string, body
 			req.Header.Add(k, v)
 		}
 	}
-	return c.doRequestPrepared(ctx, req)
+	return req, nil
 }
 
 // sendUnsigned 构造**不签名**的直连请求（M14 TOTP 显式无凭据链路用）：与 doRequest
 // 的核心装配共享，但跳过 signRequest / 注入 Signer——请求不带 Authorization 头直达
 // 服务端公开端点（register/nonce/login）。
 func (c *FileClient) sendUnsigned(ctx context.Context, method, urlPath string, body io.Reader, headers http.Header) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, urlPath, body)
+	req, err := c.newRequest(ctx, method, urlPath, body, headers)
 	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	for k, vals := range headers {
-		for _, v := range vals {
-			req.Header.Add(k, v)
-		}
+		return nil, err
 	}
 	return c.doRequestPrepared(ctx, req)
 }
@@ -115,17 +134,16 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 	// 请求上下文改用 ctx2：span 生命周期覆盖实际传输，且后续 Context 版日志自动带 trace_id/span_id。
 	req = req.WithContext(ctx2)
 
-	var resp *http.Response
-	var err error
+	// 隧道模式：使用相对 URL，隧道客户端加密，优先于其它路径。
 	if c.tunnelClient != nil {
 		if c.initError != nil {
 			return nil, c.initError
 		}
-		// 隧道模式：使用相对 URL，隧道客户端处理加密
-		resp, err = c.tunnelClient.Do(req)
+		resp, err := c.tunnelClient.Do(req)
 		return closeBodyIfErr(resp, err)
 	}
 
+	// 传输初始化失败：allowTransportFallback 时告警后回退直连，否则失败拒绝（fail-closed）。
 	if c.initError != nil {
 		if !c.allowTransportFallback {
 			return nil, fmt.Errorf("transport initialization failed: %w", c.initError)
@@ -133,16 +151,23 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 		c.logger.WarnContext(ctx2, "transport unavailable, falling back to direct mode", "init_error", c.initError)
 	}
 
+	// xfer 传输层（QUIC/WebSocket 等）：直连上层不走，单独处理。
 	if c.xferName != "" {
-		resp, err = c.doRequestViaXfer(req)
+		resp, err := c.doRequestViaXfer(req)
 		return closeBodyIfErr(resp, err)
 	}
 
-	// 直连模式：补全 server URL
+	return c.doDirect(ctx2, req)
+}
+
+// doDirect 直连模式：补全 server URL → 注入多用户 Bearer → 用隔离连接池发请求，
+// 失败且可重放时经回退代理重发（网络类错误；不带 body 才能安全重放）。
+func (c *FileClient) doDirect(ctx context.Context, req *http.Request) (*http.Response, error) {
 	fullURL := c.serverURL + req.URL.Path
 	if req.URL.RawQuery != "" {
 		fullURL += "?" + req.URL.RawQuery
 	}
+	var err error
 	req.URL, err = url.Parse(fullURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析 URL 失败: %w", err)
@@ -151,6 +176,9 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 	if c.authToken != "" && c.accessKeySecret == "" {
 		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
+	// **慢操作跳过客户端级超时（2026-10-23）**：ctx 显式标记（WithNoClientTimeout）时
+	// 用去掉 Timeout 的临时 client（复用同一 Transport 连接池），避免 /upload/complete
+	// 大文件转存（8-10 分钟）被 300s 提前掐断。
 	hc := c.httpClient
 	if hc == nil {
 		// 不落 http.DefaultClient：自建隔离连接池（硬规则——共享连接池被外部
@@ -158,8 +186,59 @@ func (c *FileClient) doRequestPrepared(ctx context.Context, req *http.Request) (
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
 		hc = &http.Client{Transport: netutil.IsolatedTransport()}
 	}
-	resp, err = hc.Do(req)
+	if noClientTimeoutFrom(ctx) && hc.Timeout != 0 {
+		hc = &http.Client{Transport: hc.Transport}
+	}
+	resp, err := hc.Do(req)
+	if err != nil && c.downloadProxy != "" && isReplayable(req) {
+		// 下载直连失败（网络类错误，非 HTTP 状态码）→ 同一请求重发经回退代理。
+		// 仅无 body 请求可安全重放（body 已消费无法重放）；隧道/xfer 分支在上方已
+		// return，不会到达这里。代理仍失败时返回代理错误（fail-closed，不静默降级）。
+		proxyResp, proxyErr := c.doRequestViaProxy(ctx, req, err)
+		if proxyErr != nil {
+			return closeBodyIfErr(proxyResp, proxyErr)
+		}
+		return proxyResp, nil
+	}
 	return closeBodyIfErr(resp, err)
+}
+
+// isReplayable 判断请求是否可安全重放（回退代理重发需要请求体仍可读）。
+// 下载/stat/list 等路径均为无 body 请求（GET/HEAD）⇒ 可重放；
+// 带 body 的一次性流（上传 multipart、JSON 请求体）不可重放，直接返回原错误。
+func isReplayable(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	return req.Body == nil || req.Body == http.NoBody
+}
+
+// doRequestViaProxy 用带 Proxy 的隔离 Transport 重发同一请求（克隆后换 Transport，
+// 不重新签名——Authorization 头随克隆保留；SproxySig 签名基于 body hash + headers
+// 已计算，重发相同签名即可）。
+func (c *FileClient) doRequestViaProxy(ctx context.Context, req *http.Request, directErr error) (*http.Response, error) {
+	proxyURL, perr := url.Parse(c.downloadProxy)
+	if perr != nil {
+		return nil, fmt.Errorf("下载代理地址无效 %q: %w（直连错误: %v）", c.downloadProxy, perr, directErr)
+	}
+	tr := netutil.IsolatedTransport()
+	tr.Proxy = http.ProxyURL(proxyURL)
+	timeout := time.Duration(0)
+	if c.httpClient != nil {
+		timeout = c.httpClient.Timeout
+	}
+	proxyClient := &http.Client{
+		Timeout:   timeout,
+		Transport: tr,
+	}
+	// 克隆请求：Header/URL 深拷贝，保留签名与凭据头；仅替换 Transport 发送。
+	proxyReq := req.Clone(ctx)
+	c.logger.WarnContext(ctx, "直连下载失败，回退代理重发", "direct_error", directErr.Error(), "proxy", c.downloadProxy, "url", req.URL.String())
+	resp, err := proxyClient.Do(proxyReq)
+	if err != nil {
+		return resp, fmt.Errorf("直连失败且代理下载失败（%s）: %w（直连错误: %v）", c.downloadProxy, err, directErr)
+	}
+	return resp, nil
 }
 
 // RequestSigner 是请求签名器 seam：宿主可注入自有凭据源/签名器（替换默认
@@ -190,16 +269,18 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 		return fmt.Errorf("signRequest: 非法请求（nil req/url）")
 	}
 	c := s.c
+	// 凭据快照（RenewAccessKey 热替换并发安全）。
+	ak, sk, id := c.credentialsSnapshot()
 	// v2 skey-id 强制必传：配置了 access_key 但缺 access_key_id 且非 renew 引导
 	// （allowMissingEntryID）→ 报错（v2 协议要求；renew 引导例外见 RenewAccessKey）。
-	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+	if ak != "" && id == "" && !c.allowMissingEntryID {
 		return fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         c.accessKey,
-		EntryID:    c.accessKeyID,
+		AK:         ak,
+		EntryID:    id,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
@@ -223,7 +304,7 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 			req.Body = io.NopCloser(signedBody)
 		}
 	}
-	req.Header.Set("Authorization", sproxysig.SignAndFormat(c.accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
+	req.Header.Set("Authorization", sproxysig.SignAndFormat(sk, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	return nil
 }
 
@@ -233,7 +314,9 @@ func (s *configSigner) Sign(ctx context.Context, req *http.Request) error {
 // **强制必传**：accessKey 非空但 skeyID 为空时返回错误（v2 协议要求；renew 引导
 // 例外见 RenewAccessKey——首次 renew 前本端恰好无 skeyID）。
 func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string, io.Reader, func(), error) {
-	if c.accessKey != "" && c.accessKeyID == "" && !c.allowMissingEntryID {
+	// 凭据快照（RenewAccessKey 热替换并发安全）。
+	ak, sk, id := c.credentialsSnapshot()
+	if ak != "" && id == "" && !c.allowMissingEntryID {
 		return "", nil, nil, fmt.Errorf("%w: 请先 `sclient trust renew` 或配置 access_key_id", ErrSkeyIDRequired)
 	}
 	pathPart, queryPart, _ := strings.Cut(urlPath, "?")
@@ -244,14 +327,14 @@ func (c *FileClient) signRequest(method, urlPath string, body io.Reader) (string
 	now := time.Now()
 	h := sproxysig.Header{
 		Version:    sproxysig.Version,
-		AK:         c.accessKey,
-		EntryID:    c.accessKeyID,
+		AK:         ak,
+		EntryID:    id,
 		TS:         now.UnixMilli(),
 		Exp:        now.Add(sproxysig.DefaultExpiry).UnixMilli(),
 		Nonce:      sproxysig.NewNonce(),
 		BodySHA256: bodyHash,
 	}
-	return sproxysig.SignAndFormat(c.accessKeySecret, h, method, pathPart, queryPart), signedBody, cleanup, nil
+	return sproxysig.SignAndFormat(sk, h, method, pathPart, queryPart), signedBody, cleanup, nil
 }
 
 // prehashBody 计算 body 的 SHA-256（发送前预计算，供签名）。
@@ -273,7 +356,13 @@ func prehashBody(body io.Reader) (io.Reader, string, func(), error) {
 		}
 		return body, hex.EncodeToString(h.Sum(nil)), nil, nil
 	}
-	f, err := os.CreateTemp("", "sproxy-sig-body-*")
+	// 收敛到固定父目录（不再散落在 Temp 根）：进程被强杀时残留可控、可按父目录批量清理。
+	// 正常路径仍由 cleanup() 立即删除（调用方 defer）。
+	dir := clientTempDir()
+	if merr := os.MkdirAll(dir, 0o700); merr != nil {
+		return nil, "", nil, merr
+	}
+	f, err := os.CreateTemp(dir, "sproxy-sig-body-*")
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -404,29 +493,64 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		err := fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
-		if resp.StatusCode == http.StatusNotFound {
-			return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
-		}
-		// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
-		// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
-		if resp.StatusCode == http.StatusInsufficientStorage {
-			return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
-		}
-		return err
+		return doJSONStatusError(resp)
 	}
 
 	if respBody != nil {
-		limited := io.LimitReader(resp.Body, 10<<20) // 10MB 上限
-		if err := json.NewDecoder(limited).Decode(respBody); err != nil {
-			return fmt.Errorf("解析响应失败: %w", err)
-		}
-
-		// 自动检查 Success 字段
-		if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
-			return fmt.Errorf("请求失败: %s", checker.message())
-		}
+		return doJSONDecodeBody(resp.Body, respBody)
 	}
 	return nil
 }
+
+// doJSONStatusError 把非 2xx 状态码映射为带上下文/哨兵的错误
+// （NotFound→ErrNotFound，HTTP 507→ErrStorageFull）。
+func doJSONStatusError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	err := fmt.Errorf("请求失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrNotFound, err.Error())
+	}
+	// 未认证（401）映射为 ErrUnauthorized 哨兵：仅此错误才应触发 SK 轮换
+	// （签名失效 / 凭据过期），5xx / 网络错误不触发（评审 P1-A：误轮换风暴）。
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("%w: %s", ErrUnauthorized, err.Error())
+	}
+	// 存储不足（HTTP 507）映射为 ErrStorageFull 哨兵错误，供调用方 errors.Is 精确判断
+	// （链式操作的存储满退避重试依赖此判断，不再退化为脆弱的字符串匹配）
+	if resp.StatusCode == http.StatusInsufficientStorage {
+		return fmt.Errorf("%w: %s", ErrStorageFull, err.Error())
+	}
+	return err
+}
+
+// doJSONDecodeBody 解析 JSON 响应体并自动检查 Success 字段（超出 10MB 上限拒收）。
+func doJSONDecodeBody(r io.Reader, respBody any) error {
+	limited := io.LimitReader(r, 10<<20) // 10MB 上限
+	if err := json.NewDecoder(limited).Decode(respBody); err != nil {
+		return fmt.Errorf("解析响应失败: %w", err)
+	}
+	// 自动检查 Success 字段
+	if checker, ok := respBody.(successChecker); ok && !checker.isSuccess() {
+		return fmt.Errorf("请求失败: %s", checker.message())
+	}
+	return nil
+}
+
+// clientTempRoot 是客户端签名临时文件的固定父目录名（收敛散落残留）。
+const clientTempRoot = "sproxy-client"
+
+// staleClientTempMaxAge 是孤儿判定阈值：超过该时长未更新的临时文件视为强杀残留。
+const staleClientTempMaxAge = 6 * time.Hour
+
+// clientTempDir 返回客户端临时目录，并在首次调用时 best-effort 清理孤儿文件
+// （进程被强杀时 defer cleanup 不会执行，残留会累积）。
+func clientTempDir() string {
+	dir := filepath.Join(os.TempDir(), clientTempRoot)
+	clientTempCleanupOnce.Do(func() {
+		// 复用 pkg/tempclean 的唯一清理实现（同时覆盖 secretdata / multipart 残留）。
+		tempclean.CleanupStale(staleClientTempMaxAge)
+	})
+	return dir
+}
+
+var clientTempCleanupOnce sync.Once

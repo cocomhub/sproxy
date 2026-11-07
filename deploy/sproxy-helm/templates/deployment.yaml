@@ -24,14 +24,24 @@ spec:
         app.kubernetes.io/name: sproxy
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
         - name: sproxy
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+              ephemeral-storage: 512Mi
+            limits:
+              cpu: 2
+              memory: 1Gi
+              ephemeral-storage: 2Gi
           ports:
             - name: http
               containerPort: 18083

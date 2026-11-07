@@ -42,10 +42,13 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
+	"github.com/cocomhub/sproxy/pkg/rootfs"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/volume"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // mirrorCopyResponse 是 POST /api/volumes/copy 的响应体。
@@ -57,13 +60,23 @@ type mirrorCopyResponse struct {
 	Idempotent bool   `json:"idempotent,omitempty"`
 }
 
-// copyVolumeHandler 处理 POST /api/volumes/copy?from_volume&to_volume&filename。
-// 语义见文件头注释（与 move 对齐，仅保留源）。
+// copyVolumeHandler 处理 POST /api/volumes/copy?from_volume&to_volume&filename[&to&force]。
+//
+// 两种形态：
+//   - **经典跨卷同 rel**（无 `to`、无 force、两侧都是本地卷）：走既有本地跨卷核心
+//     `copyFileBetweenVolumes`（双预留 + 流式 + 原子 rename，行为零改动）；
+//   - **通用复制**（CLI `cp`：目标路径可不同 / force / 任一侧为外部卷）：交 `files.Service.CopyFile`
+//     或直调卷的 blob 直拷能力（同卷 + 外部卷 + 卷支持时**不重新加解密**）。
 func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	filename := r.URL.Query().Get("filename")
 	fromVol := r.URL.Query().Get("from_volume")
 	toVol := r.URL.Query().Get("to_volume")
-	if filename == "" || fromVol == "" || toVol == "" {
+	to := r.URL.Query().Get("to")
+	if to == "" {
+		to = filename
+	}
+	force := r.URL.Query().Get("force") == "true"
+	if filename == "" {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: "from_volume、to_volume、filename 均不能为空"}, http.StatusBadRequest)
 		return
 	}
@@ -78,12 +91,37 @@ func (h *Handlers) copyVolumeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	owner := normalizeOwner(ownerFromRequest(r))
 
-	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
-	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "volume not allowed"}, http.StatusForbidden)
+	// 卷可省略（CLI `cp a.txt b.txt` 的契约）：源卷 = 文件实际所在卷，由**单一实现**
+	// volume.Router.Locate 解析；目标卷默认同源卷。此前强制两端必填 ⇒ 默认上下文
+	// （未 cd 到卷）下同卷复制必然失败「源卷与源路径不能为空」。
+	if fromVol == "" {
+		loc, ok := h.locateOwnerFile(owner, "user/"+remotePath)
+		if !ok {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: "文件不存在"}, http.StatusNotFound)
+			return
+		}
+		fromVol = loc.volumeName
+	}
+	if toVol == "" {
+		toVol = fromVol
+	}
+	if fromVol == "" || toVol == "" {
+		// 无卷语义的旧装配（locateOwnerFile 不携带卷名）：保持原有 400，不静默猜。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "from_volume、to_volume、filename 均不能为空"}, http.StatusBadRequest)
 		return
 	}
 
+	// ACL 视图（AD-6/§8）：from/to 都必须在 owner 视图内，否则 403（不泄卷存在性）。
+	if !h.volumeAllowedFor(owner, fromVol) || !h.volumeAllowedFor(owner, toVol) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgVolumeNotAllowed}, http.StatusForbidden)
+		return
+	}
+
+	// 通用形态（目标路径不同 / force / 任一侧外部卷）→ 域侧统一复制。
+	if to != filename || force || h.isExternalVolumeName(fromVol) || h.isExternalVolumeName(toVol) {
+		h.copyViaService(w, r, owner, remotePath, to, fromVol, toVol, force)
+		return
+	}
 	status, resp := h.copyFileBetweenVolumes(r.Context(), owner, remotePath, fromVol, toVol, false)
 	sendJSONResponse(w, resp, status)
 }
@@ -126,19 +164,9 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 		return errResp(http.StatusBadRequest, errMsgInvalidPath)
 	}
 	fromRoot := fromTnt.Root()
-	srcInfo, statErr := fromRoot.Stat(rel)
-	if os.IsNotExist(statErr) {
-		h.RecordAudit(ctx, AuditEvent{
-			Action: "volume_copy", ObjectType: "file", Object: remotePath,
-			Result: AuditResultError, Detail: "源文件不存在",
-		})
-		return errResp(http.StatusNotFound, "文件不存在")
-	} else if statErr != nil {
-		h.logger.Error("copy: stat 源文件失败", "file_name", remotePath, "volume", fromVol, "error", statErr)
-		return errResp(http.StatusInternalServerError, "访问源文件失败")
-	}
-	if srcInfo.IsDir() {
-		return errResp(http.StatusBadRequest, "不能复制目录（仅支持文件）")
+	srcInfo, status, resp, ok := statCopySource(ctx, h, remotePath, fromVol, fromRoot, rel)
+	if !ok {
+		return status, resp
 	}
 
 	// 同卷 copy：源已在目标卷（rel 不变即目标位置就是源自身）→ 无操作成功（幂等）。
@@ -157,84 +185,32 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 	}
 	toPool := h.volSet.Pool(toVol)
 
-	// 目标同 rel 已存在：checksum 一致 → 幂等成功（不重复占配额）；不一致 →
-	// targetOverwrite（镜像收敛）→ 覆盖；否则 409（copy API 不覆盖用户内容）。
-	if exists, eerr := h.volumeFileExists(toVol, owner, rel); eerr != nil {
-		h.logger.Error("copy: 探测目标卷失败", "file_name", remotePath, "to", toVol, "error", eerr)
-		return errResp(http.StatusInternalServerError, "探测目标卷失败")
-	} else if exists {
-		srcCS, cerr := FileChecksumRoot(fromRoot, rel)
-		if cerr != nil {
-			h.logger.Error("copy: 计算源 checksum 失败", "file_name", remotePath, "error", cerr)
-			return errResp(http.StatusInternalServerError, "计算源文件校验和失败")
-		}
-		dstCS, derr := FileChecksumRoot(toTnt.Root(), rel)
-		if derr != nil {
-			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", remotePath, "error", derr)
-			return errResp(http.StatusInternalServerError, "计算目标文件校验和失败")
-		}
-		if srcCS == dstCS {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
-				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
-			})
-			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}
-		}
-		if !targetOverwrite {
-			h.RecordAudit(ctx, AuditEvent{
-				Action: "volume_copy", ObjectType: "file", Object: remotePath,
-				Result: AuditResultDenied, Detail: "目标已存在且内容不同（copy API 不覆盖）",
-			})
-			return errResp(http.StatusConflict, "目标卷已存在同名文件且内容不同（如需覆盖请先删除目标或使用镜像策略）")
-		}
-		// 镜像收敛：目标内容不同 → 覆盖（走下方流式复制，原子替换）。
+	cvc := &copyVolumeCtx{
+		ctx: ctx, owner: owner, remotePath: remotePath, rel: rel,
+		fromRoot: fromRoot, fromVol: fromVol, toVol: toVol, toTnt: toTnt,
 	}
 
-	// 幂等命中（exists 但 checksum 一致）已在上面 return——此处目标不存在或
-	// targetOverwrite=true（镜像收敛覆盖），均走流式复制。
+	// 目标同 rel 已存在：checksum 一致 → 幂等成功；不一致 → targetOverwrite → 覆盖；否则 409。
+	if st, respBody, handled := h.checkCopyTarget(cvc, targetOverwrite); handled {
+		return st, respBody
+	}
 
-	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；任一失败回滚已预留。
-	// 覆盖写（镜像收敛目标已存在，prev>0）与 move 不同——镜像覆盖用 Adjust 差分收敛，
-	// 走 route.Commit(prev, written) 语义：先 stat 目标 prev。
-	size := srcInfo.Size()
+	// AD-7 双账本 to 侧先 reserve（owner 全局 → 目标卷池，防中间超限）；失败回滚已预留。
+	size := copySourceSize(fromRoot, rel, srcInfo)
 	scope := h.quotaScopeFor(owner, rel)
-	var scopeRes, poolRes *quota.Reservation
-	if scope != nil {
-		rr, rerr := scope.TryReserve(size)
-		if rerr != nil {
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
-		}
-		scopeRes = rr
-	}
-	if toPool != nil {
-		rr, rerr := toPool.TryReserve(size)
-		if rerr != nil {
-			if scopeRes != nil {
-				scopeRes.Release()
-			}
-			return errResp(http.StatusInsufficientStorage, "存储配额不足")
-		}
-		poolRes = rr
+	scopeRes, poolRes, status, msg, ok := reserveCopyQuota(ctx, scope, toPool, size, h.quotaWaitTimeout)
+	if !ok {
+		return errResp(status, msg)
 	}
 
-	// 覆盖写（镜像收敛，目标已有旧内容）用 Adjust 差分：复制前 stat 目标旧大小 prev，
-	// 复制后 Commit(prev, written) 使账本收敛到新大小（prev==0 = 新文件 → 直接 Commit）。
-	// **必须在复制前取值**——复制后目标已存在且尺寸=written，stat 会误判 prev==written
-	// 使 Adjust 差分恒为 0（副本不入账，双计语义丢失）。
-	prev := int64(0)
-	if st, serr := toTnt.Root().Stat(rel); serr == nil && !st.IsDir() {
-		prev = st.Size()
-	}
+	// 覆盖写（镜像收敛）用 Adjust 差分：复制前 stat 目标旧大小 prev，复制后 Commit(prev,written)。
+	// 必须在复制前取值——复制后目标已存在且尺寸=written，stat 会误判 prev==written 使差分恒为 0。
+	prev := statCopyPrev(toTnt, rel)
 
 	// 流式复制到 to 卷（临时 + fsync + 原子 rename）；失败回滚双预留，源不动。
 	written, copyErr := crossVolumeCopy(ctx, fromRoot, toTnt.Root(), rel, rel)
 	if copyErr != nil {
-		if scopeRes != nil {
-			scopeRes.Release()
-		}
-		if poolRes != nil {
-			poolRes.Release()
-		}
+		releaseCopyReserve(scopeRes, poolRes)
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "volume_copy", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "复制到目标卷失败",
@@ -242,17 +218,11 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 		h.logger.Error("copy: 复制到目标卷失败", "file_name", remotePath, "from", fromVol, "to", toVol, "error", copyErr)
 		return errResp(http.StatusInternalServerError, "复制文件失败")
 	}
-	// 纵深防御（TOCTOU 闭合）：复制字节数须与 stat 源尺寸一致——不一致 = 源在复制中被并发
-	// 改写/截断（uploadingFiles 锁已挡住同 rel upload/move，delete/restore 未持锁）。
+	// 纵深防御（TOCTOU 闭合）：复制字节数须与 stat 源尺寸一致——不一致即源被并发改写。
 	// fail-closed：删目标 + 双 Release 回滚，源不动。
 	if written != size {
 		_ = toTnt.Root().Remove(rel)
-		if scopeRes != nil {
-			scopeRes.Release()
-		}
-		if poolRes != nil {
-			poolRes.Release()
-		}
+		releaseCopyReserve(scopeRes, poolRes)
 		h.RecordAudit(ctx, AuditEvent{
 			Action: "volume_copy", ObjectType: "file", Object: remotePath,
 			Result: AuditResultError, Detail: "复制字节与源尺寸不一致（源被并发改写），已回滚",
@@ -262,8 +232,152 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 		return errResp(http.StatusInternalServerError, "复制文件失败")
 	}
 
-	// 双 commit（to 侧预留对账为实际占用 written）。覆盖写（镜像收敛，目标已有旧内容）
-	// 用 Adjust 差分：prev 在复制前已捕获，Commit(prev, written) 使账本收敛到新大小。
+	// 双 commit（to 侧预留对账为实际占用 written）+ checksum 台账 + 审计 + 响应。
+	return h.commitCopyResult(cvc, scope, toPool, scopeRes, poolRes, prev, written)
+}
+
+// statCopySource 在锁内校验源文件：存在性 / 非目录 / stat 错误映射为响应。
+// 返回 (srcInfo, status, resp, ok)；ok=false 时已命中最终响应（调用方直接返回）。
+func statCopySource(ctx context.Context, h *Handlers, remotePath, fromVol string, fromRoot *storage.Root, rel string) (os.FileInfo, int, mirrorCopyResponse, bool) {
+	srcInfo, statErr := fromRoot.Stat(rel)
+	if os.IsNotExist(statErr) {
+		h.RecordAudit(ctx, AuditEvent{
+			Action: "volume_copy", ObjectType: "file", Object: remotePath,
+			Result: AuditResultError, Detail: "源文件不存在",
+		})
+		return nil, http.StatusNotFound, mirrorCopyResponse{Success: false, Message: "文件不存在"}, false
+	} else if statErr != nil {
+		h.logger.Error("copy: stat 源文件失败", "file_name", remotePath, "volume", fromVol, "error", statErr)
+		return nil, http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "访问源文件失败"}, false
+	}
+	if srcInfo.IsDir() {
+		return nil, http.StatusBadRequest, mirrorCopyResponse{Success: false, Message: "不能复制目录（仅支持文件）"}, false
+	}
+	return srcInfo, 0, mirrorCopyResponse{}, true
+}
+
+// srcInfoCapacity 返回源文件大小（复制配额与 TOCTOU 校验用）。
+func srcInfoCapacity(srcInfo os.FileInfo) int64 { return srcInfo.Size() }
+
+// copySourceSize 返回复制用**源尺寸**：加密源卷的 Stat 是密文长度，而 `crossVolumeCopy` 经解密
+// 流复制、返回明文字节数 ⇒ 以**用户可见长度**为准（无 root 或读取失败时回落 Stat 尺寸）。
+func copySourceSize(fromRoot *storage.Root, rel string, srcInfo os.FileInfo) int64 {
+	if fromRoot != nil {
+		if ls, lerr := rootfs.UserVisibleSize(fromRoot, rel); lerr == nil {
+			return ls
+		}
+	}
+	return srcInfoCapacity(srcInfo)
+}
+
+// copyVolumeCtx 是跨卷复制（copy API / 镜像 pass）内部步骤共享的上下文：源卷根 + 目标卷租户 +
+// 相对路径 + 请求端点（审计/日志），供 checkCopyTarget / commitCopyResult 复用。
+type copyVolumeCtx struct {
+	//nolint:containedctx // S8242 已评估：单次跨卷复制作用域共享 ctx（复制 API/镜像 pass），非请求侧驻留——与下行 NOSONAR 双抑制
+	ctx        context.Context // NOSONAR: S8242 — 单次跨卷复制的作用域共享 ctx（复制 API / 镜像 pass），非请求侧驻留
+	owner      string
+	remotePath string
+	rel        string
+	fromRoot   *storage.Root
+	fromVol    string
+	toVol      string
+	toTnt      *storage.Tenant
+}
+
+// checkCopyTarget 处理目标同 rel 已存在的情形：checksum 一致 → 幂等成功（不重复占配额）；
+// 不一致 → targetOverwrite（镜像收敛）→ 继续走流式复制覆盖；否则 409（copy API 不覆盖
+// 用户内容）。返回 handled=true 表示已产出最终响应（调用方直接返回）。
+func (h *Handlers) checkCopyTarget(cvc *copyVolumeCtx, targetOverwrite bool) (int, mirrorCopyResponse, bool) {
+	if exists, eerr := h.volumeFileExists(cvc.toVol, cvc.owner, cvc.rel); eerr != nil {
+		h.logger.Error("copy: 探测目标卷失败", "file_name", cvc.remotePath, "to", cvc.toVol, "error", eerr)
+		return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "探测目标卷失败"}, true
+	} else if exists {
+		srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
+		if cerr != nil {
+			h.logger.Error("copy: 计算源 checksum 失败", "file_name", cvc.remotePath, "error", cerr)
+			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算源文件校验和失败"}, true
+		}
+		dstCS, derr := FileChecksumRoot(cvc.toTnt.Root(), cvc.rel)
+		if derr != nil {
+			h.logger.Error("copy: 计算目标 checksum 失败", "file_name", cvc.remotePath, "error", derr)
+			return http.StatusInternalServerError, mirrorCopyResponse{Success: false, Message: "计算目标文件校验和失败"}, true
+		}
+		if srcCS == dstCS {
+			h.RecordAudit(cvc.ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
+				Result: AuditResultSuccess, Detail: "目标已存在且 checksum 一致（幂等）",
+			})
+			// P1-8 修复：幂等命中时也确保目标有 meta（存量副本可能缺 sidecar）。
+			h.writeCopyMeta(cvc)
+			return http.StatusOK, mirrorCopyResponse{Success: true, Message: "目标已存在且内容一致，无需复制", Checksum: srcCS, Idempotent: true}, true
+		}
+		if !targetOverwrite {
+			h.RecordAudit(cvc.ctx, AuditEvent{
+				Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
+				Result: AuditResultDenied, Detail: "目标已存在且内容不同（copy API 不覆盖）",
+			})
+			return http.StatusConflict, mirrorCopyResponse{Success: false, Message: "目标卷已存在同名文件且内容不同（如需覆盖请先删除目标或使用镜像策略）"}, true
+		}
+		// 镜像收敛：目标内容不同 → 覆盖（走下方流式复制，原子替换）。
+	}
+	return 0, mirrorCopyResponse{}, false
+}
+
+// reserveCopyQuota 对 to 侧做双预留（owner 全局 Scope → 目标卷池，防中间超限）；
+// 任一失败回滚已预留并返回 (status, msg, false)。
+// timeout 是排队等待上限（<=0 ⇒ quota.DefaultWaitTimeout 30s）；调用方透传测试注入的短值，
+// 生产恒 0 语义不变（「配额故意打满断言 507/跳过」的用例不白等 30s）。
+func reserveCopyQuota(ctx context.Context, scope *quota.Scope, toPool *quota.Pool, size int64, timeout time.Duration) (*quota.Reservation, *quota.Reservation, int, string, bool) {
+	if timeout <= 0 {
+		timeout = quota.DefaultWaitTimeout
+	}
+	var scopeRes, poolRes *quota.Reservation
+	if scope != nil {
+		rr, rerr := scope.WaitReserve(ctx, size, timeout)
+		if rerr != nil {
+			return nil, nil, http.StatusInsufficientStorage, msgStorageQuotaExceeded, false
+		}
+		scopeRes = rr
+	}
+	if toPool != nil {
+		rr, rerr := toPool.WaitReserve(ctx, size, timeout)
+		if rerr != nil {
+			if scopeRes != nil {
+				scopeRes.Release()
+			}
+			return nil, nil, http.StatusInsufficientStorage, msgStorageQuotaExceeded, false
+		}
+		poolRes = rr
+	}
+	return scopeRes, poolRes, 0, "", true
+}
+
+// releaseCopyReserve 回滚双预留（复制失败 / TOCTOU 不一致时；nil 空操作）。
+func releaseCopyReserve(scopeRes, poolRes *quota.Reservation) {
+	if scopeRes != nil {
+		scopeRes.Release()
+	}
+	if poolRes != nil {
+		poolRes.Release()
+	}
+}
+
+// statCopyPrev 捕获目标旧大小（覆盖写 Adjust 差分用；目标不存在/是目录 → 0）。
+// 必须在复制前调用——复制后目标已存在且尺寸=written，stat 会误判 prev==written
+// 使 Adjust 差分恒为 0（副本不入账，双计语义丢失）。
+func statCopyPrev(toTnt *storage.Tenant, rel string) int64 {
+	prev := int64(0)
+	if st, serr := toTnt.Root().Stat(rel); serr == nil && !st.IsDir() {
+		prev = st.Size()
+	}
+	return prev
+}
+
+// commitCopyResult 复制成功后的收尾：双 commit（to 侧预留对账为实际占用 written；
+// 覆盖写用 Adjust 差分收敛）+ checksum 台账 + 补算实际写入哈希 + 审计 + 成功响应。
+// 源保留：from 侧账本不动（与 move 的差异——move 删源后 from 侧 ReleaseUsage/
+// ReleaseCommitted）。
+func (h *Handlers) commitCopyResult(cvc *copyVolumeCtx, scope *quota.Scope, toPool *quota.Pool, scopeRes, poolRes *quota.Reservation, prev, written int64) (int, mirrorCopyResponse) {
 	if scopeRes != nil {
 		if prev > 0 {
 			scope.Adjust(prev, written)
@@ -280,32 +394,42 @@ func (h *Handlers) copyFileBetweenVolumes(ctx context.Context, owner, remotePath
 			poolRes.Commit(written)
 		}
 	}
-	// 源保留：from 侧账本不动（与 move 的差异——move 删源后 from 侧 ReleaseUsage/
-	// ReleaseCommitted）。
-
-	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
-	if cs := h.checksumStoreFor(owner); cs != nil {
-		cs.Set(rel, serverChecksumOf(written))
-	}
 
 	// 计算实际写入 checksum（流式复制未计哈希——补算，幂等/校验用）。
-	srcCS, cerr := FileChecksumRoot(fromRoot, rel)
+	srcCS, cerr := FileChecksumRoot(cvc.fromRoot, cvc.rel)
 	if cerr != nil {
 		srcCS = ""
 	}
-	h.RecordAudit(ctx, AuditEvent{
-		Action: "volume_copy", ObjectType: "file", Object: remotePath,
-		Result: AuditResultSuccess, Detail: "from=" + fromVol + " to=" + toVol,
+	// checksum 台账：目标卷副本也登记（与上传一致，供后续幂等/删除校验复用）。
+	// 必须在实测 srcCS 算出**之后**写入——此前用 serverChecksumOf（恒空串）占位，
+	// 使 attachChecksum/writeChunkSuccess 命中空 checksum 提前返回、X-File-Checksum 为空
+	// （客户端整文件校验降级；P2 对抗评审）。
+	if srcCS != "" {
+		if cs := h.checksumStoreFor(cvc.owner); cs != nil {
+			ledgerSetVolume(cs, cvc.toVol, cvc.rel, srcCS)
+		}
+	}
+	h.RecordAudit(cvc.ctx, AuditEvent{
+		Action: "volume_copy", ObjectType: "file", Object: cvc.remotePath,
+		Result: AuditResultSuccess, Detail: "from=" + cvc.fromVol + " to=" + cvc.toVol,
 	})
-	h.logger.Info("跨卷复制成功", "file_name", remotePath, "from", fromVol, "to", toVol)
-	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", remotePath, fromVol, toVol), Checksum: srcCS, Size: written}
+	h.logger.Info("跨卷复制成功", "file_name", cvc.remotePath, "from", cvc.fromVol, "to", cvc.toVol)
+	// P1-8 修复：跨卷副本在目标卷重建 meta sidecar（与 move 的 moveMetaAfterVolumeMove
+	// 对称）——否则镜像/复制产物无完整性证据、下载零校验。失败 Warn 兜底（读侧不校验）。
+	h.writeCopyMeta(cvc)
+	return http.StatusOK, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("文件已复制: %s (%s → %s)", cvc.remotePath, cvc.fromVol, cvc.toVol), Checksum: srcCS, Size: written}
 }
 
-// serverChecksumOf 占位：流式复制不产出哈希，checksum 台账以源文件实测为准
-// （见 copyFileBetweenVolumes 补算分支）。此处保持函数存在以防未来流式复制返回哈希。
-func serverChecksumOf(written int64) string {
-	_ = written
-	return ""
+// writeCopyMeta 在跨卷复制目标卷重建 meta sidecar（best-effort：失败仅 Warn——读路径
+// 读侧不校验，不阻断复制）。目标为本地卷；tenant/rel 由 copyVolumeCtx 提供。
+func (h *Handlers) writeCopyMeta(cvc *copyVolumeCtx) {
+	if cvc.toTnt == nil || cvc.toTnt.Root() == nil {
+		return
+	}
+	if mErr := (filesMetaPolicy{h: h}).WriteMeta(cvc.ctx, cvc.owner, cvc.toTnt.Root(), cvc.rel, nil); mErr != nil {
+		h.logger.Warn("跨卷复制目标 meta 落盘失败（读侧将不校验）",
+			"file_name", cvc.remotePath, "to", cvc.toVol, "error", mErr)
+	}
 }
 
 // mirrorVolumeStats 是单次 mirrorVolume 的统计结果。
@@ -327,18 +451,7 @@ func (h *Handlers) mirrorVolume(srcVol, dstVol string) (mirrorVolumeStats, error
 	if srcTnt == nil {
 		return stats, nil
 	}
-	// 逐 owner（磁盘扫描默认卷根——与云任务恢复同源；镜像以默认卷可见租户为准）。
-	owners := h.listTenantIDs()
-	if len(owners) == 0 {
-		// 至少处理 anonymous（未认证默认租户，可能未出现在磁盘扫描——直接补一次）。
-		owners = []string{anonymousOwner}
-	}
-	foundAnon := slices.Contains(owners, anonymousOwner)
-	if !foundAnon {
-		owners = append(owners, anonymousOwner)
-	}
-
-	for _, owner := range owners {
+	for _, owner := range mirrorOwnerSet(h) {
 		// owner 在 dst 卷视图内才镜像（ACL 过滤，AD-6：无权卷不泄不写）。
 		if !h.volumeAllowedFor(owner, dstVol) {
 			continue
@@ -348,23 +461,43 @@ func (h *Handlers) mirrorVolume(srcVol, dstVol string) (mirrorVolumeStats, error
 			h.logger.Warn("mirror: 列出源卷文件失败", "volume", srcVol, "owner", owner, "error", lerr)
 			continue
 		}
-		for _, f := range files {
-			status, resp := h.copyFileBetweenVolumes(context.Background(), owner, f.relName, srcVol, dstVol, true)
-			switch {
-			case status == http.StatusOK && resp.Idempotent:
-				stats.skipped++
-			case status == http.StatusOK:
-				stats.copied++
-				stats.bytesCopied += resp.Size
-			default:
-				// 尽力而为：目标冲突（已处理为覆盖）、配额不足 507、并发 409、源被并发删 404
-				// 均跳过该文件继续。
-				h.logger.Info("mirror: 跳过单文件", "file", f.relName, "owner", owner, "status", status, "message", resp.Message)
-				stats.skipped++
-			}
-		}
+		h.mirrorOwnerFileSet(srcVol, dstVol, owner, files, &stats)
 	}
 	return stats, nil
+}
+
+// mirrorOwnerSet 返回需要镜像的 owner 集合（默认卷根扫描 + 至少含 anonymous）。
+func mirrorOwnerSet(h *Handlers) []string {
+	// 逐 owner（磁盘扫描默认卷根——与云任务恢复同源；镜像以默认卷可见租户为准）。
+	owners := h.listTenantIDs()
+	if len(owners) == 0 {
+		// 至少处理 anonymous（未认证默认租户，可能未出现在磁盘扫描——直接补一次）。
+		owners = []string{anonymousOwner}
+	}
+	if !slices.Contains(owners, anonymousOwner) {
+		owners = append(owners, anonymousOwner)
+	}
+	return owners
+}
+
+// mirrorOwnerFileSet 把单个 owner 在 srcVol 卷的全部文件复制到 dstVol（逐文件调用
+// copyFileBetweenVolumes，targetOverwrite=true 镜像收敛），并把结果记入 stats。
+func (h *Handlers) mirrorOwnerFileSet(srcVol, dstVol, owner string, files []rebalanceFileEntry, stats *mirrorVolumeStats) {
+	for _, f := range files {
+		status, resp := h.copyFileBetweenVolumes(context.Background(), owner, f.relName, srcVol, dstVol, true)
+		switch {
+		case status == http.StatusOK && resp.Idempotent:
+			stats.skipped++
+		case status == http.StatusOK:
+			stats.copied++
+			stats.bytesCopied += resp.Size
+		default:
+			// 尽力而为：目标冲突（已处理为覆盖）、配额不足 507、并发 409、源被并发删 404
+			// 均跳过该文件继续。
+			h.logger.Info("mirror: 跳过单文件", "file", f.relName, "owner", owner, "status", status, "message", resp.Message)
+			stats.skipped++
+		}
+	}
 }
 
 // volumeMirrorPass 执行一轮全部镜像策略（volumes[].mirror_to 非空且本地卷）。每源卷调
@@ -442,3 +575,79 @@ var _ = storage.AnonymousOwner
 var _ = volume.AllowedVolumes
 var _ = sort.SliceStable
 var _ = filepath.Join
+
+// isExternalVolumeName 判定卷名是否指向外部卷（无本地 *storage.Root）。
+func (h *Handlers) isExternalVolumeName(name string) bool {
+	if h.volSet == nil || name == "" {
+		return false
+	}
+	if _, ok := h.volSet.ByName(name); !ok {
+		return false
+	}
+	// 无本地根（外部/封装卷）⇒ 不走路径式镜像。
+	return !h.volSet.HasLocalRoot(name)
+}
+
+// copyViaService 走 files.Service.CopyFile（通用复制：目标路径可不同 / force / 含外部卷）。
+func (h *Handlers) copyViaService(w http.ResponseWriter, r *http.Request, owner, from, to, fromVol, toVol string, force bool) {
+	svc := h.fileServiceLocked()
+	if svc == nil {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "文件服务未装配"}, http.StatusBadRequest)
+		return
+	}
+	// 策略（同卷 blob 直拷 / 写内核）与**配额双账本预留**都在域侧统一判定，装配层只提供
+	// 外部卷只读源与接缝（避免配额口径在装配层分叉）。
+	// 情形：域侧读源 → 统一写内核写目标（跨卷必然重加密；源为外部卷时装配层给只读源）。
+	var src files.DownloadSource
+	if h.isExternalVolumeName(fromVol) {
+		src = h.externalReadSource(r.Context(), owner, fromVol, from)
+	}
+	res, err := svc.CopyFile(r.Context(), files.CopyFileInput{
+		Owner: owner, From: from, To: to, FromVol: fromVol, ToVol: toVol, Force: force, Src: src,
+	})
+	if err != nil {
+		if he, ok := errors.AsType[*files.HTTPError](err); ok {
+			sendJSONResponse(w, mirrorCopyResponse{Success: false, Message: he.Message}, he.Status)
+			return
+		}
+		sendJSONResponse(w, mirrorCopyResponse{Success: false, Message: err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, mirrorCopyResponse{Success: true, Message: fmt.Sprintf("复制完成: %s → %s", res.From, res.To),
+		Checksum: res.Checksum, Size: res.Size}, http.StatusOK)
+}
+
+// externalReadSource 为一个外部卷对象构造服务端只读源（解密转发 + meta 校验口径）。
+// 未授权/未装配/对象不存在 → nil（调用方按 404/回落处理）。
+func (h *Handlers) externalReadSource(ctx context.Context, owner, volName, remotePath string) files.DownloadSource {
+	if h.volSet == nil {
+		return nil
+	}
+	be := h.volSet.External(volName)
+	if be == nil {
+		return nil
+	}
+	v, ok := h.volSet.ByName(volName)
+	if !ok || !v.Authorize(owner) {
+		return nil
+	}
+	raw := be.FS()
+	if raw == nil {
+		return nil
+	}
+	fsys := trusted.Guard(trusted.Wrap(raw, h.trustedWrapOpts()))
+	// 键解析**与全仓其它外部卷操作同源**（externalVolumeKey）：统一 `ResolveUserLocation +
+	// FSPath`（恒 `<owner>/user/<rel>`），无卷类型分支。此前这里直接用 `ResolveUserLocation`
+	// 而部分路径（下载/删除/列举/转存）曾对嵌套封装卷用 owner-less 键 ⇒ 两套口径并存时
+	// 只读源 key 错位 → 跨卷 move/copy 从封装卷搬出恒 404「源文件不存在」（F2/§8.1 实测）；
+	// 键空间统一（阶段 2 迁移①）后两条链恒等值。
+	key, ok := externalVolumeKey(v, owner, remotePath)
+	if !ok {
+		return nil
+	}
+	e, serr := fsys.Stat(ctx, key)
+	if serr != nil || e == nil || e.IsDir {
+		return nil
+	}
+	return newExternalSource(fsys, key, e, h.verifySkipped())
+}

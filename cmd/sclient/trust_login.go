@@ -93,25 +93,12 @@ type runTrustLoginOpts struct {
 // 中止都不得静默成功）；其余内部错误写 stderr 并返回 nil（与 trust 既有命令一致）。
 // cmd 用于读取 --ca-file/--insecure（直连面 TLS 安全 flag；传 nil 时仅测试透传路径）。
 func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string, opts runTrustLoginOpts) error {
-	// 载入配置（决定是否需要注册分支 / 覆盖确认；ServerURL 供无凭据客户端定位）。
-	cfg, err := loadTrustLoginConfig(cfgSvc)
+	// 统一 context：server_url 从 config.yaml（当前 context 的 environment）读取。
+	// 无 config.yaml / 解析失败 → fail-closed 报错（不再静默回落平铺）。
+	serverURL, err := trustServerURLFromConfig(cfgFile)
 	if err != nil {
 		ios.WriteErrLine("加载配置失败: %v", err)
 		return fmt.Errorf("加载配置失败: %w", err)
-	}
-
-	// 显式无凭据客户端（M14）：零凭据构造 + doRequest 层短路签名。ServerURL 未配置
-	// 报错（无凭据客户端的 server URL 没有回落语义；--server 在此由调用方填充）。
-	if cfg.ServerURL == "" {
-		ios.WriteErrLine("未配置 server_url（无法连接 TOTP 服务端）")
-		return fmt.Errorf("未配置 server_url（无法连接 TOTP 服务端）")
-	}
-	// context 模式：server_url 来自当前 context 的 environment（config.yaml 存在时）。
-	serverURL := cfg.ServerURL
-	contextMode := false
-	if ctxURL, ok := trustContextServerURL(cfgFile, ios); ok {
-		serverURL = ctxURL
-		contextMode = true
 	}
 
 	noAuthOpts := []client.Option{client.WithSendNoAuth(true)}
@@ -131,51 +118,84 @@ func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, c
 	noAuth := client.NewFileClient(serverURL, noAuthOpts...)
 
 	// 目标登录身份：位置参数 <username>（推荐，owner 反查 AK 免记 AK）> 当前 context
-	// user 的 access_key（context 模式）> 配置 access_key > --ak <AK>。三者都无 →
-	// 报错指引 `trust register`（不静默注册新账号——注册由独立子命令 trust register
-	// 承担，登录命令只负责登录）。
-	ak := opts.manualAK
-	contextUser := ""
-	if contextMode {
-		if u, ok := trustContextCurrentUser(cfgFile); ok {
-			contextUser = u
-		}
-	}
-	if opts.username == "" && ak == "" {
-		if contextMode && contextUser != "" {
-			// 用当前 context user 的 access_key（user 段）。
-			if cu := contextUserAccessKey(cfgFile); cu != "" {
-				ak = cu
-			}
-		} else {
-			ak = cfg.AccessKey
-		}
-	}
-	if opts.username == "" && ak == "" {
+	// user 的 access_key > --ak <AK>。三者都无 → 报错指引 `trust register`（不静默
+	// 注册新账号——注册由独立子命令 trust register 承担，登录命令只负责登录）。
+	ak, contextUser, err := trustLoginResolveAK(cfgFile, opts)
+	if err != nil {
 		ios.WriteErrLine("未检测到本地 access_key 凭据，也未指定用户名/--ak")
 		ios.WriteErrLine("首次使用请先运行 `trust register [用户名]` 注册，然后 `trust login [用户名]` 免记 AK 登录")
-		return errLoginNoCreds
+		return err
 	}
 
-	// 2. 提示输入 6 位动态码（stdin）。
-	fmt.Fprintf(ios.ErrOut, "请输入 6 位动态码（已加入 Authenticator 后输入）: ")
+	// 2. 提示输入 6 位动态码（stdin），空输入/EOF 即中止（M4）。
 	reader := bufio.NewReader(ios.In)
+	code, err := trustLoginReadCode(reader, ios)
+	if err != nil {
+		return err
+	}
+
+	// 3. nonce → login（D3：login_type=cli 回填）。
+	loginRes, err := trustLoginCallTOTP(ctx, noAuth, opts, ak, code, ios)
+	if err != nil {
+		return err
+	}
+
+	// 4. 覆盖确认（D4）：已有凭据（可能来自 renew 的长命 SK）→ 提示确认后回填。
+	if err := trustLoginEnsureOverwrite(reader, cfgFile, opts.overwrite, ios); err != nil {
+		return err
+	}
+
+	// 5. 回填（统一 context：回填到 config.yaml 的 user 段 + 自动切 current user）。
+	if *cfgFile == "" {
+		// 防御：config 写入路径必须存在（生产由 root.go 生成默认路径）。
+		ios.WriteErrLine("配置文件路径为空，无法回填登录凭据")
+		return fmt.Errorf("配置文件路径为空，无法回填登录凭据")
+	}
+	return trustLoginBackfillContext(cfgFile, opts, contextUser, loginRes, ios)
+}
+
+// trustLoginResolveAK 解析目标登录身份（AK）：--ak > 位置参数 <username>（owner
+// 反查）> 当前 context user 段的 access_key。三者皆无 → 返回 errLoginNoCreds（指引
+// trust register，不静默注册新账号）。同时返回当前 context 的 user（回填用）。
+func trustLoginResolveAK(cfgFile *string, opts runTrustLoginOpts) (ak, contextUser string, err error) {
+	ak = opts.manualAK
+	if u, ok := trustContextCurrentUser(cfgFile); ok {
+		contextUser = u
+	}
+	if opts.username == "" && ak == "" && contextUser != "" {
+		// 用当前 context user 的 access_key（user 段）。
+		ak = contextUserAccessKey(cfgFile)
+	}
+	if opts.username == "" && ak == "" {
+		return "", "", errLoginNoCreds
+	}
+	return ak, contextUser, nil
+}
+
+// trustLoginReadCode 提示并读取 6 位动态码（stdin）。空输入/EOF 返回
+// errLoginNotConfirmed（M4：无输入即中止，绝不把「未确认」当成功）。
+func trustLoginReadCode(reader *bufio.Reader, ios cli.IOStreams) (string, error) {
+	fmt.Fprintf(ios.ErrOut, "请输入 6 位动态码（已加入 Authenticator 后输入）: ")
 	line, err := reader.ReadString('\n')
 	if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
 		ios.WriteErrLine("未确认（无输入），已中止")
-		return errLoginNotConfirmed
+		return "", errLoginNotConfirmed
 	}
 	code := strings.TrimSpace(line)
 	if code == "" {
 		ios.WriteErrLine("未确认（空输入），已中止")
-		return errLoginNotConfirmed
+		return "", errLoginNotConfirmed
 	}
+	return code, nil
+}
 
-	// 3. nonce → login（D3：login_type=cli 回填）。
+// trustLoginCallTOTP 发起 nonce → login 两步（D3：login_type=cli）。位置参数用户名
+// 走 LoginTOTPByOwner（owner 反查 AK 免记），否则 LoginTOTP(ak, ...)。
+func trustLoginCallTOTP(ctx context.Context, noAuth *client.FileClient, opts runTrustLoginOpts, ak, code string, ios cli.IOStreams) (*client.TOTPLoginResult, error) {
 	nonceObj, nerr := noAuth.RequestTOTPNonce(ctx)
 	if nerr != nil {
 		ios.WriteErrLine("获取登录 nonce 失败: %v", nerr)
-		return fmt.Errorf("获取登录 nonce 失败: %w", nerr)
+		return nil, fmt.Errorf("获取登录 nonce 失败: %w", nerr)
 	}
 	var loginRes *client.TOTPLoginResult
 	var lerr error
@@ -186,98 +206,89 @@ func runTrustLogin(ctx context.Context, cmd *cobra.Command, ios cli.IOStreams, c
 	}
 	if lerr != nil {
 		ios.WriteErrLine("登录失败: %v", lerr)
-		return fmt.Errorf("登录失败: %w", lerr)
+		return nil, fmt.Errorf("登录失败: %w", lerr)
 	}
 	fmt.Fprintf(ios.Out, "登录成功: ak=%s session_expires_at=%s\n",
 		loginRes.AK, loginRes.SessionExpiresAt.Format("2006-01-02 15:04"))
+	return loginRes, nil
+}
 
-	// 4. 覆盖确认（D4）：已有凭据（可能来自 renew 的长命 SK）→ 提示确认后回填。
-	// 拒绝覆盖返回独立哨兵 errLoginOverwriteDenied（与动态码阶段的
-	// errLoginNotConfirmed 语义区分）。已有凭据来源：context 模式看 user 段的
-	// access_key_secret；平铺模式看 cfg.AccessKeySecret。
-	hasExisting := cfg.AccessKeySecret != ""
-	if contextMode {
-		if sec := contextUserSecret(cfgFile); sec != "" {
-			hasExisting = true
-		}
-	}
-	if hasExisting && !opts.overwrite {
-		fmt.Fprint(ios.ErrOut, "将覆盖现有 access_key_secret 凭据；长期运行 daemon 建议 `trust renew`，确认覆盖? (y/N): ")
-		cLine, cerr := reader.ReadString('\n')
-		if errors.Is(cerr, io.EOF) && strings.TrimSpace(cLine) == "" {
-			ios.WriteErrLine("未确认（无输入），已中止")
-			return errLoginNotConfirmed
-		}
-		cAns := strings.ToLower(strings.TrimSpace(cLine))
-		if cAns == "" {
-			ios.WriteErrLine("未确认（空输入），已中止")
-			return errLoginNotConfirmed
-		}
-		if cAns != "y" && cAns != "yes" {
-			ios.WriteErrLine("已取消（拒绝覆盖现有凭据）")
-			return errLoginOverwriteDenied
-		}
-	}
-
-	// 5. 回填（沿用 trust renew 的 SaveConfig 模式）。context 模式回填到 user 段；
-	// 平铺模式回填到平铺配置。
-	if *cfgFile == "" {
-		// 防御：config 写入路径必须存在（生产由 root.go 生成默认路径）。
-		ios.WriteErrLine("配置文件路径为空，无法回填登录凭据")
-		return fmt.Errorf("配置文件路径为空，无法回填登录凭据")
-	}
-	if contextMode {
-		// 回填到当前 context user 段（或位置参数用户名对应的 user 段）。
-		ccfg, cerr2 := contextcfg.Load(*cfgFile)
-		if cerr2 != nil {
-			ios.WriteErrLine("重新加载 context 配置失败: %v", cerr2)
-			return fmt.Errorf("重新加载 context 配置失败: %w", cerr2)
-		}
-		userName := opts.username
-		if userName == "" {
-			userName = contextUser
-		}
-		if userName == "" {
-			// 最后兜底：用登录响应 AK 作为 user 名。
-			userName = loginRes.AK
-		}
-		u := ccfg.FindUser(userName)
-		if u == nil {
-			ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: userName})
-			u = ccfg.FindUser(userName)
-		}
-		u.AccessKey = loginRes.AK
-		u.AccessKeySecret = hex.EncodeToString(loginRes.SessionSK)
-		u.AccessKeyID = loginRes.SessionSkeyID
-		u.Owner = userName
-		// 自动切当前 context 的 user（位置参数用户名登录时也切换）。
-		if cur := ccfg.FindContext(ccfg.CurrentContext); cur != nil {
-			cur.User = userName
-		}
-		if err := contextcfg.Save(ccfg, *cfgFile); err != nil {
-			ios.WriteErrLine("保存 context 配置失败: %v", err)
-			return fmt.Errorf("保存 context 配置失败: %w", err)
-		}
-		fmt.Fprintf(ios.Out, "凭据已回填: access_key=%s access_key_id=%s（user %s 已更新，context 已切换）\n",
-			loginRes.AK, loginRes.SessionSkeyID, userName)
+// trustLoginEnsureOverwrite 判定并交互确认覆盖现有凭据（D4）：已有凭据（可能来自
+// renew 的长命 SK）→ 提示确认后回填；--overwrite 跳过确认。已有凭据看当前 context
+// user 段的 access_key_secret。拒绝覆盖返回 errLoginOverwriteDenied；无输入/空输入
+// 返回 errLoginNotConfirmed（与动态码阶段的 errLoginNotConfirmed 语义区分）。
+func trustLoginEnsureOverwrite(reader *bufio.Reader, cfgFile *string, overwrite bool, ios cli.IOStreams) error {
+	if overwrite {
 		return nil
 	}
-	reloaded, cerr2 := loadTrustLoginConfig(cfgSvc)
-	if cerr2 != nil {
-		ios.WriteErrLine("重新加载配置失败: %v", cerr2)
-		return fmt.Errorf("重新加载配置失败: %w", cerr2)
+	if contextUserSecret(cfgFile) == "" {
+		return nil
 	}
-	reloaded.AccessKey = loginRes.AK
-	reloaded.AccessKeySecret = hex.EncodeToString(loginRes.SessionSK)
-	reloaded.AccessKeyID = loginRes.SessionSkeyID
-	if err := client.SaveConfig(reloaded, *cfgFile); err != nil {
-		ios.WriteErrLine("保存配置失败: %v", err)
-		return fmt.Errorf("保存配置失败: %w", err)
+	return trustLoginConfirmOverwrite(reader, ios)
+}
+
+// trustLoginConfirmOverwrite 打印覆盖确认提示并读取 y/N。无输入/空输入返回
+// errLoginNotConfirmed；非 y/yes 返回 errLoginOverwriteDenied（用户明确拒绝覆盖，
+// 可用 --overwrite 跳过确认）。
+func trustLoginConfirmOverwrite(reader *bufio.Reader, ios cli.IOStreams) error {
+	fmt.Fprint(ios.ErrOut, "将覆盖现有 access_key_secret 凭据；长期运行 daemon 建议 `trust renew`，确认覆盖? (y/N): ")
+	cLine, cerr := reader.ReadString('\n')
+	if errors.Is(cerr, io.EOF) && strings.TrimSpace(cLine) == "" {
+		ios.WriteErrLine("未确认（无输入），已中止")
+		return errLoginNotConfirmed
 	}
-	fmt.Fprintf(ios.Out, "凭据已回填: access_key=%s access_key_id=%s（access_key_secret 已写入配置）\n",
-		loginRes.AK, loginRes.SessionSkeyID)
+	cAns := strings.ToLower(strings.TrimSpace(cLine))
+	if cAns == "" {
+		ios.WriteErrLine("未确认（空输入），已中止")
+		return errLoginNotConfirmed
+	}
+	if cAns != "y" && cAns != "yes" {
+		ios.WriteErrLine("已取消（拒绝覆盖现有凭据）")
+		return errLoginOverwriteDenied
+	}
 	return nil
 }
+
+// trustLoginBackfillContext 把登录凭据回填到 context 配置的 user 段，并自动切换
+// 当前 context 的 user（位置参数用户名登录时也切换）。
+func trustLoginBackfillContext(cfgFile *string, opts runTrustLoginOpts, contextUser string, res *client.TOTPLoginResult, ios cli.IOStreams) error {
+	ccfg, cerr2 := contextcfg.Load(*cfgFile)
+	if cerr2 != nil {
+		ios.WriteErrLine("重新加载 context 配置失败: %v", cerr2)
+		return fmt.Errorf("重新加载 context 配置失败: %w", cerr2)
+	}
+	userName := opts.username
+	if userName == "" {
+		userName = contextUser
+	}
+	if userName == "" {
+		// 最后兜底：用登录响应 AK 作为 user 名。
+		userName = res.AK
+	}
+	u := ccfg.FindUser(userName)
+	if u == nil {
+		ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: userName})
+		u = ccfg.FindUser(userName)
+	}
+	u.AccessKey = res.AK
+	u.AccessKeySecret = hex.EncodeToString(res.SessionSK)
+	u.AccessKeyID = res.SessionSkeyID
+	u.Owner = userName
+	// 自动切当前 context 的 user（位置参数用户名登录时也切换）。
+	if cur := ccfg.FindContext(ccfg.CurrentContext); cur != nil {
+		cur.User = userName
+	}
+	if err := contextcfg.Save(ccfg, *cfgFile); err != nil {
+		ios.WriteErrLine("保存 context 配置失败: %v", err)
+		return fmt.Errorf("保存 context 配置失败: %w", err)
+	}
+	fmt.Fprintf(ios.Out, "凭据已回填: access_key=%s access_key_id=%s（user %s 已更新，context 已切换）\n",
+		res.AK, res.SessionSkeyID, userName)
+	return nil
+}
+
+// trustLoginBackfillFlat 已删除（统一 context 配置：回填唯一路径 = config.yaml 的
+// user 段，不再有平铺 sclient.yaml 形态）。
 
 // loadTrustLoginConfig 载入 sclient 配置（nil cfgSvc / 空配置视为无配置）。
 func loadTrustLoginConfig(cfgSvc ConfigProvider) (*client.Config, error) {
@@ -294,16 +305,40 @@ func loadTrustLoginConfig(cfgSvc ConfigProvider) (*client.Config, error) {
 	return cfg, nil
 }
 
+// trustServerURLFromConfig 从 config.yaml（当前 context 的 environment）解析
+// server_url。无配置/损坏/引用缺失 → fail-closed 报错（统一 context 后无平铺回落）。
+func trustServerURLFromConfig(cfgFile *string) (string, error) {
+	if cfgFile == nil || *cfgFile == "" {
+		return "", errConfigNotFound
+	}
+	cc, cerr := contextcfg.Load(*cfgFile)
+	if cerr != nil {
+		return "", fmt.Errorf("加载 context 配置失败: %w", cerr)
+	}
+	if len(cc.Contexts) == 0 || cc.CurrentContext == "" {
+		return "", errConfigNotFound
+	}
+	cur := cc.FindContext(cc.CurrentContext)
+	if cur == nil {
+		return "", errConfigNotFound
+	}
+	env := cc.FindEnvironment(cur.Environment)
+	if env == nil || env.ServerURL == "" {
+		return "", fmt.Errorf("未配置 server_url（无法连接 TOTP 服务端；请 sclient context set --env-name <e> 指定）")
+	}
+	return env.ServerURL, nil
+}
+
 // trustLoginTLSFlags 读取 --ca-file / --insecure 直连面 TLS 安全 flag。
 // cmd 为 nil（纯测试透传 runTrustLoginOpts 路径）时返回空（不启用 CA/insecure）。
 func trustLoginTLSFlags(cmd *cobra.Command) (caFile string, insecure bool) {
 	if cmd == nil {
 		return "", false
 	}
-	if f := cmd.Flags().Lookup("ca-file"); f != nil {
+	if cmd.Flags().Lookup("ca-file") != nil {
 		caFile, _ = cmd.Flags().GetString("ca-file")
 	}
-	if f := cmd.Flags().Lookup("insecure"); f != nil {
+	if cmd.Flags().Lookup("insecure") != nil {
 		insecure, _ = cmd.Flags().GetBool("insecure")
 	}
 	return caFile, insecure

@@ -37,7 +37,7 @@ func (m *memFSEnc) OpenRead(ctx context.Context, path string) (io.ReadCloser, er
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
-func (m *memFSEnc) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (m *memFSEnc) WriteFile(ctx context.Context, key LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	b, _ := io.ReadAll(r)
 	m.files[path] = b
 	return nil
@@ -69,7 +69,7 @@ func TestEncryptedFS_Roundtrip(t *testing.T) {
 	efs := NewEncryptedFS(inner, key)
 	plain := strings.Repeat("secret data ", 1000)
 
-	if err := efs.WriteFile(context.Background(), "a.txt", strings.NewReader(plain), int64(len(plain)), 0); err != nil {
+	if err := efs.WriteFile(context.Background(), LogicalKey{}, "a.txt", strings.NewReader(plain), int64(len(plain)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// 底层密文不含明文特征。
@@ -119,7 +119,7 @@ func TestEncryptedFS_StreamingLarge_NoOOM(t *testing.T) {
 	efs := NewEncryptedFS(inner, key)
 	// 4 MiB 明文（跨 64 块，验证分块加密流式性）。
 	plain := strings.Repeat("0123456789abcdef", 256*1024)
-	if err := efs.WriteFile(context.Background(), "big.bin", strings.NewReader(plain), int64(len(plain)), 0); err != nil {
+	if err := efs.WriteFile(context.Background(), LogicalKey{}, "big.bin", strings.NewReader(plain), int64(len(plain)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if len(inner.files["big.bin"]) <= len(plain) {

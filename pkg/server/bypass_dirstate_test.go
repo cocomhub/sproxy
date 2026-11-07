@@ -1,0 +1,103 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+// bypass_dirstate_test.go 锁定 R16 缺陷族修复：旁路写（cloud 转存 / 归档转存 / 跨卷 move）
+// 成功后必须登记**派生状态**（checksum 台账 + 搜索索引），否则该卷 list 缺条目且 checksum 空。
+//
+// 变异（去掉 IndexMove/RecordBypassWrite 的 checksum store 写入或索引 upsert）⇒ 断言红。
+
+import (
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/storage"
+	"github.com/cocomhub/sproxy/pkg/testutil"
+)
+
+// TestIndexMove_MigratesChecksumAndEventDrivesIndex 钉住 V4 阶段二口径：
+//   - `IndexMove` 只迁移 **checksum 台账**（物理搬移的索引维护已由 Root 事件承担）；
+//   - 事件（这里用目标卷的 `MutationWrite` 等价模拟）负责把条目落到**目标卷**并带台账 checksum。
+//
+// 变异：① 去掉 IndexMove 的台账写入 ⇒ checksum 断言红；② 去掉事件 ⇒ 条目缺失/卷归属陈旧 ⇒ 红。
+func TestIndexMove_MigratesChecksumAndEventDrivesIndex(t *testing.T) {
+	t.Parallel()
+	dir := testutil.MkdirTemp(t, "idxmove-")
+	h := newAssemblyTestHandlers(t, dir)
+	svc := h.fileService()
+	if svc == nil {
+		t.Fatal("fileService 不可用")
+	}
+	tnt := h.tenantFor("alice")
+	if tnt == nil {
+		t.Fatal("tenant 不可用")
+	}
+	if err := tnt.Root().MkdirAll("user/docs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fh, ferr := tnt.Root().OpenFileEncrypted("user/docs/a.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	_, _ = fh.Write([]byte("hello-bypass"))
+	_ = fh.Close()
+
+	const owner, rel, cs = "alice", "user/docs/a.bin", "abc123"
+	// 先触发一次 search（构建 owner 索引——`upsert` 仅在已构建时生效）。
+	// 注：list 自 §15.2 步骤 3 起**不再读索引**（视图/实时扫描），所以预热必须走 search。
+	if _, serr := svc.Search(t.Context(), files.SearchQuery{Owner: owner, Query: "no-such-file"}); serr != nil {
+		t.Fatalf("预热 search: %v", serr)
+	}
+	// ① 台账迁移（IndexMove 唯一职责）。
+	svc.IndexMove(owner, rel, 42, cs, "vol2", nil)
+	if got, ok := ledgerGetVolume(h.checksumStoreFor(owner), "vol2", rel); !ok || got != cs {
+		t.Fatalf("move 后 checksum 台账应写入 %q，got %q ok=%v（未写 ⇒ 目标卷 list checksum 空）", cs, got, ok)
+	}
+	// ② 物理搬移造成的索引更新由事件承担：目标卷内容写事件（Tag=vol2）刷新条目与卷归属。
+	// 事件口径：Root = **卷根**（这里是 globalRoot），Rel = 卷根命名空间 `<owner>/user/<rel>`。
+	svc.ApplyRootMutation(storage.Mutation{
+		Op: storage.MutationWrite, Tag: "vol2", Root: h.globalRoot, Rel: owner + "/" + rel,
+	})
+	// list（实时扫描）：仍列出条目；checksum 按**卷维度**读（§15.1.1）——台账已迁到目标卷
+	// vol2，而本测试并未物理搬移文件（仍在默认卷）⇒ 源卷条目读不到 checksum 属预期。
+	res, lerr := svc.List(t.Context(), files.ListQuery{Owner: owner, Subdir: "docs"})
+	if lerr != nil {
+		t.Fatalf("list: %v", lerr)
+	}
+	found := false
+	for _, f := range res.Files {
+		if f.Name == "a.bin" {
+			found = true
+			if f.Checksum != "" {
+				t.Fatalf("源卷条目不应读到目标卷的 checksum，got %q", f.Checksum)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("move 后 list 应包含 a.bin（got %d 条）", len(res.Files))
+	}
+
+	// 索引（只服务搜索）由事件驱动更新：条目卷归属 = 事件 Tag（目标卷 vol2）。
+	sres, serr := svc.Search(t.Context(), files.SearchQuery{Owner: owner, Query: "a.bin"})
+	if serr != nil {
+		t.Fatalf("search: %v", serr)
+	}
+	hit := false
+	for _, f := range sres.Files {
+		if strings.HasSuffix(f.Name, "a.bin") {
+			hit = true
+			if f.Volume != "vol2" {
+				t.Fatalf("索引条目卷归属 = %q，want vol2（事件应携带目标卷 Tag）", f.Volume)
+			}
+			if f.Checksum != cs {
+				t.Fatalf("索引条目 checksum = %q, want %q", f.Checksum, cs)
+			}
+		}
+	}
+	if !hit {
+		t.Fatalf("search 应命中 a.bin（got %d 条：%+v）", len(sres.Files), sres.Files)
+	}
+}

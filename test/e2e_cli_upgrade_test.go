@@ -48,7 +48,7 @@ func TestE2E_CLI_UpgradeCheckJSON(t *testing.T) {
 	bin := e2eBinPath(t, "cmd/sclient")
 	tmp := t.TempDir()
 	cmd := exec.Command(bin,
-		"--config", filepath.Join(tmp, "sclient.yaml"),
+		"--config", filepath.Join(tmp, "config.yaml"),
 		"upgrade", "--check", "--json",
 		"--api-base", ts.URL+"/repos/cocomhub/sproxy",
 		"--release-base", ts.URL,
@@ -130,23 +130,27 @@ func TestE2E_CLI_UpgradeFull(t *testing.T) {
 		t.Fatalf("拷贝 sclient 到临时目录: %v", werr)
 	}
 
-	cmd := exec.Command(target,
-		"--config", filepath.Join(tmp, "sclient.yaml"),
-		"upgrade", "--to", tag, "--force",
-		"--api-base", ts.URL+"/repos/cocomhub/sproxy",
-		"--release-base", ts.URL,
-	)
-	cmd.Env = append(os.Environ(),
-		"XDG_CACHE_HOME="+filepath.Join(tmp, "xdg-cache"),
-		"XDG_CONFIG_HOME="+filepath.Join(tmp, "xdg-config"),
-	)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	// upgrade 原子替换 target 后**立即 fork 新二进制**；Windows/慢 FS 上替换句柄
-	// 可能尚未完全释放，首次启动会报 text file busy（ETXTBSY）——这是升级流程
-	// 的固有竞态而非测试缺陷。有界重试（10 次 × 100ms 间隔）容忍该窗口。
-	if rerr := runWithTextFileBusyRetry(cmd, 10, 100*time.Millisecond); rerr != nil {
+	// upgrade 原子替换 target 后**立即 fork 新二进制**；慢 FS 上替换句柄可能尚未完全
+	// 释放，首次启动会报 text file busy（ETXTBSY）——升级流程的固有竞态，非测试缺陷。
+	// 有界重试容忍该窗口；**每次尝试都新建 exec.Cmd**（同一个 Cmd 只能 Run 一次，
+	// 复用会报 `exec: already started`——CI 上就是这样偶发失败的）。
+	newCmd := func() *exec.Cmd {
+		cmd := exec.Command(target,
+			"--config", filepath.Join(tmp, "config.yaml"),
+			"upgrade", "--to", tag, "--force",
+			"--api-base", ts.URL+"/repos/cocomhub/sproxy",
+			"--release-base", ts.URL,
+		)
+		cmd.Env = append(os.Environ(),
+			"XDG_CACHE_HOME="+filepath.Join(tmp, "xdg-cache"),
+			"XDG_CONFIG_HOME="+filepath.Join(tmp, "xdg-config"),
+		)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		return cmd
+	}
+	if rerr := runWithTextFileBusyRetry(newCmd, 10, 100*time.Millisecond); rerr != nil {
 		t.Fatalf("sclient upgrade --to 失败: %v\nstdout:\n%s\nstderr:\n%s", rerr, stdout.String(), stderr.String())
 	}
 
@@ -159,13 +163,17 @@ func TestE2E_CLI_UpgradeFull(t *testing.T) {
 	}
 }
 
-// runWithTextFileBusyRetry 执行 cmd；若启动失败报 text file busy（ETXTBSY，upgrade
-// 原子替换后立即 fork 的竞态，见 TestE2E_CLI_UpgradeFull 的 flake 记录 #590），按
-// retry 次 × interval 有界重试；其余错误立即返回。
-func runWithTextFileBusyRetry(cmd *exec.Cmd, retries int, interval time.Duration) error {
+// runWithTextFileBusyRetry 执行由 newCmd 构造的命令；若启动失败报 text file busy
+// （ETXTBSY，upgrade 原子替换后立即 fork 的竞态，见 #590），按 retry 次 × interval
+// 有界重试；其余错误立即返回。
+//
+// **每次尝试都调用 newCmd 新建 exec.Cmd**：`exec.Cmd` 只能 Run 一次，复用同一个实例
+// 会返回 `exec: already started`（CI 上实测过——ETXTBSY 后重试反而变成另一种假失败）。
+func runWithTextFileBusyRetry(newCmd func() *exec.Cmd, retries int, interval time.Duration) error {
 	var lastErr error
 	for i := 0; i < retries; i++ {
-		if lastErr = cmd.Run(); lastErr == nil {
+		lastErr = newCmd().Run()
+		if lastErr == nil {
 			return nil
 		}
 		if !isETXTBSY(lastErr) {

@@ -626,6 +626,61 @@ test('错误路径：401 → E_AUTH 且保留 status；网络错误 → E_NETWOR
   }
 });
 
+test('直连 403 → E_SERVER 且透传 body error（写保护文案，非认证失败）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: 'volume: 目录已被封装卷占用，只读' }), { status: 403 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/api/files', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('目录已被封装卷占用'), '403 应透传服务端 body 真实文案, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('隧道外层 403 → E_SERVER 透传 body（修复前 E_AUTH 吞文案）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'tunnel', accessKey: AK, accessKeySecret: SK, tunnelDefault: true });
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: '签名校验失败' }), { status: 403 });
+    let caught = null;
+    try {
+      await transport.coreRequest('GET', '/tunnel', {});
+    } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('签名校验失败'), '隧道外层 403 应透传 body, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('C3：文件写面 403/507 服务端回 {message} 也透传（非仅 {error}）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    // 文件写面（upload/chunk-complete/delete/mkdir 等）错误体为 {success:false, message: …}——
+    // serverErrorMessage 现兼容 message 字段，507 「存储配额不足」与 403 「占用只读」真实文案可透传。
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    // 403：写保护占用目录
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: false, message: 'volume: 目录已被封装卷占用，只读（main/videos 被封装卷 videos 占用）' }), { status: 403 });
+    let caught403 = null;
+    try { await transport.coreRequest('POST', '/delete', {}); } catch (e) { caught403 = e; }
+    assert.ok(caught403 && caught403.code === 'E_SERVER' && caught403.status === 403, JSON.stringify(caught403));
+    assert.ok(caught403.message.includes('目录已被封装卷占用'), '403 {message} 应透传, got: ' + caught403.message);
+    // 507：存储配额不足
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: false, message: '存储配额不足' }), { status: 507 });
+    let caught507 = null;
+    try { await transport.coreRequest('POST', '/upload', {}); } catch (e) { caught507 = e; }
+    assert.ok(caught507 && caught507.code === 'E_SERVER' && caught507.status === 507, JSON.stringify(caught507));
+    assert.ok(caught507.message.includes('存储配额不足'), '507 {message} 应透传, got: ' + caught507.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test('隧道响应帧解密失败 → E_DECRYPT', async () => {
   const origFetch = globalThis.fetch;
   try {
@@ -979,6 +1034,47 @@ test('files deleteFile/rename 带 X-File-Checksum 头映射', async () => {
   assert.strictEqual(core.calls[1].opts.headers['X-File-Checksum'], 'cafebeef');
 });
 
+// 用户裁定 2026-10-27：下载/删除/改名等文件操作**行卷优先**（data-volume），
+// 回落当前过滤卷——多卷同名 rel 时不歧义；外部/加密卷上必需（服务端 ?volume= 定位）。
+test('files deleteFile/rename/mkdir/rmdir/stat 带可选 volume 参数', async () => {
+  const core = makeMockCore([
+    okResp({ success: true }), // delete
+    okResp({ success: true }), // rename
+    okResp({ success: true }), // mkdir
+    okResp({ success: true }), // rmdir
+    { status: 200, headers: { 'X-File-Size': '3' }, body: new Uint8Array(0) }, // stat
+  ]);
+  const api = makeApi(core);
+  await api.files.deleteFile('a.txt', 'abc123', 'disk2');
+  assert.strictEqual(core.calls[0].path, '/delete?filename=a.txt&volume=disk2', 'delete 应带行卷');
+  await api.files.rename('old.txt', 'new.txt', 'cafebeef', 'disk2');
+  assert.strictEqual(core.calls[1].path, '/rename?from=old.txt&to=new.txt&volume=disk2', 'rename 应带行卷');
+  await api.files.mkdir('d', 'disk2');
+  assert.strictEqual(core.calls[2].path, '/mkdir?dirname=d&volume=disk2', 'mkdir 应带卷');
+  await api.files.rmdir('d', 'disk2');
+  assert.strictEqual(core.calls[3].path, '/rmdir?dirname=d&volume=disk2&force=true', 'rmdir 应带卷');
+  await api.files.stat('x/y.txt', 'disk2');
+  assert.strictEqual(core.calls[4].path, '/api/files/stat?filename=x%2Fy.txt&volume=disk2', 'stat 应带卷');
+  // 不传 volume（全部卷/auto）→ 不发送（零回归）。
+  const core2 = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
+  const api2 = makeApi(core2);
+  await api2.files.deleteFile('a.txt', 'abc123');
+  assert.strictEqual(core2.calls[0].path, '/delete?filename=a.txt', '无卷时不应发送 volume（auto）');
+  await api2.files.rename('o', 'n', 'c');
+  assert.strictEqual(core2.calls[1].path, '/rename?from=o&to=n', '无卷时不应发送 volume');
+});
+
+test('files.download 带可选 volume（行卷优先）', async () => {
+  const core = makeMockCore([{ status: 200, headers: { 'content-type': 'application/octet-stream' }, body: new TextEncoder().encode('d') }]);
+  const api = makeApi(core);
+  await api.files.download('x/y.txt', { volume: 'vault' });
+  assert.strictEqual(core.calls[0].path, '/download?filename=x%2Fy.txt&volume=vault', 'download 应带行卷');
+  const core2 = makeMockCore([{ status: 200, headers: {}, body: new Uint8Array(0) }]);
+  const api2 = makeApi(core2);
+  await api2.files.download('x/y.txt');
+  assert.strictEqual(core2.calls[0].path, '/download?filename=x%2Fy.txt', '无卷时不应发送 volume');
+});
+
 test('files mkdir/rmdir 映射', async () => {
   const core = makeMockCore([okResp({ success: true }), okResp({ success: true })]);
   const api = makeApi(core);
@@ -1232,6 +1328,31 @@ test('cloud 任务映射（create/batch/list/get/cancel/delete/resume/archive）
   assert.deepStrictEqual(jsonBody(core.calls[8].opts.bodyBytes), { task_ids: ['a', 'b'] });
 });
 
+// cloud 四行为透传：integrityMustPass 仅在 true 时发送 JSON 键 integrity_must_pass
+// （snake_case）；false/未传不发 = 后端默认不强制，既有调用零回归。
+test('cloud 任务 integrityMustPass 透传（true 发送 / false 与缺省不发）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 't1' }),
+    okResp({ id: 't2' }),
+    okResp({ tasks: [] }),
+    okResp({ id: 'g1' }),
+    okResp({ id: 't0' }),
+  ]);
+  const api = makeApi(core);
+  // true → integrity_must_pass: true（三入口 createDownload/createBatch/createGroup）。
+  await api.cloud.createDownload('http://x/a', 'a.jpg', { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[0].opts.bodyBytes).integrity_must_pass, true);
+  await api.cloud.createBatch([{ url: 'http://x/b', filename: 'b.jpg' }], { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[1].opts.bodyBytes).integrity_must_pass, true);
+  await api.cloud.createGroup('grp', [{ url: 'http://x/c', filename: 'c.jpg' }], { integrityMustPass: true });
+  assert.strictEqual(jsonBody(core.calls[2].opts.bodyBytes).integrity_must_pass, true);
+  // false / 缺省 → 不发（JSON 键不存在 = 后端默认，零回归）。
+  await api.cloud.createDownload('http://x/d', 'd.jpg', { integrityMustPass: false });
+  assert.ok(!('integrity_must_pass' in jsonBody(core.calls[3].opts.bodyBytes)));
+  await api.cloud.createDownload('http://x/e', 'e.jpg');
+  assert.ok(!('integrity_must_pass' in jsonBody(core.calls[4].opts.bodyBytes)));
+});
+
 test('cloud 组映射（create/list/get/cancel/delete/resume/archive）', async () => {
   const core = makeMockCore([
     okResp({ id: 'g1', total_tasks: 1 }),
@@ -1266,25 +1387,30 @@ test('cloud 组映射（create/list/get/cancel/delete/resume/archive）', async 
 // ---- share ----
 test('share create/list/revoke 映射', async () => {
   const core = makeMockCore([
-    okResp({ success: true, token: 'T' }),
-    okResp({ success: true, token: 'T' }),
-    okResp({ shares: [{ token: 'T', filename: 'a.txt' }] }),
-    okResp({ success: true }),
+    okResp({ success: true, token: 'T' }), // create #1
+    okResp({ success: true, token: 'T' }), // create #2
+    okResp({ success: true, token: 'T' }), // create #3（带 volume）
+    okResp({ shares: [{ token: 'T', filename: 'a.txt' }] }), // list
+    okResp({ success: true }), // revoke
   ]);
   const api = makeApi(core);
   await api.share.create({ filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
-  assert.strictEqual(core.calls[0].path, '/api/share');
+  assert.strictEqual(core.calls[0].path, '/api/shares');
   assert.strictEqual(core.calls[0].method, 'POST');
   assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 3, one_time: false });
   const noBody = await api.share.create({ filename: 'a.txt' });
   assert.strictEqual(noBody.token, 'T');
   assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes), { filename: 'a.txt', ttl: '24h', max_downloads: 0, one_time: false });
+  // volume 可选透传（外部卷/加密卷分享必须能指定卷；缺省不发送该字段，保持旧行为）。
+  await api.share.create({ filename: 'a.txt', volume: 'vault' });
+  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes),
+    { filename: 'a.txt', ttl: '24h', max_downloads: 0, one_time: false, volume: 'vault' });
   const list = await api.share.list();
-  assert.strictEqual(core.calls[2].path, '/api/shares');
+  assert.strictEqual(core.calls[3].path, '/api/shares');
   assert.strictEqual(list.shares.length, 1);
   await api.share.revoke('T');
-  assert.strictEqual(core.calls[3].path, '/api/shares/T');
-  assert.strictEqual(core.calls[3].method, 'DELETE');
+  assert.strictEqual(core.calls[4].path, '/api/shares/T');
+  assert.strictEqual(core.calls[4].method, 'DELETE');
 });
 
 // ---- config ----
@@ -1521,4 +1647,42 @@ test('util.buildMultipart 片段断言（boundary/字段/文件存在性）', ()
   assert.ok(text.indexOf('name="file"; filename="name.txt"') >= 0, '文件字段存在');
   assert.ok(text.indexOf('[object Uint8Array]') < 0, '文件内容应为原始字节非字符串化');
   assert.ok(text.indexOf('hello' + String.fromCharCode(13) + String.fromCharCode(10)) >= 0, '文件字节与 CRLF 相邻');
+});
+
+test('B4#4：非 JSON 平文本 403 也透传（api_keys permission denied 不再泛化）', async () => {
+  const origFetch = globalThis.fetch;
+  try {
+    transport.configure({ mode: 'direct', accessKey: AK, accessKeySecret: SK });
+    // api_keys role-forbidden 返回 http.Error("permission denied") 平文本 → 应透传原文。
+    globalThis.fetch = async () => new Response('permission denied', { status: 403, headers: { 'Content-Type': 'text/plain' } });
+    let caught = null;
+    try { await transport.coreRequest('POST', '/delete', {}); } catch (e) { caught = e; }
+    assert.ok(caught && caught.code === 'E_SERVER' && caught.status === 403, JSON.stringify(caught));
+    assert.ok(caught.message.includes('permission denied'), '平文本 403 应透传原文, got: ' + caught.message);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+// cloud meta_extra 透传：metaExtra 对象 → JSON 键 meta_extra；缺省/空不发（零回归）。
+test('cloud 任务 metaExtra 透传（对象发送 / 缺省不发）', async () => {
+  const core = makeMockCore([
+    okResp({ id: 'm1' }),
+    okResp({ id: 'm2' }),
+    okResp({ id: 'm3' }),
+    okResp({ tasks: [] }),
+  ]);
+  const api = makeApi(core);
+  const meta = { gcid: 'GCID123', note: 'e2e', share_url: 'https://ks/a' };
+  await api.cloud.createDownload('http://x/a', 'a.jpg', { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[0].opts.bodyBytes).meta_extra, meta);
+  await api.cloud.createBatch([{ url: 'http://x/b', filename: 'b.jpg' }], { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[1].opts.bodyBytes).meta_extra, meta);
+  await api.cloud.createGroup('grp', [{ url: 'http://x/c' }], { metaExtra: meta });
+  assert.deepStrictEqual(jsonBody(core.calls[2].opts.bodyBytes).meta_extra, meta);
+  // 缺省 / 空对象 → 不发 meta_extra。
+  await api.cloud.createDownload('http://x/d', 'd.jpg');
+  assert.ok(!('meta_extra' in jsonBody(core.calls[3].opts.bodyBytes)));
+  await api.cloud.createDownload('http://x/e', 'e.jpg', { metaExtra: {} });
+  assert.ok(!('meta_extra' in jsonBody(core.calls[4].opts.bodyBytes)));
 });

@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // newTestUserVolumeStore 构造绑定到 t.TempDir() 的 store（owner 目录隔离）。
@@ -170,6 +172,47 @@ func TestUserVolumeStore_AtomicWrite(t *testing.T) {
 	}
 	if got == nil || got.Capacity != 10 {
 		t.Fatalf("新实例读取 = %+v, want capacity=10", got)
+	}
+}
+
+// TestUserVolumeStore_ACLPersistAndRestore（评审 S1）验证 ACL 是持久化字段：Create 落盘后
+// ScanRestore 还原不丢——重启装配据此重建 registry 卷 ACL（否则恢复路径丢 ACL = 回退开放）。
+func TestUserVolumeStore_ACLPersistAndRestore(t *testing.T) {
+	t.Parallel()
+	s := newTestUserVolumeStore(t)
+	acl := volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}}
+	if err := s.Create("alice", UserVolume{Name: "disk", Type: "baidupcs", ACL: acl}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := s.ScanRestore()
+	if err != nil {
+		t.Fatalf("ScanRestore: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ScanRestore = %d 卷, want 1", len(got))
+	}
+	if got[0].ACL.Mode != volume.ModeAllow {
+		t.Fatalf("还原 ACL.Mode = %q, want %q", got[0].ACL.Mode, volume.ModeAllow)
+	}
+	if _, ok := got[0].ACL.Owners["alice"]; !ok {
+		t.Fatalf("还原 ACL.Owners 缺 alice: %v", got[0].ACL.Owners)
+	}
+}
+
+// TestUserVolumeStore_ACLZeroValueCompat（评审 S1 数据兼容）验证：不带 ACL 的旧卷读回零值
+// ACL（Mode=="" = 默认开放）——不静默收紧既有共享卷。
+func TestUserVolumeStore_ACLZeroValueCompat(t *testing.T) {
+	t.Parallel()
+	s := newTestUserVolumeStore(t)
+	if err := s.Create("alice", UserVolume{Name: "legacy", Type: "baidupcs"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := s.Get("alice", "legacy")
+	if err != nil || got == nil {
+		t.Fatalf("Get = %v/%v, want 存在", got, err)
+	}
+	if got.ACL.Mode != "" {
+		t.Fatalf("旧卷 ACL.Mode = %q, want 零值（开放兼容）", got.ACL.Mode)
 	}
 }
 

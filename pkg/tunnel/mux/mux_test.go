@@ -653,19 +653,7 @@ func TestRetransmitQueue_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			s, err := dm.Open(ctx)
-			if err != nil {
-				t.Logf("stream %d open failed: %v", i, err)
-				return
-			}
-			defer s.Close()
-
-			// 写入小数据块
-			data := []byte("hello from stream " + string(rune('0'+i)))
-			_, err = s.Write(data)
-			if err != nil {
-				t.Logf("stream %d write failed: %v", i, err)
-			}
+			retransmitConcurrentOpenAndWrite(t, dm, ctx, i)
 		}(i)
 	}
 
@@ -673,25 +661,49 @@ func TestRetransmitQueue_Concurrent(t *testing.T) {
 	acceptDone := make(chan struct{})
 	go func() {
 		defer close(acceptDone)
-		for range numStreams {
-			s, err := lm.Accept(ctx)
-			if err != nil {
-				return
-			}
-			// 读取并丢弃数据
-			buf := make([]byte, 1024)
-			for {
-				_, err := s.Read(buf)
-				if err != nil {
-					break
-				}
-			}
-			s.Close()
-		}
+		retransmitConcurrentAcceptAll(t, lm, ctx, numStreams)
 	}()
 
 	wg.Wait()
 	<-acceptDone
+}
+
+// retransmitConcurrentOpenAndWrite 打开一条流并写入小数据块。
+func retransmitConcurrentOpenAndWrite(t *testing.T, dm *mux.Mux, ctx context.Context, i int) {
+	t.Helper()
+	s, err := dm.Open(ctx)
+	if err != nil {
+		t.Logf("stream %d open failed: %v", i, err)
+		return
+	}
+	defer s.Close()
+
+	// 写入小数据块
+	data := []byte("hello from stream " + string(rune('0'+i)))
+	_, err = s.Write(data)
+	if err != nil {
+		t.Logf("stream %d write failed: %v", i, err)
+	}
+}
+
+// retransmitConcurrentAcceptAll 接受并读取 numStreams 条流、丢弃数据。
+func retransmitConcurrentAcceptAll(t *testing.T, lm *mux.Mux, ctx context.Context, numStreams int) {
+	t.Helper()
+	for range numStreams {
+		s, err := lm.Accept(ctx)
+		if err != nil {
+			return
+		}
+		// 读取并丢弃数据
+		buf := make([]byte, 1024)
+		for {
+			_, err := s.Read(buf)
+			if err != nil {
+				break
+			}
+		}
+		s.Close()
+	}
 }
 
 // mustEncodeFrame 是本包测试的编码辅助（EncodeFrame 现在返回 error）。

@@ -64,27 +64,39 @@ func assertKeysDeepEqual(t *testing.T, got, want []Key) {
 	}
 	for i := range want {
 		g, w := got[i], want[i]
-		if g.AK != w.AK || g.Owner != w.Owner || g.Role != w.Role {
-			t.Errorf("key %d 账号字段不一致: %+v vs %+v", i, g, w)
+		assertKeyFieldsEqual(t, i, g, w)
+		assertKeyEntriesEqual(t, i, g.Entries, w.Entries)
+	}
+}
+
+// assertKeyFieldsEqual 比较单个 Key 的账号字段与 SK 条目元数据/字节/时间。
+func assertKeyFieldsEqual(t *testing.T, i int, g, w Key) {
+	t.Helper()
+	if g.AK != w.AK || g.Owner != w.Owner || g.Role != w.Role {
+		t.Errorf("key %d 账号字段不一致: %+v vs %+v", i, g, w)
+	}
+	if string(g.TOTPSecret) != string(w.TOTPSecret) {
+		t.Errorf("key %d TOTPSecret 不一致: %q vs %q", i, g.TOTPSecret, w.TOTPSecret)
+	}
+	if len(g.Entries) != len(w.Entries) {
+		t.Fatalf("key %d entries = %d, want %d", i, len(g.Entries), len(w.Entries))
+	}
+}
+
+// assertKeyEntriesEqual 逐条目比较 SK 条目的元数据 + 字节 + 时间。
+func assertKeyEntriesEqual(t *testing.T, i int, ge, we []SKEntry) {
+	t.Helper()
+	for j := range we {
+		g, w := ge[j], we[j]
+		if g.ID != w.ID || g.Kind != w.Kind || g.WrapKeyID != w.WrapKeyID ||
+			g.Status != w.Status || g.Meta.Type != w.Meta.Type || g.Meta.IP != w.Meta.IP {
+			t.Errorf("key %d entry %d 元数据不一致: %+v vs %+v", i, j, g, w)
 		}
-		if string(g.TOTPSecret) != string(w.TOTPSecret) {
-			t.Errorf("key %d TOTPSecret 不一致: %q vs %q", i, g.TOTPSecret, w.TOTPSecret)
+		if string(g.SK) != string(w.SK) {
+			t.Errorf("key %d entry %d SK 字节不一致", i, j)
 		}
-		if len(g.Entries) != len(w.Entries) {
-			t.Fatalf("key %d entries = %d, want %d", i, len(g.Entries), len(w.Entries))
-		}
-		for j := range w.Entries {
-			ge, we := g.Entries[j], w.Entries[j]
-			if ge.ID != we.ID || ge.Kind != we.Kind || ge.WrapKeyID != we.WrapKeyID ||
-				ge.Status != we.Status || ge.Meta.Type != we.Meta.Type || ge.Meta.IP != we.Meta.IP {
-				t.Errorf("key %d entry %d 元数据不一致: %+v vs %+v", i, j, ge, we)
-			}
-			if string(ge.SK) != string(we.SK) {
-				t.Errorf("key %d entry %d SK 字节不一致", i, j)
-			}
-			if !ge.CreatedAt.Equal(we.CreatedAt) || !ge.ExpiresAt.Equal(we.ExpiresAt) {
-				t.Errorf("key %d entry %d 时间不一致: %+v vs %+v", i, j, ge.CreatedAt, we.CreatedAt)
-			}
+		if !g.CreatedAt.Equal(w.CreatedAt) || !g.ExpiresAt.Equal(w.ExpiresAt) {
+			t.Errorf("key %d entry %d 时间不一致: %+v vs %+v", i, j, g.CreatedAt, w.CreatedAt)
 		}
 	}
 }
@@ -380,114 +392,67 @@ func TestLoadMasterKeyFromFile_Base64AndRaw(t *testing.T) {
 	key := bytes.Repeat([]byte{0x7e}, 32)
 
 	t.Run("base64-带换行", func(t *testing.T) {
-		p := filepath.Join(t.TempDir(), "master.key")
-		content := base64.StdEncoding.EncodeToString(key) + "\n"
-		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile: %v", err)
-		}
-		if !bytes.Equal(got, key) {
-			t.Fatalf("base64 格式解码不一致")
-		}
+		assertLoadMasterKey(t, []byte(base64.StdEncoding.EncodeToString(key)+"\n"), key, "base64 格式解码不一致")
 	})
-
 	t.Run("raw-32B", func(t *testing.T) {
-		p := filepath.Join(t.TempDir(), "master.key")
-		if err := os.WriteFile(p, key, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile(raw): %v", err)
-		}
-		if !bytes.Equal(got, key) {
-			t.Fatalf("raw 格式读取不一致")
-		}
+		assertLoadMasterKey(t, key, key, "raw 格式读取不一致")
 	})
-
 	t.Run("raw-末字节为换行0x0a不剥", func(t *testing.T) {
 		// I-1 回归：合法 raw 32B key 的末字节恰为 0x0a（换行字节），整文件即密钥，
 		// 不得按尾换行剥离（旧 TrimSpace 实现会误剥导致 31B 误拒）。
 		raw := bytes.Repeat([]byte{0x5a}, 32)
 		raw[31] = 0x0a
-		p := filepath.Join(t.TempDir(), "master.key")
-		if err := os.WriteFile(p, raw, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile(raw-end-0x0a): %v", err)
-		}
-		if !bytes.Equal(got, raw) {
-			t.Fatalf("raw 末字节 0x0a 不应剥离: got %x", got)
-		}
+		assertLoadMasterKey(t, raw, raw, "raw 末字节 0x0a 不应剥离")
 	})
-
 	t.Run("raw-首字节为空格0x20不剥", func(t *testing.T) {
 		// I-1 回归：raw key 首字节为合法空白字节 0x20，不得被 TrimSpace 误剥。
 		raw := bytes.Repeat([]byte{0x24}, 32)
 		raw[0] = 0x20
-		p := filepath.Join(t.TempDir(), "master.key")
-		if err := os.WriteFile(p, raw, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile(raw-lead-space): %v", err)
-		}
-		if !bytes.Equal(got, raw) {
-			t.Fatalf("raw 首字节 0x20 不应剥离: got %x", got)
-		}
+		assertLoadMasterKey(t, raw, raw, "raw 首字节 0x20 不应剥离")
 	})
-
 	t.Run("raw-32B加尾LF", func(t *testing.T) {
-		p := filepath.Join(t.TempDir(), "master.key")
-		content := append(append([]byte(nil), key...), '\n')
-		if err := os.WriteFile(p, content, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile(raw+LF): %v", err)
-		}
-		if !bytes.Equal(got, key) {
-			t.Fatalf("raw 32B+LF 应剥尾换行还原密钥: got %x", got)
-		}
+		assertLoadMasterKey(t, append(append([]byte(nil), key...), '\n'), key, "raw 32B+LF 应剥尾换行还原密钥")
 	})
-
 	t.Run("raw-32B加尾CRLF", func(t *testing.T) {
-		p := filepath.Join(t.TempDir(), "master.key")
-		content := append(append(append([]byte(nil), key...), '\r'), '\n')
-		if err := os.WriteFile(p, content, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		got, err := LoadMasterKeyFromFile(p)
-		if err != nil {
-			t.Fatalf("LoadMasterKeyFromFile(raw+CRLF): %v", err)
-		}
-		if !bytes.Equal(got, key) {
-			t.Fatalf("raw 32B+CRLF 应剥尾换行还原密钥: got %x", got)
-		}
+		assertLoadMasterKey(t, append(append(append([]byte(nil), key...), '\r'), '\n'), key, "raw 32B+CRLF 应剥尾换行还原密钥")
 	})
-
 	t.Run("非法内容", func(t *testing.T) {
-		p := filepath.Join(t.TempDir(), "master.key")
-		if err := os.WriteFile(p, []byte("not-a-key"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadMasterKeyFromFile(p); err == nil {
-			t.Fatal("非法 master key 文件应报错")
-		}
+		assertLoadMasterKeyError(t, []byte("not-a-key"))
 	})
-
 	t.Run("文件不存在", func(t *testing.T) {
 		if _, err := LoadMasterKeyFromFile(filepath.Join(t.TempDir(), "nope.key")); err == nil {
 			t.Fatal("缺失 master key 文件应报错")
 		}
 	})
+}
+
+// assertLoadMasterKey 写 content 到临时 master.key，LoadMasterKeyFromFile 并断言等于 want。
+// msg 是失败时的语义化诊断文案（各 subtest 特有，便于定位格式语义）。
+func assertLoadMasterKey(t *testing.T, content, want []byte, msg string) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "master.key")
+	if err := os.WriteFile(p, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadMasterKeyFromFile(p)
+	if err != nil {
+		t.Fatalf("LoadMasterKeyFromFile: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s: got %x", msg, got)
+	}
+}
+
+// assertLoadMasterKeyError 写 content 到临时 master.key，并断言 Load 报错。
+func assertLoadMasterKeyError(t *testing.T, content []byte) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "master.key")
+	if err := os.WriteFile(p, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadMasterKeyFromFile(p); err == nil {
+		t.Fatal("非法 master key 文件应报错")
+	}
 }
 
 // TestEncryptWithKey_NonceUnique 验证同明文 + 同 key 两次加密的密文不同（nonce 每次

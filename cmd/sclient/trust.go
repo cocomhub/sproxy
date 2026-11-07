@@ -75,7 +75,7 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			res, err := svc.RenewAccessKey(cmd.Context())
@@ -84,60 +84,58 @@ func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 				return fmt.Errorf("SK 轮换失败: %w", err)
 			}
 
-			// 回填配置：新 SK + 新 sk_id（本地持久化；旧 SK 在 config 中不再需要）。
-			// context 模式：回写当前 context user 段；平铺模式：回写平铺配置。
+			// 回填配置：新 SK + 新 sk_id（统一 context：写回当前 context user 段）。
 			newSecret := hex.EncodeToString(res.NewSecret)
-			if cfgFile != nil && *cfgFile != "" {
-				if cc, cerr := contextcfg.Load(*cfgFile); cerr == nil && len(cc.Contexts) > 0 && cc.CurrentContext != "" {
-					if cur := cc.FindContext(cc.CurrentContext); cur != nil && cur.User != "" {
-						if u := cc.FindUser(cur.User); u != nil {
-							u.AccessKeySecret = newSecret
-							u.AccessKeyID = res.SKID
-							if u.AccessKey == "" {
-								u.AccessKey = res.AK
-							}
-							if serr := contextcfg.Save(cc, *cfgFile); serr == nil {
-								expiry := "永久"
-								if !res.ExpiresAt.IsZero() {
-									expiry = res.ExpiresAt.Format(time.RFC3339)
-								}
-								fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入 context user %s，立即生效)\n",
-									res.AK, res.SKID, expiry, cur.User)
-								return nil
-							}
-						}
-					}
-				}
-			}
-			cfg, cerr := cfgSvc.LoadConfig()
-			if cerr != nil {
-				ios.WriteErrLine("加载配置失败: %v", cerr)
-				return fmt.Errorf("加载配置失败: %w", cerr)
-			}
-			cfg.AccessKeySecret = newSecret
-			cfg.AccessKeyID = res.SKID
-			if cfg.AccessKey == "" {
-				cfg.AccessKey = res.AK
-			}
-			if *cfgFile == "" {
-				// 防御：config 写入路径必须存在（生产由 root.go 生成默认路径）。
-				return fmt.Errorf("配置文件路径为空，无法回填轮换后的 SK")
-			}
-			if err := client.SaveConfig(cfg, *cfgFile); err != nil {
-				ios.WriteErrLine("保存配置失败: %v", err)
-				return fmt.Errorf("保存配置失败: %w", err)
-			}
-
-			expiry := "永久"
-			if !res.ExpiresAt.IsZero() {
-				expiry = res.ExpiresAt.Format(time.RFC3339)
-			}
-			fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入配置，立即生效)\n",
-				res.AK, res.SKID, expiry)
-			return nil
+			return trustRenewBackfillContext(cfgFile, res, newSecret, ios)
 		},
 	}
 	return cmd
+}
+
+// trustRenewBackfillContext 把轮换后的 SK 回填到 context 配置（当前 context 的
+// user 段）。统一 context 后这是唯一回填路径：配置不存在/无 context/无 user/保存
+// 失败都 fail-closed 报错（不再静默回落平铺）。
+func trustRenewBackfillContext(cfgFile *string, res *client.RenewResult, newSecret string, ios cli.IOStreams) error {
+	if cfgFile == nil || *cfgFile == "" {
+		return fmt.Errorf("配置文件路径为空，无法回填轮换后的 SK")
+	}
+	cc, cerr := contextcfg.Load(*cfgFile)
+	if cerr != nil {
+		return fmt.Errorf("加载 context 配置失败: %w", cerr)
+	}
+	if len(cc.Contexts) == 0 || cc.CurrentContext == "" {
+		return fmt.Errorf("未找到当前 context（请先 sclient context use <name>）")
+	}
+	cur := cc.FindContext(cc.CurrentContext)
+	if cur == nil || cur.User == "" {
+		return fmt.Errorf("当前 context 无 user（请先 sclient context set --user-name <u>）")
+	}
+	u := cc.FindUser(cur.User)
+	if u == nil {
+		return fmt.Errorf("当前 context user %q 不存在", cur.User)
+	}
+	u.AccessKeySecret = newSecret
+	u.AccessKeyID = res.SKID
+	if u.AccessKey == "" {
+		u.AccessKey = res.AK
+	}
+	if err := contextcfg.Save(cc, *cfgFile); err != nil {
+		return fmt.Errorf("保存 context 配置失败: %w", err)
+	}
+	fmt.Fprintf(ios.Out, "SK 已轮换: ak=%s sk_id=%s 有效期至 %s (新 SK 已写入 context user %s，立即生效)\n",
+		res.AK, res.SKID, trustSKExpiryText(res.ExpiresAt), cur.User)
+	return nil
+}
+
+// trustRenewBackfillFlat 已删除（统一 context 配置：renew 回填唯一路径 = config.yaml
+// 的 user 段，不再有平铺 sclient.yaml 形态）。
+
+// trustSKExpiryText 格式化 SK 有效期显示文案（zero = 永久，否则 RFC3339）。
+func trustSKExpiryText(t time.Time) string {
+	if t.IsZero() {
+		return "永久"
+	}
+	return t.Format(time.RFC3339)
 }
 
 // ---- trust sk ----
@@ -162,45 +160,54 @@ func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		Short: "列出 AK 的 SK 条目（只展示本端能解开 secret 的条目，其余 masked）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ak, _ := cmd.Flags().GetString("ak")
-			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			if ak == "" {
-				ak = svc.AccessKey()
-			}
-			if ak == "" {
-				return fmt.Errorf("未配置 access_key 也未指定 --ak")
-			}
-			infos, err := svc.ListAccessKeys(cmd.Context(), ak)
-			if err != nil {
-				ios.WriteErrLine("查询 SK 列表失败: %v", err)
-				return fmt.Errorf("查询 SK 列表失败: %w", err)
-			}
-			if len(infos) == 0 {
-				fmt.Fprintln(ios.Out, "该 AK 暂无 SK 条目")
-				return nil
-			}
-			fmt.Fprintf(ios.Out, "%-20s  %-20s  %-20s  %-8s  %-10s  %s\n",
-				"SK_ID", "CREATED", "EXPIRES", "STATUS", "TYPE", "SECRET")
-			for _, s := range infos {
-				// SECRET 列只标记能否解开——明文 SK 属凭据（S49），绝不打印。
-				secret := "<encrypted>"
-				if !s.Masked {
-					secret = "<decrypted>"
-				}
-				expires := "永久"
-				if !s.Expires.IsZero() {
-					expires = s.Expires.Format("2006-01-02 15:04")
-				}
-				fmt.Fprintf(ios.Out, "%-20s  %-20s  %-20s  %-8s  %-10s  %s\n",
-					s.SKID, s.Created.Format("2006-01-02 15:04"), expires, s.Status, s.MetaType, secret)
-			}
-			return nil
+			return trustSKListRunE(cmd, factory, ios, cfgSvc)
 		},
 	}
+}
+
+// trustSKListRunE 执行 trust sk list 主体（newCmdTrustSKList 的 RunE 抽出，降 CC）。
+func trustSKListRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) error {
+	ak, _ := cmd.Flags().GetString("ak")
+	svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+	if ak == "" {
+		ak = svc.AccessKey()
+	}
+	if ak == "" {
+		return fmt.Errorf("未配置 access_key 也未指定 --ak")
+	}
+	infos, err := svc.ListAccessKeys(cmd.Context(), ak)
+	if err != nil {
+		ios.WriteErrLine("查询 SK 列表失败: %v", err)
+		return fmt.Errorf("查询 SK 列表失败: %w", err)
+	}
+	if len(infos) == 0 {
+		fmt.Fprintln(ios.Out, "该 AK 暂无 SK 条目")
+		return nil
+	}
+	fmt.Fprintf(ios.Out, "%-20s  %-20s  %-20s  %-8s  %-10s  %s\n",
+		"SK_ID", "CREATED", "EXPIRES", "STATUS", "TYPE", "SECRET")
+	for _, s := range infos {
+		printTrustSKRow(ios, s)
+	}
+	return nil
+}
+
+// printTrustSKRow 打印单行 SK 条目（SECRET 列只标记能否解开——明文是凭据 S49，绝不打印）。
+func printTrustSKRow(ios cli.IOStreams, s client.SKInfo) {
+	secret := "<encrypted>"
+	if !s.Masked {
+		secret = "<decrypted>"
+	}
+	expires := "永久"
+	if !s.Expires.IsZero() {
+		expires = s.Expires.Format("2006-01-02 15:04")
+	}
+	fmt.Fprintf(ios.Out, "%-20s  %-20s  %-20s  %-8s  %-10s  %s\n",
+		s.SKID, s.Created.Format("2006-01-02 15:04"), expires, s.Status, s.MetaType, secret)
 }
 
 // newCmdTrustSKDelete 创建 trust sk delete 命令。
@@ -213,7 +220,7 @@ func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 			ak, _ := cmd.Flags().GetString("ak")
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if ak == "" {
@@ -240,40 +247,45 @@ func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 		Short: "设单条 SK 的生效截止时间（--until 缺省清空=恢复永久有效）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ak, _ := cmd.Flags().GetString("ak")
-			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
-			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
-				return fmt.Errorf(errFmtInitClient, err)
-			}
-			if ak == "" {
-				ak = svc.AccessKey()
-			}
-			if ak == "" {
-				return fmt.Errorf("未配置 access_key 也未指定 --ak")
-			}
-			var untilTime time.Time
-			if until != "" {
-				untilTime, err = time.Parse(time.RFC3339, until)
-				if err != nil {
-					ios.WriteErrLine("--until 需为 RFC3339 时间（如 2026-09-01T12:00:00Z）: %v", err)
-					return fmt.Errorf("--until 需为 RFC3339 时间: %w", err)
-				}
-			}
-			if err := svc.ExpireSK(cmd.Context(), ak, args[0], untilTime); err != nil {
-				ios.WriteErrLine("设 SK 过期失败: %v", err)
-				return fmt.Errorf("设 SK 过期失败: %w", err)
-			}
-			if untilTime.IsZero() {
-				fmt.Fprintf(ios.Out, "SK 已设为永久有效: %s (ak=%s)\n", args[0], ak)
-			} else {
-				fmt.Fprintf(ios.Out, "SK 截止时间已更新: %s → %s (ak=%s)\n", args[0], untilTime.Format(time.RFC3339), ak)
-			}
-			return nil
+			return trustSKExpireRunE(cmd, factory, ios, cfgSvc, args, &until)
 		},
 	}
 	cmd.Flags().StringVar(&until, "until", "", "过期截止时间（RFC3339，如 2026-09-01T12:00:00Z；空=恢复永久有效）")
 	return cmd
+}
+
+// trustSKExpireRunE 执行 trust sk expire 主体（newCmdTrustSKExpire 的 RunE 抽出）。
+func trustSKExpireRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, args []string, until *string) error {
+	ak, _ := cmd.Flags().GetString("ak")
+	svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
+	if err != nil {
+		ios.WriteErrLine(errFmtInitClientPrint, err)
+		return fmt.Errorf(errFmtInitClient, err)
+	}
+	if ak == "" {
+		ak = svc.AccessKey()
+	}
+	if ak == "" {
+		return fmt.Errorf("未配置 access_key 也未指定 --ak")
+	}
+	var untilTime time.Time
+	if *until != "" {
+		untilTime, err = time.Parse(time.RFC3339, *until)
+		if err != nil {
+			ios.WriteErrLine("--until 需为 RFC3339 时间（如 2026-09-01T12:00:00Z）: %v", err)
+			return fmt.Errorf("--until 需为 RFC3339 时间: %w", err)
+		}
+	}
+	if err := svc.ExpireSK(cmd.Context(), ak, args[0], untilTime); err != nil {
+		ios.WriteErrLine("设 SK 过期失败: %v", err)
+		return fmt.Errorf("设 SK 过期失败: %w", err)
+	}
+	if untilTime.IsZero() {
+		fmt.Fprintf(ios.Out, "SK 已设为永久有效: %s (ak=%s)\n", args[0], ak)
+	} else {
+		fmt.Fprintf(ios.Out, "SK 截止时间已更新: %s → %s (ak=%s)\n", args[0], untilTime.Format(time.RFC3339), ak)
+	}
+	return nil
 }
 
 // ---- trust ak ----
@@ -299,7 +311,7 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			sums, err := svc.ListAKs(cmd.Context())
@@ -333,7 +345,7 @@ func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		RunE: func(cmd *cobra.Command, args []string) error {
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			owner, _ := cmd.Flags().GetString("owner")
@@ -413,7 +425,7 @@ func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 
 			svc, err := newTrustDirectClient(cmd, factory, cfgSvc)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			if err := svc.DeleteAK(cmd.Context(), target, force); err != nil {

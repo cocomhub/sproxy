@@ -17,22 +17,53 @@ import (
 	"time"
 )
 
+// markRunningLocked 置 running 标记并创建「已停止」通知通道（调用方必须持 m.mu 写锁）。
+func (m *CloudDownloadManager) markRunningLocked(taskID string) {
+	m.running[taskID] = true
+	if _, ok := m.runningDone[taskID]; !ok {
+		m.runningDone[taskID] = make(chan struct{})
+	}
+}
+
+// clearRunningLocked 清除 running 并关闭通知通道（幂等；调用方必须持 m.mu 写锁）。
+func (m *CloudDownloadManager) clearRunningLocked(taskID string) {
+	delete(m.running, taskID)
+}
+
+// signalStoppedLocked 通知 waitTaskStopped「任务已完全停止」（关闭 runningDone 通道）。
+//
+// **必须在释放配额/落定状态之后调用**（不变量：waitTaskStopped 返回 ⇒ 配额已归零）。
+// 此前 close 与清理 running 同处 clearRunningLocked，而 cleanupRunning 的释放紧随其后
+// ⇒ 等待方可能在释放完成前被唤醒并读到残留 Usage（CI 偶发
+// `CancelDuringWrite_QuotaZero` 的 `Usage()=400 want 0` 根因）。
+func (m *CloudDownloadManager) signalStoppedLocked(taskID string) {
+	if ch, ok := m.runningDone[taskID]; ok {
+		close(ch)
+		delete(m.runningDone, taskID)
+	}
+}
+
 // waitTaskStopped 等待任务的下载 goroutine 完全退出（running 标记清除）。
 // 最多等待 timeout。返回 false 表示超时仍未退出。
 // 调用方不得持有 m.mu（本函数内部需取读锁）。
 func (m *CloudDownloadManager) waitTaskStopped(taskID string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		m.mu.RLock()
-		running := m.running[taskID]
-		m.mu.RUnlock()
-		if !running {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(100 * time.Millisecond)
+	m.mu.RLock()
+	done := m.runningDone[taskID]
+	running := m.running[taskID]
+	m.mu.RUnlock()
+	if !running {
+		return true
+	}
+	if done == nil {
+		// 兼容：running 为真但没有通知通道（异常装配）⇒ 退化为一次读判断，
+		// 不引入墙钟轮询（调用方仍有自己的超时语义）。
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -66,7 +97,7 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 			stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
 		}
 	}
-	delete(m.running, taskID)
+	m.clearRunningLocked(taskID)
 
 	// 补充释放：闭合并发放弃留下的「释放被推迟给不存在的 goroutine」窗口（独立复核发现）。
 	// ResumeTask 在「置 pending/running 并解锁」与「重新取锁回滚」（本函数）之间不持锁；窗口中
@@ -81,6 +112,7 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 	if stored, ok := m.tasks[taskID]; !ok || stored.Status == "cancelled" {
 		m.releaseTaskScope(task)
 	}
+	m.signalStoppedLocked(taskID)
 }
 
 // resumeWindowHook 是**测试 seam**：ResumeTask 在「置 pending/running 并解锁」与「重新取锁做
@@ -98,16 +130,10 @@ var resumeWindowHook func(m *CloudDownloadManager, taskID string)
 // 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举）。
 func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner string) error {
 	m.mu.Lock()
-	task, ok := m.tasks[taskID]
-	if !ok || !ownerVisible(task.Owner, owner) {
+	_, err := m.resumeTaskLookupLocked(taskID, owner, false)
+	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("task not found: %s", taskID)
-	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		// 解锁前捕获 status：fmt.Errorf 若直接引用 task.Status 会在 m.mu 释放后读共享字段，
-		// 与 CancelTask 的 t.Status = "cancelled"（持锁写）构成数据竞争。
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
+		return err
 	}
 	// 释放写锁再等待：waitTaskStopped 内部需取读锁，持有写锁会死锁。
 	// 等待期间任务可能被删除或状态被并发修改，之后会重新校验。
@@ -122,18 +148,20 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	}
 
 	m.mu.Lock()
-	task, ok = m.tasks[taskID]
-	if !ok {
+	task, err := m.resumeTaskLookupLocked(taskID, "", true)
+	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("task not found: %s", taskID)
+		return err
 	}
-	if status := task.Status; status != "failed" && status != "cancelled" {
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is in status %q, only failed/cancelled tasks can be resumed", taskID, status)
-	}
-	if m.running[taskID] {
-		m.mu.Unlock()
-		return fmt.Errorf("task %s is still running, cannot resume now", taskID)
+
+	// E-M2（damaged 自愈）：恢复 completed+damaged 任务（重下修复）→ 置运行时标记允许
+	// 转存覆盖本任务先前写过的目标卷副本（W1/W3 拒绝覆写只对他人生效）。failed/
+	// cancelled 续传不置——目标卷若已存在（先前转存成功）幂等命中仍走 WriteIfAbsent。
+	// D-CRITICAL 修复：每次 resume **先清再按当前状态置**——否则 completed+damaged→
+	// resume(置 true)→failed→再 resume（不再置位但旧标记仍 true）→ 转存盲覆他人同 rel。
+	task.resumeSelfOverwrite = false
+	if task.Status == "completed" && task.IntegrityStatus == "damaged" {
+		task.resumeSelfOverwrite = true
 	}
 
 	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态
@@ -146,27 +174,35 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// UpdatedAt 在 running 置位后更新（值语义）：waitTaskStopped 以 running 为终态信号，
 	// 先置 running 保证 watcher 一旦观察到即可视为本次 resume 已生效；UpdatedAt 紧随写入。
 	task.Status = "pending"
-	m.running[taskID] = true
+	m.markRunningLocked(taskID)
 	task.Error = ""
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+	// M1（对抗评审）：resume 重置完整性运行时累计（integritySames/LastChecksum）——
+	// 新下载会话从零累计，防 stale 跨 resume 累计导致首轮即误判 permanent。
+	// IntegrityStatus 一并清空（重下后重新判定）。
+	task.integritySames = 0
+	task.integrityLastChecksum = ""
+	task.IntegrityStatus = ""
+	// C2 边界：**显式 resume 一律重下**（含 completed+damaged 自愈修复）⇒ 清掉「产物完整」
+	// 标记，否则恢复复用分支会把用户要修的坏产物当成好产物直接转存。
+	// 进程重启的自动恢复**不走本函数**，故 C2 的「跳过重复下载」仍生效。
+	task.DownloadDone = false
+	task.DownloadedSize = 0
+	task.DownloadedChecksum = ""
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时
 	// 保留 .partial 的既有占位，早退回滚不得释放它）。
-	var resumeReserved int64
-	if task.ReservedSize == 0 {
-		if err := m.storage.TryReserveCloud(cloudReservePlaceholder); err != nil {
-			// 占位失败：本次 resume 不会启动 goroutine，必须**整体回滚**（见 rollbackResumeLocked）。
-			// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
-			// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
-			// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
-			m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
-			m.mu.Unlock()
-			return err
-		}
-		task.ReservedSize = cloudReservePlaceholder
-		resumeReserved = cloudReservePlaceholder
+	resumeReserved, err := m.reserveCloudResumeLocked(task)
+	if err != nil {
+		// 占位失败：本次 resume 不会启动 goroutine，必须**整体回滚**（见 rollbackResumeLocked）。
+		// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
+		// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
+		// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
+		m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
+		m.mu.Unlock()
+		return err
 	}
 	m.mu.Unlock()
 
@@ -206,14 +242,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		// 租户短时可越过 max_storage_bytes）；偏高只由周期扫描收敛。
 		// 此处无 goroutine（waitTaskStopped 已确认）且 running 已置位（并发 DeleteTask 会推迟
 		// 释放）⇒ 锁内记账后由本路径独占释放，releaseTaskScope 的复调释放 0（幂等）。
-		discarded := removeDiscardedTaskFiles(destPath, removeTaskFile)
-		m.mu.Lock()
-		// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
-		// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
-		if task.account != nil && discarded > 0 {
-			task.account.ReleaseCommitted(discarded)
-		}
-		m.mu.Unlock()
+		m.discardForceResumeFiles(task, destPath)
 	}
 
 	if err := m.saveTask(task); err != nil {
@@ -224,6 +253,59 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	m.wg.Add(1)
 	go m.executeDownload(context.Background(), task)
 	return nil
+}
+
+// resumeTaskLookupLocked 在持 m.mu 写锁状态下按 ID 取任务并做可恢复校验。
+// owner 非空时校验可见性（首次进入）；checkRunning 为真时校验任务未在运行（等待旧
+// goroutine 退出后的二次进入）。
+// 解锁前捕获 status：fmt.Errorf 若在 m.mu 释放后读共享字段，与 CancelTask 的
+// t.Status = "cancelled"（持锁写）构成数据竞争。
+func (m *CloudDownloadManager) resumeTaskLookupLocked(taskID, owner string, checkRunning bool) (*CloudTask, error) {
+	task, ok := m.tasks[taskID]
+	if !ok || (owner != "" && !ownerVisible(task.Owner, owner)) {
+		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	// M2（damaged 重下入口）：completed+IntegrityStatus==damaged 也允许恢复——
+	// damaged 是「警告继续」放行后的完成态，任务可显式重下修复。其余完成态
+	// （verified/未校验）不可恢复（无重下诉求，防误操作）。
+	status := task.Status
+	resumable := status == "failed" || status == "cancelled" ||
+		(status == "completed" && task.IntegrityStatus == "damaged")
+	if !resumable {
+		return nil, fmt.Errorf("task %s is in status %q, only failed/cancelled (or damaged) tasks can be resumed", taskID, status)
+	}
+	if checkRunning && m.running[taskID] {
+		return nil, fmt.Errorf("task %s is still running, cannot resume now", taskID)
+	}
+	return task, nil
+}
+
+// reserveCloudResumeLocked 为 resume 重新占位（仅当任务当前无既有占位；调用方须持 m.mu 写锁）。
+// 返回本次调用新落的占位字节数（0 = 未新增，此时 task.ReservedSize 是任务失败时保留
+// .partial 的既有占位，早退回滚不得释放它）。
+func (m *CloudDownloadManager) reserveCloudResumeLocked(task *CloudTask) (int64, error) {
+	if task.ReservedSize != 0 {
+		return 0, nil
+	}
+	placeholder := m.placeholderFor() // 自适应占位（同 CreateTask；见 placeholderFor 根因说明）
+	if err := m.storage.TryReserveCloud(placeholder); err != nil {
+		return 0, err
+	}
+	task.ReservedSize = placeholder
+	return placeholder, nil
+}
+
+// discardForceResumeFiles force 续传时丢弃旧产物（结果文件 + .partial + .partial.etag）并回拨
+// Scope 占用（逻辑见 ResumeTask 的 force 分支注释）。
+func (m *CloudDownloadManager) discardForceResumeFiles(task *CloudTask, destPath string) {
+	discarded := removeDiscardedTaskFiles(destPath, m.removeFileOrDefault())
+	m.mu.Lock()
+	// 不得释放超过本任务记录的占用：删除的字节多于本任务记的账时，超出部分属同桶邻居的
+	// 份额，直接 ReleaseUsage 会吃掉它们（层内无归属，见 pkg/quota 的逐层钳制）。
+	if task.account != nil && discarded > 0 {
+		task.account.ReleaseCommitted(discarded)
+	}
+	m.mu.Unlock()
 }
 
 // ResumeGroup 恢复组内所有失败/取消任务。

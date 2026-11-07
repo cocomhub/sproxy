@@ -1,8 +1,5 @@
 <!DOCTYPE html>
-<!--
- Copyright 2026 The Cocomhub Authors. All rights reserved.
- SPDX-License-Identifier: Apache-2.0
--->
+<!-- Copyright 2026 The Cocomhub Authors. All rights reserved. SPDX-License-Identifier: Apache-2.0 -->
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -31,12 +28,12 @@
     <button id="lang-toggle" type="button" title="切换语言 / Switch language" data-i18n="lang_switch">语言</button>
     <label class="btn btn-primary" for="file-input" id="upload-btn-label">上传文件</label>
     <input type="file" id="file-input" multiple style="display:none">
-    <label for="upload-volume" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="上传目标卷（默认 auto）">卷
-      <select id="upload-volume" aria-label="上传卷" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
-        <option value="">auto</option>
+    <label for="volume-select" style="display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text-secondary);white-space:nowrap;" title="当前工作卷：影响文件列表过滤、上传目标与卷内操作（空 = 全部卷 / 自动定位；选择持久化，刷新后保留）"><span data-i18n="volume_lbl">卷</span>
+      <select id="volume-select" aria-label="当前卷" style="padding:5px 8px;border:1px solid var(--border-input);border-radius:4px;font-size:13px;color:var(--text-primary);background:var(--bg-input);">
+        <option value="">全部卷 / auto</option>
       </select>
     </label>
-    <button type="button" id="refresh-btn" class="btn btn-secondary">刷新列表</button>
+    <button type="button" id="refresh-btn" class="btn btn-secondary" title="强制刷新：清空服务端卷状态缓存（默认永不过期）后重新列举，用于感知进程外改动（本机直写盘 / 其它实例 / 网盘 App 直改）">强制刷新</button>
     <input type="text" id="search-input" placeholder="搜索文件…" aria-label="搜索文件" style="padding:6px 10px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;flex:1;min-width:160px;">
     <button type="button" id="search-btn" class="btn btn-primary">搜索</button>
     <button type="button" class="btn btn-secondary" id="clear-search-btn" style="display:none;">清除搜索</button>
@@ -113,7 +110,9 @@
       <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
       <button type="button" id="audit-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">审计</button>
       <button type="button" id="volumes-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷</button>
+      <button type="button" id="vol-manage-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷管理</button>
       <button type="button" id="credentials-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">凭据</button>
+      <button type="button" id="secret-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Secret</button>
       <button type="button" id="sync-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">同步冲突</button>
       <button type="button" id="mesh-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Mesh</button>
     </div>
@@ -122,7 +121,9 @@
     <div id="hub-panel" style="display:none;"></div>
     <div id="audit-panel" style="display:none;"></div>
     <div id="volumes-panel" style="display:none;"></div>
+    <div id="vol-manage-panel" style="display:none;"></div>
     <div id="credentials-panel" style="display:none;"></div>
+    <div id="secret-panel" style="display:none;"></div>
     <div id="sync-panel" style="display:none;"></div>
     <div id="mesh-panel" style="display:none;"></div>
     <div style="margin-top:16px;text-align:right;">
@@ -145,17 +146,19 @@
     </div>
     <div id="share-create-panel">
       <div style="margin-bottom:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">文件名</label>
-        <input type="text" id="share-filename" placeholder="输入文件名..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <label for="share-filename" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">文件名</label>
+        <input type="text" id="share-filename" placeholder="输入文件名..." aria-label="分享文件名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <!-- 分享源卷提示：外部/加密卷分享是否带对卷，用户一眼可确认（空 = 自动定位）。 -->
+        <div id="share-source-hint" style="margin-top:4px;font-size:12px;color:var(--text-muted);">源卷: 自动定位</div>
       </div>
       <div style="display:flex;gap:8px;margin-bottom:12px;">
         <div style="flex:1;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">有效期</label>
-          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label for="share-ttl" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">有效期</label>
+          <input type="text" id="share-ttl" value="24h" placeholder="如 1h, 24h, 7d" aria-label="分享有效期" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="flex:1;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">最大下载次数</label>
-          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label for="share-max-downloads" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">最大下载次数</label>
+          <input type="number" id="share-max-downloads" value="0" min="0" placeholder="0=不限" aria-label="最大下载次数" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
       </div>
       <div style="margin-bottom:12px;">
@@ -175,6 +178,15 @@
 </div>
 
 <!-- 版本管理弹窗 -->
+<div id="meta-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:640px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">文件元数据</h3>
+      <button type="button" id="meta-modal-close" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </div>
+    <div id="meta-modal-body"><div class="empty-msg">加载中...</div></div>
+  </div>
+</div>
 <div id="version-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
@@ -209,16 +221,16 @@
       <!-- FF1：AK/动态码输入框外包一层 form，Enter 触发提交（键盘可访问性） -->
       <form id="login-form" onsubmit="return false;">
         <div style="margin-bottom:12px;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）或 AccessKey（二选一）</label>
-          <input type="text" id="login-owner" placeholder="输入用户名（owner）登录..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label for="login-owner" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）或 AccessKey（二选一）</label>
+          <input type="text" id="login-owner" placeholder="输入用户名（owner）登录..." aria-label="登录用户名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="margin-bottom:12px;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey（或留空用用户名）</label>
-          <input type="text" id="login-ak" placeholder="输入 AccessKey..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label for="login-ak" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">AccessKey（或留空用用户名）</label>
+          <input type="text" id="login-ak" placeholder="输入 AccessKey..." aria-label="登录 AccessKey" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <div style="margin-bottom:12px;">
-          <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
-          <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+          <label for="login-code" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">6 位动态码</label>
+          <input type="text" id="login-code" placeholder="输入身份验证器动态码..." autocomplete="one-time-code" inputmode="numeric" maxlength="6" aria-label="身份验证器动态码" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
         </div>
         <button type="button" id="do-login-btn" class="btn btn-primary" style="width:100%;">登录</button>
       </form>
@@ -226,11 +238,30 @@
     </div>
     <div id="register-panel" style="display:none;">
       <div style="margin-bottom:12px;">
-        <label style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）</label>
-        <input type="text" id="register-owner" placeholder="注册用户名（首个注册将成为 admin）..." style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
+        <label for="register-owner" style="display:block;margin-bottom:4px;font-size:13px;color:var(--text-secondary);">用户名（owner）</label>
+        <input type="text" id="register-owner" placeholder="注册用户名（首个注册将成为 admin）..." aria-label="注册用户名" style="width:100%;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;box-sizing:border-box;">
       </div>
       <button type="button" id="do-register-btn" class="btn btn-primary" style="width:100%;">注册</button>
       <div id="register-result" style="margin-top:12px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 视频播放器弹窗（标准 <video> Range 播放） -->
+<div id="video-player-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;padding:24px;box-sizing:border-box;">
+  <div id="video-player-body" style="width:100%;max-width:960px;"></div>
+</div>
+
+<!-- 任务审计弹窗（传输页云任务「审计」行 → auditRowsHtml 渲染） -->
+<div id="audit-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:760px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <h3 style="margin:0;font-size:16px;">任务审计</h3>
+      <button type="button" id="audit-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </div>
+    <div id="audit-body" style="max-height:56vh;overflow-y:auto;"></div>
+    <div style="margin-top:16px;text-align:right;">
+      <button type="button" id="audit-close-modal-btn" class="btn btn-primary">关闭</button>
     </div>
   </div>
 </div>
@@ -264,15 +295,21 @@
 <script src="app-render.js"></script>
 <script src="events.js"></script>
 <script src="user-volumes.js"></script>
+<script src="quota-format.js"></script>
 <script src="volume-health.js"></script>
 <script src="notify-format.js"></script>
 <script src="audit-export.js"></script>
 <script src="image-preview.js"></script>
 <script src="volume-ops.js"></script>
 <script src="credentials-format.js"></script>
+<script src="secrets-format.js"></script>
+<script src="vol-manage-format.js"></script>
+<script src="audit-rows-format.js"></script>
+<script src="audit-filter.js"></script>
 <script src="sync-conflicts-format.js"></script>
 <script src="mesh-status-format.js"></script>
 <script src="trash-format.js"></script>
+<script src="video-player.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

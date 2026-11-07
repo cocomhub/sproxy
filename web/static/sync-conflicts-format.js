@@ -10,11 +10,11 @@
 
 // syncConflictsHtml(data) → 冲突列表表格（path/hunk 数/双方摘要 + resolve 按钮）。
 function syncConflictsHtml(data) {
-  var list = (data && data.conflicts) || [];
+  const list = data?.conflicts || [];
   if (list.length === 0) {
     return '<div class="empty-msg">暂无未解决冲突</div>';
   }
-  var rows = list.map(function (c) {
+  const rows = list.map(function (c) {
     return '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + escHtml(c.path) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">' + (c.hunk_count || 0) +
       '</td><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;color:var(--text-secondary);">' +
@@ -38,8 +38,8 @@ function conflictResolveQuery(id, choice) {
 
 function escHtml(s) {
   return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -12,6 +12,7 @@ package server
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,18 +51,42 @@ func TestByteFileCoordinator_KeyIsolated(t *testing.T) {
 	}
 }
 
+// fakeCoordClock 是可推进的测试时钟（构造期注入，运行期不可变）。
+type fakeCoordClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeCoordClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeCoordClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// TestByteFileCoordinator_WindowRefill 锁窗口语义：窗口内拒绝超额、过期后重新放行。
+//
+// 用**注入时钟**推进时间，不依赖「两次调用间隔 < window」：此前 window=2s 且靠墙钟，
+// 满载 CI runner（Windows + -race + 文件 IO）上两次调用可能超过 2s ⇒ 偶发
+// "within window should be rejected"（PR #928 系列 flake）。
 func TestByteFileCoordinator_WindowRefill(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	// window 用 2s：Windows 上文件 IO 慢 + -race 下余量（与 fileCoordinator 测试同约定）。
-	c := newByteFileCoordinator(100, 2*time.Second, dir, testutil.DiscardLogger())
+	clock := &fakeCoordClock{t: time.Now()}
+	c := newByteFileCoordinator(100, time.Minute, dir, testutil.DiscardLogger(), withByteCoordClock(clock.Now))
 	if !c.Consume("k", 100) {
 		t.Fatal("first window 100B should pass")
 	}
 	if c.Consume("k", 1) {
 		t.Fatal("within window should be rejected")
 	}
-	if !testutil.WaitForBool(30*time.Second, func() bool { return c.Consume("k", 1) }) {
+	clock.Advance(time.Minute + time.Second)
+	if !c.Consume("k", 1) {
 		t.Fatal("after window refill should be allowed")
 	}
 }

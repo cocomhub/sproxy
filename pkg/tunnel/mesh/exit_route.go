@@ -27,9 +27,10 @@ import (
 // DefaultLocalDialTimeout 是本地直连探测默认超时（被墙 TCP 黑洞可感知的合理上界）。
 const DefaultLocalDialTimeout = 3 * time.Second
 
-// localDialFunc 是本地直连拨号函数（包级可注入，测试替换为慢桩模拟黑洞；
-// 对齐 webrtc.SetSTUN 的包级全局模式）。
-var localDialFunc = func(ctx context.Context, addr string) (net.Conn, error) {
+// defaultLocalDial 是默认本地直连实现（net.Dialer 直连）。**私有、运行期不可变**——
+// 非 seam（用户裁定 2026-10-07：禁止测试依赖/修改包级全局；测试经 NewLocalOrExitDial
+// localDial 参数注入 slowLocalDial，不触碰本变量）。
+func defaultLocalDial(ctx context.Context, addr string) (net.Conn, error) {
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp", addr)
 }
@@ -107,15 +108,19 @@ func closeLoserConn(ch chan result) {
 
 // NewLocalOrExitDial 构造「本地直连优先 → 回退出口」拨号函数。
 // localTimeout 是本地直连探测超时（0 = 不试本地，直接 exit）；exit 为 nil 时退化为纯本地直连
-// （等价 Config.Dial=nil，本机出口语义）。
+// （等价 Config.Dial=nil，本机出口语义）。localDial 是本地拨号实现（nil = 默认 net.Dialer
+// 直连）——**构造参数注入**（用户裁定 2026-10-07：禁止测试依赖全局函数/并发修改包级
+// seam；调用方在创建时传入，运行期不可变；测试传 slowLocalDial 模拟本地黑洞）。
 // 本地被墙（黑洞挂起直到超时）时**并行竞速**：exit 无需等待 localTimeout 满，先成功者胜
 // （收益：每新连接省下最多 localTimeout 的等待）。本地快时 local 立即胜出（零额外开销）。
-func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
-	// 构造时捕获一次包级 localDialFunc（不可变快照）：raceDial 会在子 goroutine 中调用
-	// local 闭包，若闭包内再读包级变量，会与测试 t.Cleanup 恢复（Write）形成 data race
-	// （CI Test Sub-Modules 实证：TestLocalOrExitDial_Race_ExitWinsWhileLocalBlackholed）。
-	// 捕获后闭包只引用本快照，不再读包级状态。
-	local := localDialFunc
+func NewLocalOrExitDial(localTimeout time.Duration, exit func(ctx context.Context, addr string) (net.Conn, error), localDial ...func(ctx context.Context, addr string) (net.Conn, error)) func(ctx context.Context, addr string) (net.Conn, error) {
+	// 构造时捕获一次 local 实现（不可变快照）：raceDial 会在子 goroutine 中调用
+	// local 闭包，若闭包内再读包级变量，会与测试替换形成 data race。捕获后闭包只引用
+	// 本快照，不再读包级状态。**不再有包级 localDialFunc seam**。
+	local := defaultLocalDial
+	if len(localDial) > 0 && localDial[0] != nil {
+		local = localDial[0]
+	}
 	if exit == nil {
 		return func(ctx context.Context, addr string) (net.Conn, error) {
 			return local(ctx, addr)
@@ -185,37 +190,45 @@ func PickExitGroup(mode ExitGroupMode, weights []int, counter *uint64, nodes []s
 		n := atomic.AddUint64(counter, 1) - 1
 		return int(n % uint64(len(nodes))), nil
 	case ExitGroupWeighted:
-		// 权重语义：weights[i] 是 nodes[i] 的权重扇区大小；
-		// 长度不匹配/全零（≤0）→ 等权回落（等同 round-robin 轮转，Warn 由调用方负责）。
-		total := 0
-		if len(weights) == len(nodes) {
-			for _, w := range weights {
-				if w > 0 {
-					total += w
-				}
-			}
+		if idx, ok := exitGroupWeightedStart(counter, weights, nodes); ok {
+			return idx, nil
 		}
-		if total == 0 {
-			n := atomic.AddUint64(counter, 1) - 1
-			return int(n % uint64(len(nodes))), nil
-		}
-		// 权重扇区轮转：counter 自增定位到 total 权重内位置，按扇区归属映射到节点下标。
-		pos := int(atomic.AddUint64(counter, 1)-1) % total
-		acc := 0
-		for i := range nodes {
-			if weights[i] <= 0 {
-				continue
-			}
-			acc += weights[i]
-			if pos < acc {
-				return i, nil
-			}
-		}
-		// 防御：理论上不可达（pos < total 且扇区覆盖 total）；回落首节点。
-		return 0, nil
+		// 等权回落：总权重非正（缺失/长度不匹配/全零）→ 等同 round-robin 轮转。
+		n := atomic.AddUint64(counter, 1) - 1
+		return int(n % uint64(len(nodes))), nil
 	default:
 		return 0, fmt.Errorf("exit-group: 未知模式 %q", mode)
 	}
+}
+
+// exitGroupWeightedStart 计算 weighted 模式的起始节点下标。weights[i] 是 nodes[i]
+// 的权重扇区大小；缺失/长度不匹配/全零（非正）→ ok=false（调用方等权回落，等同
+// round-robin）。counter 自增定位 total 权重内位置，按扇区归属映射到节点下标。
+// 返回 (n, true) 命中扇区；防御性不可达分支（pos<total 且扇区覆盖 total）回落首节点。
+func exitGroupWeightedStart(counter *uint64, weights []int, nodes []string) (int, bool) {
+	total := 0
+	if len(weights) == len(nodes) {
+		for _, w := range weights {
+			if w > 0 {
+				total += w
+			}
+		}
+	}
+	if total == 0 {
+		return 0, false
+	}
+	pos := int(atomic.AddUint64(counter, 1)-1) % total
+	acc := 0
+	for i := range nodes {
+		if weights[i] <= 0 {
+			continue
+		}
+		acc += weights[i]
+		if pos < acc {
+			return i, true
+		}
+	}
+	return 0, true
 }
 
 // NewExitGroupDial 构造出口节点组拨号（roadmap P1 出口策略管理）：
@@ -284,22 +297,7 @@ func NewAutoExitDial(
 			return nil, fmt.Errorf("auto-exit: 拉取节点列表失败: %w", err)
 		}
 		// 候选 = outbound-dial 能力优先，无则全部在线节点；再减排除名单。
-		var candidates []client.HubNodeInfo
-		for _, n := range nodes {
-			if slices.Contains(exclude, n.ID) {
-				continue
-			}
-			if slices.Contains(n.Capabilities, hub.CapabilityOutboundDial) {
-				candidates = append(candidates, n)
-			}
-		}
-		if len(candidates) == 0 {
-			for _, n := range nodes {
-				if !slices.Contains(exclude, n.ID) {
-					candidates = append(candidates, n)
-				}
-			}
-		}
+		candidates := selectAutoExitCandidates(nodes, exclude)
 		var lastErr error
 		for _, n := range candidates {
 			if exitDialFor == nil {
@@ -317,4 +315,26 @@ func NewAutoExitDial(
 		return nil, fmt.Errorf("auto-exit: 无可用出口节点")
 	}
 	return NewLocalOrExitDial(localTimeout, exit)
+}
+
+// selectAutoExitCandidates 从节点列表过滤出出口候选：outbound-dial 能力优先，无则
+// 全部在线节点；两者都统一减排除名单。
+func selectAutoExitCandidates(nodes []client.HubNodeInfo, exclude []string) []client.HubNodeInfo {
+	var candidates []client.HubNodeInfo
+	for _, n := range nodes {
+		if slices.Contains(exclude, n.ID) {
+			continue
+		}
+		if slices.Contains(n.Capabilities, hub.CapabilityOutboundDial) {
+			candidates = append(candidates, n)
+		}
+	}
+	if len(candidates) == 0 {
+		for _, n := range nodes {
+			if !slices.Contains(exclude, n.ID) {
+				candidates = append(candidates, n)
+			}
+		}
+	}
+	return candidates
 }

@@ -99,7 +99,7 @@ func makefileVar(t *testing.T, root, name string) string {
 }
 
 // TestBenchTargetsHavePackageTimeout 见文件头注释。
-func TestBenchTargetsHavePackageTimeout(t *testing.T) {
+func TestBenchTargetsHavePackageTimeout(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	t.Parallel()
 	root := moduleRoot(t)
 

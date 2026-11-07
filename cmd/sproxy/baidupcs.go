@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	baidupcs "github.com/cocomhub/sproxy/pkg/baidupcs"
+	baidupcs "github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 )
 
 const (

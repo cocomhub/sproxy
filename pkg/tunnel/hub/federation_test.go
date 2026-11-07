@@ -547,42 +547,42 @@ func TestFederationClient_PersistConcurrentScheduleClose(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				fc.SetCandidatesForTest(map[string][]hub.FederationNode{
-					"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
-				})
-				fc.SaveCandidates() // 高频写（与 scheduleSave 的 timer 并发）
-				// 1ms 退避是「竞态研磨」的节奏前提（与去抖 timer 并发写），登记语义前提。
-				time.Sleep(time.Millisecond)
-			}
+			federationRaceSetSave(fc, ctx)
 		}(i)
 	}
 	// 同时高频 scheduleSave（触发去抖 timer）。
 	wg.Go(func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			fc.SetCandidatesForTest(map[string][]hub.FederationNode{
-				"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
-			})
-			// 有意保留：同上（竞态研磨节奏前提；与 558 行处同类）。
-			fc.SaveCandidates()
-			time.Sleep(time.Millisecond)
-		}
+		federationRaceSetSave(fc, ctx)
 	})
 	wg.Wait()
 
 	fc.Close() // 并发关闭（flushSave 与在途 timer 竞态）
 
 	// 文件应存在且内容为最新状态（无 panic、无损坏）。
+	federationAssertFileCandidates(t, persistFile)
+}
+
+// federationRaceSetSave 高频写候选 + 保存：与 scheduleSave 的去抖 timer 并发竞态研磨
+// （1ms 退避是「竞态研磨」的节奏前提；与反复 SaveCandidates 同源，登记语义前提）。
+func federationRaceSetSave(fc *hub.FederationClient, ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		fc.SetCandidatesForTest(map[string][]hub.FederationNode{
+			"p1": {{ID: "n1", Addr: "1.2.3.4:1"}},
+		})
+		fc.SaveCandidates() // 高频写（与 scheduleSave 的 timer 并发）
+		// 1ms 退避是「竞态研磨」的节奏前提（与去抖 timer 并发写），登记语义前提。
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// federationAssertFileCandidates 校验持久化文件存在、非空且可 JSON 解析（无损坏）。
+func federationAssertFileCandidates(t *testing.T, persistFile string) {
+	t.Helper()
 	raw, err := os.ReadFile(persistFile)
 	if err != nil {
 		t.Fatalf("并发关闭后候选文件应存在: %v", err)

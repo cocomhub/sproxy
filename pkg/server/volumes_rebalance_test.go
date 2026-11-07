@@ -100,21 +100,7 @@ func TestVolumesRebalance_Basic(t *testing.T) {
 		"b.txt": "BBBBBBBBB",
 		"c.txt": "CCCCCCCCCC",
 	}
-	var total int64
-	for name, content := range files {
-		body := []byte(content)
-		total += int64(len(body))
-		status, _, respBody := volumeUpload(t, url, name, body, "")
-		if status != http.StatusOK {
-			t.Fatalf("上传 %s 应 200, got %d %s", name, status, respBody)
-		}
-		if !diskFileExists(t, dirs[0], "alice", name) {
-			t.Fatalf("%s 应初始落 main", name)
-		}
-	}
-	if got := h.volSet.Pool("main").Usage(); got != total {
-		t.Fatalf("初始 main 池=%d want %d", got, total)
-	}
+	total := rebalanceUploadFiles(t, url, dirs, h, files)
 
 	status, bodyResp := rebalanceVolume(t, url, "main", "disk2", "")
 	if status != http.StatusOK {
@@ -134,6 +120,33 @@ func TestVolumesRebalance_Basic(t *testing.T) {
 		t.Fatalf("rebalance remaining=%d want 0（尽力迁移到 from 空）", out.Remaining)
 	}
 
+	verifyRebalancedMovedAndLedger(t, h, dirs, files, total)
+}
+
+// rebalanceUploadFiles 上传 files 到 main（逐一断言落盘）并返回总字节、校验 main 池记账。
+func rebalanceUploadFiles(t *testing.T, url string, dirs []string, h *Handlers, files map[string]string) int64 {
+	t.Helper()
+	var total int64
+	for name, content := range files {
+		body := []byte(content)
+		total += int64(len(body))
+		status, _, respBody := volumeUpload(t, url, name, body, "")
+		if status != http.StatusOK {
+			t.Fatalf("上传 %s 应 200, got %d %s", name, status, respBody)
+		}
+		if !diskFileExists(t, dirs[0], "alice", name) {
+			t.Fatalf("%s 应初始落 main", name)
+		}
+	}
+	if got := h.volSet.Pool("main").Usage(); got != total {
+		t.Fatalf("初始 main 池=%d want %d", got, total)
+	}
+	return total
+}
+
+// verifyRebalancedMovedAndLedger 验证迁移后文件位置与双账本（main 池 / disk2 池 / owner user 桶）。
+func verifyRebalancedMovedAndLedger(t *testing.T, h *Handlers, dirs []string, files map[string]string, total int64) {
+	t.Helper()
 	for name := range files {
 		if diskFileExists(t, dirs[0], "alice", name) {
 			t.Fatalf("rebalance 后 %s 不应残留 main", name)
@@ -308,30 +321,51 @@ func TestVolumesRebalance_ConcurrentLocked(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			var code int
-			var err error
-			if i < 2 {
-				code, _, err = rebalanceVolumeCore(url, "main", "disk2", "")
-			} else {
-				code, _, err = moveVolumeCore(url, "main", "disk2", "c.txt")
-			}
+			code := rebalanceOrMoveOnce(url, i)
 			mu.Lock()
 			defer mu.Unlock()
-			if err != nil {
-				transportErrs++
-				results[i] = -1
-				return
-			}
 			results[i] = code
+			if code == -1 {
+				transportErrs++
+			}
 		}(i)
 	}
 	wg.Wait()
 	if transportErrs != 0 {
 		t.Fatalf("%d 个并发请求传输失败", transportErrs)
 	}
-	ok, conflict, other := 0, 0, 0
-	for i := range n {
-		switch results[i] {
+	ok, conflict, other := tallyRebalanceResults(t, results)
+	// 恰 1 次成功迁移（其余 409/404 = 竞态跳过）；不得出现双份/账本错乱。
+	if ok == 0 {
+		t.Fatalf("并发 rebalance/move 应至少 1 成功, got ok=%d conflict=%d other=%d", ok, conflict, other)
+	}
+	if other != 0 {
+		t.Fatalf("并发请求不应有其它状态（500 等）, other=%d", other)
+	}
+	// 最终一致性：文件恰在 disk2 一份，main 无；双账本一致（main 0 / disk2 size）。
+	verifyConcurrentRebalanceFileState(t, h, dirs, body)
+}
+
+// rebalanceOrMoveOnce 触发一次并发 rebalance（i<2）或 move（i>=2），传输错误返回 -1。
+func rebalanceOrMoveOnce(url string, i int) int {
+	var code int
+	var err error
+	if i < 2 {
+		code, _, err = rebalanceVolumeCore(url, "main", "disk2", "")
+	} else {
+		code, _, err = moveVolumeCore(url, "main", "disk2", "c.txt")
+	}
+	if err != nil {
+		return -1
+	}
+	return code
+}
+
+// tallyRebalanceResults 统计并发结果状态（404 按冲突处理，其余计入 other）。
+func tallyRebalanceResults(t *testing.T, results []int) (ok, conflict, other int) {
+	t.Helper()
+	for i, code := range results {
+		switch code {
 		case http.StatusOK:
 			ok++
 		case http.StatusConflict:
@@ -341,17 +375,15 @@ func TestVolumesRebalance_ConcurrentLocked(t *testing.T) {
 			conflict++
 		default:
 			other++
-			t.Logf("并发请求 #%d status=%d", i, results[i])
+			t.Logf("并发请求 #%d status=%d", i, code)
 		}
 	}
-	// 恰 1 次成功迁移（其余 409/404 = 竞态跳过）；不得出现双份/账本错乱。
-	if ok == 0 {
-		t.Fatalf("并发 rebalance/move 应至少 1 成功, got ok=%d conflict=%d other=%d", ok, conflict, other)
-	}
-	if other != 0 {
-		t.Fatalf("并发请求不应有其它状态（500 等）, other=%d", other)
-	}
-	// 最终一致性：文件恰在 disk2 一份，main 无；双账本一致（main 0 / disk2 size）。
+	return
+}
+
+// verifyConcurrentRebalanceFileState 验证并发后最终一致性：单份、账本一致、内容完好。
+func verifyConcurrentRebalanceFileState(t *testing.T, h *Handlers, dirs []string, body []byte) {
+	t.Helper()
 	if diskFileExists(t, dirs[0], "alice", "c.txt") {
 		t.Fatal("并发后 main 不应残留 c.txt")
 	}

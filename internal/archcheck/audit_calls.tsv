@@ -1,0 +1,40 @@
+# R35-a 审计调用点棘轮（只减不增）。2026-10-31 修正：门禁此前用 WalkDir("..") 以包目录为 cwd，只扫到 internal/，pkg/** 从未被检查（基线因此陈旧）。修复扫描根为 moduleRoot 后按实际值重定基线。
+cmd/sproxy/root.go	1	
+pkg/files/chunked_upload.go	1	
+pkg/files/copy_ops.go	3	
+pkg/files/meta_update.go	1	
+pkg/files/tags.go	1	
+pkg/files/trash.go	6	
+pkg/files/write_ops.go	32	
+pkg/server/ai_embed_wiring.go	1	
+pkg/server/ai_insight_handler.go	6	
+pkg/server/ai_privacy.go	1	
+pkg/server/archive.go	1	
+pkg/server/backends_api.go	4	
+pkg/server/backup_api.go	1	
+pkg/server/checksum_api.go	1	
+pkg/server/cloudtasks/download.go	4	# 云任务 CRUD 的取消/删除审计（经注入的 cloudtasks.Audit → h.RecordAudit）
+pkg/server/cloudtasks/group.go	3	# 组创建/删除审计（S2b；经注入的 cloudtasks.Audit → h.RecordAudit）
+pkg/server/cloudtasks/transfer.go	1	# 归档转存审计 cloud_archive（P1-c S3c 自 cloud_download_handler.go 迁入；经注入的 cloudtasks.Audit）
+pkg/server/cloudtasks_wiring.go	1	
+pkg/server/config_api.go	2	
+pkg/server/credentials_handler.go	17	
+pkg/server/download_handler.go	1	
+pkg/server/files_service.go	1	
+pkg/server/notify_handlers.go	1	
+pkg/server/register_handler.go	30	
+pkg/server/remotefs/remote_read.go	2	# 跨节点只读面审计（T1 迁入 remotefs；经注入的 Audit → h.RecordAudit）
+pkg/server/remotefs/remote_write.go	2	# 跨节点写面审计（T1 迁入 remotefs；经注入的 Audit → h.RecordAudit）
+pkg/server/remotefs_wiring.go	1	# 跨节点面 Deps 适配（Audit.Record → h.RecordAudit，唯一映射点）
+pkg/server/routes_setup.go	1	
+pkg/server/secrets_api.go	5	
+pkg/server/share.go	2	
+pkg/server/sync_handler.go	2	
+pkg/server/tier_manager.go	1	
+pkg/server/user_volume_api.go	3	
+pkg/server/verify_handler.go	1	
+pkg/server/verify_wiring.go	1	
+pkg/server/version.go	15	
+pkg/server/volume_export.go	2	
+pkg/server/volumes_api.go	14	
+pkg/server/volumes_mirror.go	8	

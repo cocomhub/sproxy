@@ -270,92 +270,104 @@ func TestServeE2ERelay_DialPolicyAllowAndDeny(t *testing.T) {
 
 	t.Run("allow", func(t *testing.T) {
 		t.Parallel()
-		// L --net.Pipe-- X(真实 ServeE2ERelay) --TCP出口-- T(echo accept → ServeE2EListener)。
-		lX, xL := net.Pipe()
-		rec := &recordingPipe{Conn: xL} // X 视角：记录 X 读到的全部字节
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-		defer cancel()
-
-		echoLn, serveErr := startEchoListener(t, ctx, idT, idL.Fingerprint())
-		defer echoLn.Close()
-
-		xErr := startXRelay(ctx, rec, func(addr string) (string, bool) {
-			return echoLn.Addr().String(), true
-		})
-
-		conn, derr := DialE2E(ctx, lX, EndToEndOptions{
-			Enabled:          true,
-			Identity:         idL,
-			PeerFingerprints: []string{idT.Fingerprint()},
-			DialAddr:         echoLn.Addr().String(), // 多跳：写 dial 指令，X 出口拨号到 echo
-		})
-		if derr != nil {
-			t.Fatalf("DialE2E 失败: %v", derr)
-		}
-		defer conn.Close()
-		plain := "RELAY-SECRET"
-		resp, rerr := conn.Do(ctx, "POST", "/echo", plain)
-		if rerr != nil {
-			t.Fatalf("经 X 中继的端到端请求失败: %v", rerr)
-		}
-		if resp != plain {
-			t.Fatalf("回读不一致: got %q, want %q", resp, plain)
-		}
-		if got := rec.snapshot(); strings.Contains(got, plain) {
-			t.Fatalf("X 中继通道出现明文（应只见密文），snapshot=%q", got)
-		}
-		cancel()
-		_ = conn.Close()
-		_ = lX.Close()
-		_ = xL.Close()
-		_ = echoLn.Close()
-		select {
-		case <-serveErr:
-		case <-time.After(2 * time.Second):
-			t.Fatal("ServeE2EListener 未退出")
-		}
-		select {
-		case <-xErr:
-		case <-time.After(2 * time.Second):
-			t.Fatal("ServeE2ERelay 未退出")
-		}
+		runE2ERelayDialPolicyAllow(t, idL, idT)
 	})
 
 	t.Run("deny", func(t *testing.T) {
 		t.Parallel()
-		lX, xL := net.Pipe()
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		defer cancel()
-
-		xErr := startXRelay(ctx, xL, func(addr string) (string, bool) {
-			return "", false // dialPolicy 拒绝：任何目标都返回 false
-		})
-
-		conn, derr := DialE2E(ctx, lX, EndToEndOptions{
-			Enabled:          true,
-			Identity:         idL,
-			PeerFingerprints: []string{idT.Fingerprint()},
-			DialAddr:         "deny-target.invalid:1", // 多跳：写 dial 指令（X 将拒绝）
-		})
-		if derr != nil {
-			t.Fatalf("DialE2E 不应失败（dial 帧写在外层首部）: %v", derr)
-		}
-		defer conn.Close()
-		cancel()
-		_ = lX.Close()
-		_ = xL.Close()
-		select {
-		case rxErr := <-xErr:
-			if rxErr == nil {
-				t.Fatal("dialPolicy 拒绝应返回错误")
-			}
-			if !strings.Contains(rxErr.Error(), "拨号策略") {
-				t.Fatalf("应报拨号策略拒绝，got: %v", rxErr)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("ServeE2ERelay 未退出")
-		}
+		runE2ERelayDialPolicyDeny(t, idL, idT)
 	})
+}
+
+// runE2ERelayDialPolicyAllow 验证 dialPolicy 放行时密文透传成功且 X 只见密文。
+func runE2ERelayDialPolicyAllow(t *testing.T, idL, idT *tunnel.Identity) {
+	t.Helper()
+	// L --net.Pipe-- X(真实 ServeE2ERelay) --TCP出口-- T(echo accept → ServeE2EListener)。
+	lX, xL := net.Pipe()
+	rec := &recordingPipe{Conn: xL} // X 视角：记录 X 读到的全部字节
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	echoLn, serveErr := startEchoListener(t, ctx, idT, idL.Fingerprint())
+	defer echoLn.Close()
+
+	xErr := startXRelay(ctx, rec, func(addr string) (string, bool) {
+		return echoLn.Addr().String(), true
+	})
+
+	conn, derr := DialE2E(ctx, lX, EndToEndOptions{
+		Enabled:          true,
+		Identity:         idL,
+		PeerFingerprints: []string{idT.Fingerprint()},
+		DialAddr:         echoLn.Addr().String(), // 多跳：写 dial 指令，X 出口拨号到 echo
+	})
+	if derr != nil {
+		t.Fatalf("DialE2E 失败: %v", derr)
+	}
+	defer conn.Close()
+	plain := "RELAY-SECRET"
+	resp, rerr := conn.Do(ctx, "POST", "/echo", plain)
+	if rerr != nil {
+		t.Fatalf("经 X 中继的端到端请求失败: %v", rerr)
+	}
+	if resp != plain {
+		t.Fatalf("回读不一致: got %q, want %q", resp, plain)
+	}
+	if got := rec.snapshot(); strings.Contains(got, plain) {
+		t.Fatalf("X 中继通道出现明文（应只见密文），snapshot=%q", got)
+	}
+	cancel()
+	_ = conn.Close()
+	_ = lX.Close()
+	_ = xL.Close()
+	_ = echoLn.Close()
+	select {
+	case <-serveErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeE2EListener 未退出")
+	}
+	select {
+	case <-xErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeE2ERelay 未退出")
+	}
+}
+
+// runE2ERelayDialPolicyDeny 验证 dialPolicy 拒绝时 ServeE2ERelay 返回错误（不拨号）。
+func runE2ERelayDialPolicyDeny(t *testing.T, idL, idT *tunnel.Identity) {
+	t.Helper()
+	lX, xL := net.Pipe()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	xErr := startXRelay(ctx, xL, func(addr string) (string, bool) {
+		return "", false // dialPolicy 拒绝：任何目标都返回 false
+	})
+
+	conn, derr := DialE2E(ctx, lX, EndToEndOptions{
+		Enabled:          true,
+		Identity:         idL,
+		PeerFingerprints: []string{idT.Fingerprint()},
+		DialAddr:         "deny-target.invalid:1", // 多跳：写 dial 指令（X 将拒绝）
+	})
+	if derr != nil {
+		t.Fatalf("DialE2E 不应失败（dial 帧写在外层首部）: %v", derr)
+	}
+	defer conn.Close()
+	cancel()
+	_ = lX.Close()
+	_ = xL.Close()
+	select {
+	case rxErr := <-xErr:
+		if rxErr == nil {
+			t.Fatal("dialPolicy 拒绝应返回错误")
+		}
+		if !strings.Contains(rxErr.Error(), "拨号策略") {
+			t.Fatalf("应报拨号策略拒绝，got: %v", rxErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeE2ERelay 未退出")
+	}
 }
 
 // TestServeE2ERelay_NilDialPolicyFailsClosed 验证 dialPolicy nil fail-closed：

@@ -118,6 +118,23 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// relChildPath 返回 path 相对 subdir 的直接子项相对名；非直接子项（越界 / 嵌套）返回空串。
+func relChildPath(p, subdir string) string {
+	var rel string
+	if subdir != "" {
+		if !strings.HasPrefix(p, subdir+"/") {
+			return ""
+		}
+		rel = strings.TrimPrefix(p, subdir+"/")
+	} else {
+		rel = p
+	}
+	if strings.Contains(rel, "/") {
+		return "" // 非直接子项
+	}
+	return rel
+}
+
 func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	subdir := strings.TrimPrefix(r.URL.Query().Get("subdir"), "/")
 	if m.failList {
@@ -133,43 +150,23 @@ func (m *httpMockFS) handleList(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	var files []map[string]any
 	for p, f := range m.files {
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(p, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(p, subdir+"/")
-		} else {
-			rel = p
+		if rel := relChildPath(p, subdir); rel != "" {
+			files = append(files, map[string]any{
+				"name":     rel,
+				"size":     len(f.data),
+				"checksum": f.checksum,
+				"mod_time": f.mtime,
+				"is_dir":   false,
+			})
 		}
-		if strings.Contains(rel, "/") {
-			continue // 非直接子项
-		}
-		files = append(files, map[string]any{
-			"name":     rel,
-			"size":     len(f.data),
-			"checksum": f.checksum,
-			"mod_time": f.mtime,
-			"is_dir":   false,
-		})
 	}
 	for d := range m.dirs {
 		if d == subdir {
 			continue
 		}
-		var rel string
-		if subdir != "" {
-			if !strings.HasPrefix(d, subdir+"/") {
-				continue
-			}
-			rel = strings.TrimPrefix(d, subdir+"/")
-		} else {
-			rel = d
+		if rel := relChildPath(d, subdir); rel != "" {
+			files = append(files, map[string]any{"name": rel, "is_dir": true})
 		}
-		if strings.Contains(rel, "/") {
-			continue
-		}
-		files = append(files, map[string]any{"name": rel, "is_dir": true})
 	}
 	m.mu.Unlock()
 	sort.Slice(files, func(i, j int) bool {
@@ -553,7 +550,7 @@ func TestHTTPTransport_WriteFile_Empty(t *testing.T) {
 	tr := newHTTPTransport(t, srv)
 
 	// size==0：走轻量 multipart Upload（不走分块会话）
-	if err := tr.WriteFile(context.Background(), "empty.txt", bytes.NewReader(nil), 0, 0); err != nil {
+	if err := tr.WriteFile(context.Background(), syncpkg.LogicalKey{}, "empty.txt", bytes.NewReader(nil), 0, 0); err != nil {
 		t.Fatalf("WriteFile(empty) error: %v", err)
 	}
 	files := m.snapshotFiles()
@@ -575,7 +572,7 @@ func TestHTTPTransport_WriteFile_NonEmpty_PreservesMTime(t *testing.T) {
 	content := "hello chunked world"
 	// 100ns 对齐：Windows NTFS/FAT 的 mtime 精度为 100ns，任意纳秒值会被截断
 	const mtime = 1700000000123456700
-	if err := tr.WriteFile(context.Background(), "sub/chunked.txt", strings.NewReader(content), int64(len(content)), mtime); err != nil {
+	if err := tr.WriteFile(context.Background(), syncpkg.LogicalKey{}, "sub/chunked.txt", strings.NewReader(content), int64(len(content)), mtime); err != nil {
 		t.Fatalf("WriteFile(non-empty) error: %v", err)
 	}
 	files := m.snapshotFiles()
@@ -832,7 +829,7 @@ func TestHTTPTransport_WriteFile_ChunkedFailure(t *testing.T) {
 	m.failChunk = true
 	tr := newHTTPTransport(t, srv)
 	content := strings.Repeat("x", 5<<20) // 5MB → 多 chunk
-	if err := tr.WriteFile(context.Background(), "big.bin", strings.NewReader(content), int64(len(content)), 0); err == nil {
+	if err := tr.WriteFile(context.Background(), syncpkg.LogicalKey{}, "big.bin", strings.NewReader(content), int64(len(content)), 0); err == nil {
 		t.Fatalf("chunk 失败时 WriteFile 应返回 error")
 	}
 }
@@ -857,7 +854,7 @@ func TestHTTPTransport_WriteFile_Empty_PreservesMTime(t *testing.T) {
 	srv, m := newHTTPMockFS(t)
 	tr := newHTTPTransport(t, srv)
 	const mtime = 1700000000123456700
-	if err := tr.WriteFile(context.Background(), "empty.txt", bytes.NewReader(nil), 0, mtime); err != nil {
+	if err := tr.WriteFile(context.Background(), syncpkg.LogicalKey{}, "empty.txt", bytes.NewReader(nil), 0, mtime); err != nil {
 		t.Fatalf("WriteFile(empty+mtime) error: %v", err)
 	}
 	files := m.snapshotFiles()

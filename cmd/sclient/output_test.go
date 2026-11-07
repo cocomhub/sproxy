@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -542,45 +543,35 @@ func TestBoolStr(t *testing.T) {
 	}
 }
 
-func TestBuildFormatter_Default(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*TextFormatter); !ok {
-		t.Fatalf("expected TextFormatter, got %T", fm)
+// TestBuildFormatter 表驱动验证 buildFormatterWithWriter 的 --json 开关分派
+// （默认→TextFormatter；--json=true→JSONFormatter）。历史 4 个重复测试
+// （TestBuildFormatter_Default/_JSON 与 TestBuildFormatterWithWriter_Default/_JSON
+// 同构，均为同一函数/同一断言）合并而来，消除 S4144 重复。
+func TestBuildFormatter(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		json string
+		want string // 期望的格式化器类型名（TextFormatter / JSONFormatter）
+	}{
+		{name: "default", json: "", want: "*main.TextFormatter"},
+		{name: "json", json: "true", want: "*main.JSONFormatter"},
 	}
-}
-
-func TestBuildFormatter_JSON(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().Set("json", "true")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*JSONFormatter); !ok {
-		t.Fatalf("expected JSONFormatter, got %T", fm)
-	}
-}
-
-func TestBuildFormatterWithWriter_Default(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*TextFormatter); !ok {
-		t.Fatalf("expected TextFormatter, got %T", fm)
-	}
-}
-
-func TestBuildFormatterWithWriter_JSON(t *testing.T) {
-	var buf strings.Builder
-	cmd := &cobra.Command{}
-	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().Set("json", "true")
-	fm := buildFormatterWithWriter(&buf, cmd)
-	if _, ok := fm.(*JSONFormatter); !ok {
-		t.Fatalf("expected JSONFormatter, got %T", fm)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			cmd := &cobra.Command{}
+			cmd.Flags().Bool("json", false, "")
+			if tt.json != "" {
+				if err := cmd.Flags().Set("json", tt.json); err != nil {
+					t.Fatalf("Set(json): %v", err)
+				}
+			}
+			fm := buildFormatterWithWriter(&buf, cmd)
+			if fmt.Sprintf("%T", fm) != tt.want {
+				t.Fatalf("expected %s, got %T", tt.want, fm)
+			}
+		})
 	}
 }
 
@@ -748,5 +739,52 @@ func TestJSONFormatter_PrintTransferStats(t *testing.T) {
 	}
 	if decoded.Stats["file_count"] == nil {
 		t.Fatalf("stats 缺 file_count: %s", buf.String())
+	}
+}
+
+// TestLocalTimeDisplay 验证 transferred_at（UTC RFC3339 存储）展示转本地时区；
+// 非时间键原样。
+func TestLocalTimeDisplay(t *testing.T) {
+	t.Parallel()
+	// UTC 存储值
+	utc := "2026-10-28T03:00:55Z"
+	got := localTimeDisplay("transferred_at", utc)
+	if got == utc {
+		t.Fatalf("transferred_at 应转本地时区，仍原样 %q", got)
+	}
+	if !strings.Contains(got, "2026-10-28") {
+		t.Fatalf("本地时区显示应含日期: %q", got)
+	}
+	// 非时间键原样
+	if localTimeDisplay("checksum", "abc") != "abc" {
+		t.Fatal("checksum 非时间键应原样")
+	}
+	// 非法时间原样（不崩）
+	if localTimeDisplay("transferred_at", "not-a-time") != "not-a-time" {
+		t.Fatal("非法时间应原样")
+	}
+}
+
+// TestHumanExtraDisplay 验证 Text 模式 human 可视化：时间转本地时区、URL 解码为可见字符；
+// 其它键原样（原始内容由 --json / --raw 输出）。
+func TestHumanExtraDisplay(t *testing.T) {
+	t.Parallel()
+	// transferred_at（UTC RFC3339）→ 本地时区
+	got, changed := humanExtraDisplay("transferred_at", "2026-10-28T03:00:55Z")
+	if !changed || got == "2026-10-28T03:00:55Z" {
+		t.Fatalf("时间键应转本地时区: %q changed=%v", got, changed)
+	}
+	// source_url 百分号编码 → 可见字符
+	enc := "https://example.com/s/abc?spx_target=%E4%B8%AD%E6%96%87.mp4"
+	got2, changed2 := humanExtraDisplay("source_url", enc)
+	if !changed2 || strings.Contains(got2, "%E4") {
+		t.Fatalf("source_url 应解码为可见字符: %q", got2)
+	}
+	if !strings.Contains(got2, "中文.mp4") {
+		t.Fatalf("解码结果应含中文: %q", got2)
+	}
+	// 普通键原样
+	if v, c := humanExtraDisplay("checksum", "abc123"); c || v != "abc123" {
+		t.Fatalf("普通键应原样: %q %v", v, c)
 	}
 }

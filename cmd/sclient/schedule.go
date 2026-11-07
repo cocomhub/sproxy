@@ -9,6 +9,7 @@ package main
 // 零新依赖（不引 robfig/cron）——字段语义与系统 crontab 对齐。
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -59,50 +60,78 @@ func parseCronExpr(spec string) (*cronExpr, error) {
 	return expr, nil
 }
 
-// parseCronField 解析单字段（*、数值、逗号列表、a-b 区间）。
-func parseCronField(f string, min, max int) ([]int, error) {
+// parseCronField 解析单字段（*、数值、逗号列表、a-b 区间、*/N 步长）。
+func parseCronField(f string, minVal, maxVal int) ([]int, error) {
 	var out []int
 	for part := range strings.SplitSeq(f, ",") {
 		part = strings.TrimSpace(part)
-		if part == "*" {
-			for v := min; v <= max; v++ {
-				out = append(out, v)
+		vals, ok, err := parseCronPart(part, minVal, maxVal)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			v, verr := strconv.Atoi(part)
+			if verr != nil || v < minVal || v > maxVal {
+				return nil, fmt.Errorf("非法数值 %q（范围 [%d,%d]）", part, minVal, maxVal)
 			}
+			out = append(out, v)
 			continue
 		}
-		// */N 步长（如 */6 → 0,6,12,...）。
-		if after, ok := strings.CutPrefix(part, "*/"); ok {
-			step, err := strconv.Atoi(after)
-			if err != nil || step <= 0 {
-				return nil, fmt.Errorf("非法步长 %q", part)
-			}
-			for v := min; v <= max; v += step {
-				out = append(out, v)
-			}
-			continue
-		}
-		if strings.Contains(part, "-") {
-			bounds := strings.SplitN(part, "-", 2)
-			lo, err1 := strconv.Atoi(bounds[0])
-			hi, err2 := strconv.Atoi(bounds[1])
-			if err1 != nil || err2 != nil {
-				return nil, fmt.Errorf("非法区间 %q", part)
-			}
-			if lo < min || hi > max || lo > hi {
-				return nil, fmt.Errorf("区间 %q 越界 [%d,%d]", part, min, max)
-			}
-			for v := lo; v <= hi; v++ {
-				out = append(out, v)
-			}
-			continue
-		}
-		v, err := strconv.Atoi(part)
-		if err != nil || v < min || v > max {
-			return nil, fmt.Errorf("非法数值 %q（范围 [%d,%d]）", part, min, max)
-		}
-		out = append(out, v)
+		out = append(out, vals...)
 	}
 	return out, nil
+}
+
+// parseCronPart 解析单字段的一个逗号分段：`*` 全量 / `*/N` 步长 / `a-b` 区间。
+// ok=false 表示该分段不属于以上模式（落到调用方的普通数值解析）。fail-closed：
+// 步长非法（非正整数）或区间越界 → 返回含原分段的错误。
+func parseCronPart(part string, minVal, maxVal int) (vals []int, ok bool, err error) {
+	if part == "*" {
+		for v := minVal; v <= maxVal; v++ {
+			vals = append(vals, v)
+		}
+		return vals, true, nil
+	}
+	// */N 步长（如 */6 → 0,6,12,...）。
+	if after, cut := strings.CutPrefix(part, "*/"); cut {
+		return parseCronStep(part, after, minVal, maxVal)
+	}
+	// a-b 区间。
+	if strings.Contains(part, "-") {
+		return parseCronRange(part, minVal, maxVal)
+	}
+	return nil, false, nil
+}
+
+// parseCronStep 解析 `*/N` 步长分段（非法步长或步长非正 → 含原分段的错误）。
+func parseCronStep(part, after string, minVal, maxVal int) ([]int, bool, error) {
+	step, serr := strconv.Atoi(after)
+	if serr != nil || step <= 0 {
+		return nil, true, fmt.Errorf("非法步长 %q", part)
+	}
+	var vals []int
+	for v := minVal; v <= maxVal; v += step {
+		vals = append(vals, v)
+	}
+	return vals, true, nil
+}
+
+// parseCronRange 解析 `a-b` 区间分段（数值非法或越界 → 返回含原分段的错误）。
+func parseCronRange(part string, minVal, maxVal int) ([]int, bool, error) {
+	bounds := strings.SplitN(part, "-", 2)
+	lo, err1 := strconv.Atoi(bounds[0])
+	hi, err2 := strconv.Atoi(bounds[1])
+	if err1 != nil || err2 != nil {
+		return nil, true, fmt.Errorf("非法区间 %q", part)
+	}
+	if lo < minVal || hi > maxVal || lo > hi {
+		return nil, true, fmt.Errorf("区间 %q 越界 [%d,%d]", part, minVal, maxVal)
+	}
+	var vals []int
+	for v := lo; v <= hi; v++ {
+		vals = append(vals, v)
+	}
+	return vals, true, nil
 }
 
 // matches 判断 t 是否命中表达式（日/月双匹配：dom 与 dow 任一命中即真，同 crontab）。
@@ -127,6 +156,50 @@ func (e *cronExpr) nextAfter(t time.Time) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("cron 表达式在未来 1 年内无命中时刻")
+}
+
+// scheduleLoop 常驻调度主循环：到点触发一次同步（串行），完成后计算下一次命中
+// 时刻；睡到下一个整分钟边界（最长 30s）并响应取消（SIGINT/SIGTERM 优雅退出）。
+func scheduleLoop(ctx context.Context, expr *cronExpr, runner *syncWatcher, quiet bool, next time.Time, ios cli.IOStreams) error {
+	var nerr error
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+		now := time.Now()
+		next, nerr = scheduleRunDue(ctx, expr, runner, quiet, now, next, ios)
+		if nerr != nil {
+			return nerr
+		}
+		// 睡到下一个整分钟边界（最长 30s），响应取消。
+		wait := min(time.Until(next), 30*time.Second)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+// scheduleRunDue 到点（!now.Before(next)）时触发一次同步并计算下一次命中时刻；
+// 未到点时原样返回 next。到点同步失败记错后不退出。
+func scheduleRunDue(ctx context.Context, expr *cronExpr, runner *syncWatcher, quiet bool, now, next time.Time, ios cli.IOStreams) (time.Time, error) {
+	if now.Before(next) {
+		return next, nil
+	}
+	if err := runner.triggerSync(ctx); err != nil && ctx.Err() == nil {
+		ios.WriteErrLine("schedule: 同步任务失败: %v", err)
+	}
+	next, nerr := expr.nextAfter(now)
+	if nerr != nil {
+		return next, nerr
+	}
+	if !quiet {
+		ios.WriteOutLine("schedule: 下次触发 %s", next.Format(time.RFC3339))
+	}
+	return next, nil
 }
 
 // newCmdSyncSchedule 创建 `sync schedule <cron>` 子命令：cron 表达式到点触发同步。
@@ -155,7 +228,7 @@ func newCmdSyncSchedule(factory clientfactory.Factory, ios cli.IOStreams, st *st
 			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -179,34 +252,7 @@ func newCmdSyncSchedule(factory clientfactory.Factory, ios cli.IOStreams, st *st
 			if !o.quiet {
 				ios.WriteOutLine("schedule: %s 下次触发 %s（direction=%s）", args[0], next.Format(time.RFC3339), runner.direction)
 			}
-			// 主循环：到点触发一次（串行），完成后计算下一次。
-			for {
-				if ctx.Err() != nil {
-					return nil
-				}
-				now := time.Now()
-				if !now.Before(next) {
-					if err := runner.triggerSync(ctx); err != nil && ctx.Err() == nil {
-						ios.WriteErrLine("schedule: 同步任务失败: %v", err)
-					}
-					next, nerr = expr.nextAfter(now)
-					if nerr != nil {
-						return nerr
-					}
-					if !o.quiet {
-						ios.WriteOutLine("schedule: 下次触发 %s", next.Format(time.RFC3339))
-					}
-				}
-				// 睡到下一个整分钟边界（最长 30s），响应取消。
-				wait := min(time.Until(next), 30*time.Second)
-				timer := time.NewTimer(wait)
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					return nil
-				case <-timer.C:
-				}
-			}
+			return scheduleLoop(ctx, expr, runner, o.quiet, next, ios)
 		},
 	}
 	cmd.Flags().StringVar(&o.remote, "remote", "", "远程节点名（服务端 sync_remotes 配置名，必填）")

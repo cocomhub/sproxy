@@ -123,6 +123,15 @@ func (f *FileStore) List(prefix string) ([][]byte, error) {
 		return nil, fmt.Errorf("store/file: 检查前缀目录失败: %w", err)
 	}
 
+	keys, err := f.collectKeys(prefix, walkRoot)
+	if err != nil {
+		return nil, err
+	}
+	return f.readKeys(keys)
+}
+
+// collectKeys 遍历 walkRoot 收集 prefix 下的全部记录 key（跳过目录与 .tmp 崩溃残留）。
+func (f *FileStore) collectKeys(prefix, walkRoot string) ([]string, error) {
 	// 先收集匹配的 key，遍历结束后统一读取（避免在 WalkDir 回调内做文件 I/O，防 TOCTOU 穿越）。
 	var keys []string
 	err := filepath.WalkDir(walkRoot, func(path string, d fs.DirEntry, err error) error {
@@ -149,7 +158,11 @@ func (f *FileStore) List(prefix string) ([][]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store/file: 前缀遍历失败: %w", err)
 	}
+	return keys, nil
+}
 
+// readKeys 按 key 读取全部值（对每个 key 再校验一次防逃逸兜底）。
+func (f *FileStore) readKeys(keys []string) ([][]byte, error) {
 	out := make([][]byte, 0, len(keys))
 	for _, key := range keys {
 		path, keyErr := f.keyPath(key) // 再校验一次（防逃逸兜底）

@@ -59,15 +59,25 @@ jobs:
       # 2026-09-18 教训：master 曾残留 10 文件未 go fix（子代理 --no-verify + CI 无检查）
       - name: Install addlicense
         run: |
-          go install github.com/google/addlicense@latest
+          # addlicense 经 tools.go 锁定在 go.mod/go.sum（S8545 锁文件强制）；
+          # go install（无 @latest）从当前 module go.mod 解析 tools.go 引入的锁定版本，
+          # 并从 go.sum 校验模块哈希——禁裸 @latest。
+          go install github.com/google/addlicense
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: check-format (gofix/addlicense/gofmt 全部 module 无残留)
         run: make check-format
 
+      # 版本 pin 说明：v2.13.x 内置 x/tools 的 export-data 解码器上限为 version 4，而
+      # runner 经 check-latest 拉到的 Go 1.27.2 把 unified export data 抬到 version 5 →
+      # 全仓 typecheck 硬错（"cannot decode ... export data version 5 is greater than
+      # maximum supported version 4"），报点全落在 stdlib import 上、与业务代码无关。
+      # 该错仅与「lint 二进制内置解码器版本」有关，用 go1.27.2 从源码重建 v2.13.2 仍复现；
+      # v2.14.0 已支持 v5。**升级此 pin 前须以 CI 同款 Go 全量验证**：
+      # `make lint lint-all lint-web-e2e lint-e2e` 均 0 issues（新 linter 版本可能引入新 findings）。
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           args: --timeout=5m ./...
 
       # 上面的 `./...` 只覆盖根 module：其余 10 个模块（cmd/sproxy、cmd/sclient、
@@ -117,24 +127,6 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 20
-      minio:
-        image: cgr.dev/chainguard/minio:latest
-        # chainguard minio 以非 root 65532 运行且无默认数据目录：--user root 先
-        # chown /data（匿名卷初始归 root）再以 65532 启动 server（quay.io 原镜像
-        # 2026-09-24 起 pull unauthorized，换 chainguard 镜像规避 Docker Hub 限流）。
-        options: >-
-          --user root
-          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 20
-        entrypoint: sh
-        command: -c "chown 65532:65532 /data && /usr/bin/minio server /data"
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -149,32 +141,32 @@ jobs:
       - name: go vet
         run: make vet
 
-      - name: go test (race, incl Vault L2/L3)
-        run: VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root S3_ENDPOINT=127.0.0.1:9000 make test
-
-      - name: go test (coverage)
-        run: make cover-check
-
-      # 协议面 fuzz（限时）：mux 帧解析 / TCP 帧定界 / tunnel 元数据头。
-      # 限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job 多次因长任务
-      # 超时（6 分钟 job 上限），fuzz 同理必须限时，防 CI 超时；三个目标均为
-      # 纯内存/bytes 输入，无网络与墙钟依赖，适合 CI 短跑。
-      # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后
-      # 新增 corpus 脏文件）。
-      - name: fuzz (bounded, protocol parsers)
+      # 全量测试 + 覆盖**一次产出**（TEST_COVER_PROFILE 由 make test 透传 -coverprofile：
+      # -race 与 -cover 同进程完成）——不再跑第二遍全量。#862 曾用「make test + 单独
+      # cover-test」期望缓存复用，但 CI 实测 go test(race) 295s + cover-test 271s 未被命中
+      # （-coverprofile 改变命令行 ⇒ 缓存 key 不同，第二遍必重跑）。覆盖阈值由
+      # cover-check COVER_REUSE=1 只对 build/cover.out 计算（不重跑测试）。
+      # GOTEST_TIMEOUT 20m：2 核 runner 全量 ./... 实际 ~7m，5m 上限过紧导致偶发超时
+      # （Windows 4 核 ~4m25s 证明测试本身健康）；secretdata mock 派生落地后应回落到 ~3m，
+      # 届时可收紧回 5m（独立 PR 处理，避免阻塞依赖 secret 的功能）。
+      - name: go test (race + coverage, incl Vault L2/L3)
+        # TEST_EXCLUDE=internal/archcheck：archcheck 门禁已在 Lint job 非 race 跑（13s），
+        # race 全量在 Test job 里是纯耗时（Windows 实测 87s / ubuntu 70s——全仓扫描子进程
+        # 被 race 检测器放大）。从本 job 剔除，门禁不丢。
         run: |
-          go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
-          go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
-          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=30s ./pkg/tunnel/
+          VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root make test GOTEST_TIMEOUT="-timeout=20m" TEST_COVER_PROFILE=build/cover.out TEST_EXCLUDE=internal/archcheck
+          mkdir -p build/coverage
+          cp build/cover.out build/coverage/root.out
+          make cover-check COVER_REUSE=1 GOTEST_TIMEOUT="-timeout=20m"
 
       - name: Upload coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: coverage-ubuntu
-          path: build/cover.out
+          name: coverage-root
+          path: build/coverage/root.out
 
       - name: Upload coverage to CodeCov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           files: build/cover.out
           flags: unittests
@@ -203,11 +195,35 @@ jobs:
         run: make vet
 
       - name: go test (race)
-        run: make test
+        # GOTEST_TIMEOUT 20m：2 核 runner 全量超时缓解（同 Test (ubuntu) job 注记）。
+        # 同 ubuntu：archcheck 剔除（门禁在 Lint job），-87s。
+        run: make test GOTEST_TIMEOUT="-timeout=20m" TEST_EXCLUDE=internal/archcheck
 
   test-submodules:
     name: Test Sub-Modules (cmd + ext + hub + mesh)
     runs-on: ubuntu-latest
+    # MinIO：s3 集成测试在 16 号子 module（pkg/volume/ext/s3），env 探测 S3_ENDPOINT
+    # 不可达即 t.Skip——此处起 minio service 让 s3 集成测试实跑（原挂在 test job 是死配置：
+    # 根 make test 的 ./... 不跨 module，s3 测试从未实跑却每次起容器）。
+    services:
+      minio:
+        image: cgr.dev/chainguard/minio:latest
+        # chainguard minio 以非 root 65532 运行且无默认数据目录：--user root 先
+        # chown /data（匿名卷初始归 root）再以 65532 启动 server（quay.io 原镜像
+        # 2026-09-24 起 pull unauthorized，换 chainguard 镜像规避 Docker Hub 限流）。
+        options: >-
+          --user root
+          --health-cmd "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000' || exit 1"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+        entrypoint: sh
+        command: -c "chown 65532:65532 /data && /usr/bin/minio server /data"
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
@@ -216,12 +232,22 @@ jobs:
           check-latest: true
       - name: prepare (buildmeta embed)
         run: make prepare
-      - name: go test all sub-modules (race)
-        run: make test-all
+      # 子 module 测试 + 覆盖（SKIP_ROOT_COVER：根覆盖由 test job 的 vault 版产出）：
+      # 产出 build/coverage/<slug>.out 供 Sonar 聚合读取。
+      - name: go test all sub-modules (race, coverage)
+        run: S3_ENDPOINT=127.0.0.1:9000 make test-cover-all SKIP_ROOT_COVER=true
       # 发布脚本门禁：tag-release.sh 的计划/SKIP/同源/安全默认由纯 bash 夹具钉住
       # （临时 git 仓库，不触碰本仓库）。挂在**必检**的 test-submodules job 内。
       - name: tag-release script tests
         run: make test-tag-release
+      # 子 module e2e-tagged 测试的编译门禁（默认 build tags 不编译它们，防静默腐化）。
+      - name: vet sub-module e2e tests (compile gate)
+        run: make vet-e2e-submodules
+      - name: Upload coverage (sub-modules)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-submodules
+          path: build/coverage/
 
   e2e:
     name: E2E (real binaries)
@@ -250,7 +276,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.2
+          version: v2.14.0
           args: --timeout=5m --build-tags=e2e ./test/...
       - name: go test e2e (real binaries)
         run: make test-e2e
@@ -268,6 +294,21 @@ jobs:
         run: make prepare
       - name: go test chaos
         run: make test-chaos
+      # 协议面 fuzz（限时）并入 chaos：与混沌同属「非常规、可慢、限定环境」类别，
+      # 不拖长常规 test job。限时 30s（go test -fuzz 的 fuzztime）——本仓 Benchmark job
+      # 多次因长任务超时，fuzz 同理必须限时；全部目标为纯内存/bytes 输入，无网络依赖。
+      # 注：seed corpus 由 f.Add 内联，不落 testdata 目录（避免每次 fuzz 后新增 corpus 脏文件）。
+      # 时长权衡（2026-10-27）：同包目标（pkg/tunnel 两枚）与纯数学目标（FuzzCalcChunkSize）
+      # 减半到 15s——30s/目标远超实际发现窗口（seed corpus 内联）。实测 6 目标 205s→175s（含
+      # 每个目标固定 ~13s 编译，fuzztime 只控 fuzz 引擎时间）；CI runner 上同样省 ~30s。
+      - name: fuzz (bounded, 6 protocol parsers)
+        run: |
+          go test -count=1 -fuzz=FuzzDecodeFrame -fuzztime=30s ./pkg/tunnel/mux/ &&
+          go test -count=1 -fuzz=FuzzTcpFraming -fuzztime=30s ./pkg/tunnel/xfer/internal/tcp/ &&
+          go test -count=1 -fuzz=FuzzTunnelMetaFrame -fuzztime=15s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzParseKey -fuzztime=15s ./pkg/tunnel/ &&
+          go test -count=1 -fuzz=FuzzValidateFilePath -fuzztime=30s ./pkg/pathguard/ &&
+          go test -count=1 -fuzz=FuzzCalcChunkSize -fuzztime=15s ./pkg/client/
 
   build:
     name: Build
@@ -299,24 +340,49 @@ jobs:
   sonar:
     name: SonarQube
     runs-on: ubuntu-latest
-    needs: lint
+    # 纯覆盖消费 + 扫描：不再依赖 lint（解除串行等待），不再自跑 cover-check（此前重复
+    # 全量根测试）。覆盖由两个测试 job 产出（test→coverage-root，test-submodules→
+    # coverage-submodules），下载后经 build/coverage/*.out 通配喂给 Sonar 聚合。
+    # 2026-10-27 复核：needs 收窄为 [test] **不带来收益**——实测 test 276s > submodules
+    # 244s，Sonar 开始时间恒由 test 决定；且缺 submodules 覆盖会丢子 module 覆盖率
+    # （artifact 下载失败）。故保留双 needs。
+    needs: [test, test-submodules]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
+      - name: Download coverage (root)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          go-version: "1.27"
-          check-latest: true
+          name: coverage-root
+          path: build/coverage/
 
-      - name: go test (coverage)
-        run: make cover-check
+      - name: Download coverage (sub-modules)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-submodules
+          path: build/coverage/
 
       - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        uses: sonarsource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # 质量门禁：扫描后等待 SonarCloud 的 New Code gate 结果（sonarqube-scan-action
+      # 本身不等待 gate，必须走独立 quality-gate-action 回流 report-task.txt）。
+      # 2026-10-01：plan 只允许内置 "Sonar way" gate（无法换自定义/改内置条件），其对
+      # New Code 强制 coverage≥80 对 Go 多 module 难达标，gate 恒红为误报 → continue-
+      # on-error 保留可见不阻断 PR；issue 仍实时提交 SonarCloud 靠本地/报告人工把关。
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        continue-on-error: true
+        uses: sonarsource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
+        with:
+          pollingTimeoutSec: 600
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
   ui-e2e:
     name: UI E2E Tests
@@ -332,9 +398,16 @@ jobs:
         env:
           GOWORK: "off"
         with:
-          version: v2.13.2
+          version: v2.14.0
           working-directory: web/e2e
           args: --timeout=5m -c ../../.golangci.yml ./...
+      - name: Cache Playwright browsers
+        # 浏览器二进制缓存（~/.cache/ms-playwright）：避免每次冷装 chromium（含 deps）。
+        # key 按 playwright-go 版本波纹——依赖锁文件（web/e2e/go.sum）变化时自动失效。
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('web/e2e/go.sum') }}
       - name: Install Playwright browsers
         run: |
           cd web/e2e

@@ -165,7 +165,7 @@ func (h *Handler) dispatchLocal(w http.ResponseWriter, r *http.Request, req *Req
 
 		sr.mu.Lock()
 		code := sr.statusCode
-		hdrs := sr.header.Clone()
+		hdrs := sr.sentHeader.Clone()
 		sr.mu.Unlock()
 
 		respMetaJSON, _ := json.Marshal(Response{

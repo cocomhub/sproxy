@@ -24,7 +24,7 @@ func (valueStorer) Save([]accesskey.Key) error     { return nil }
 //   - 真指针 → 原样同一值；
 //   - 非指针值类型实现（valueStorer 满足 CredentialStorer）→ 原样同一接口值。
 func TestNormalizeStorer(t *testing.T) {
-	real := accesskey.NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
+	realStore := accesskey.NewCredentialStore(filepath.Join(t.TempDir(), "tenant", "meta"))
 
 	cases := []struct {
 		name    string
@@ -33,35 +33,41 @@ func TestNormalizeStorer(t *testing.T) {
 	}{
 		{name: "字面nil", in: nil, wantNil: true},
 		{name: "typed-nil指针", in: (*accesskey.CredentialStore)(nil), wantNil: true},
-		{name: "真指针非nil", in: real},
+		{name: "真指针非nil", in: realStore},
 		{name: "非指针值类型", in: valueStorer{tag: "v"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeStorer(tc.in)
-			if tc.wantNil {
-				if got != nil {
-					t.Fatalf("应归一为 nil, got %#v", got)
-				}
-				return
-			}
-			if got == nil {
-				t.Fatalf("非 nil 输入被误归一为 nil")
-			}
-			// 同一性：归一结果与入参指向/等效同一实例。
-			switch v := tc.in.(type) {
-			case *accesskey.CredentialStore:
-				if got.(*accesskey.CredentialStore) != v {
-					t.Fatalf("真指针应原样返回，got 另一个实例")
-				}
-			case valueStorer:
-				stored, ok := got.(valueStorer)
-				if !ok || stored != v {
-					t.Fatalf("值类型应原样返回: got %#v, want %#v", got, v)
-				}
-			default:
-				t.Fatalf("未预期的输入类型单向断言: %T", tc.in)
-			}
+			assertNormalizeStorerCase(t, tc.in, tc.wantNil)
 		})
+	}
+}
+
+// assertNormalizeStorerCase 校验单个 normalizeStorer 用例的归一结果与同一性。
+func assertNormalizeStorerCase(t *testing.T, in accesskey.CredentialStorer, wantNil bool) {
+	t.Helper()
+	got := normalizeStorer(in)
+	if wantNil {
+		if got != nil {
+			t.Fatalf("应归一为 nil, got %#v", got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatalf("非 nil 输入被误归一为 nil")
+	}
+	// 同一性：归一结果与入参指向/等效同一实例。
+	switch v := in.(type) {
+	case *accesskey.CredentialStore:
+		if got.(*accesskey.CredentialStore) != v {
+			t.Fatalf("真指针应原样返回，got 另一个实例")
+		}
+	case valueStorer:
+		stored, ok := got.(valueStorer)
+		if !ok || stored != v {
+			t.Fatalf("值类型应原样返回: got %#v, want %#v", got, v)
+		}
+	default:
+		t.Fatalf("未预期的输入类型单向断言: %T", in)
 	}
 }

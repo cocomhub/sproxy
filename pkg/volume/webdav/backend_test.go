@@ -119,6 +119,7 @@ func TestRegisterWebDAVBackend(t *testing.T) {
 	t.Parallel()
 	typ := "webdav-test-reg"
 	registerWebDAVBackendWithFactory(typ)
+	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 
 	v := volume.Volume{
 		Name: "webdav-vol",

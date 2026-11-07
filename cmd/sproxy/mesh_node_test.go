@@ -132,7 +132,7 @@ func TestStartMeshNodeRole_EnabledStartsAndStopsOnCtx(t *testing.T) {
 	cfg.Hub.NodeID = ""       // 回落链全空
 	cfg.SetDefaults()
 	creds := &meshHubCreds{AK: "ak-" + strings.Repeat("a", 32), SK: strings.Repeat("b", 64), SkeyID: "skey-0123456789ab"}
-	if started := startMeshNodeRoleWithCreds(t.Context(), cfg, "127.0.0.1:19000", "", creds, nil, loggerDiscard()); started {
+	if startMeshNodeRoleWithCreds(t.Context(), cfg, "127.0.0.1:19000", "", creds, nil, loggerDiscard()) {
 		t.Fatal("缺 node_id 时不应启动（fail-closed）")
 	}
 
@@ -140,7 +140,7 @@ func TestStartMeshNodeRole_EnabledStartsAndStopsOnCtx(t *testing.T) {
 	cfg.Mesh.Node.NodeID = "node-b-self"
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if started := startMeshNodeRoleWithCreds(ctx, cfg, "127.0.0.1:19000", "", creds, nil, loggerDiscard()); !started {
+	if !startMeshNodeRoleWithCreds(ctx, cfg, "127.0.0.1:19000", "", creds, nil, loggerDiscard()) {
 		t.Fatal("前置齐备时应启动")
 	}
 	cancel()

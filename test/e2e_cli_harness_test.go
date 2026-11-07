@@ -8,6 +8,7 @@ package sproxy_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -40,28 +41,108 @@ func startCLIEnv(t *testing.T, extraConfig string) *cliEnv {
 	t.Helper()
 	baseURL, storageRoot, cleanup := startSPROXYImpl(t, extraConfig)
 	t.Cleanup(cleanup)
-	return &cliEnv{
+	env := &cliEnv{
 		BaseURL:     baseURL,
 		StorageRoot: storageRoot,
 		TmpDir:      filepath.Dir(storageRoot),
 		sclientBin:  e2eBinPath(t, "cmd/sclient"),
 	}
+	// 统一 context：预写 config.yaml（env 段 server_url + user 段凭据），
+	// 使每次 sclient 子进程都能解析出有效 context（fail-closed 不再静默回落）。
+	env.writeConfigYAML(t)
+	return env
 }
 
 // cliPrefixFlags 返回 sclient 前置全局 flag（顺序固定，置于子命令前）。
 //
-// --config 指向**不存在**的路径：sclientcfg.New 对 IsNotExist 静默忽略，从而隔离本机
-// ~/.config/sproxy/sclient.yaml（--server 挡不住用户配置里的 access_key 等）。
-// --access-key 非空即令 clientfactory 走 client.WithTunnel(ak, sk) → 加密隧道 localMux
-// 路径，故目标 handler 必须双侧注册（本套件覆盖的路由均已双侧注册）。
+// --config 指向临时 config.yaml（统一 context 模型）：PersistentPreRunE 会从该
+// config.yaml 解析 context；此处用 e2eTest 凭据构造 env+user 段（--server/--access-key*
+// 仍显式传以便覆盖 config 默认）。不存在的路径会触发「无配置」fail-closed——本套件
+// 一定先写配置再跑命令（见 startCLIEnv 内 config.yaml 装配）。
 func (e *cliEnv) cliPrefixFlags() []string {
 	return []string{
-		"--config", filepath.Join(e.TmpDir, "sclient.yaml"),
+		"--config", e.configYAMLPath(),
 		"--server", e.BaseURL,
 		"--access-key", e2eTestAK,
 		"--access-key-secret", e2eTestSK,
 		"--access-key-id", e2eTestID,
 	}
+}
+
+// configYAMLPath 返回本 cliEnv 的 config.yaml 路径（XDG 配置目录 sproxy/config.yaml）。
+func (e *cliEnv) configYAMLPath() string {
+	return filepath.Join(e.TmpDir, cliXDGConfigDir, "sproxy", "config.yaml")
+}
+
+// writeConfigYAML 写入统一 context 配置（手写 YAML 模板，test 包不 import internal
+// contextcfg）：env 段 server_url + user 段凭据（e2e 夹具）。
+func (e *cliEnv) writeConfigYAML(t *testing.T) {
+	t.Helper()
+	body := fmt.Sprintf(`apiVersion: sclient/v1
+kind: Config
+current-context: e2e
+environments:
+  - name: e2e
+    server_url: %q
+users:
+  - name: e2e
+    access_key: %q
+    access_key_secret: %q
+    access_key_id: %q
+contexts:
+  - name: e2e
+    environment: e2e
+    user: e2e
+`, e.BaseURL, e2eTestAK, e2eTestSK, e2eTestID)
+	if err := os.MkdirAll(filepath.Dir(e.configYAMLPath()), 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(e.configYAMLPath(), []byte(body), 0o600); err != nil {
+		t.Fatalf("写 config.yaml: %v", err)
+	}
+}
+
+// writeMinimalConfigYAML 写最小合法 config.yaml（手写 YAML 模板；env+user+context，
+// 无凭据）：供不依赖凭据的常驻命令（http-proxy 等）满足统一 context 的 fail-closed 门禁。
+func writeMinimalConfigYAML(t *testing.T, path string) error {
+	t.Helper()
+	body := `apiVersion: sclient/v1
+kind: Config
+current-context: local
+environments:
+  - name: local
+    server_url: http://127.0.0.1:18083
+users:
+  - name: local
+contexts:
+  - name: local
+    environment: local
+    user: local
+`
+	return os.WriteFile(path, []byte(body), 0o600)
+}
+
+// writeContextConfigYAML 写带凭据的统一 context config.yaml（手写 YAML 模板；
+// test 包不 import internal contextcfg）。供需认证的 sclient 子进程 e2e 使用。
+func writeContextConfigYAML(t *testing.T, path, serverURL, ak, sk, skID string) error {
+	t.Helper()
+	body := fmt.Sprintf(`apiVersion: sclient/v1
+kind: Config
+current-context: e2e
+environments:
+  - name: e2e
+    server_url: %q
+users:
+  - name: e2e
+    access_key: %q
+    access_key_secret: %q
+    access_key_id: %q
+contexts:
+  - name: e2e
+    environment: e2e
+    user: e2e
+`, serverURL, ak, sk, skID)
+	return os.WriteFile(path, []byte(body), 0o600)
 }
 
 // cliEnv 的 XDG 隔离目录名（每次 sclientRun 惰性创建，避免 --config 之外的
@@ -75,10 +156,9 @@ const (
 // sclientRun 以子进程运行 sclient，注入隔离配置 + SproxySig 凭据与全局 flag。
 //
 // 隔离三件套（memory: cli-test-config-isolation）：
-//   - --config 指向不存在路径 → sclientcfg.New 静默忽略，不读本机 sclient.yaml；
-//   - XDG_CACHE_HOME / XDG_CONFIG_HOME 指向本次测试临时目录 → cd 持久化的 currentDir
-//     与 identity.json 均不会读到本机用户状态（跨平台：adrg/xdg 在 Windows 亦优先取
-//     这两个环境变量）。
+//   - --config 指向本次临时 config.yaml；XDG_CACHE_HOME / XDG_CONFIG_HOME 指向本次
+//     测试临时目录 → cd 持久化的 currentDir 与 identity.json 均不会读到本机用户状态
+//     （跨平台：adrg/xdg 在 Windows 亦优先取这两个环境变量）。
 //
 // 返回 stdout/stderr/err；调用方自行判定（负例用 raw，正例用 sclient）。
 func (e *cliEnv) sclientRun(t *testing.T, dir string, args ...string) (string, string, error) {

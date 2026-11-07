@@ -1,0 +1,285 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package sync
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+)
+
+// RangeSeeker 把「可选 RangeReader + 已知 size」适配为 io.ReadSeeker，供
+// http.ServeContent 服务端转发随机访问（A/C 态：secretdata 加密卷 / 私密外部卷）。
+//
+// ServeContent 的用法恰好是：Seek(0, SeekEnd) 取 size → Seek(0, SeekStart) →
+// 顺序 Read（Range 请求也是一次定位后顺序读）。RangeSeeker 在**窗口边界**（每
+// rangeWindow 字节）或 Seek 跳跃时重开一次 OpenRangeRead，逐窗口续读——每窗口
+// 连续读取 = 一次 RangeRead。
+//
+// offset 语义：明文逻辑位置（与 http.ServeContent 收到的 Range offset 一致；
+// 加密卷 OpenRangeRead 的 offset 同样为明文坐标，无需额外寻址转换）。
+//
+// **窗口上界（评审 C1 修复，2026-10-05）**：openRange 传 min(size-off, rangeWindow)
+// 而非 [off, EOF)——secretdata OpenRangeRead 是急切物化覆盖区间（rangeReadBytes
+// 把整个 [off, off+size) 下载+解密成单 []byte）；若传尾段，随机访问会每次拉整个
+// 文件尾并驻留内存，完全抵消关键帧随机访问目标。窗口把单次物化限制为 ≤窗口明文
+// （覆盖窗口的块仍整块下载——PR #733 已知边界）。顺带激活 Read 的段末续读分支
+// （rcEnd < size 恒假死代码消除）。
+//
+// ctx 处理（containedctx 收敛）：ctx 是单次 ServeContent 操作的取消信号，由
+// NewRangeSeeker 捕获进 openRange 闭包（struct 不持 context.Context 字段）——
+// 关闭调用方 ctx 即终止在途 RangeRead 与段流读取。
+//
+// 无 RangeReader 的 FS：NewRangeSeeker 返回错误（调用方退整流 200 路径，不 500）。
+type RangeSeeker struct {
+	openRange func(off int64) (io.ReadCloser, error) // 重开 [off, off+window) 段流（闭包捕获 ctx）
+	size      int64                                  // 逻辑文件大小（Stat 已知）
+	window    int64                                  // 单段窗口上界（评审 C1：防尾段急切物化）
+	off       int64                                  // 当前逻辑 offset
+
+	rc    io.ReadCloser // 当前区间流；nil = 未打开
+	rcEnd int64         // 当前区间流的逻辑终点（rc 读到此处即段末）
+}
+
+// rangeWindow 是 RangeSeeker 的**本地卷**单段窗口上界（2026-10-05 评审 C1）：限制单次
+// OpenRangeRead 物化的明文量。取 4MiB——播放器 Range 请求通常 ≤1MiB（单段命中），
+// 顺序播放按窗口逐段续读（每段一次 RangeRead 开销可接受）。与 secretdata 块大小
+// （64KiB-4MiB 级）同量级，覆盖窗口的块整块下载边界不变。
+// 本地卷零网络开销 + page cache ⇒ 大窗口减少重开次数。
+const rangeWindow = 4 << 20
+
+// NewRangeSeeker 构造 RangeSeeker。fs 必须实现 RangeReader（否则返回错误——调用方
+// 决定整流 200 或 fail）。ctx 为本次 ServeContent 操作的取消信号（见类型注释）。
+func NewRangeSeeker(ctx context.Context, fs FS, rel string, size int64) (*RangeSeeker, error) {
+	return newRangeSeeker(ctx, fs, rel, size, 0) // 0 = 自适应（本地/外部）
+}
+
+// NewRangeSeekerWithHint 构造 RangeSeeker 并允许调用方覆盖窗口大小（winHint>0 生效）。
+// 服务端 /download 外部卷整流路径用它把窗口提升到 4MiB（= 百度 CDN 单次 Range 上限）：
+// 8MiB 的分块请求只需 2 次窗口重开，而非默认 256KiB 窗口的 32 次（实测 chunk 中位
+// 20s → 目标 <3s）；seek 仍按窗口重开，4MiB 粒度对播放首帧足够。
+func NewRangeSeekerWithHint(ctx context.Context, fs FS, rel string, size, winHint int64) (*RangeSeeker, error) {
+	return newRangeSeeker(ctx, fs, rel, size, winHint)
+}
+
+// newRangeSeeker 是 NewRangeSeeker 的核心；winHint>0 时强制窗口（测试/调优用）。
+func newRangeSeeker(ctx context.Context, fs FS, rel string, size int64, winHint int64) (*RangeSeeker, error) {
+	if fs == nil {
+		return nil, fmt.Errorf("sync: RangeSeeker 底层 FS 为 nil")
+	}
+	rr := AssertRangeReader(fs)
+	if rr == nil {
+		return nil, fmt.Errorf("sync: FS 未实现 RangeReader，无法随机访问（服务端整流路径）")
+	}
+	// P1（第 5 轮对抗评审）：透明装饰器（MetaBucketGuard/TrustedVolumeFS/CapacityFS/
+	// StagingQuotaGateFS 等）**无条件**实现 OpenRangeRead（inner 无能力时运行期才返
+	// ErrUnsupported），故仅凭类型断言恒真——会让调用方（external_source.go）的
+	// 「整流 seeker 回落」变成死代码：RangeSeeker 构造成功、首次 Read 才报错，而
+	// ServeContent 已发出 200/Content-Length → 客户端静默截断。
+	// 判据必须下探最内层原始卷（与 Innermost 的既定能力探测纪律一致）。
+	if AssertRangeReader(Innermost(fs)) == nil {
+		return nil, fmt.Errorf("sync: 底层卷未实现 RangeReader（仅装饰层回显），无法随机访问（服务端整流路径）")
+	}
+	if size < 0 {
+		return nil, fmt.Errorf("sync: 非法文件大小 %d", size)
+	}
+	// **窗口按底层本地性自适应（2026-10-21 缺陷修复）**：本地卷（page cache + 零网络
+	// 开销）用大窗口（顺序读优、重开次数少）；外部/网盘卷用小窗口（首帧/seek 优、读放大低
+	// ——窗口是惰性流式预取上限，拖进度条时大窗口会多拉无用数据）。
+	// 判据与能力探测同口径：下探最内层原始卷（Innermost）。
+	win := int64(rangeWindow)
+	if winHint > 0 {
+		win = winHint
+	} else if inner := Innermost(fs); inner != nil {
+		if lv, ok := inner.(LocalVolume); ok && !lv.IsLocalVolume() {
+			win = int64(externalRangeWindow)
+		}
+	}
+	return &RangeSeeker{
+		openRange: func(off int64) (io.ReadCloser, error) {
+			if off < 0 || off > size {
+				return nil, fmt.Errorf("sync: RangeSeeker 区间偏移 %d 越出 [0,%d]", off, size)
+			}
+			want := min(size-off, win)
+			return rr.OpenRangeRead(ctx, rel, off, want)
+		},
+		size:   size,
+		window: win,
+	}, nil
+}
+
+// externalRangeWindow 是外部/网盘卷的 RangeSeeker 窗口（2026-10-21）：
+// 256KiB——顺序播放的每窗口读放大上限适中，seek 后重开窗口的无效拉取远小于 4MiB。
+const externalRangeWindow = 256 << 10
+
+// Read 从当前 offset 读入 p。窗口流耗尽时重开 [off, off+window) 的 RangeRead 续读。
+func (s *RangeSeeker) Read(p []byte) (int, error) {
+	if s.off >= s.size {
+		if s.rc != nil {
+			s.rc.Close()
+			s.rc = nil
+		}
+		return 0, io.EOF
+	}
+	if s.rc == nil {
+		if err := s.open(); err != nil {
+			return 0, err
+		}
+	}
+	n, err := s.rc.Read(p)
+	s.off += int64(n)
+	if errors.Is(err, io.EOF) && s.rcEnd < s.size {
+		// 窗口流读完但文件未耗尽：关旧段、重开下一窗口续读（顺序读大文件逐段）。
+		s.rc.Close()
+		s.rc = nil
+		return n, nil
+	}
+	return n, err
+}
+
+// Seek 实现 io.Seeker：SeekEnd 返回 size（廉价，不真 seek）；SeekStart 设置偏移，
+// 若与当前段流连续（恰在段末）则续用，否则关闭段流待下次 Read 重开。
+func (s *RangeSeeker) Seek(offset int64, whence int) (int64, error) {
+	var next int64
+	switch whence {
+	case io.SeekStart:
+		next = offset
+	case io.SeekCurrent:
+		next = s.off + offset
+	case io.SeekEnd:
+		next = s.size + offset
+	default:
+		return s.off, fmt.Errorf("sync: 非法 whence %d", whence)
+	}
+	if next < 0 {
+		return s.off, fmt.Errorf("sync: 负 seek 偏移 %d", next)
+	}
+	if next > s.size {
+		next = s.size
+	}
+	// 连续（当前段流刚读到段末且 next 恰好接上）→ 保留段流；否则关闭重开。
+	if s.rc != nil && next != s.rcEnd {
+		s.rc.Close()
+		s.rc = nil
+	}
+	s.off = next
+	return s.off, nil
+}
+
+// Close 关闭当前区间流（幂等）。
+func (s *RangeSeeker) Close() error {
+	if s.rc != nil {
+		err := s.rc.Close()
+		s.rc = nil
+		return err
+	}
+	return nil
+}
+
+// open 重开 [off, min(size, off+window)) 的 RangeRead 窗口流（评审 C1：窗口上界
+// 限制单次物化，激活 Read 段末续读分支）。
+func (s *RangeSeeker) open() error {
+	if s.off >= s.size {
+		return io.EOF
+	}
+	rc, err := s.openRange(s.off)
+	if err != nil {
+		return fmt.Errorf("sync: RangeSeeker 打开区间 [%d,%d) 失败: %w", s.off, s.off+s.window, err)
+	}
+	s.rc = rc
+	end := min(s.off+s.window, s.size)
+	s.rcEnd = end
+	return nil
+}
+
+// StreamSeeker 把**只有 OpenRead**（无 RangeReader）的 FS 适配为 io.ReadSeeker + io.Closer，
+// 供 http.ServeContent 服务端转发。无 RangeReader 的外部卷（如 S3 网关后端）此前
+// NewRangeSeeker 直接报错 → /download 恒 500；本类型兑现注释承诺的「退整流 200 路径」。
+//
+// Seek 语义：Seek(0,End) 返回已知 size（不打开）；非当前偏移的定位用「关流 + 下次 Read
+// 重开并丢弃 offset 字节」模拟（Range 请求多付一次顺序读，功能可用）。ctx 为单次
+// ServeContent 取消信号（闭包捕获）。
+type StreamSeeker struct {
+	open func() (io.ReadCloser, error)
+	size int64
+	pos  int64
+	rc   io.ReadCloser
+}
+
+// NewStreamSeeker 构造整流 seeker（fs 仅需 OpenRead）。
+func NewStreamSeeker(ctx context.Context, fs FS, rel string, size int64) *StreamSeeker {
+	if size < 0 {
+		size = 0
+	}
+	return &StreamSeeker{
+		size: size,
+		open: func() (io.ReadCloser, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return fs.OpenRead(ctx, rel)
+		},
+	}
+}
+
+// Read 顺序读取（首次或重开时按 pos 丢弃前缀）。
+func (s *StreamSeeker) Read(p []byte) (int, error) {
+	if s.rc == nil {
+		rc, err := s.open()
+		if err != nil {
+			return 0, err
+		}
+		s.rc = rc
+		if s.pos > 0 {
+			if _, derr := io.CopyN(io.Discard, rc, s.pos); derr != nil {
+				_ = rc.Close()
+				s.rc = nil
+				return 0, derr
+			}
+		}
+	}
+	n, err := s.rc.Read(p)
+	s.pos += int64(n)
+	return n, err
+}
+
+// Seek 支持 Start/Current/End（非当前位仅记录，Read 时重开丢弃）。
+func (s *StreamSeeker) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = s.pos + offset
+	case io.SeekEnd:
+		abs = s.size + offset
+	default:
+		return 0, fmt.Errorf("sync: StreamSeeker 非法 whence %d", whence)
+	}
+	if abs < 0 {
+		return 0, fmt.Errorf("sync: StreamSeeker 负偏移 %d", abs)
+	}
+	if s.rc != nil && abs == s.pos {
+		return abs, nil
+	}
+	_ = s.closeStream()
+	s.pos = abs
+	return abs, nil
+}
+
+// Close 关闭当前流。
+func (s *StreamSeeker) Close() error {
+	err := s.closeStream()
+	return err
+}
+
+func (s *StreamSeeker) closeStream() error {
+	if s.rc == nil {
+		return nil
+	}
+	err := s.rc.Close()
+	s.rc = nil
+	return err
+}

@@ -13,18 +13,10 @@ import (
 	"time"
 )
 
-// syncTestServer 返回模拟 /api/sync/tasks 端点的测试服务器。
-// 对齐服务端 sync_handler.go 的 JSON 契约：
-//   - POST /api/sync/tasks → 201 直接返回 SyncTask（去重复用 200）
-//   - GET  /api/sync/tasks → {success, tasks:[SyncTaskMeta]}
-//   - GET  /api/sync/tasks/{id} → SyncTask / 404 {error}
-//   - POST /api/sync/tasks/{id}/cancel → 200 {status:"cancelled"} / 404 {error}
-//   - DELETE /api/sync/tasks/{id} → 200 {status:"deleted"} / 404 {error}
-func syncTestServer(t *testing.T) (*httptest.Server, string) {
-	t.Helper()
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
+// syncTestServerCreateHandler 返回 POST /api/sync/tasks 的 mock handler：
+// 校验请求方向/remote 并返回 201 SyncTask。
+func syncTestServerCreateHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		var req SyncTaskRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -61,18 +53,25 @@ func syncTestServer(t *testing.T) (*httptest.Server, string) {
 			UpdatedAt:      time.Now(),
 			ExpiresAt:      time.Now().Add(24 * time.Hour),
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
+// syncTestServerListHandler 返回 GET /api/sync/tasks 的 mock handler：回填两个任务。
+func syncTestServerListHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		tasks := []SyncTaskMeta{
 			{ID: "sync-1", Direction: "push", Remote: "r1", Status: "completed", FilesTotal: 2, FilesDone: 2, BytesTotal: 100, BytesDone: 100},
 			{ID: "sync-2", Direction: "pull", Remote: "r2", Status: "syncing"},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "tasks": tasks})
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+// syncTestServerGetHandler 返回 GET /api/sync/tasks/{id} 的 mock handler：
+// 未知 ID 返回 404，其余返回 completed 任务。
+func syncTestServerGetHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id == "notfound" {
 			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
@@ -83,9 +82,12 @@ func syncTestServer(t *testing.T) (*httptest.Server, string) {
 			ID: id, Direction: "push", Remote: "r1", Status: SyncStatusCompleted,
 			FilesTotal: 2, FilesDone: 2, BytesTotal: 100, BytesDone: 100,
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("POST /api/sync/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+// syncTestServerCancelHandler 返回 POST /api/sync/tasks/{id}/cancel 的 mock handler。
+func syncTestServerCancelHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("id") == "notfound" {
 			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
 			return
@@ -93,9 +95,12 @@ func syncTestServer(t *testing.T) (*httptest.Server, string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "cancelled"})
-	})
+	}
+}
 
-	mux.HandleFunc("DELETE /api/sync/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+// syncTestServerDeleteHandler 返回 DELETE /api/sync/tasks/{id} 的 mock handler。
+func syncTestServerDeleteHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("id") == "notfound" {
 			http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
 			return
@@ -103,7 +108,24 @@ func syncTestServer(t *testing.T) (*httptest.Server, string) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-	})
+	}
+}
+
+// syncTestServer 返回模拟 /api/sync/tasks 端点的测试服务器。
+// 对齐服务端 sync_handler.go 的 JSON 契约：
+//   - POST /api/sync/tasks → 201 直接返回 SyncTask（去重复用 200）
+//   - GET  /api/sync/tasks → {success, tasks:[SyncTaskMeta]}
+//   - GET  /api/sync/tasks/{id} → SyncTask / 404 {error}
+//   - POST /api/sync/tasks/{id}/cancel → 200 {status:"cancelled"} / 404 {error}
+//   - DELETE /api/sync/tasks/{id} → 200 {status:"deleted"} / 404 {error}
+func syncTestServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/sync/tasks", syncTestServerCreateHandler())
+	mux.HandleFunc("GET /api/sync/tasks", syncTestServerListHandler())
+	mux.HandleFunc("GET /api/sync/tasks/{id}", syncTestServerGetHandler())
+	mux.HandleFunc("POST /api/sync/tasks/{id}/cancel", syncTestServerCancelHandler())
+	mux.HandleFunc("DELETE /api/sync/tasks/{id}", syncTestServerDeleteHandler())
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)

@@ -1,0 +1,236 @@
+# BaiduPCS Plugin (pkg/volume/ext/baidupcs)
+
+百度网盘（BaiduPCS）存储后端插件，**独立 Go module**。
+
+## 方案（R2：fork + replace）
+
+本包**不 fork 裁剪核心库进 sproxy 仓库**——直接引用外部 fork：
+
+- **外部 fork**：`github.com/cocomhub/BaiduPCS-Go`（fork 自 `qjfoidnh/BaiduPCS-Go`）
+  - module 声明**保持 `github.com/qjfoidnh/BaiduPCS-Go` 一行不改** → GitHub「Sync fork」零冲突
+  - 上游更新 → fork 点 Sync fork → 更新本包 `go.mod` 的 replace commit（一行）
+- **replace 接入**：`pkg/volume/ext/baidupcs/go.mod` 里
+  ```
+  require github.com/qjfoidnh/BaiduPCS-Go v0.0.0
+  replace github.com/qjfoidnh/BaiduPCS-Go => github.com/cocomhub/BaiduPCS-Go <commit>
+  ```
+  Go module 惰性加载，只编译 import 图内的包；fork 内部 import 自引用无需修改。
+- **零污染**：开源实现不进本仓，不受 sproxy addlicense/lint 强校验影响；本包只含自有薄 adapter。
+
+## 执行策略
+
+- **二进制优先**：默认调 `BaiduPCS-Go` 二进制（命令语义稳定、子进程隔离、完整传输器内置、可独立升级）
+- **库兜底**：二进制缺失/失败/超时 → 回退 fork 库实现（`PrepareUpload`/`DownloadFile`）
+
+## 稳定性保障
+
+- 传输共享 `http.Client`（无整体超时，正文由 ctx 约束）
+- 上传后 ETag 复核有界重试 ≤3
+- 错误分类映射集中维护（31066/-3/-9 → NotFound 等）
+- 子进程 `exec.CommandContext` + 超时
+
+## 构建
+
+```bash
+cd pkg/volume/ext/baidupcs
+GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go mod tidy
+GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go build ./...
+GOSUMDB=off GOPRIVATE=github.com/cocomhub GOWORK=off go test ./...
+```
+
+> `GOSUMDB=off GOPRIVATE=github.com/cocomhub` 必须：cocomhub fork 未发布到 sum.golang.org，
+> 需跳过 sumdb 校验（私有依赖标准做法）。CI 装配时需同样注入这两个环境变量。
+
+## 维护流程（fork 更新）
+
+1. 上游 `qjfoidnh/BaiduPCS-Go` 更新 → cocomhub fork 点 GitHub「Sync fork」（零冲突）
+2. 更新本包 `go.mod` 的 `replace` commit 为 fork 最新：
+   ```bash
+   gh api repos/cocomhub/BaiduPCS-Go/commits/main --jq .sha
+   ```
+3. `go mod tidy` + 测试
+
+## P2：库兜底真实现（脱离二进制完整可用）
+
+P2 把库兜底从「最小 stub」提升为**真实现**，二进制缺失/失败/超时时完全可用：
+
+### 分片上传（NewMultiUploader）
+
+- 走上游多线程分片上传器：`Precreate` → 并发分片 `TmpFile` → `CreateSuperFile`（合并）
+- `MultiUpload` 三方法由本包 `baiduMultiUpload` 实现（接百度网盘 API）
+- 并发度 / 分块大小 / 限速可配（默认 4 并发 / 4MB 分片）
+- 分片瞬时失败自动重试；重名策略 skip/overwrite 跟随上传参数
+
+### 断点续传（本地持久化）
+
+- 上传断点：`InstanceState` 持久化到 `<Layout.Resume>/<key>.json`（原子写 tmp+rename）
+- 下载断点：上游 `Downloader` 的 Range 断点文件在 `<Layout.Tmp>/<key>.download`（JSON）
+- 断点 key = `sanitize(目标路径) + 文件大小`——文件变更（大小不同）则断点自动失效
+- **中间状态只依赖本地文件系统**（用户硬约束）：staging/resume/cache/tmp 全在本地 `Layout` 下，网盘只存最终文件
+
+### 本地目录布局
+
+```
+<BaseDir>/
+  staging/  本地上传暂存（配合 quota）
+  resume/   上传断点（InstanceState JSON）
+  cache/    下载缓存（可选）
+  tmp/      通用临时文件（下载断点 .download、.part 半截文件）
+```
+
+### 配额挂钩（P2 基础版）
+
+- `Quota` 内存计数：staging/cache 预留 → 传输完成释放，防止本地磁盘被中间态占满
+- 超限返回错误（调用方暂停/拒绝继续写 staging）
+- P4 与 sproxy `pkg/quota.Scope` 融合时替换为 owner 配额池
+
+## P3：sync.FS 适配 + VolumeBackend（可同步的存储后端）
+
+百度网盘已成为「可同步的存储后端」——`pkg/sync` 引擎可在本地↔网盘间同步（与本地↔本地共用同一套编排逻辑）。
+
+### 能力
+
+- **`StorageFS`**（`syncfs.go`）：把 `Storage` 适配为 `pkg/sync.FS`（7 方法接口）
+  - `ListDir` → `Storage.List`（Path 相对 FS 根、正斜杠）
+  - `Stat` → `Storage.Stat`（不存在返回 nil；网盘根恒为目录）
+  - `OpenRead` → `Storage.Get`（本地临时文件 + 自动清理）
+  - `WriteFile` → 本地 staging 临时文件 + `Storage.Put`（**中间态只依赖本地 FS**）
+  - `Rename` → `Storage.Copy` + `Storage.Delete`（网盘无原子 MOVE 两步）
+  - `Delete` → `Storage.Delete`（幂等）；`MakeDir` → no-op（网盘无独立目录纯概念）
+- **`VolumeBackend`**（`volume.go`）：`NewVolumeBackend` 构造「网盘卷 = StorageFS + 本地中间态根目录」
+  - 寻址：装配后 `baidupcs://<卷名>/<path>` 可被 `syncmgr.Job` 使用
+  - `RootDir` 是本地中间态基目录（staging/cache 落它之下，符合 `volume.RootDir` 契约）
+- **quota 借贷**（`StorageFS.WithQuota`）：装配层注入 `QuotaTracker` 实现（如 `pkg/quota.Scope`）
+  - staging 写入预留 size → 上传网盘成功释放；失败归还
+
+### 同步用法（syncmgr / pkg/sync）
+
+```go
+// 本地 → 网盘（push）
+job := &sync.Job{Direction: DirectionPush, Src: "", Dst: "", Recursive: true, ConflictPolicy: ConflictSkip}
+engine.Sync(ctx, sync.NewLocalFS(localRoot, nil), storageFS, job)
+
+// 网盘 → 本地（pull，同引擎反向）
+engine.Sync(ctx, storageFS, sync.NewLocalFS(localRoot, nil), job)
+```
+
+### 中间态约束（用户硬规则）
+
+所有暂存/断点/缓存只依赖本地文件系统（`<LocalRoot>/`）：WriteFile 流先落 staging 临时文件再上传；
+OpenRead 经本地临时文件返回流；网盘侧只存最终文件。
+
+## P4：syncmgr 双向同步集成 + quota 融合（服务端真实装配）
+
+百度网盘已成为**服务端可编排的同步目标**：`sync_remotes[].kind=baidupcs` 的同步任务由
+`syncmgr`（任务编排）+ `syncexec`（执行器）驱动，本地↔网盘双向同步与本地↔本地共用同一套
+编排逻辑（统计/冲突策略/递归）。
+
+### 配置示例
+
+```yaml
+# 系统盘并入 volumes[]（V3）：type=baidupcs 外部卷 + extra（每盘独立凭据/盘根/中间态目录）。
+# 首卷（默认卷）必为本地卷（V3 装配层 fail-closed）；baidupcs 盘排后。
+volumes:
+  - name: "default"          # 默认卷（首卷；本地）
+    type: "local"            # 缺省
+    root: "./storage"
+  - name: "mydisk"           # baidupcs 系统盘（卷名 = sync_remotes[].volume 引用）
+    type: "baidupcs"         # 外部卷后端（需已注册——生产装配自动 RegisterBackend）
+    root: ""                 # 外部卷 RootDir 语义 = 空（V3 框架：无本地根）
+    extra:
+      local_root: "/var/lib/sproxy/baidupcs"   # 本地中间态基目录（staging/resume/cache/tmp；空 = 系统默认）
+      bduss: ""              # 百度网盘登录凭据（库兜底需要）
+      baidu_root: "/"        # 网盘根路径（空 = "/"）
+      binary_path: ""        # BaiduPCS-Go 可执行路径（空 = PATH 查找）
+  - name: "backup"           # 第二盘（不同凭据/盘根）
+    type: "baidupcs"
+    extra:
+      local_root: "/var/lib/sproxy/baidupcs-backup"
+      bduss: ""
+      baidu_root: "/backup"
+
+# 声明同步远端（kind=baidupcs：本机网盘卷，无网络对端）
+sync_remotes:
+  - name: "mydisk"
+    kind: "baidupcs"
+    volume: "mydisk"       # 本机卷名（= volumes[].name）
+```
+
+创建同步任务（sclient/API）时 `remote: "mydisk"`，`src`/`dst` 为 FS 根相对路径
+（如 `sub/dir`；空 = 整个根）。**push** = 本地→网盘；**pull** = 网盘→本地。
+
+> **配置迁移（V3 接入）**：早期 `baidupcs` 段（`enabled`/`disks[]`）已移除——系统盘统一
+> 到 `volumes[]`（`type=baidupcs` + `extra`）。T7 的 `local_root` 语义迁到 `extra.local_root`。
+
+### 寻址与装配链路
+
+`kind=baidupcs` 的远端**不经网络拨号**：装配层（`cmd/sproxy/baidupcs_sync.go` 的
+`setupBaidupcsFSFactory`）启动时 `RegisterBackend("baidupcs")` 注册后端插件，`assembleVolumes`
+按 `volumes[].type=baidupcs` 经 `registry.NewBackend` 构造 `StorageFS`（+ 本地中间态根目录），
+持有在 `registry.Set.external`；执行时工厂按 `remote.Volume` 查 `Set.External` 返回对应
+`StorageFS`，交给 `pkg/sync` 引擎：
+
+```
+syncmgr.Manager ── Executor.Run ── BaidupcsFS 工厂（Set.External 查卷）── StorageFS ── Storage ── 网盘
+```
+
+`pkg/syncexec` 只消费 `sync.FS` 抽象 + 工厂签名（`SetBaidupcsFSFactory`），不依赖
+`pkg/volume/ext/baidupcs` 具体类型——领域包互不依赖，卷寻址经唯一装配层的 `registry.Set`（与 mesh 载体同构）。
+后续新 volume 类型（s3/webdav）只 `RegisterBackend` 注册新后端，不改装配核心（V3 可插拔）。
+
+### quota 融合（staging 记账）
+
+`StorageFS.WithQuota` 注入 `scopeQuotaTracker`（`QuotaTracker` 的卷级 `pkg/quota.Scope`
+适配器）：本地 staging 写入前 `TryReserve(size)` + `Commit(size)` 入账，上传完成/失败后
+`ReleaseUsage(size)` 从 committed 扣减——**中间态只依赖本地 FS**（用户硬约束）且占用被
+记账。
+
+> **当前为记账形态（无限额）**：`Scope(0)` 只记录 staging 占用、不设上限；per-owner 分桶与
+> 限额（防本地磁盘占满）是 **P5 演进**（`BaidupcsFSFactory` 签名无任务 owner 上下文，与
+> mesh 工厂同构——需要时扩展签名或改卷级限额配置）。
+
+### fail-closed 语义
+
+- `volumes[]` 配 `type=baidupcs` 的卷需 `extra.bduss` 或 `extra.binary_path` 至少一个非空
+  ——否则**启动即拒绝**（Validate 层，fail-closed：二进制优先与库兜底都无可用执行路径）。
+- Storage 构造失败（凭据/客户端错误）→ 装配层**不注入**并告警：`kind=baidupcs` 的远端
+  以 `syncexec.ErrBaidupcsNotWired` 明确失败，**绝不回落 direct**（回落会让「已声明本机卷」
+  的配置静默走远程 HTTP，破坏卷寻址语义——与 mesh 同一原则）。
+- `remote.volume` 未装配（`volumes[].name` 不匹配或非 baidupcs 类型）→ 创建/执行任务明确报错。
+
+### 疑虑清单闭环
+
+- **List 单层过滤（P3 疑虑，已修）**：`Storage.List` 由「Stat 包装（单对象）」改为**真目录
+  单层列举**（库 `FilesDirectoriesList`，含目录条目）；`Storage.Stat` 走库
+  `FilesDirectoriesMeta`（isdir/mtime/size）。`StorageFS.ListDir` 单层透传，树遍历由
+  `pkg/sync` 引擎自递归。
+- **quota 卷级记账（P5 per-owner）**：如上，当前卷级 Scope(0) 记账；per-owner 分桶与限额留 P5。
+- **`Storage.Copy` = Get + Put 组合**（P3 遗留缺口补齐）：`StorageFS.Rename`（Copy+Delete
+  两步）可走通，但整文件下载再上传（非服务端直拷）。真实百度网盘有 COPY API，将来 Adapter
+  扩展可优化为服务端直拷。
+
+## 用户自有卷（User Volumes，U5）
+
+百度网盘还可作为**用户自有卷**（per-owner）使用：每个用户经管理 API 动态创建自己的网盘卷
+（`<storage_root>/<owner>/meta/volume/<name>.json` 持久化，重启自动恢复），与系统盘
+（`volumes[]` 静态配置）互补。
+
+### 管理 API（仅 owner）
+
+```
+POST   /api/volumes/user           创建（JSON: {name, type, capacity, extra}）
+GET    /api/volumes/user           列出我的卷
+DELETE /api/volumes/user?name=<n>  删除（活跃同步任务引用中 → 409）
+```
+
+- `type` 必须已注册后端（`baidupcs` 即本插件）；`extra` 同系统盘（bduss/baidu_root/
+  binary_path/local_root）。
+- 容量独立（`vol_capacity`，不计 owner 配额）；仅外部类型（本地卷归系统盘）。
+- 跨 owner 访问 → 404 防枚举；删除运行中引用 → 409。
+
+### 同步任务寻址
+
+- `sync_remotes[]` 配 `{ name: "<用户卷名>", kind: "baidupcs", volume: "<用户卷名>" }`；
+  创建任务时 `remote` 字段 = 该 remote 名。
+- 任务 `Owner` 必须匹配卷 `Owner`（跨 owner 拒绝，404 语义）——装配层注入的 owner 归属
+  校验闭包（系统盘名对所有用户开放，用户卷名仅归属用户）。

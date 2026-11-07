@@ -100,18 +100,33 @@ func findFilesNamedLocal(t *testing.T, root, name string) []string {
 	return found
 }
 
-// sclientArgs 组装 sclient 子进程的全局 flag + 子命令参数。
-//   - --config 指向**不存在**的路径：隔离本机 ~/.config/sproxy/sclient.yaml
-//     （--server 挡不住用户配置里的 access_key 等）；
-//   - AK/SK/ID 三件套：--access-key 非空即令 clientfactory 走 client.WithTunnel →
+// sclientArgs 组装 sclient 子进程的全局 flag + 子命令参数（统一 context）：
+//   - --config 指向临时 config.yaml（含 env 段 server_url + user 段凭据），隔离本机配置；
+//   - AK/SK/ID 三件套写入 config.yaml 的 user 段 → clientfactory 走 client.WithTunnel →
 //     加密隧道 localMux 路径（服务端 /tunnel 内层已注册文件面路由）。
 func sclientArgs(baseURL, tmpDir string, args ...string) []string {
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err == nil {
+		body := fmt.Sprintf(`apiVersion: sclient/v1
+kind: Config
+current-context: e2e
+environments:
+  - name: e2e
+    server_url: %q
+users:
+  - name: e2e
+    access_key: %q
+    access_key_secret: %q
+    access_key_id: %q
+contexts:
+  - name: e2e
+    environment: e2e
+    user: e2e
+`, baseURL, e2eAK, e2eSK, e2eID)
+		_ = os.WriteFile(cfgPath, []byte(body), 0o600)
+	}
 	prefix := []string{
-		"--config", filepath.Join(tmpDir, "sclient.yaml"),
-		"--server", baseURL,
-		"--access-key", e2eAK,
-		"--access-key-secret", e2eSK,
-		"--access-key-id", e2eID,
+		"--config", cfgPath,
 	}
 	return append(prefix, args...)
 }

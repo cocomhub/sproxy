@@ -33,6 +33,12 @@ const (
 	oidcStateTTL = 10 * time.Minute
 	// oidcMaxStateEntries 是 state 内存表上限（防无限膨胀）。
 	oidcMaxStateEntries = 4096
+
+	// authSchemeBearer 是 Authorization 头的 Bearer 前缀（认证/token 提取共享）。
+	authSchemeBearer = "Bearer "
+	// msgOIDCLoginUnavailable / msgOIDCLoginFail 是 OIDC 登录面错误响应文案。
+	msgOIDCLoginUnavailable = "oidc 登录暂不可用"
+	msgOIDCLoginFail        = "oidc 登录失败"
 )
 
 // OIDCAuthenticator 是 OIDC 外部认证器（Authorization Code + PKCE）。
@@ -190,8 +196,8 @@ func (a *OIDCAuthenticator) Routes() []authn.ExternalAuthRoute {
 func (a *OIDCAuthenticator) Authenticate(ctx context.Context, r *http.Request) (*authn.Principal, error) {
 	// Bearer id_token 路径：非 Bearer 头快速失败（不写响应，R4-I3）。
 	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") && auth != "Bearer " {
-		token := strings.TrimPrefix(auth, "Bearer ")
+	if strings.HasPrefix(auth, authSchemeBearer) && auth != "Bearer " {
+		token := strings.TrimPrefix(auth, authSchemeBearer)
 		return a.authenticateIDToken(ctx, token)
 	}
 	// 会话 cookie 路径。
@@ -260,18 +266,18 @@ func (a *OIDCAuthenticator) handleLogin(w http.ResponseWriter, r *http.Request) 
 	prov, err := a.provider(r.Context())
 	if err != nil {
 		a.logger.Warn("oidc: login 失败（discovery 不可用）", "error", err.Error())
-		http.Error(w, "oidc 登录暂不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgOIDCLoginUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	verifier, err := randomString(64)
 	if err != nil {
-		http.Error(w, "oidc 登录暂不可用", http.StatusInternalServerError)
+		http.Error(w, msgOIDCLoginUnavailable, http.StatusInternalServerError)
 		return
 	}
 	challenge := sha256.Sum256([]byte(verifier))
 	state, err := randomString(32)
 	if err != nil {
-		http.Error(w, "oidc 登录暂不可用", http.StatusInternalServerError)
+		http.Error(w, msgOIDCLoginUnavailable, http.StatusInternalServerError)
 		return
 	}
 	a.mu.Lock()
@@ -283,7 +289,7 @@ func (a *OIDCAuthenticator) handleLogin(w http.ResponseWriter, r *http.Request) 
 
 	u, err := url.Parse(prov.authURL)
 	if err != nil {
-		http.Error(w, "oidc 登录暂不可用", http.StatusInternalServerError)
+		http.Error(w, msgOIDCLoginUnavailable, http.StatusInternalServerError)
 		return
 	}
 	q := u.Query()
@@ -335,7 +341,7 @@ func (a *OIDCAuthenticator) handleCallback(w http.ResponseWriter, r *http.Reques
 	prov, err := a.provider(r.Context())
 	if err != nil {
 		a.logger.Warn("oidc: 回调失败（discovery 不可用）", "error", err.Error())
-		http.Error(w, "oidc 登录暂不可用", http.StatusServiceUnavailable)
+		http.Error(w, msgOIDCLoginUnavailable, http.StatusServiceUnavailable)
 		return
 	}
 	// 用 verifier 换 token（Authorization Code + PKCE）。
@@ -348,48 +354,48 @@ func (a *OIDCAuthenticator) handleCallback(w http.ResponseWriter, r *http.Reques
 	form.Set("code_verifier", a.takeVerifier(state))
 	tokenReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, prov.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		http.Error(w, "oidc 登录失败", http.StatusInternalServerError)
+		http.Error(w, msgOIDCLoginFail, http.StatusInternalServerError)
 		return
 	}
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokenResp, err := prov.client.Do(tokenReq)
 	if err != nil {
 		a.logger.Warn("oidc: token 交换失败", "error", err.Error())
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, tokenResp.Body)
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	var tok struct {
 		IDToken string `json:"id_token"`
 	}
 	if derr := json.NewDecoder(io.LimitReader(tokenResp.Body, 1<<20)).Decode(&tok); derr != nil || tok.IDToken == "" {
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	claims, err := a.verify(r.Context(), tok.IDToken)
 	if err != nil {
 		a.logger.Warn("oidc: id_token 校验失败", "error", err.Error())
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	sub, _ := claims["sub"].(string)
 	if sub == "" {
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	owner, err := a.ownerFromClaims(claims, sub)
 	if err != nil {
-		http.Error(w, "oidc 登录失败", http.StatusUnauthorized)
+		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
 	}
 	ak := oidcAK(sub)
 	if err := a.sess.Issue(w, ak, owner); err != nil {
-		http.Error(w, "oidc 登录失败", http.StatusInternalServerError)
+		http.Error(w, msgOIDCLoginFail, http.StatusInternalServerError)
 		return
 	}
 	// 登录成功：审计 + 跳回 Web UI。

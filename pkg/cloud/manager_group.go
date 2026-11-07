@@ -21,29 +21,16 @@ import (
 
 // CreateGroup 创建下载任务组。
 // owner 是请求认证派生的组归属，子任务写入同 owner（组级多租户隔离）。
-// 校验文件名冲突，创建子任务。
-func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry, owner string) (*CloudTaskGroup, error) {
+// 校验文件名冲突，创建子任务。params 透传组级四参（transfer/save/download_local/integrity_must_pass）——
+// 组内每个子任务与单条/batch 同语义（服务端组创建曾硬编码 Save:true + 无 transfer）。
+func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Entry, owner string, params TaskParams) (*CloudTaskGroup, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("at least one URL is required")
 	}
 
 	// 校验文件名冲突
-	filenameSet := make(map[string]int)
-	for _, entry := range urls {
-		fn, err := cloudfilename.ResolveFilename(entry)
-		if err != nil {
-			return nil, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
-		}
-		filenameSet[fn]++
-	}
-	var conflicts []string
-	for fn, count := range filenameSet {
-		if count > 1 {
-			conflicts = append(conflicts, fn)
-		}
-	}
-	if len(conflicts) > 0 {
-		return nil, fmt.Errorf("filename conflicts detected: %s; please specify unique filenames via request", strings.Join(conflicts, ", "))
+	if err := validateGroupFilenameConflicts(urls); err != nil {
+		return nil, err
 	}
 
 	groupID := newGroupID()
@@ -60,80 +47,12 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 		ExpiresAt:  now.Add(m.config.TaskTTL),
 	}
 
-	var taskIDs []string
-	var newTaskIDs []string  // 本次新建的任务（回滚时删除）
-	var absorbedIDs []string // 去重吸收的既有任务（回滚时清除组归属但不删除）
-	seen := make(map[string]bool, len(urls))
-	// rollback 在循环中途失败时清理"本次新建"的任务与存储预留，防止泄漏 pending 任务。
-	// 去重吸收的既有独立任务不属于本组创建，回滚时不得删除（否则误删用户已有下载）。
-	rollback := func() {
-		// 先清除被吸收任务的组归属，避免悬挂引用到不存在的组
-		for _, id := range absorbedIDs {
-			var snap *CloudTask
-			m.mu.Lock()
-			t, ok := m.tasks[id]
-			if ok {
-				t.GroupID = ""
-				c := *t
-				c.account = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
-				snap = &c
-			}
-			m.mu.Unlock()
-			if ok {
-				_ = m.saveTask(snap)
-			}
-		}
-		for _, newTaskID := range slices.Backward(newTaskIDs) {
-			if err := m.DeleteTask(newTaskID, owner); err != nil {
-				m.logger.Warn("failed to rollback group task", "task_id", newTaskID, "error", err)
-			}
-		}
-	}
-	for _, entry := range urls {
-		fn, err := cloudfilename.ResolveFilename(entry)
-		if err != nil {
-			rollback()
-			return nil, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
-		}
-		// 该 URL 已有**对请求者可见**的活跃任务 → 本次是去重吸收既有任务，回滚时不删除。
-		// 跨 owner 的同 URL 任务不可见，不吸收（各自独立下载，防组归属性混乱）。
-		absorbed := m.findByURL(entry.URL, owner) != nil
-
-		task, err := m.CreateTask("url", entry.URL, fn, -1, owner)
-		if err != nil {
-			rollback()
-			return nil, fmt.Errorf("create task for %s: %w", entry.URL, err)
-		}
-		// 更新存储任务（而非 CreateTask 返回的副本）的 GroupID。
-		// CreateTask 去重命中时返回的是快照副本，只改副本会导致内存与磁盘不一致。
-		m.mu.Lock()
-		stored, ok := m.tasks[task.ID]
-		if !ok {
-			m.mu.Unlock()
-			rollback()
-			return nil, fmt.Errorf("task disappeared during group creation: %s", task.ID)
-		}
-		// 去重命中：同组重复 URL 或已属其他组的活跃任务不允许重复入组
-		if stored.GroupID != "" && stored.GroupID != groupID {
-			m.mu.Unlock()
-			rollback()
-			return nil, fmt.Errorf("duplicate URL %s already belongs to group %s", entry.URL, stored.GroupID)
-		}
-		if seen[stored.ID] {
-			m.mu.Unlock()
-			rollback()
-			return nil, fmt.Errorf("duplicate URL in group: %s", entry.URL)
-		}
-		stored.GroupID = groupID
-		m.mu.Unlock()
-		_ = m.saveTask(stored)
-		taskIDs = append(taskIDs, stored.ID)
-		if absorbed {
-			absorbedIDs = append(absorbedIDs, stored.ID)
-		} else {
-			newTaskIDs = append(newTaskIDs, stored.ID)
-		}
-		seen[stored.ID] = true
+	taskIDs, newTaskIDs, absorbedIDs, err := m.createGroupTasks(urls, owner, groupID, params)
+	if err != nil {
+		// rollback 在循环中途失败时清理"本次新建"的任务与存储预留，防止泄漏 pending 任务。
+		// 去重吸收的既有任务不属于本组创建，回滚时不得删除（否则误删用户已有下载）。
+		m.rollbackGroupTasks(absorbedIDs, newTaskIDs, owner)
+		return nil, err
 	}
 
 	group.TaskIDs = taskIDs
@@ -154,9 +73,123 @@ func (m *CloudDownloadManager) CreateGroup(name string, urls []cloudfilename.Ent
 	return group, nil
 }
 
-// SubmitAndStartGroup 创建组并启动所有子任务下载。
-func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string) (*CloudTaskGroup, error) {
-	group, err := m.CreateGroup(name, urls, owner)
+// createGroupTasks 为组逐 URL 创建子任务（可能去重吸收既有任务），并区分
+// 「本次新建」与「被吸收」两类任务 ID 供回滚使用。err 时返回已累积的分类列表，
+// 由调用方按列表回滚（新建删除 / 吸收仅清除组归属）。
+func (m *CloudDownloadManager) createGroupTasks(urls []cloudfilename.Entry, owner, groupID string, params TaskParams) (taskIDs, newTaskIDs, absorbedIDs []string, err error) {
+	seen := make(map[string]bool, len(urls))
+	for _, entry := range urls {
+		task, absorbed, err := m.createGroupEntry(entry, owner, groupID, seen, params)
+		if err != nil {
+			return taskIDs, newTaskIDs, absorbedIDs, err
+		}
+		taskIDs = append(taskIDs, task.ID)
+		if absorbed {
+			absorbedIDs = append(absorbedIDs, task.ID)
+		} else {
+			newTaskIDs = append(newTaskIDs, task.ID)
+		}
+	}
+	return taskIDs, newTaskIDs, absorbedIDs, nil
+}
+
+// rollbackGroupTasks 清理组创建中途失败产生的任务：先清除被吸收任务的组归属
+// （避免悬挂引用到不存在的组），再倒序删除本次新建的任务。
+func (m *CloudDownloadManager) rollbackGroupTasks(absorbedIDs, newTaskIDs []string, owner string) {
+	// 先清除被吸收任务的组归属，避免悬挂引用到不存在的组
+	for _, id := range absorbedIDs {
+		var snap *CloudTask
+		m.mu.Lock()
+		t, ok := m.tasks[id]
+		if ok {
+			t.GroupID = ""
+			c := *t
+			c.account = nil // 内部拷贝不携带运行时配额句柄（saveTask json 亦不含）
+			snap = &c
+		}
+		m.mu.Unlock()
+		if ok {
+			_ = m.saveTask(snap)
+		}
+	}
+	for _, newTaskID := range slices.Backward(newTaskIDs) {
+		if err := m.DeleteTask(newTaskID, owner); err != nil {
+			m.logger.Warn("failed to rollback group task", "task_id", newTaskID, "error", err)
+		}
+	}
+}
+
+// validateGroupFilenameConflicts 校验所有 URL 解析出的文件名是否唯一，重复返回冲突错误。
+func validateGroupFilenameConflicts(urls []cloudfilename.Entry) error {
+	filenameSet := make(map[string]int)
+	for _, entry := range urls {
+		fn, err := cloudfilename.ResolveFilename(entry)
+		if err != nil {
+			return fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
+		}
+		filenameSet[fn]++
+	}
+	var conflicts []string
+	for fn, count := range filenameSet {
+		if count > 1 {
+			conflicts = append(conflicts, fn)
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("filename conflicts detected: %s; please specify unique filenames via request", strings.Join(conflicts, ", "))
+	}
+	return nil
+}
+
+// createGroupEntry 为组创建一个 URL 条目对应的子任务（可能去重吸收既有任务）。
+// seen 用于同组内 URL 去重；err 时由调用方回滚。返回存储任务与是否吸收既有任务（absorbed）。
+// params 透传组级四参（transfer/save/download_local/integrity_must_pass）：组内每个子任务与单条/batch 同语义
+// （服务端组创建曾硬编码 Save:true + 无 transfer，组链三参最后一跳丢失——修复后
+// --transfer-volume/--save 对组真实生效）。
+func (m *CloudDownloadManager) createGroupEntry(entry cloudfilename.Entry, owner, groupID string, seen map[string]bool, params TaskParams) (*CloudTask, bool, error) {
+	fn, err := cloudfilename.ResolveFilename(entry)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid filename for %s: %w", entry.URL, err)
+	}
+	// 该 URL 已有**对请求者可见**的活跃任务，且四参与本次一致 → 本次是去重吸收既有任务，
+	// 回滚时不删除（参数不匹配时 CreateTask 会新建，须按新建回滚删除——C1 I-1：吸收
+	// 分类必须与 CreateTask 内部的 sameTaskParams 判定一致，否则参数不匹配的重建任务
+	// 被误归 absorbed，回滚只清 GroupID 不删除 → 孤儿 pending 泄漏 1GiB 占位）。
+	absorbed := m.findByURL(entry.URL, owner, params) != nil
+
+	task, err := m.CreateTask("url", entry.URL, fn, -1, owner, params)
+	if err != nil {
+		return nil, false, fmt.Errorf("create task for %s: %w", entry.URL, err)
+	}
+	// 更新存储任务（而非 CreateTask 返回的副本）的 GroupID。
+	// CreateTask 去重命中时返回的是快照副本，只改副本会导致内存与磁盘不一致。
+	m.mu.Lock()
+	stored, ok := m.tasks[task.ID]
+	if !ok {
+		m.mu.Unlock()
+		return nil, false, fmt.Errorf("task disappeared during group creation: %s", task.ID)
+	}
+	// 去重命中：同组重复 URL 或已属其他组的活跃任务不允许重复入组
+	if stored.GroupID != "" && stored.GroupID != groupID {
+		m.mu.Unlock()
+		return nil, false, fmt.Errorf("duplicate URL %s already belongs to group %s", entry.URL, stored.GroupID)
+	}
+	if seen[stored.ID] {
+		m.mu.Unlock()
+		return nil, false, fmt.Errorf("duplicate URL in group: %s", entry.URL)
+	}
+	stored.GroupID = groupID
+	m.mu.Unlock()
+	_ = m.saveTask(stored)
+	seen[stored.ID] = true
+	return stored, absorbed, nil
+}
+
+// SubmitAndStartGroup 创建组并启动所有子任务下载。params 透传组级四参
+// （transfer/save/download_local）——与单条/batch 同语义（C1 修复：此前服务端组
+// 创建硬编码 Save:true + 无 transfer，组链三参在最后一跳被丢弃）。
+func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfilename.Entry, owner string, params TaskParams) (*CloudTaskGroup, error) {
+	group, err := m.CreateGroup(name, urls, owner, params)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +202,8 @@ func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfile
 		m.mu.Lock()
 		task, exists := m.tasks[taskID]
 		if exists && task.Status == "pending" && !m.running[taskID] {
-			m.running[taskID] = true
+			m.markRunningLocked(taskID)
+			task.Submitted = true // C1：排队中也要可恢复（见 CloudTask.Submitted）
 		} else {
 			task = nil
 		}
@@ -177,6 +211,7 @@ func (m *CloudDownloadManager) SubmitAndStartGroup(name string, urls []cloudfile
 		if task == nil {
 			continue
 		}
+		_ = m.saveTask(task)
 		m.wg.Add(1)
 		go m.executeDownload(context.Background(), task)
 	}

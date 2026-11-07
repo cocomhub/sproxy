@@ -42,6 +42,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 )
@@ -103,6 +104,9 @@ var (
 	ErrInvalidAK = errors.New("accesskey: invalid access key")
 	// ErrRegistrationRequiresSecret 注册必须提供 sk 或 totpSecret 之一（不能双 nil）。
 	ErrRegistrationRequiresSecret = errors.New("accesskey: registration requires sk or totpSecret")
+	// ErrReservedOwner 表示 owner（租户键）为保留租户名（如审计租户 `audit`）⇒ 拒绝登记。
+	// 保留名清单见 ReservedOwnerNames（设计 docs/designs/2026-10-19-audit-service.md §5.6）。
+	ErrReservedOwner = errors.New("accesskey: reserved owner name")
 )
 
 // Meta 是 SK 条目的附加元信息（审计 / 展示用）。
@@ -370,6 +374,20 @@ func hexSegmentOK(s string) (int, bool) {
 	return n, true
 }
 
+// ReservedOwnerNames 是**租户键（AK 的 Owner，即租户名）**的保留名：用户/注册/凭据管理
+// 一律不得占用。目前唯一保留名是**审计租户 `audit`**（设计
+// docs/designs/2026-10-19-audit-service.md §5.6）：审计条目按租户隔离，其租户目录
+// `<卷根>/audit/` 与用户租户**同一命名空间**（参与 ListOwners / 配额 / 巡检）⇒ 若可被
+// 注册占用，攻击者即可劫持/污染审计空间。内部装配（server 启动建立审计空间）**不经**
+// UpsertAK 路径创建该租户，故在此拒绝不影响功能。
+var ReservedOwnerNames = []string{"audit"}
+
+// IsReservedOwner 报告 owner（租户键）是否为保留名。空值**不**算保留（由调用方按各自
+// 语义拒绝空值），避免把「未设置」误报为「保留」。
+func IsReservedOwner(owner string) bool {
+	return slices.Contains(ReservedOwnerNames, owner)
+}
+
 // IsValidAK 判断 ak 是否为合法 AccessKey：
 //   - 前缀 ∈ AllowedAKPrefixes（当前唯一可接受 ak-）——白名单回溯，未来新类型前缀
 //     加入白名单即自动放行；
@@ -384,35 +402,42 @@ func IsValidAK(ak string) bool {
 		if !strings.HasPrefix(ak, p) {
 			continue
 		}
-		rest := strings.TrimPrefix(ak, p)
-		if rest == "" {
-			return false
-		}
-		idx := strings.LastIndex(rest, "-")
-		var hexPart, meshPart string
-		if idx < 0 {
-			// 无 mesh 段：整个 rest 即随机 hex 段。
-			hexPart = rest
-		} else {
-			hexPart = rest[idx+1:]
-			meshPart = rest[:idx]
-			if meshPart == "" {
-				// "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
-				return false
-			}
-		}
-		if _, ok := hexSegmentOK(hexPart); !ok {
-			return false
-		}
-		if meshPart == "" {
-			return true // 无 mesh 段
-		}
-		for i := 0; i < len(meshPart); i++ {
-			if !strings.ContainsRune(meshCharset, rune(meshPart[i])) {
-				return false
-			}
-		}
-		return true
+		return validAKRest(strings.TrimPrefix(ak, p))
 	}
 	return false
+}
+
+// validAKRest 校验去掉前缀后的 AK 剩余部分（随机 hex 段 + 可选 mesh 段）：
+//   - 末尾随机 hex 段为 32hex（标准）或 16hex（legacy），且全为 hex 字符；
+//   - mesh 段只允许 [0-9A-Za-z_-] 字符；
+//   - "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
+func validAKRest(rest string) bool {
+	if rest == "" {
+		return false
+	}
+	idx := strings.LastIndex(rest, "-")
+	var hexPart, meshPart string
+	if idx < 0 {
+		// 无 mesh 段：整个 rest 即随机 hex 段。
+		hexPart = rest
+	} else {
+		hexPart = rest[idx+1:]
+		meshPart = rest[:idx]
+		if meshPart == "" {
+			// "ak--<hex>" 双连字符歧义 → 拒绝（空 mesh 应写作 ak-<hex>）。
+			return false
+		}
+	}
+	if _, ok := hexSegmentOK(hexPart); !ok {
+		return false
+	}
+	if meshPart == "" {
+		return true // 无 mesh 段
+	}
+	for i := 0; i < len(meshPart); i++ {
+		if !strings.ContainsRune(meshCharset, rune(meshPart[i])) {
+			return false
+		}
+	}
+	return true
 }

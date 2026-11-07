@@ -3,8 +3,29 @@
 
 // 主逻辑：文件列表、CRUD、批量操作、导航、UI 工具。
 // 依赖 sclient/sha256.js, sclient/*, cloudfilename.js, upload.js（先加载）。
-// global: setVolumeContext（upload.js，上传「卷」上下文 setter；本文件三处经 typeof 守卫引用：
-//   populateUploadVolumeSelect 回落、upload-volume change、file-input change）
+// global: setVolumeContext / currentVolume（upload.js，上传「卷」上下文 setter；本文件经 typeof 守卫引用：
+//   populateVolumeSelect 回落、volume-select change、DOMContentLoaded 恢复）
+// global: uploadFiles / checkResumableUploads / resumeUpload（upload.js，上传执行与断点续传入口：
+//   uploadFiles 由 file-input change 调用、checkResumableUploads 在 DOMContentLoaded 初始化与
+//   上传完成后调用、resumeUpload 由 transferResume 经 typeof 守卫调用）
+// global: volManageFormHtml / volManageListHtml / composeNestedTarget / composeCapacityText（vol-manage-format.js，「卷管理」tab 渲染 + 容量单位拼接）
+// global: auditRowsHtml（audit-rows-format.js，任务「审计」弹窗行渲染；经 showTaskAudit 调用）
+// global: videoPlayerModalHtml（video-player.js，视频播放弹窗 HTML；经 showVideoPlayer 调用）
+// global: trashTableHtml（trash-format.js，回收站表渲染）
+// global: notifyTableHtml（notify-format.js，通知表渲染）
+// global: credentialsPanelHtml（credentials-format.js，凭据面板渲染）
+// global: credAddBody（credentials-format.js，凭据新增请求体构造：credAdd 经 coreRequest 提交）
+// global: secretsPanelHtml / secretExportValue（secrets-format.js，密钥面板渲染与导出取值）
+// global: syncConflictsHtml / conflictResolveQuery（sync-conflicts-format.js，冲突表渲染与解决请求路径）
+// global: auditExportBlob / auditExportFilename / auditExportRows / notifyTestSummary（audit-export.js，审计导出的 blob/文件名/统计）
+// global: previewImageUrl / previewOriginalUrl（image-preview.js，图片预览 URL 派生）
+// global: volumeOpsBarHtml / volumeOpLabel / volumeOpQuery（volume-ops.js，卷操作按钮条与操作文案/请求路径）
+// global: clearCancelledUpload / pauseUploadSession / removeUploadSession / setTransferStore（upload.js，
+//   传输通道条目的取消/暂停/移除与传输 store 注入；setTransferStore 经 typeof 守卫调用）
+//
+// 说明：以上均为**跨文件隐式全局**（index.html script 顺序保证提供方先于 app.js 加载，调用点
+// 运行期解引用）。新增/改名任何一项都必须同步本清单——`node --check` 不做跨文件符号解析，
+// 漏改会在运行期才炸（见 CLAUDE.md「跨文件隐式全局陷阱」记录）。
 
 const BASE = '';
 // SproxySig 请求签名认证（AccessKey/AccessKeySecret/AccessKeyID）。Secret 只存本端计算签名，
@@ -23,10 +44,34 @@ if (!sessionStorage.getItem('sproxy_access_key') && !!accessKeyID) {
   accessKeyID = '';
   sessionStorage.removeItem('sproxy_access_key_id');
 }
-let currentSubdir = localStorage.getItem('sproxy_subdir') || '';
+// 卷存储键：必须**在最前**声明（const TDZ——VOLUME_STORE_KEY 在 savedSubdirFor 之前被引用
+// 会抛「Cannot access before initialization」，实测整脚本中断 ⇒ 下拉/列表全空）。
+const VOLUME_STORE_KEY = 'sproxy_volume';
+// currentSubdir 初始值：**按当前工作卷恢复**（用户裁定 2026-10-27 各卷独立记忆最新路径）。
+// 各卷**各自**记忆最新路径：有记录 → 用记录；无记录 → 卷根（''）。**不回落**到全局键——
+// 否则「在 A 卷进 sub/，切到从未来过的 B 卷」会错误地停在 B 卷的 sub/ 目录。
+// 无卷（全部卷 / auto）才用全局键。
+const SUBDIR_STORE_KEY = 'sproxy_subdir';
+const SUBDIR_PER_VOL_PREFIX = 'sproxy_subdir_vol_';
+function savedSubdirFor(vol) {
+  if (vol) {
+    const v = localStorage.getItem(SUBDIR_PER_VOL_PREFIX + vol);
+    return v === null ? '' : v;
+  }
+  return localStorage.getItem(SUBDIR_STORE_KEY) || '';
+}
+let currentSubdir = savedSubdirFor(localStorage.getItem(VOLUME_STORE_KEY) || '');
 let _searchActive = false;
 let _currentOffset = 0;
 let _hasMore = false;
+// 当前工作卷（工具栏「卷」下拉 #volume-select）——**单一卷上下文**（用户裁定 2026-10-27）：
+// 同时决定 ① 文件列表过滤（?volume=）② 上传目标卷 ③ 卷内文件操作回退卷。
+// 空 = 全部卷 / auto（不发送 ?volume=，零回归）。选择持久化到 localStorage——修复用户实测
+// 缺陷：「选 baidu 卷进入某目录后刷新页面，卷信息丢失但目录还在 ⇒ 列表显示为空」。
+let _volumeFilter = localStorage.getItem(VOLUME_STORE_KEY) || '';
+// _volumeRestorePending：启动时从 localStorage 恢复的卷需等 /api/volumes 确认「仍可见」后再
+// 决定是否带 ?volume= 请求列表（否则卷已删/无权限时会得到一个空列表且无从解释）。
+let _volumeRestorePending = _volumeFilter !== '';
 const PAGE_LIMIT = 500;
 
 // 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
@@ -123,7 +168,7 @@ function saveAccessKeys() {
   // F6：手动保存的 AK 与当前已存 AK 不一致（切换账号）时，清空 skey-id（accessKeyID）
   // ——否则 session 登录遗留的 skey-id= 会精确锁定一个不属于当前 AK 的 SK 条目，
   // 后续请求静默 401（历史缺陷）。登录流程写入的 AK 与此处一致，不受影响。
-  var prevAk = null;
+  let prevAk = null;
   try { prevAk = sessionStorage.getItem('sproxy_access_key'); } catch (e) { /* ignore */ }
   if (accessKey && prevAk && accessKey !== prevAk) {
     accessKeyID = '';
@@ -139,6 +184,9 @@ function saveAccessKeys() {
     sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
   } catch (e) { /* ignore */ }
   showToast('AccessKey 已保存', 'success');
+  // 凭据变化后必须重算派生数据（缺陷修复，2026-10-21）：新 AK 可能可见不同的卷/审计范围；
+  // 与登录成功走同一入口（卷下拉 + 事件流 + 断点续传 + 打开着的监控 tab + 列表）。
+  if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
 }
 
 // applyWebLoginKeys：Web 登录成功（login.js）后统一刷新本页凭据态——
@@ -159,36 +207,80 @@ function applyWebLoginKeys(ak, secret, id) {
   try {
     sclientTransport.configure({ accessKey: accessKey, accessKeySecret: accessKeySecret, accessKeyID: accessKeyID, mode: undefined, tunnelDefault: undefined });
   } catch (e) { /* ignore */ }
+  // 统一刷新入口（登录流程可能直接调本函数而不经 login.js 的按钮路径）——幂等。
+  if (typeof refreshAfterAuth === 'function') void refreshAfterAuth();
 }
 
-// --- 卷：上传下拉（工具栏「卷」）---
-// 选项来源 /api/volumes（owner 可见卷）；加载失败（无凭据/未授权）时下拉保持 auto。
-function populateUploadVolumeSelect(vols) {
-  const sel = document.getElementById('upload-volume');
+// --- 卷：工具栏「卷」下拉（#volume-select）——单一卷上下文（用户裁定 2026-10-27）---
+// 选项来源 /api/volumes（owner 可见卷，含 secretdata/egress 等加密卷）。选中某卷后
+// ① refreshList({volume}) 切到该卷明文目录 ② 上传目标卷同步为同卷（currentVolume）
+// ③ 卷内文件操作回退卷（行卷优先）。首项「全部卷 / auto」（value=""）= 不发送 ?volume=
+// （零回归：未过滤时列表为全部可见卷聚合，上传为 auto 路由）。
+// 选择经 localStorage 持久化（VOLUME_STORE_KEY）——刷新/重开页面后保留（用户裁定）。
+function populateVolumeSelect(vols) {
+  const sel = document.getElementById('volume-select');
   if (!sel) return;
-  const cur = sel.value || '';
+  const cur = sel.value || _volumeFilter;
   while (sel.options.length > 1) sel.remove(1);
   for (const v of vols || []) {
-    if (!v || !v.name) continue;
+    if (!(v?.name)) continue;
     const opt = document.createElement('option');
     opt.value = v.name;
     opt.textContent = v.name;
     sel.appendChild(opt);
   }
-  // 恢复原选择；若原选择已不在可见卷内则回落 auto。
+  // 恢复原选择；原选择已不在可见卷内则回落「全部卷 / auto」。
   let found = false;
-  for (let i = 0; i < sel.options.length; i++) {
-    if (sel.options[i].value === cur) { found = true; break; }
+  for (const opt of sel.options) {
+    if (opt.value === cur) { found = true; break; }
   }
   sel.value = found ? cur : '';
+  // 单一卷上下文：列表过滤 + 上传目标同步（幂等；空串 = auto）。
+  // 持久化选择被卷确认不可见（已删/无权限）时，同步清掉 localStorage（避免下次刷新重蹈）。
+  if (!found && cur !== '') {
+    localStorage.removeItem(VOLUME_STORE_KEY);
+    _volumeFilter = '';
+  } else {
+    _volumeFilter = sel.value;
+  }
   if (typeof setVolumeContext === 'function') setVolumeContext(sel.value);
 }
 
-async function initUploadVolumeSelect() {
+async function initVolumeSelect() {
   try {
     const data = await sc.files.volumes();
-    populateUploadVolumeSelect(data && data.volumes);
-  } catch (e) { /* 无凭据/未授权/无卷 API：保持 auto，不破坏无认证浏览 */ }
+    populateVolumeSelect(data?.volumes);
+  } catch (e) { /* 无凭据/未授权/无卷 API：保持空（全部卷 / auto），不破坏无认证浏览 */ }
+  _volumeRestorePending = false;
+}
+
+// refreshVolumeSelect 重新拉取 /api/volumes 并刷新「卷」下拉。
+//
+// 为什么需要显式刷新（缺陷修复，2026-10-21）：下拉只在 DOMContentLoaded 时初始化一次
+// （见文件末尾 `initVolumeSelect()` 调用点）。登录前那次 `/api/volumes` 因无凭据 401 ⇒ 下拉
+// 只剩「全部卷 / auto」；登录成功后若只 `refreshList()`，下拉**永不重试** ⇒ 运行时创建的卷
+// （如 secretdata `vault`）在下拉里看不到（用户实测）。
+async function refreshVolumeSelects() {
+  await initVolumeSelect();
+}
+
+// refreshAfterAuth 是「凭据生效后」的唯一刷新入口（登录成功 / 会话密钥变更后调用）：
+// 先刷新卷下拉（新凭据可能多出可见卷），再刷新文件列表（否则列表仍按旧的空卷过滤请求）。
+// 供 login.js 调用；未登录路径不受影响（本函数只在凭据建立后执行）。
+async function refreshAfterAuth() {
+  // ① 卷下拉（本函数服务的核心缺陷点）
+  await refreshVolumeSelects();
+  // ② 事件流：登录前 401 会停止且不再重连 ⇒ 必须显式重启（同类缺陷）。
+  if (typeof eventsRestartAfterAuth === 'function') eventsRestartAfterAuth();
+  // ③ 断点续传探测：登录前因无凭据失败（静默隐藏），登录后重探才能显示可续传会话。
+  if (typeof checkResumableUploads === 'function') void checkResumableUploads();
+  // ④ 监控弹窗若开着：重拉**当前活动 tab**（登录前打开会渲染失败占位且不再重试）。
+  const statsModal = document.getElementById('stats-modal');
+  if (statsModal && statsModal.style.display !== 'none' && typeof statsRefresh === 'function') {
+    statsRefresh();
+  }
+  // ⑤ 文件列表（依赖新凭据；放最后，避免与下拉刷新竞争同一渲染路径）。
+  await refreshList();
 }
 
 // --- UI 工具 ---
@@ -217,15 +309,28 @@ function copyChecksum(cs) {
 }
 
 // --- 文件列表 ---
-async function refreshList() {
+async function refreshList(opts) {
+  const o = opts || {};
+  // 支持 {volume} 参数：显式传入时同步模块级 _volumeFilter（「卷」下拉 change 走此路径，
+  // 后续 refreshList/loadMore 沿用当前过滤）。volume 为空字符串 = 全部卷（不发送）。
+  if (o.volume !== undefined) {
+    _volumeFilter = o.volume || '';
+    localStorage.setItem(VOLUME_STORE_KEY, _volumeFilter);
+  }
   const el = document.getElementById('file-list');
   el.innerHTML = '<div class="empty-msg">加载中...</div>';
   updateBreadcrumb();
   _currentOffset = 0;
   _hasMore = false;
   try {
-    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT });
-    let files = Array.isArray(data) ? data : (data && data.files) || [];
+    // 启动时从 localStorage 恢复的卷（_volumeRestorePending）需先经 /api/volumes 确认仍可见：
+    // 卷已删/无权限时回落全部卷（否则会得到一个空列表且无从解释）。确认流程由
+    // initVolumeSelect 异步完成（populateVolumeSelect 会把不可见卷重置为 ''），
+    // 这里在确认完成前**不发送** ?volume=（避免带已失效卷名请求）。
+    let vol = _volumeFilter;
+    if (_volumeRestorePending) vol = '';
+    let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: vol || undefined });
+    let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset = files.length;
     _hasMore = (data.total || 0) > _currentOffset;
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">暂无文件</div>'; return; }
@@ -236,18 +341,42 @@ async function refreshList() {
   }
 }
 
+// forceRefreshList 是工具栏「强制刷新」入口（用户要求 2026-10-29：Web UI 必须有明确可用的
+// 强制刷新方式）。服务端卷状态缓存**默认永不过期**，普通「重新列举」会命中缓存 ⇒ 看不到
+// 本机直写盘/其它实例/网盘 App 的改动。本函数先 POST /api/volumes/refresh（当前卷；全部卷
+// 上下文则不带 volume = 清空全部），再重新列举 ⇒ 真正感知进程外改动。
+async function forceRefreshList() {
+  const btn = document.getElementById('refresh-btn');
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', volumeRefreshPath(_volumeFilter), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    if (data && data.success === false) {
+      showToast('强制刷新失败: ' + (data.message || '未知错误'), 'error');
+      return;
+    }
+    await refreshList();
+    showToast(_volumeFilter ? ('已清空 ' + _volumeFilter + ' 的缓存并重新列举') : '已清空全部卷缓存并重新列举', 'success');
+  } catch (e) {
+    showToast('强制刷新失败: ' + (e && e.message ? e.message : String(e)), 'error');
+  } finally {
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = prev; }
+  }
+}
+
 async function loadMore() {
   const el = document.getElementById('file-list');
-  const qs = (currentSubdir ? '?subdir=' + encodeURIComponent(currentSubdir) + '&' : '?') + 'offset=' + _currentOffset + '&limit=' + PAGE_LIMIT;
-  const listUrl = '/api/files' + qs;
   try {
-    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT });
-    let files = Array.isArray(data) ? data : (data && data.files) || [];
+    let vol = _volumeFilter;
+    if (_volumeRestorePending) vol = '';
+    let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: vol || undefined });
+    let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset += files.length;
     _hasMore = (data.total || 0) > _currentOffset;
 
     const tbody = el.querySelector('table tbody');
-    if (!tbody) { refreshList(); return; }
+    if (!tbody) { void refreshList(); return; }
     for (const fi of files) {
       const fullName = currentSubdir ? currentSubdir + '/' + fi.name : fi.name;
       tbody.insertAdjacentHTML('beforeend', buildFileRowHtml(fi, fullName));
@@ -277,7 +406,7 @@ async function searchFiles() {
   el.innerHTML = '<div class="empty-msg">搜索中...</div>';
   try {
     let data = await sc.files.search(q);
-    let files = Array.isArray(data) ? data : (data && data.files) || [];
+    let files = Array.isArray(data) ? data : data?.files || [];
     _searchActive = true;
     document.getElementById('clear-search-btn').style.display = '';
     if (files.length === 0) { el.innerHTML = '<div class="empty-msg">未找到匹配文件</div>'; return; }
@@ -292,14 +421,20 @@ function clearSearch() {
   document.getElementById('search-input').value = '';
   document.getElementById('clear-search-btn').style.display = 'none';
   _searchActive = false;
-  refreshList();
+  void refreshList();
 }
 
-// --- 目录导航 ---
+// --- 目录导航（按卷分别保存最新路径——用户裁定 2026-10-27）---
+// 每个卷独立记忆最后访问的目录：切卷时自动跳到该卷上次所在目录（
+// 修复用户实测缺陷「选卷后刷新，卷丢失但目录还在 ⇒ 显示空」）；
+// 进入目录时把 currentSubdir 记到该卷名下，下次切回该卷自动恢复。
+// （键常量与 savedSubdirFor 定义在文件顶部——currentSubdir 初值就靠它。）
 function navigateDir(subdir) {
   currentSubdir = subdir;
-  localStorage.setItem('sproxy_subdir', subdir);
-  refreshList();
+  localStorage.setItem(SUBDIR_STORE_KEY, subdir);
+  const vol = _volumeFilter || '';
+  if (vol) localStorage.setItem(SUBDIR_PER_VOL_PREFIX + vol, subdir);
+  void refreshList();
 }
 
 function updateBreadcrumb() {
@@ -325,21 +460,21 @@ async function mkdirDir() {
   if (!name) { showToast('请输入目录名', 'warning'); return; }
   const dirPath = currentSubdir ? currentSubdir + '/' + name : name;
   try {
-    const data = await sc.files.mkdir(dirPath);
-    if (data && data.success) {
+    const data = await sc.files.mkdir(dirPath, _volumeFilter || undefined);
+    if (data?.success) {
       showToast('目录已创建: ' + dirPath, 'success');
       input.value = '';
-      refreshList();
-    } else { showToast('创建目录失败: ' + ((data && data.message) || ''), 'error'); }
+      void refreshList();
+    } else { showToast('创建目录失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('创建目录失败: ' + e.message, 'error'); }
 }
 
 async function rmdirDir(dirPath) {
   if (!confirm('确认删除目录 "' + dirPath + '" 及其所有内容?')) return;
   try {
-    const data = await sc.files.rmdir(dirPath);
-    if (data && data.success) { showToast('目录已删除: ' + dirPath, 'success'); refreshList(); }
-    else { showToast('删除目录失败: ' + ((data && data.message) || ''), 'error'); }
+    const data = await sc.files.rmdir(dirPath, _volumeFilter || undefined);
+    if (data?.success) { showToast('目录已删除: ' + dirPath, 'success'); void refreshList(); }
+    else { showToast('删除目录失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除目录失败: ' + e.message, 'error'); }
 }
 
@@ -347,17 +482,20 @@ async function rmdirDir(dirPath) {
 // downloadFile 入口改组：先 stat 取 size/mtime/checksum，再委派 download.js 的分块管线
 //（并发 3 拉取 → IndexedDB 缓存 → 完成后合并 Blob → 本文件 triggerDownload 保存 + toast）。
 // 旧的全量 GET /download（sc.files.download）作为无 download.js 时的保底回落（保留）。
-async function downloadFile(name, expectedChecksum) {
-  if (typeof downloadMgr !== 'undefined' && downloadMgr && downloadMgr.createDownloadManager) {
+// volume：行卷优先（data-volume），空则回落当前过滤卷（用户裁定 2026-10-27）。
+async function downloadFile(name, expectedChecksum, vol) {
+  const volume = vol || _volumeFilter || undefined;
+  if (typeof downloadMgr !== 'undefined' && downloadMgr?.createDownloadManager) {
     const mgr = getDownloadManager();
     try {
-      const statRes = await sc.files.stat(name);
+      const statRes = await sc.files.stat(name, volume);
       const meta = httpFileMeta(statRes);
       const result = await mgr.startDownload(name, meta, {
+        volume: volume, // 下载管线 stat/chunk 透传（外部/加密卷必需）
         // 完成回调由本文件提供：triggerDownload 保存 + toast（管线自身不含 DOM）。
         onComplete: function (blob, filename) {
           triggerDownload(filename, blob);
-          const shouldVerify = !!(meta && meta.checksum);
+          const shouldVerify = !!meta?.checksum;
           showToast(filename + ' 下载完成' + (shouldVerify ? '，校验通过' : ''), 'success');
         },
         onError: function (err) { showToast('下载失败: ' + err.message, 'error'); },
@@ -366,16 +504,16 @@ async function downloadFile(name, expectedChecksum) {
     } catch (e) {
       // 传输/建项失败 → 回落旧全量下载（保证下载入口可用），并提示已回退。
       showToast(name + ' 分块下载启动失败，回落全量下载: ' + e.message, 'warning');
-      return legacyDownloadFile(name, expectedChecksum);
+      return legacyDownloadFile(name, expectedChecksum, volume);
     }
   }
-  return legacyDownloadFile(name, expectedChecksum);
+  return legacyDownloadFile(name, expectedChecksum, volume);
 }
 
 // httpFileMeta 从 stat 响应 {headers} 提取下载管线 stat 参数 {size, mtime, checksum}
 //（X-File-Size / X-File-MTime / X-File-Checksum；兼容小写与大写键）。
 function httpFileMeta(statRes) {
-  const headers = (statRes && statRes.headers) ? statRes.headers : {};
+  const headers = statRes?.headers ? statRes.headers : {};
   function hv(key) {
     const direct = headers[key] || headers[key.toLowerCase()] || headers[key.toUpperCase()];
     if (Array.isArray(direct)) return direct[0] || '';
@@ -383,7 +521,7 @@ function httpFileMeta(statRes) {
   }
   const sizeN = Number(hv('X-File-Size'));
   return {
-    size: isFinite(sizeN) && sizeN > 0 ? sizeN : ((statRes && statRes.size) || 0),
+    size: Number.isFinite(sizeN) && sizeN > 0 ? sizeN : (statRes?.size || 0),
     mtime: hv('X-File-MTime'),
     checksum: hv('X-File-Checksum'),
   };
@@ -400,9 +538,9 @@ function getDownloadManager() {
 }
 
 // legacyDownloadFile：旧全量 GET /download（保底回落）——保留但不再默认走。
-async function legacyDownloadFile(name, expectedChecksum) {  try {
-    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' } });
-    const serverCS = (headers && headers['X-File-Checksum']) || '';
+async function legacyDownloadFile(name, expectedChecksum, volume) {  try {
+    const { blob, headers } = await sc.files.download(name, { downloadHeaders: { 'X-File-Checksum': '' }, volume: volume });
+    const serverCS = headers?.['X-File-Checksum'] || '';
     if (serverCS) {
       const localCS = await computeFileSHA256(blob);
       if (localCS !== serverCS) {
@@ -428,7 +566,8 @@ function computeFileSHA256(blob) {
   if (readWhole) return blob.arrayBuffer().then(function(buf) { return sha256Bytes(new Uint8Array(buf)); });
   const cs = Math.min(64 * 1024 * 1024, total);
   const n = Math.ceil(total / cs);
-  const sh = new sclientSha256();
+  const Sha256 = sclientSha256; /* S2430：构造器名大写——sclientSha256 为跨文件全局，本地别名化解 */
+  const sh = new Sha256();
   function process(i) {
     if (i >= n) return Promise.resolve();
     const s = i * cs, e = Math.min(s + cs, total);
@@ -459,7 +598,7 @@ function triggerDownload(fileName, data) {
 function downloadCompleteHandler(blob, filename) {
   if (!blob || !filename) return;
   triggerDownload(filename, blob);
-  showToast(filename + ' 下载完成' + (filename.indexOf('校验通过') >= 0 ? '' : ''), 'success');
+  showToast(filename + ' 下载完成' + (filename.includes('校验通过') ? '' : '，校验通过'), 'success');
   renderTransferChannel();
 }
 
@@ -471,26 +610,55 @@ function itemParentDir(filename) {
 }
 
 // --- 删除 ---
-async function deleteFile(name, checksum) {
+async function deleteFile(name, checksum, vol) {
+  const volume = vol || _volumeFilter || undefined;
+  // checksum 缺失时先 stat 兜底（外部卷列表不返回 checksum——见 resolveOpChecksum）。
+  // 先于 confirm 做：拿不到就立即报错，不让用户白确认一遍。
+  const cs = await resolveOpChecksum(name, checksum, volume, '删除');
+  if (!cs) return;
   if (!confirm('确认删除 "' + name + '"?')) return;
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
   try {
-    const data = await sc.files.deleteFile(name, checksum);
-    if (data && data.success) { showToast('删除成功: ' + name, 'success'); refreshList(); }
-    else { showToast('删除失败: ' + ((data && data.message) || ''), 'error'); }
+    const data = await sc.files.deleteFile(name, cs, volume);
+    if (data?.success) { showToast('删除成功: ' + name, 'success'); void refreshList(); }
+    else { showToast('删除失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
 // --- 重命名 ---
-async function renameFile(name, checksum) {
-  if (!checksum) { showToast('缺少 checksum，无法校验完整性', 'error'); return; }
+async function renameFile(name, checksum, vol) {
   const newName = prompt('新的文件名（路径）:', name);
   if (!newName || newName === name) return;
+  const volume = vol || _volumeFilter || undefined;
   try {
-    const data = await sc.files.rename(name, newName, checksum);
-    if (data && data.success) { showToast('重命名成功: ' + newName, 'success'); refreshList(); }
-    else { showToast('重命名失败: ' + ((data && data.message) || ''), 'error'); }
+    const cs = await resolveOpChecksum(name, checksum, volume, '重命名');
+    if (!cs) return;
+    const data = await sc.files.rename(name, newName, cs, volume);
+    if (data?.success) { showToast('重命名成功: ' + newName, 'success'); void refreshList(); }
+    else { showToast('重命名失败: ' + (data?.message || ''), 'error'); }
   } catch (e) { showToast('重命名失败: ' + e.message, 'error'); }
+}
+
+// resolveOpChecksum 为写操作取源文件 checksum：列表已带则直接用；否则 HEAD stat 兜底。
+//
+// 为什么需要（用户实测 2026-10-27）：**外部卷**（baidupcs / secretdata / S3 …）列举不
+// 携带 checksum——它们的整文件哈希在卷内 meta（sidecar / 加密 meta）而逐条读会 n 次远端
+// 往返。Web UI 行 `data-checksum` 因此为空，旧实现在前端直接报「缺少 checksum」→ 外部卷
+// **无法删除/改名**（功能死路）。CLI 侧 FileClient.Delete 一直是「先 Stat 取 checksum 再删」
+// 所以 CLI 无此问题——本函数把同一语义搬到前端（单次 HEAD，按需发生，列表不变慢）。
+// 返回空串 = 确实拿不到（调用方已 toast，调用处 return）。
+async function resolveOpChecksum(name, checksum, volume, actionLabel) {
+  if (checksum) return checksum;
+  let res;
+  try {
+    res = await sc.files.stat(name, volume);
+  } catch (e) {
+    showToast(actionLabel + '失败: 读取文件信息出错（' + e.message + '）', 'error');
+    return '';
+  }
+  const meta = httpFileMeta(res);
+  if (meta.checksum) return meta.checksum;
+  showToast('缺少 checksum，无法校验完整性' + (volume ? '（卷 ' + volume + '）' : ''), 'error');
+  return '';
 }
 
 // --- 批量操作 ---
@@ -519,9 +687,42 @@ function getSelectedFiles() {
   for (const cb of document.querySelectorAll('.file-select:checked')) {
     const filename = cb.dataset.filename;
     const checksum = cb.dataset.checksum;
-    if (filename) results.push({ filename: filename, checksum: checksum });
+    // volume：行卷（外部/加密卷上批量操作需定位——与单条操作同一优先级）。
+    const volume = cb.dataset.volume || '';
+    if (filename) results.push({ filename: filename, checksum: checksum, volume: volume });
   }
   return results;
+}
+
+// fillMissingChecksums 为批量写操作补 checksum（列表未带的逐条 HEAD stat 兜底）。
+// 返回 { items, missing }：missing 为非空时调用方应中止（无法校验的条目不得静默操作）。
+async function fillMissingChecksums(items, actionLabel) {
+  const out = [];
+  const missing = [];
+  for (const it of items) {
+    if (it.checksum) {
+      out.push(it);
+      continue;
+    }
+    let cs = '';
+    try {
+      cs = httpFileMeta(await sc.files.stat(it.filename, it.volume || _volumeFilter || undefined)).checksum;
+    } catch (e) {
+      missing.push(it.filename + '（' + e.message + '）');
+      continue;
+    }
+    if (!cs) {
+      missing.push(it.filename);
+      continue;
+    }
+    out.push({ filename: it.filename, checksum: cs, volume: it.volume });
+  }
+  if (missing.length > 0) {
+    showToast(actionLabel + '中止：以下文件无法取得 checksum —— ' + missing.slice(0, 3).join(', ') +
+      (missing.length > 3 ? ' 等 ' + missing.length + ' 个' : ''), 'error');
+    return { items: out, missing: missing };
+  }
+  return { items: out, missing: missing };
 }
 
 async function batchDelete() {
@@ -529,16 +730,19 @@ async function batchDelete() {
   if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
   if (!confirm('确定要删除选中的 ' + files.length + ' 个文件吗？')) return;
   try {
+    const filled = await fillMissingChecksums(files, '批量删除');
+    if (filled.missing.length > 0) return;
+    const payload = filled.items.map(function(f) { return { filename: f.filename, checksum: f.checksum }; });
     // 服务端 /api/batch/delete 回包为 {results:[{filename,success,message}]}（无顶层
     // success）——成败与文案统一由 appRender.batchOpSummary 归一；逐条处理下部分成功
     // 也会落盘，故无论成败都 refreshList()。
-    const data = await sc.files.batchDelete(files);
-    const s = appRender.batchOpSummary((data && data.results) || [], '删除');
+    const data = await sc.files.batchDelete(payload);
+    const s = appRender.batchOpSummary(data?.results || [], '删除');
     showToast(s.message, s.ok ? 'success' : 'error');
     // 与 batchRename 对称：先复位选择态（否则删空后 refreshList 走空列表提前返回，
     // 工具栏仍显示「已选 N 个文件」），再刷新列表。
     clearSelection();
-    refreshList();
+    void refreshList();
   } catch (e) { showToast('批量删除失败: ' + e.message, 'error'); }
 }
 
@@ -551,17 +755,25 @@ async function batchRename() {
     if (newName === null) continue;
     if (newName.trim() === '') { showToast('文件名不能为空', 'error'); return; }
     if (newName === f.filename) continue;
-    operations.push({ from: f.filename, to: newName, checksum: f.checksum });
+    operations.push({ from: f.filename, to: newName, checksum: f.checksum, volume: f.volume });
   }
   if (operations.length === 0) { showToast('没有需要重命名的文件', 'info'); return; }
+  // 外部卷列表不带 checksum ⇒ 逐条 HEAD stat 兜底（缺则中止，不静默跳校验）。
+  const filled = await fillMissingChecksums(
+    operations.map(function(o) { return { filename: o.from, checksum: o.checksum, volume: o.volume }; }),
+    '批量重命名');
+  if (filled.missing.length > 0) return;
+  for (let i = 0; i < operations.length; i++) {
+    operations[i].checksum = filled.items[i].checksum;
+  }
   try {
     // prompt 取消/跳过的项不进 operations，故以服务端 results 为准（逐条 {success,message}）；
     // 部分成功也会落盘，因此无论成败都清选择 + refreshList()。
     const data = await sc.files.batchRename(operations);
-    const s = appRender.batchOpSummary((data && data.results) || [], '重命名');
+    const s = appRender.batchOpSummary(data?.results || [], '重命名');
     showToast(s.message, s.ok ? 'success' : 'error');
     clearSelection();
-    refreshList();
+    void refreshList();
   } catch (e) { showToast('批量重命名失败: ' + e.message, 'error'); }
 }
 
@@ -571,11 +783,11 @@ async function batchDownloadArchive() {
   const files = selected.map(function(f) { return f.filename; });
   try {
     const ar = await sc.files.archive(files);
-    if (ar && ar.success && ar.blob) {
+    if (ar?.success && ar.blob) {
       triggerDownload(ar.filename || 'archive.tar.gz', ar.blob);
       showToast('归档下载完成: ' + (ar.filename || 'archive.tar.gz'), 'success');
     } else {
-      showToast('归档失败: ' + ((ar && ar.message) || '未知错误'), 'error');
+      showToast('归档失败: ' + (ar?.message || '未知错误'), 'error');
     }
   } catch (err) { showToast('归档失败: ' + err.message, 'error'); }
 }
@@ -584,17 +796,54 @@ async function batchDownloadArchive() {
 async function downloadDirArchive(dirPath) {
   try {
     const ar = await sc.files.archiveDir(dirPath);
-    if (ar && ar.success && ar.blob) {
+    if (ar?.success && ar.blob) {
       triggerDownload(ar.filename || (dirPath.replace('/', '_') + '.tar.gz'), ar.blob);
       showToast('目录打包下载完成', 'success');
     } else {
-      showToast('打包下载失败: ' + ((ar && ar.message) || '未知错误'), 'error');
+      showToast('打包下载失败: ' + (ar?.message || '未知错误'), 'error');
     }
   } catch (e) { showToast('打包下载失败: ' + e.message, 'error'); }
 }
 
-// --- 回收站 ---
-// showTrash 拉取 /api/trash 并渲染（文件 tab 旁入口；未装配 → 空提示）。
+// --- 回收站（多卷：各卷独立管理 + 汇总展示；用户裁定 2026-10-19 ③）---
+// trashVolumeSel 是当前卷筛选（空串 = 全部卷）。模块级以跨重渲染/重开面板保持用户选择。
+let trashVolumeSel = '';
+// wireTrashPanel 绑定卷筛选与两个清空动作。**用 onclick/onchange 赋值**（非 addEventListener）：
+// 筛选切换会重渲染并重新调用本函数，赋值语义天然避免重复绑定。
+function wireTrashPanel(panel, entries) {
+  const sel = panel.querySelector('#trash-volume-filter');
+  if (sel) {
+    sel.onchange = function () {
+      trashVolumeSel = sel.value;
+      panel.innerHTML = trashTableHtml(entries, trashVolumeSel);
+      wireTrashPanel(panel, entries);
+    };
+  }
+  const volBtn = panel.querySelector('#trash-empty-vol-btn');
+  if (volBtn) {
+    volBtn.onclick = async function () {
+      const scope = trashVolumeSel ? ('卷 ' + trashVolumeSel) : '默认卷';
+      if (!confirm('确认清空' + scope + '的回收站？此操作不可撤销。')) return;
+      const q = trashVolumeSel ? ('?volume=' + encodeURIComponent(trashVolumeSel)) : '';
+      try {
+        await sclientTransport.coreRequest('POST', '/api/trash/empty' + q, {});
+        void showTrash();
+      } catch (e) { showToast('清空失败: ' + e.message, 'error'); }
+    };
+  }
+  const allBtn = panel.querySelector('#trash-empty-all-btn');
+  if (allBtn) {
+    allBtn.onclick = async function () {
+      if (!confirm('确认清空全部卷的回收站？此操作不可撤销。')) return;
+      try {
+        await sclientTransport.coreRequest('POST', '/api/trash/empty?all=1', {});
+        void showTrash();
+      } catch (e) { showToast('清空失败: ' + e.message, 'error'); }
+    };
+  }
+}
+// showTrash 拉取 /api/trash（**汇总**：后端返回 owner 可见各本地卷的条目）并渲染（文件 tab 旁入口；
+// 未装配 → 空提示）。筛选为**前端过滤**（一次请求拿到全部，切换卷不重复请求）。
 async function showTrash() {
   const panel = document.getElementById('trash-panel');
   if (!panel) return;
@@ -602,31 +851,39 @@ async function showTrash() {
   try {
     const res = await sclientTransport.coreRequest('GET', '/api/trash', {});
     const data = sclientUtil.decodeJSON(res.body);
-    panel.innerHTML = trashTableHtml(data.entries || []);
+    const entries = data.entries || [];
+    panel.innerHTML = trashTableHtml(entries, trashVolumeSel);
     // 恢复按钮委托（event delegation）。
     panel.querySelectorAll('.trash-restore-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        const rel = btn.getAttribute('data-trash-rel');
+        const rel = btn.dataset.trashRel;
+        const row = btn.closest('tr');
+        const vol = row ? row.querySelector('td').textContent : '';
+        // 传卷名：后端缺省也能跨卷定位，但显式传卷可避免同名条目歧义、并少一次探测。
+        const q = '/api/trash/restore?file=' + encodeURIComponent(rel) +
+          (vol ? '&volume=' + encodeURIComponent(vol) : '');
         try {
-          await sclientTransport.coreRequest('POST', '/api/trash/restore?file=' + encodeURIComponent(rel), {});
-          showTrash();
+          await sclientTransport.coreRequest('POST', q, {});
+          void showTrash();
         } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
       });
     });
+    wireTrashPanel(panel, entries);
   } catch (e) { panel.innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
 }
 
 // --- 监控 ---
 // statsRefresh 刷新当前活动监控 tab：读激活的 .stats-tab id，按活动 tab 刷新
 // （审计 tab 在 tunnel/无凭据场景刷不到实时操作，但保持「刷新=重拉当前视图」语义统一）。
-// 复用 switchStatsTab 的重载语义（showAudit/showStats），不改 switchStatsTab 内部实现。
+// 复用 switchStatsTab 的重载语义（showAudit/showStats/...），不改 switchStatsTab 内部实现。
+// 全量 tab 特判：非 stats 的活动 tab 一律委托 switchStatsTab 重拉自身（vol-manage/secret/
+// credentials/sync/mesh 等 tab 不再跳回 stats 面板）。
 function statsRefresh() {
   const active = document.querySelector('.stats-tab.active');
   const id = active ? active.id : 'stats-tab';
   const tab = id.replace('-tab', '');
-  if (tab === 'audit') { switchStatsTab('audit'); return; }
-  if (tab === 'volumes') { switchStatsTab('volumes'); return; }
-  showStats();
+  if (tab !== 'stats') { switchStatsTab(tab); return; }
+  void showStats();
 }
 
 // showStats 打开监控弹窗并默认展示 stats tab。
@@ -639,9 +896,9 @@ async function showStats() {
     // 直接走传输层 coreRequest 取 JSON（隧道/直连自动协商 + SproxySig）。
     const res = await sclientTransport.coreRequest('GET', '/api/stats', {});
     const data = sclientUtil.decodeJSON(res.body);
-    var du = data.disk_usage || {};
-    var rc = data.request_counts || {};
-    var notifyHtml = '';
+    const du = data.disk_usage || {};
+    const rc = data.request_counts || {};
+    let notifyHtml = '';
     try {
       // 通知历史（roadmap 通知中心）：并行拉最近条目渲染（无凭据/未装配 → 静默跳过）。
       const nres = await sclientTransport.coreRequest('GET', '/api/notify/history?limit=10', {});
@@ -650,7 +907,7 @@ async function showStats() {
         '<h4 style="margin:0;font-size:14px;color:var(--text-secondary);">最近通知</h4>' +
         '<button type="button" id="notify-test-btn" class="btn btn-sm btn-secondary" title="向全部已配置通知渠道发送测试消息">测试通知</button>' +
         '</div>' + notifyTableHtml(ndata.entries || []);
-    } catch (e) { notifyHtml = ''; }
+    } catch { /* 通知历史端点不可用/无凭据——跳过该区块 */ notifyHtml = ''; }
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data) + notifyHtml;
     const testBtn = document.getElementById('notify-test-btn');
     if (testBtn) testBtn.addEventListener('click', notifyTest);
@@ -685,19 +942,23 @@ function switchStatsTab(tab) {
   document.getElementById('credentials-panel').style.display = tab === 'credentials' ? 'block' : 'none';
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
+  document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
+  document.getElementById('vol-manage-panel').style.display = tab === 'vol-manage' ? 'block' : 'none';
   document.querySelectorAll('.stats-tab').forEach(function(el) {
     const on = el.id === tab + '-tab';
     el.classList.toggle('active', on);
     el.style.borderBottomColor = on ? 'var(--tab-active)' : 'transparent';
     el.style.color = on ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
-  if (tab === 'config') showConfig();
-  if (tab === 'hub') showHub();
-  if (tab === 'audit') showAudit();
-  if (tab === 'volumes') showVolumes();
-  if (tab === 'credentials') showCredentials();
-  if (tab === 'sync') showSyncConflicts();
-  if (tab === 'mesh') showMeshStatus();
+  if (tab === 'config') void showConfig();
+  if (tab === 'hub') void showHub();
+  if (tab === 'audit') void showAudit();
+  if (tab === 'volumes') void showVolumes();
+  if (tab === 'credentials') void showCredentials();
+  if (tab === 'sync') void showSyncConflicts();
+  if (tab === 'mesh') void showMeshStatus();
+  if (tab === 'secret') void showSecrets();
+  if (tab === 'vol-manage') void showVolManage();
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -714,12 +975,12 @@ async function showCredentials() {
     if (addBtn) addBtn.addEventListener('click', credAdd);
     panel.querySelectorAll('.cred-delete-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        const ak = btn.getAttribute('data-ak');
+        const ak = btn.dataset.ak;
         if (!confirm('确定删除凭据 ' + ak + '？')) return;
         try {
           await sclientTransport.coreRequest('DELETE', '/api/credentials/' + encodeURIComponent(ak), {});
           showToast('凭据 ' + ak + ' 已删除', 'success');
-          showCredentials();
+          void showCredentials();
         } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
       });
     });
@@ -739,12 +1000,254 @@ async function credAdd() {
     const data = sclientUtil.decodeJSON(res.body);
     const msg = document.getElementById('cred-msg');
     if (res.status === 200 || res.status === 201) {
-      showToast('凭据 ' + ak + ' 已创建' + (data && data.secret ? '（secret: ' + data.secret + '）' : ''), 'success');
-      showCredentials();
-    } else {
-      if (msg) msg.textContent = '创建失败: ' + ((data && data.error) || 'HTTP ' + res.status);
+      showToast('凭据 ' + ak + ' 已创建' + (data?.secret ? '（secret: ' + data.secret + '）' : ''), 'success');
+      void showCredentials();
+    } else if (msg) {
+      msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
     }
   } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// --- secret 卷管理（/api/secrets 面板；web 只做随机，双口令仅 CLI） ---
+// showSecrets 拉取 secret 列表并渲染；403 → 提示无权限。
+async function showSecrets() {
+  const panel = document.getElementById('secret-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/secrets', {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = secretsPanelHtml(data);
+    const addBtn = document.getElementById('secret-add-btn');
+    if (addBtn) addBtn.addEventListener('click', secretAdd);
+    panel.querySelectorAll('.secret-export-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { void secretExport(btn.dataset.name); });
+    });
+    panel.querySelectorAll('.secret-delete-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const name = btn.dataset.name;
+        if (!confirm('确定删除 secret ' + name + '？此操作不可恢复（对应加密数据将无法解密）。')) return;
+        try {
+          await sclientTransport.coreRequest('DELETE', '/api/secrets/' + encodeURIComponent(name), {});
+          showToast('secret ' + name + ' 已删除', 'success');
+          void showSecrets();
+        } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
+      });
+    });
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">secret 加载失败（需认证）: ' + appRender.escHtml(e?.message ? e.message : String(e)) + '</div>';
+  }
+}
+
+// secretAdd 创建随机 secret（服务端生成）→ 展示返回的 secret 值供立即备份。
+async function secretAdd() {
+  const name = document.getElementById('secret-new-name').value.trim();
+  if (!name) { showToast('secret 名必填', 'error'); return; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', '/api/secrets', {
+      headers: { 'Content-Type': 'application/json' },
+      bodyBytes: new TextEncoder().encode(JSON.stringify({ name: name, mode: 'random' })),
+    });
+    const data = sclientUtil.decodeJSON(res.body);
+    const msg = document.getElementById('secret-msg');
+    if (res.status === 200 || res.status === 201) {
+      const val = data?.value || '';
+      showToast('secret ' + name + ' 已创建', 'success');
+      if (msg) msg.innerHTML = '<div style="color:var(--text-secondary);margin-top:6px;">' +
+        '<strong>请立即备份（仅本次显示）：</strong><br>' +
+        '<span style="font-family:monospace;word-break:break-all;">' + appRender.escHtml(val) + '</span></div>';
+      void showSecrets();
+    } else if (msg) {
+      msg.textContent = '创建失败: ' + (data?.error || 'HTTP ' + res.status);
+    }
+  } catch (e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
+// secretExport 导出 secret（GET /api/secrets/{name}）→ 展示明文供用户自行保管。
+async function secretExport(name) {
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/secrets/' + encodeURIComponent(name), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    const val = secretExportValue(data);
+    if (!val) { showToast('导出为空（secret 不存在？）', 'error'); return; }
+    // 显示明文弹层（用户复制/下载自行保管）。
+    const panel = document.getElementById('secret-panel');
+    const info = document.createElement('div');
+    info.id = 'secret-export-info';
+    info.style.cssText = 'margin-top:8px;padding:8px;border:1px solid var(--border-color);border-radius:4px;';
+    info.innerHTML = '<div style="margin-bottom:4px;font-weight:600;">导出 ' + appRender.escHtml(name) + '（请立即妥善保管）</div>' +
+      '<div style="font-family:monospace;word-break:break-all;font-size:12px;color:var(--text-primary);">' + appRender.escHtml(val) + '</div>' +
+      '<button type="button" id="secret-export-close-btn" class="btn btn-sm" style="margin-top:6px;">关闭</button>';
+    panel.appendChild(info);
+    const closeBtn = document.getElementById('secret-export-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', function () { info.remove(); });
+    showToast('secret ' + name + ' 已导出', 'success');
+  } catch (e) { showToast('导出失败: ' + e.message, 'error'); }
+}
+
+// --- 卷管理（/api/backends schema 驱动建卷表单 + /api/volumes/user 列表/删除） ---
+// showVolManage 拉取 backend 类型 schema + 我的用户卷 → 渲染类型下拉 + 动态表单 + 列表。
+// 卷类型/字段全部由 GET /api/backends 驱动（前端不硬编码类型）；volume-select 候选为
+// 我的用户卷（allow_wrapper 过滤由 volManageFormHtml 处理）；防环/必填校验由服务端负责，
+// 前端透传 400/409 错误文案。
+async function showVolManage() {
+  const panel = document.getElementById('vol-manage-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const data = await loadVolManageData();
+    const meta = data.meta;
+    const types = data.types;
+    const volsWithCat = data.volsWithCat;
+    const candsWithCat = data.candsWithCat;
+    let selHtml = '';
+    types.forEach(function (t) {
+      selHtml += '<option value="' + appRender.escHtml(t) + '">' + appRender.escHtml(t) + '</option>';
+    });
+    panel.innerHTML =
+      '<div style="font-weight:600;margin:4px 0 8px;">卷管理（schema 动态建卷）</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;">' +
+        '<label for="vm-type-select" style="font-size:13px;color:var(--text-secondary);">类型：</label>' +
+        '<select id="vm-type-select" style="padding:6px 8px;border:1px solid var(--border-input);border-radius:4px;background:var(--bg-container);color:var(--text-primary);font-size:13px;">' + selHtml + '</select>' +
+      '</div>' +
+      '<div id="vm-form-area"></div>' +
+      '<div style="margin-top:16px;border-top:1px solid var(--border-color);padding-top:10px;">' +
+        '<div style="font-weight:600;margin-bottom:6px;">我的卷</div>' +
+        '<div id="vm-list"></div>' +
+      '</div>';
+    const formArea = document.getElementById('vm-form-area');
+    const selEl = document.getElementById('vm-type-select');
+    const type = types.length ? types[0] : '';
+    if (formArea) renderVolManageForm(formArea, type, meta, candsWithCat);
+    const listEl = document.getElementById('vm-list');
+    if (listEl) listEl.innerHTML = volManageListHtml({ volumes: volsWithCat });
+    if (selEl && types.length) {
+      selEl.addEventListener('change', function () {
+        const fa = document.getElementById('vm-form-area');
+        if (fa) renderVolManageForm(fa, selEl.value, meta, candsWithCat);
+      });
+    }
+    if (listEl && !listEl.dataset.bound) {
+      listEl.dataset.bound = '1';
+      listEl.addEventListener('click', onVolManageListClick);
+    }
+  } catch (e) {
+    panel.innerHTML = '<div class="empty-msg">卷管理不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试。</span></div>';
+  }
+}
+
+// loadVolManageData 拉取 backend 类型 schema / 全量可见卷（含本地 config 卷 + 外部卷）/
+// 我的用户卷，返回 {meta, types, volsWithCategory, candsWithCategory}。底层卷候选源用
+// GET /api/volumes（owner 可见全量，含本地 config 卷——服务端 validateWrapperTarget 允许
+// target 指向任意 owner 可见卷）；「我的卷」列表用 GET /api/volumes/user。两者都经
+// withCat 补 category（据 type → /api/backends 的 category）。
+async function loadVolManageData() {
+  const bdRes = await sc.files.backends();
+  const uvRes = await sc.files.userVolumes();
+  const allRes = await sc.files.volumes();
+  const backends = (bdRes && bdRes.backends) || [];
+  const vols = (uvRes && uvRes.volumes) || [];
+  const allVols = (allRes && allRes.volumes) || [];
+  // type → {category, label, fields} 映射；并给卷补 category（列表 category 列 + 表单过滤）。
+  const meta = {};
+  backends.forEach(function (b) {
+    meta[b.type] = { category: b.category || '', label: b.label || '', fields: b.fields || [] };
+  });
+  const withCat = function (vlt) {
+    const m = meta[vlt.type];
+    return Object.assign({}, vlt, { category: (m && m.category) || vlt.category || '' });
+  };
+  return {
+    meta: meta,
+    types: Object.keys(meta),
+    volsWithCat: vols.map(withCat),       // 「我的卷」列表（有 type）
+    candsWithCat: allVols.map(withCat),   // 底层卷候选（含本地 config 卷）
+  };
+}
+
+// renderVolManageForm 把指定类型的 schema 表单渲染进容器，并绑定创建按钮。
+function renderVolManageForm(el, type, meta, vols) {
+  const m = meta[type] || { category: '', label: '', fields: [] };
+  el.innerHTML = volManageFormHtml({
+    type: type, category: m.category, label: m.label, fields: m.fields, volumes: vols,
+  });
+  const btn = el.querySelector('#vm-create-btn');
+  if (btn) btn.addEventListener('click', onSubmitVolManage);
+}
+
+// onSubmitVolManage 读取卷管理表单（name/type/capacity + schema 字段）→ POST /api/volumes/user。
+// extra 按字段 key 组装：volume-select/enum/text → 字符串；number → 数值；bool → 布尔。
+async function onSubmitVolManage() {
+  const area = document.getElementById('vm-form-area');
+  if (!area) return;
+  const typeEl = area.querySelector('[name="type"]');
+  const nameEl = area.querySelector('[name="name"]');
+  const capEl = area.querySelector('[name="capacity"]');
+  const type = typeEl ? typeEl.value : '';
+  const name = nameEl ? nameEl.value.trim() : '';
+  if (!name || !type) { showToast('卷名与类型必填', 'error'); return; }
+  let capacity = 0;
+  const capStr = capEl ? capEl.value.trim() : '';
+  if (capStr) {
+    // 单位下拉（vol-manage-format.js）：数字 + 单位（如 100 + GiB）拼接成 `100GiB` 提交；
+    // 输入已带单位/非纯数字时原样透传（parseSizeText 支持既有形态）。
+    const unitEl = area.querySelector('[name="capacity_unit"]');
+    const unit = unitEl ? unitEl.value : '';
+    const combined = composeCapacityText(capStr, unit);
+    try { capacity = appRender.parseSizeText(combined); } catch (e) {
+      showToast('容量格式非法：' + (e?.message ? e.message : String(e)), 'error');
+      return;
+    }
+  }
+  const extra = {};
+  area.querySelectorAll('[name]').forEach(function (el) {
+    const k = el.getAttribute('name');
+    if (k === 'name' || k === 'type' || k === 'capacity' || k === 'capacity_unit') return;
+    if (k && k.endsWith('_subdir')) return; // 子目录由 composeNestedTarget 合并进 target
+    if (el.type === 'checkbox') extra[k] = el.checked;
+    else if (el.type === 'number') extra[k] = el.value === '' ? 0 : Number(el.value);
+    else extra[k] = el.value;
+  });
+  // 嵌套封装：volume-select 的值与其 `_subdir` 输入合并成 `<卷>/<子目录>`。
+  area.querySelectorAll('input[name$="_subdir"]').forEach(function (inp) {
+    const k = inp.getAttribute('name');
+    if (!k) return;
+    const fk = k.replace(/_subdir$/, '');
+    const sub = inp.value ? inp.value.trim() : '';
+    if (sub) extra[fk] = composeNestedTarget(String(extra[fk] || ''), sub);
+  });
+  try {
+    const res = await sc.files.createUserVolume({ name: name, type: type, capacity: capacity, extra: extra });
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已创建', 'success');
+      void showVolManage();
+    } else {
+      showToast('创建失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('创建失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+}
+
+// onVolManageListClick 列表事件委托：删除按钮（确认后 DELETE）。
+// 409（有任务引用）由 transport 抛错走 catch（E_SERVER 含服务端 409 文案）——此前的
+// `res.status === 409` 分支是死代码（transport 对非 2xx 恒抛错），已删除，catch 侧透传真实文案。
+async function onVolManageListClick(ev) {
+  const btn = ev.target.closest('[data-delete-volume]');
+  if (!btn) return;
+  const name = btn.dataset.deleteVolume;
+  if (!name || !window.confirm('确认删除卷 ' + name + '？')) return;
+  try {
+    const res = await sc.files.deleteUserVolume(name);
+    if (res && res.success) {
+      showToast('卷 ' + name + ' 已删除', 'success');
+    } else {
+      showToast('删除失败：' + (res && res.error ? res.error : 'HTTP ' + (res && res.status)), 'error');
+    }
+  } catch (e) {
+    showToast('删除失败：' + (e?.message ? e.message : String(e)), 'error');
+  }
+  void showVolManage();
 }
 
 // --- 同步冲突（B3：/api/sync/conflicts 面板） ---
@@ -758,13 +1261,13 @@ async function showSyncConflicts() {
     panel.innerHTML = syncConflictsHtml(data);
     panel.querySelectorAll('.conflict-ours-btn, .conflict-theirs-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        const id = btn.getAttribute('data-id');
+        const id = btn.dataset.id;
         const choice = btn.classList.contains('conflict-ours-btn') ? 'ours' : 'theirs';
         if (!confirm('确定冲突 ' + id + ' 采用' + (choice === 'ours' ? '我方' : '对方') + '？')) return;
         try {
           await sclientTransport.coreRequest('POST', conflictResolveQuery(id, choice), { headers: { 'Content-Type': 'application/json' }, bodyBytes: new TextEncoder().encode(JSON.stringify({ choice: choice })) });
           showToast('冲突 ' + id + ' 已解决', 'success');
-          showSyncConflicts();
+          void showSyncConflicts();
         } catch (e) { showToast('解决失败: ' + e.message, 'error'); }
       });
     });
@@ -796,10 +1299,11 @@ async function showVolumes() {
   volumeHealthTimerStart(panel); // 卷面板可见：启动 30s 定时刷新（幂等）
   try {
     const data = await sc.files.volumes();
-    const vols = (data && data.volumes) || [];
+    const vols = data?.volumes || [];
     let html = '<div style="font-weight:600;margin:4px 0 8px;">存储卷</div>' + appRender.volumesTableHtml(vols);
     html += volumeOpsBarHtml(vols); // B1：copy/move/rebalance 操作按钮
     html += userVolumesSectionHtml();
+  html += quotaSectionHtml();
     html += volumeHealthSectionHtml();
     panel.innerHTML = html;
     wireUserVolumeEvents(panel);
@@ -807,13 +1311,48 @@ async function showVolumes() {
     loadVolumeHealth(panel); // 拉取 /metrics 渲染卷健康面板（失败降级空态）
   } catch (e) {
     // 认证失败（401/403）或服务端无卷 API：不当作破坏性错误，提示配置 AK/SK 或该端点不可用。
-    panel.innerHTML = '<div class="empty-msg">卷信息不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试（未配置凭据时仅无认证端点可访问）。</span></div>';
+    panel.innerHTML = '<div class="empty-msg">卷信息不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '<br><span style="font-size:12px;">请配置 AccessKey/Secret 后重试（未配置凭据时仅无认证端点可访问）。</span></div>';
+  }
+}
+
+// ---- 配额区（卷面板内「配额」，用户确认：面板内新增区） ----
+
+// quotaSectionHtml 返回「配额」区骨架：容器 + 刷新按钮（数据来自 GET /api/quota 联邦视图）。
+// 渲染全部走纯模块 quotaFormat（可 node:test 直测）；此处只做 DOM 与网络。
+function quotaSectionHtml() {
+  return '<div class="settings-section">'
+    + '<h3 style="margin-bottom:8px;">配额</h3>'
+    + '<div id="quota-panel"><div style="color:var(--text-muted);font-size:13px;">加载中...</div></div>'
+    + '<button type="button" id="quota-refresh" style="margin-top:8px;">刷新</button>'
+    + '<div id="quota-msg" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></div>'
+    + '</div>';
+}
+
+// loadQuota 拉取联邦配额并渲染（走 sclientTransport.coreRequest ⇒ 自动 SproxySig 签名）。
+// 旧服务端（404）⇒ 显式提示降级，不静默（与 CLI 同口径）。
+async function loadQuota() {
+  const panel = document.getElementById('quota-panel');
+  const msg = document.getElementById('quota-msg');
+  if (!panel) return;
+  try {
+    const res = await sclientTransport.coreRequest('GET', '/api/quota', {});
+    if (res.status === 404) {
+      panel.innerHTML = '<div class="empty-msg">当前服务端不支持联邦配额视图。</div>';
+      if (msg) msg.textContent = '服务端版本较旧：/api/quota 不可用。';
+      return;
+    }
+    if (res.status !== 200) throw new Error('HTTP ' + res.status);
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = quotaFormat.federatedQuotaHtml(data);
+    if (msg) msg.textContent = '';
+  } catch (err) {
+    panel.innerHTML = '<div class="empty-msg">配额加载失败。</div>';
+    if (msg) msg.textContent = String(err && err.message ? err.message : err);
   }
 }
 
 // ---- 用户卷区（卷面板内「我的用户卷」，用户确认：面板内新增区） ----
 
-// userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
 // userVolumesSectionHtml 返回「我的用户卷」区骨架：创建表单 + 列表容器 + 错误提示位。
 // type 下拉初始用静态默认（baidupcs|webdav）；loadUserVolumes 拉取 /api/backends 后
 // 动态填充（未来任何新 backend 自动出现——V4 backend 列表 API）。
@@ -843,7 +1382,7 @@ function volumeHealthSectionHtml() {
 // /metrics 公开无凭据（server 中间件链无 authMiddleware）；拉取失败降级空态不报错。
 // rebalance 进度（roadmap 3.3 P1 残余，本片补）：同一次 /metrics 拉取解析
 // sproxy_rebalance_progress 系列 → 卷健康面板下追加迁移进度条（无任务时隐藏该区）。
-var _volHealthTimer = null;
+let _volHealthTimer = null;
 function loadVolumeHealth(panel) {
   const el = document.getElementById('volume-health-list');
   if (!el) return;
@@ -870,7 +1409,7 @@ function loadVolumeHealth(panel) {
     })
     .catch(function (e) {
       // /metrics 不可用（网络/服务端异常）：空态提示，不破坏卷面板。
-      el.innerHTML = '<div class="empty-msg" style="color:var(--text-muted);font-size:13px;">卷健康数据不可用：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+      el.innerHTML = '<div class="empty-msg" style="color:var(--text-muted);font-size:13px;">卷健康数据不可用：' + appRender.escHtml(e?.message ? e.message : String(e)) + '</div>';
     });
 }
 
@@ -889,16 +1428,16 @@ async function loadUserVolumes() {
   if (listEl) {
     try {
       const data = await sc.files.userVolumes();
-      const vols = (data && data.volumes) || [];
+      const vols = data?.volumes || [];
       listEl.innerHTML = userVolumes.userVolumesTableHtml(vols);
     } catch (e) {
-      listEl.innerHTML = '<div class="empty-msg">用户卷加载失败：' + appRender.escHtml(e && e.message ? e.message : String(e)) + '</div>';
+      listEl.innerHTML = '<div class="empty-msg">用户卷加载失败：' + appRender.escHtml(e?.message ? e.message : String(e)) + '</div>';
     }
   }
   // 动态填充 type 下拉（backend 列表 API；失败静默保留静态默认）。
   try {
     const bd = await sc.files.backends();
-    const types = (bd && bd.backends) || [];
+    const types = bd?.backends || [];
     if (types.length) {
       const sel = document.getElementById('uv-type');
       if (sel) {
@@ -920,64 +1459,111 @@ function wireUserVolumeEvents(panel) {
     listEl.dataset.bound = '1';
     listEl.addEventListener('click', onUserVolumeListClick);
   }
-  loadUserVolumes();
+  void loadUserVolumes();
+  void loadQuota();
+  const quotaRefresh = document.getElementById("quota-refresh");
+  if (quotaRefresh) quotaRefresh.addEventListener("click", () => { void loadQuota(); });
 }
 
-// onCreateUserVolume 读取表单 → 校验 → 创建 → 刷新列表。
-async function onCreateUserVolume() {
+// setMsgText：安全写提示位（msg 可能不存在，如面板未渲染）。
+function setMsgText(msg, text) {
+  if (msg) msg.textContent = text;
+}
+
+// readCreateVolumeForm 读取「新建用户卷」表单 → {msg, name, typ, capStr, extraStr}。
+function readCreateVolumeForm() {
   const msg = document.getElementById('uv-create-msg');
-  if (msg) msg.textContent = '';
   const nameEl = document.getElementById('uv-name');
   const typeEl = document.getElementById('uv-type');
   const capEl = document.getElementById('uv-capacity');
   const extraEl = document.getElementById('uv-extra');
-  const name = nameEl ? nameEl.value.trim() : '';
-  const typ = typeEl ? typeEl.value : '';
-  const capStr = capEl ? capEl.value.trim() : '';
-  const extraStr = extraEl ? extraEl.value : '';
-  if (!name || !typ) {
-    if (msg) msg.textContent = '卷名与类型必填';
-    return;
+  return {
+    msg: msg,
+    name: nameEl ? nameEl.value.trim() : '',
+    typ: typeEl ? typeEl.value : '',
+    capStr: capEl ? capEl.value.trim() : '',
+    extraStr: extraEl ? extraEl.value : '',
+  };
+}
+
+// createUserVolumeRequest 调创建 API 并刷新列表 → {ok, error?}。
+async function createUserVolumeRequest(name, typ, capacity, extra) {
+  const res = await sc.files.createUserVolume({ name: name, type: typ, capacity: capacity, extra: extra });
+  if (res?.success) {
+    await loadUserVolumes();
+    return { ok: true };
   }
-  const extra = userVolumes.parseExtra(extraStr);
-  if (extra.error) {
-    if (msg) msg.textContent = extra.error;
-    return;
-  }
+  return { ok: false, error: res?.error || '未知错误' };
+}
+
+// validateCreateVolumeForm 校验卷创建表单 → {ok?} 或 {error}（不落 DOM，可单测）。
+function validateCreateVolumeForm(form) {
+  if (!form.name || !form.typ) return { error: '卷名与类型必填' };
+  const extra = userVolumes.parseExtra(form.extraStr);
+  if (extra.error) return { error: extra.error };
   let capacity = 0;
-  if (capStr !== '') {
-    try {
-      capacity = parseSizeText(capStr);
-    } catch (e) {
-      if (msg) msg.textContent = '容量格式非法：' + (e && e.message ? e.message : String(e));
-      return;
-    }
+  if (form.capStr === '') return { ok: true, capacity: capacity, extra: extra };
+  try {
+    capacity = appRender.parseSizeText(form.capStr);
+  } catch (e) {
+    return { error: '容量格式非法：' + (e?.message ? e.message : String(e)) };
+  }
+  return { ok: true, capacity: capacity, extra: extra };
+}
+
+// clearCreateVolumeForm 清空卷创建表单输入。
+function clearCreateVolumeForm() {
+  const nameEl = document.getElementById('uv-name');
+  const capEl = document.getElementById('uv-capacity');
+  const extraEl = document.getElementById('uv-extra');
+  if (nameEl) nameEl.value = '';
+  if (capEl) capEl.value = '';
+  if (extraEl) extraEl.value = '';
+}
+
+// onCreateUserVolume 读取表单 → 校验 → 创建 → 刷新列表。
+async function onCreateUserVolume() {
+  const form = readCreateVolumeForm();
+  const msg = form.msg;
+  setMsgText(msg, '');
+  const parsed = validateCreateVolumeForm(form);
+  if (parsed.error) {
+    setMsgText(msg, parsed.error);
+    return;
   }
   try {
-    const res = await sc.files.createUserVolume({ name: name, type: typ, capacity: capacity, extra: extra });
-    if (res && res.success) {
-      if (msg) msg.textContent = '创建成功';
-      if (nameEl) nameEl.value = '';
-      if (capEl) capEl.value = '';
-      if (extraEl) extraEl.value = '';
-      await loadUserVolumes();
+    const r = await createUserVolumeRequest(form.name, form.typ, parsed.capacity, parsed.extra);
+    if (r.ok) {
+      clearCreateVolumeForm();
+      setMsgText(msg, '创建成功');
     } else {
-      if (msg) msg.textContent = '创建失败：' + ((res && res.error) || '未知错误');
+      setMsgText(msg, '创建失败：' + r.error);
     }
   } catch (e) {
-    if (msg) msg.textContent = '创建失败：' + (e && e.message ? e.message : String(e));
+    setMsgText(msg, '创建失败：' + (e?.message ? e.message : String(e)));
   }
 }
 
 // wireVolumeOps 绑定卷操作按钮（B1）：copy/move 弹 filename 输入（当前目录文件）+ rebalance 直接触发。
 // 目标卷来自行内下拉；成功 toast + 刷新卷面板。
+// 「重建索引」（S5）单独绑定：触发 POST /api/volumes/refresh（幂等，本地卷无索引）。
 function wireVolumeOps(panel) {
-  panel.querySelectorAll('.vol-copy-btn, .vol-move-btn, .vol-rebalance-btn').forEach(function (btn) {
+	panel.querySelectorAll('.vol-refresh-btn').forEach(function (btn) {
+		if (btn.dataset.bound) return;
+		btn.dataset.bound = '1';
+		btn.addEventListener('click', function () {
+			void runVolumeRefresh(btn.dataset.vol, btn);
+		});
+	});
+	panel.querySelectorAll('.vol-copy-btn, .vol-move-btn, .vol-rebalance-btn').forEach(function (btn) {
     if (btn.dataset.bound) return;
     btn.dataset.bound = '1';
     btn.addEventListener('click', function () {
-      const op = btn.classList.contains('vol-copy-btn') ? 'copy' : btn.classList.contains('vol-move-btn') ? 'move' : 'rebalance';
-      const fromVol = btn.getAttribute('data-vol');
+      let op;
+      if (btn.classList.contains('vol-copy-btn')) op = 'copy';
+      else if (btn.classList.contains('vol-move-btn')) op = 'move';
+      else op = 'rebalance';
+      const fromVol = btn.dataset.vol;
       const targetSel = panel.querySelector('.vol-op-target[data-vol="' + CSS.escape(fromVol) + '"]');
       const toVol = targetSel ? targetSel.value : '';
       if (!toVol || toVol === fromVol) {
@@ -987,12 +1573,36 @@ function wireVolumeOps(panel) {
       if (op === 'copy' || op === 'move') {
         const filename = prompt(op === 'copy' ? '复制文件（相对当前目录）:' : '移动文件（相对当前目录）:');
         if (!filename) return;
-        runVolumeOp(op, fromVol, toVol, filename);
+        void runVolumeOp(op, fromVol, toVol, filename);
       } else {
-        runVolumeOp(op, fromVol, toVol, '');
+        void runVolumeOp(op, fromVol, toVol, '');
       }
     });
   });
+}
+
+// runVolumeRefresh 触发卷内存索引重建（S5）：POST /api/volumes/refresh?volume=<卷>。
+// 用途：secretdata 等外部卷被外部改动（网盘 App 直改 / 外部工具删 blob）后，幽灵条目/旧哈希
+// 不收敛——本按钮显式重建。本地卷 = 无内存索引（幂等成功）；后端不支持该能力 = 405。
+async function runVolumeRefresh(volName, btn) {
+  if (!volName) return;
+  if (!confirm('强制刷新卷 "' + volName + '"？\n\n清空该卷的服务端状态缓存（默认永不过期）并重新读取底层，\n用于感知进程外改动（本机直写盘 / 其它实例 / 网盘 App 直改）。\n本地卷同样适用；操作幂等。')) return;
+  const prev = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '重建中…'; }
+  try {
+    const res = await sclientTransport.coreRequest('POST', volumeRefreshPath(volName), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    if (data && data.success === false) {
+      showToast('卷刷新失败: ' + (data.message || '未知错误'), 'error');
+      return;
+    }
+    showToast('卷缓存已刷新: ' + volName, 'success');
+    void showVolumes(); // 刷新卷面板（用量等可能随重扫变化）
+  } catch (e) {
+    showToast('卷刷新失败: ' + e.message, 'error');
+  } finally {
+    if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = prev; }
+  }
 }
 
 // runVolumeOp 执行卷操作 POST（copy/move/rebalance）→ toast 摘要 + 刷新。
@@ -1001,47 +1611,41 @@ async function runVolumeOp(op, fromVol, toVol, filename) {
     const res = await sclientTransport.coreRequest('POST', volumeOpQuery(op, fromVol, toVol, filename, 0), {});
     const data = sclientUtil.decodeJSON(res.body);
     let msg = volumeOpLabel(op) + '完成';
-    if (data && data.moved != null) msg += '：迁移 ' + data.moved + ' 个文件 / ' + (data.bytes_moved != null ? data.bytes_moved : '') + ' 字节';
+    if (data?.moved != null) msg += '：迁移 ' + data.moved + ' 个文件 / ' + (data.bytes_moved != null ? data.bytes_moved : '') + ' 字节';
     showToast(msg, 'success');
-    showVolumes();
+    void showVolumes();
   } catch (e) {
     showToast(volumeOpLabel(op) + '失败: ' + e.message, 'error');
   }
+}
+
+// deleteUserVolumeMessage(name) → DELETE 用户卷并返回展示文案（失败返回错误文案）。
+async function deleteUserVolumeMessage(name) {
+  const res = await sc.files.deleteUserVolume(name);
+  if (res?.success) return '已删除 ' + name;
+  return '删除失败：' + (res?.error || '未知错误');
 }
 
 // onUserVolumeListClick 列表事件委托：删除按钮（确认后 DELETE + 刷新；409 引用中显示错误）。
 async function onUserVolumeListClick(ev) {
   const btn = ev.target.closest('[data-action="delete-user-volume"]');
   if (!btn) return;
-  const name = btn.getAttribute('data-name');
+  const name = btn.dataset.name;
   if (!name || !window.confirm('确认删除用户卷 ' + name + '？')) return;
   const msg = document.getElementById('user-volumes-msg');
   if (msg) msg.textContent = '';
   try {
-    const res = await sc.files.deleteUserVolume(name);
-    if (res && res.success) {
-      if (msg) msg.textContent = '已删除 ' + name;
-    } else {
-      if (msg) msg.textContent = '删除失败：' + ((res && res.error) || '未知错误');
-    }
+    if (msg) msg.textContent = await deleteUserVolumeMessage(name);
     await loadUserVolumes();
   } catch (e) {
-    if (msg) msg.textContent = '删除失败：' + (e && e.message ? e.message : String(e));
+    if (msg) msg.textContent = '删除失败：' + (e?.message ? e.message : String(e));
     await loadUserVolumes();
   }
 }
 
-// parseSizeText 人类可读容量 → 字节（"100GiB"/"2GB"/纯数字）。非法抛错。
-function parseSizeText(text) {
-  const t = String(text).trim();
-  if (t === '') return 0;
-  const m = /^([\d.]+)\s*(B|KB|MB|GB|KiB|MiB|GiB)?$/i.exec(t);
-  if (!m) throw new Error('无法解析大小: ' + t);
-  const n = parseFloat(m[1]);
-  const unit = (m[2] || '').toUpperCase();
-  const mult = { '': 1, B: 1, KB: 1000, MB: 1000 * 1000, GB: 1000 * 1000 * 1000, KIB: 1024, MIB: 1024 * 1024, GIB: 1024 * 1024 * 1024 }[unit];
-  return Math.round(n * (mult || 1));
-}
+// parseSizeText 已下沉 appRender.parseSizeText（含 TB/TiB 单位解析，供建卷容量单位下拉复用）。
+// 此处不再定义同名函数（禁跨文件隐式全局重复定义，见 CLAUDE.md 记录）——调用一律走
+// appRender.parseSizeText，浏览器运行时 appRender 先加载、随 onClick 事件触发时已就绪。
 
 async function showConfig() {
   document.getElementById('config-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
@@ -1049,6 +1653,15 @@ async function showConfig() {
     const data = await sc.config.get();
     document.getElementById('config-panel').innerHTML = configTableHtml(data);
   } catch (e) { document.getElementById('config-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
+}
+
+// unwrapListResult：Promise.allSettled 的列表结果 → 数组（fulfilled 且 value 为数组或
+// 对象[field]/[]；rejected 或字段缺失 → []）。
+function unwrapListResult(r, field) {
+  if (r.status !== 'fulfilled') return [];
+  const v = r.value;
+  if (Array.isArray(v)) return v;
+  return v?.[field] || [];
 }
 
 // --- Hub 管理 ---
@@ -1073,9 +1686,7 @@ async function showHub() {
   const meshR = settled[2];
   const fedNodesR = settled[3];
   const fedSvcsR = settled[4];
-  const nodes = nodesR.status === 'fulfilled'
-    ? (Array.isArray(nodesR.value) ? nodesR.value : ((nodesR.value && nodesR.value.nodes) || []))
-    : [];
+  const nodes = unwrapListResult(nodesR, 'nodes');
   const stats = statsR.status === 'fulfilled' ? statsR.value : null;
   const card = meshR.status === 'fulfilled' ? meshStatusHtml(meshR.value) : '';
   let hubHtml = '';
@@ -1084,17 +1695,13 @@ async function showHub() {
     // topologySvg 返回 ''/降级提示，表格仍保留（兜底不白屏）。
     hubHtml = hubTopologySvg(nodes) + hubTableHtml(nodes, stats);
   } else {
-    const reason = (nodesR.reason && nodesR.reason.message) || (statsR.reason && statsR.reason.message) || '未知错误';
+    const reason = nodesR.reason?.message || statsR.reason?.message || '未知错误';
     hubHtml = '<div class="empty-msg">Hub 未启用或请求失败: ' + appRender.escHtml(reason) + '</div>';
   }
   // 联邦节点/服务表：各自独立容错（端点未启用 404 → 空串，不连带隐藏其它区块）。
   // 领域 API 把裸数组包装为 {nodes:[...]}/{services:[...]}（与 nodes() 同款），此处归一。
-  const fedNodes = fedNodesR.status === 'fulfilled'
-    ? (Array.isArray(fedNodesR.value) ? fedNodesR.value : ((fedNodesR.value && fedNodesR.value.nodes) || []))
-    : [];
-  const fedSvcs = fedSvcsR.status === 'fulfilled'
-    ? (Array.isArray(fedSvcsR.value) ? fedSvcsR.value : ((fedSvcsR.value && fedSvcsR.value.services) || []))
-    : [];
+  const fedNodes = unwrapListResult(fedNodesR, 'nodes');
+  const fedSvcs = unwrapListResult(fedSvcsR, 'services');
   const fedNodesHtml = federationNodesHtml(fedNodes);
   const fedSvcsHtml = federationServicesHtml(fedSvcs);
   document.getElementById('hub-panel').innerHTML = card + hubHtml + fedNodesHtml + fedSvcsHtml;
@@ -1117,21 +1724,81 @@ function hubTopologySvg(nodes) { return appRender.topologySvg(nodes); }
 // showAudit 拉取最近审计事件并渲染到 #audit-panel。direct 与隧道两条路径均可达
 // （/api/audit 同时注册主 mux（authMiddleware）与 localMux（隧道加密即认证））。
 // 加载失败渲染通用错误占位（不展示原始错误细节，minimal）。
+// 审计面板状态：一次拉取最近 200 条，筛选在**客户端**完成（audit-filter.js 纯函数，见 R10 单测）。
+// 不额外请求 ⇒ 不改变读面权限语义（行已由服务端按单轴 Owner 过滤/脱敏）。
+let auditEventsCache = [];
+let auditFilterState = null;
+
 async function showAudit() {
-  document.getElementById('audit-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  const panel = document.getElementById('audit-panel');
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     const data = await sc.audit.list({ limit: 200 });
-    const events = (data && data.events) || [];
-    document.getElementById('audit-panel').innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
-      '<span style="font-weight:600;">审计日志（最近 200 条）</span>' +
-      '<button type="button" id="audit-export-btn" class="btn btn-sm btn-secondary" title="导出全量审计事件为 JSON 文件">导出</button>' +
-      '</div>' + auditTableHtml(events);
+    auditEventsCache = data?.events || [];
+    auditFilterState = auditFilter.auditFilterEmpty();
+    panel.innerHTML = auditFilterBarHtml();
     const exportBtn = document.getElementById('audit-export-btn');
     if (exportBtn) exportBtn.addEventListener('click', auditExport);
+    bindAuditFilters();
+    auditRenderTable();
   } catch (e) {
-    document.getElementById('audit-panel').innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
+    panel.innerHTML = '<div class="empty-msg">审计数据请求失败: ' + e.message + '</div>';
   }
+}
+
+// auditFilterBarHtml 渲染筛选栏 + 表格容器（id 固定，供事件绑定与 e2e 使用）。
+function auditFilterBarHtml() {
+  const inputStyle = 'padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:transparent;color:inherit;';
+  return '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px;">' +
+    '<span style="font-weight:600;">审计日志</span>' +
+    '<input id="audit-filter-action" type="text" placeholder="动作包含…" title="按动作子串筛选（不区分大小写）" style="' + inputStyle + 'width:130px;">' +
+    '<input id="audit-filter-owner" type="text" placeholder="归属租户包含…" title="按 owner 子串筛选" style="' + inputStyle + 'width:130px;">' +
+    '<input id="audit-filter-volume" type="text" placeholder="卷包含…" title="按卷名子串筛选（卷维度，评审 R13）" style="' + inputStyle + 'width:110px;">' +
+    '<select id="audit-filter-result" title="按结果精确筛选" style="' + inputStyle + '">' +
+    '<option value="">全部结果</option><option value="success">成功</option><option value="denied">拒绝</option><option value="error">失败</option>' +
+    '</select>' +
+    '<select id="audit-filter-kind" title="按条目类别精确筛选" style="' + inputStyle + '">' +
+    '<option value="">全部类别</option><option value="event">事件</option><option value="state">状态</option>' +
+    '<option value="span">步骤</option><option value="resource">资源</option><option value="done">终态</option><option value="rotate">轮转</option>' +
+    '</select>' +
+    '<span id="audit-filter-summary" style="color:var(--text-muted);"></span>' +
+    '<button type="button" id="audit-filter-reset" class="btn btn-sm btn-secondary" title="清除全部筛选条件">清除</button>' +
+    '<button type="button" id="audit-export-btn" class="btn btn-sm btn-secondary" title="导出全量审计事件为 JSON 文件">导出</button>' +
+    '<div id="audit-table" style="flex-basis:100%;"></div>' +
+    '</div>';
+}
+
+// bindAuditFilters 绑定筛选控件（input/change 即时生效）与「清除」按钮。
+function bindAuditFilters() {
+  const map = { action: '#audit-filter-action', owner: '#audit-filter-owner', volume: '#audit-filter-volume', result: '#audit-filter-result', kind: '#audit-filter-kind' };
+  Object.keys(map).forEach(function (k) {
+    const el = document.querySelector(map[k]);
+    if (!el) return;
+    const onInput = function () { auditFilterState[k] = el.value; auditRenderTable(); };
+    el.addEventListener('input', onInput);
+    el.addEventListener('change', onInput);
+  });
+  const reset = document.getElementById('audit-filter-reset');
+  if (reset) {
+    reset.addEventListener('click', function () {
+      auditFilterState = auditFilter.auditFilterEmpty();
+      Object.keys(map).forEach(function (k) {
+        const el = document.querySelector(map[k]);
+        if (el) el.value = '';
+      });
+      auditRenderTable();
+    });
+  }
+}
+
+// auditRenderTable 用当前筛选条件重渲染表格与计数摘要（不发请求）。
+function auditRenderTable() {
+  const filter = auditFilterState || auditFilter.auditFilterEmpty();
+  const rows = auditFilter.auditFilterRows(auditEventsCache, filter);
+  const table = document.getElementById('audit-table');
+  if (table) table.innerHTML = auditTableHtml(rows);
+  const sum = document.getElementById('audit-filter-summary');
+  if (sum) sum.textContent = auditFilter.auditFilterSummary(auditEventsCache.length, rows.length);
 }
 
 // auditExport 拉取 /api/audit/export（时间正序 JSON 数组）→ 浏览器下载 audit-<ts>.json。
@@ -1162,7 +1829,7 @@ async function removeHubNode(nodeId) {
   try {
     await sc.hub.remove(nodeId);
     showToast('节点 ' + nodeId + ' 已移除', 'success');
-    showHub();
+    void showHub();
   } catch (e) { showToast('移除失败: ' + e.message, 'error'); }
 }
 
@@ -1175,10 +1842,10 @@ function configTableHtml(cfg) {
 }
 
 async function updateConfigField(key, value) {
-  var patch = (function() { var o = {}; o[key] = value; return o; })();
+  const patch = (function() { const o = {}; o[key] = value; return o; })();
   try {
     const data = await sc.config.update(patch);
-    if (data && data.success) { showToast('配置已更新', 'success'); showConfig(); }
+    if (data?.success) { showToast('配置已更新', 'success'); void showConfig(); }
     else { showToast('更新失败', 'error'); }
   } catch (e) { showToast('更新失败: ' + e.message, 'error'); }
 }
@@ -1191,29 +1858,26 @@ function statsTableHtml(du, rc, s) { return appRender.statsTableHtml(du, rc, s);
 
 // --- 暗色模式 ---
 function initTheme() {
-  var saved = localStorage.getItem('sproxy_theme');
+  const saved = localStorage.getItem('sproxy_theme');
   if (saved === 'dark') {
-    document.documentElement.setAttribute('data-theme', 'dark');
+    document.documentElement.dataset.theme = 'dark';
     document.getElementById('theme-toggle-btn').textContent = '☀️';
   } else if (saved === 'light') {
-    document.documentElement.removeAttribute('data-theme');
+    delete document.documentElement.dataset.theme;
     document.getElementById('theme-toggle-btn').textContent = '🌙';
-  } else {
-    // 未保存时跟随系统
-    if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      document.getElementById('theme-toggle-btn').textContent = '☀️';
-    }
+  } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
 }
 
 function toggleTheme() {
-  var current = document.documentElement.getAttribute('data-theme');
+  const current = document.documentElement.dataset.theme;
   if (current === 'dark') {
-    document.documentElement.removeAttribute('data-theme');
+    delete document.documentElement.dataset.theme;
     localStorage.setItem('sproxy_theme', 'light');
     document.getElementById('theme-toggle-btn').textContent = '🌙';
   } else {
-    document.documentElement.setAttribute('data-theme', 'dark');
+    document.documentElement.dataset.theme = 'dark';
     localStorage.setItem('sproxy_theme', 'dark');
     document.getElementById('theme-toggle-btn').textContent = '☀️';
   }
@@ -1234,7 +1898,7 @@ document.addEventListener('keydown', function(e) {
       // r: 刷新列表（非 Ctrl+R）
       if (!e.ctrlKey && !e.metaKey) {
         e.preventDefault();
-        refreshList();
+        void refreshList();
       }
       break;
     case '/':
@@ -1255,7 +1919,7 @@ document.addEventListener('keydown', function(e) {
 document.addEventListener('keydown', function(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    var selectAll = document.getElementById('select-all-checkbox');
+    const selectAll = document.getElementById('select-all-checkbox');
     if (selectAll) {
       e.preventDefault();
       selectAll.click();
@@ -1266,7 +1930,7 @@ document.addEventListener('keydown', function(e) {
 // Delete: 批量删除选中文件
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Delete' && !e.target.tagName.match(/INPUT|TEXTAREA|SELECT/i)) {
-    var batchDelete = document.getElementById('batch-delete-btn');
+    const batchDelete = document.getElementById('batch-delete-btn');
     if (batchDelete && batchDelete.style.display !== 'none') {
       e.preventDefault();
       batchDelete.click();
@@ -1277,7 +1941,10 @@ document.addEventListener('keydown', function(e) {
 // --- 初始化 ---
 sclientInit();
 initTheme();
-refreshList();
+// NOSONAR（S7785）：classic script（index.html 非 type=module）无顶层 await，
+// refreshList 是 async 只能 void 调用；改 module 会改变加载时序（默认 defer）——
+// 规则无法以代码修复，裸 NOSONAR 抑制（SonarJS 不支持规则号后缀）。
+void refreshList(); // NOSONAR
 
 // --- 文件变更事件流（roadmap §2 P1）：SSE 订阅 /api/events 实时刷新 ---
 // 事件源（服务端 #433）：files 领域层 publishFileEvent → EventBus → SSE 推送
@@ -1290,9 +1957,9 @@ refreshList();
 //
 // 优雅降级：无凭据 + 服务端拒绝（401）或网络错误 → 停止重连并回落既有轮询/
 // 手动刷新路径（refreshList 由页面交互/按钮触发，事件流只是增量加速器）。
-var _eventsStream = null; // 活动 SSE 连接（fetch reader）
-var _eventsCursor = 0;    // Last-Event-ID 游标（localStorage 持久化）
-var _eventsReconnectAttempt = 0; // 重连退避计数
+let _eventsStream = null; // 活动 SSE 连接（fetch reader）
+let _eventsCursor = 0;    // Last-Event-ID 游标（localStorage 持久化）
+let _eventsReconnectAttempt = 0; // 重连退避计数
 
 // eventsOwner 返回事件流订阅 owner：有 AK 用 accessKeyMesh 解析（AK 形式 owner，
 // 与事件 bus 的 owner 语义一致），否则 anonymous（未认证直通场景）。
@@ -1319,9 +1986,9 @@ function eventsSaveCursor(c) {
 
 // eventsOnEvent：收到事件 → 记录游标 + 文件相关动作触发列表刷新。
 // 幂等：连续事件去抖（避免 upload 多分块事件风暴）——300ms 内只刷一次。
-var _eventsRefreshTimer = null;
+let _eventsRefreshTimer = null;
 function eventsOnEvent(evt) {
-  if (!evt || !evt.data) return;
+  if (!(evt?.data)) return;
   const d = evt.data;
   if (d.cursor) {
     _eventsCursor = webEvents.nextCursor(_eventsCursor, d.cursor);
@@ -1329,7 +1996,7 @@ function eventsOnEvent(evt) {
   }
   if (webEvents.isRefreshableAction(d.action)) {
     if (_eventsRefreshTimer) clearTimeout(_eventsRefreshTimer);
-    _eventsRefreshTimer = setTimeout(function() { refreshList(); }, 300);
+    _eventsRefreshTimer = setTimeout(function() { void refreshList(); }, 300);
   }
 }
 
@@ -1339,11 +2006,11 @@ function eventsOnEvent(evt) {
 //   - 连接意外关闭/错误 → 指数退避重连（游标回放）；401/403 停止（认证问题无意义重连）
 function eventsStart() {
   if (typeof webEvents === 'undefined' || typeof fetch !== 'function') return;
+  if (_eventsAuthBlocked) return; // 无凭据被拒：等登录成功后 eventsRestartAfterAuth 重启
   const owner = eventsOwner();
   const url = webEvents.buildEventsUrl(owner);
   const cursor = eventsLastEventID();
   if (cursor > 0) _eventsCursor = cursor;
-  const headers = {};
   webEvents.buildEventsHeaders(
     accessKey || '',
     accessKeySecret || '',
@@ -1351,49 +2018,69 @@ function eventsStart() {
     (typeof sclientSig !== 'undefined') ? sclientSig : null,
     url
   ).then(function(h) {
-    // 合并 Last-Event-ID（游标回放）与认证头。
-    const finalHeaders = Object.assign({}, h);
+    // 合并响应头——游标回放（Last-Event-ID）追加到认证头。
+    const finalHeaders = { ...h };
     if (_eventsCursor > 0) finalHeaders['Last-Event-ID'] = String(_eventsCursor);
-    fetch(url, { method: 'GET', headers: finalHeaders })
-      .then(function(resp) {
-        if (resp.status === 401 || resp.status === 403) {
-          // 认证失败：事件流不可用，静默停止（不打断既有交互；轮询/手动刷新仍工作）。
-          _eventsStream = null;
-          return;
+    return fetch(url, { method: 'GET', headers: finalHeaders });
+  }).then(function(resp) {
+    if (resp.status === 401 || resp.status === 403) {
+      // 认证失败：事件流不可用，暂停重连（不打断既有交互；轮询/手动刷新仍工作）。
+      // **但必须可恢复**（缺陷修复，2026-10-21）：旧实现直接 return 且不留标记 ⇒ 登录前 401
+      // 之后**永不重连**，用户登录后实时事件仍然死（与「登录后卷下拉不刷新」同属
+      // 「凭据生效后派生状态没重算」）。记录 _eventsAuthBlocked，由 refreshAfterAuth 显式重启。
+      _eventsStream = null;
+      _eventsAuthBlocked = true;
+      return;
+    }
+    if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
+      throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
+    }
+    _eventsReconnectAttempt = 0; // 连接成功复位退避
+    _eventsAuthBlocked = false;
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    function pump() {
+      return reader.read().then(function(result) {
+        if (result.done) { _eventsStream = null; scheduleReconnect(); return; }
+        buffer += decoder.decode(result.value, { stream: true });
+        // 按完整事件块切分处理（parseSSE 容忍跨块积累的未完成尾部）。
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const chunk = buffer.slice(0, idx + 2);
+          buffer = buffer.slice(idx + 2);
+          const events = webEvents.parseSSE(chunk);
+          for (const evt of events) eventsOnEvent(evt);
         }
-        if (!resp.ok || !resp.body || typeof resp.body.getReader !== 'function') {
-          throw new Error('SSE 响应不可用 (HTTP ' + resp.status + ')');
-        }
-        _eventsReconnectAttempt = 0; // 连接成功复位退避
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        function pump() {
-          return reader.read().then(function(result) {
-            if (result.done) { _eventsStream = null; scheduleReconnect(); return; }
-            buffer += decoder.decode(result.value, { stream: true });
-            // 按完整事件块切分处理（parseSSE 容忍跨块积累的未完成尾部）。
-            let idx;
-            while ((idx = buffer.indexOf('\n\n')) !== -1) {
-              const chunk = buffer.slice(0, idx + 2);
-              buffer = buffer.slice(idx + 2);
-              const events = webEvents.parseSSE(chunk);
-              for (const evt of events) eventsOnEvent(evt);
-            }
-            return pump();
-          }).catch(function() {
-            _eventsStream = null;
-            scheduleReconnect();
-          });
-        }
-        _eventsStream = { close: function() { try { reader.cancel(); } catch (e) { /* ignore */ } } };
-        pump();
-      })
-      .catch(function() {
+        return pump();
+      }).catch(function() {
         _eventsStream = null;
         scheduleReconnect();
       });
+    }
+    _eventsStream = { close: function() { reader.cancel().catch(function() { /* ignore */ }); } };
+    pump();
+  }).catch(function() {
+    _eventsStream = null;
+    scheduleReconnect();
   });
+}
+
+// _eventsAuthBlocked 表示上次连接因 401/403 停止（无凭据）。凭据生效后由
+// eventsRestartAfterAuth 显式放行并重连——否则实时更新在登录后仍永久失效。
+let _eventsAuthBlocked = false;
+
+// eventsRestartAfterAuth 在凭据生效后重启事件流（登录成功路径调用；幂等）。
+function eventsRestartAfterAuth() {
+  _eventsAuthBlocked = false;
+  _eventsReconnectAttempt = 0;
+  // 凭据变化后旧连接仍在（登录前匿名/loopback 允许时）⇒ 必须**关闭并重连**：事件流按
+  // 连接时刻的身份做 owner 过滤，沿用旧连接会继续只收到旧身份可见的事件。
+  if (_eventsStream && typeof _eventsStream.close === 'function') {
+    try { _eventsStream.close(); } catch (e) { /* ignore */ }
+  }
+  _eventsStream = null;
+  eventsStart();
 }
 
 // scheduleReconnect：断线后指数退避重连（1s→2s→4s→…→30s 封顶）。
@@ -1430,17 +2117,151 @@ eventsStart();
 window.addEventListener('beforeunload', eventsStop);
 
 // --- 分享管理 ---
-var _shareModalVisible = false;
+let _shareModalVisible = false;
 
-function showShareModal(name) {
+// _shareVolume 是本次分享源所在卷（来自文件行的 data-volume；空 = 服务端自动定位）。
+// 为什么不在 createShare 里直接读 currentVolume()：文件行进来看的是**该文件实际所在卷**
+// （多卷聚合/外部卷列表下与过滤卷可能不同），行卷更准确。
+let _shareVolume = '';
+
+function showShareModal(name, volume) {
   _shareModalVisible = true;
+  _shareVolume = volume || '';
   document.getElementById('share-modal').style.display = 'flex';
   document.getElementById('share-filename').value = name || '';
+  updateShareSourceHint();
   document.getElementById('share-ttl').value = '24h';
   document.getElementById('share-max-downloads').value = '0';
   document.getElementById('share-one-time').checked = false;
   switchShareTab('create');
-  refreshShareList();
+  void refreshShareList();
+}
+
+// updateShareSourceHint 显示「分享源卷」：行卷/过滤卷/自动定位三态可观测
+// （外部卷/加密卷分享是否带对卷，用户一眼可确认）。
+function updateShareSourceHint() {
+  const el = document.getElementById('share-source-hint');
+  if (!el) return;
+  const vol = (typeof appRender !== 'undefined' && appRender.shareVolumeFor)
+    ? appRender.shareVolumeFor(_shareVolume, (typeof currentVolume === 'function' ? currentVolume() : ''))
+    : (_shareVolume || '');
+  el.textContent = vol ? ('源卷: ' + vol) : '源卷: 自动定位（本地卷优先，未命中再扫外部卷）';
+}
+
+// ---- 文件元数据（meta extra）弹窗：展示 + 编辑（合并/整表替换/删键）----
+// 用户口径（2026-10-26）：默认**新增而非覆盖**——所以主按钮是「保存（合并）」，
+// 「整表替换」是显式覆盖入口。
+var _metaModalFile = '';
+
+async function showMetaModal(filename, volume) {
+  _metaModalFile = filename;
+  const modal = document.getElementById('meta-modal');
+  const body = document.getElementById('meta-modal-body');
+  if (!modal || !body) return;
+  body.innerHTML = '<div class="empty-msg">加载中...</div>';
+  modal.style.display = 'flex';
+  try {
+    const prevVol = typeof _volumeFilter !== 'undefined' ? _volumeFilter : '';
+    if (volume && sc.files.setVolume) sc.files.setVolume(volume);
+    const res = await sc.files.getMeta(filename);
+    if (volume && sc.files.setVolume) sc.files.setVolume(prevVol || '');
+    const extra = (res && res.extra) || {};
+    body.innerHTML = appRender.buildMetaModalHtml(filename, extra);
+    bindMetaModalButtons();
+  } catch (e) {
+    body.innerHTML = '<div class="empty-msg">加载失败: ' + appRender.escHtml(e.message) + '</div>';
+  }
+}
+
+function closeMetaModal() {
+  const modal = document.getElementById('meta-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+// readMetaEditJSON 解析编辑框 JSON（非法 JSON → 抛错由调用方 showToast）。
+function readMetaEditJSON() {
+  const ta = document.getElementById('meta-edit-json');
+  if (!ta) return {};
+  const raw = (ta.value || '').trim();
+  if (!raw) return {};
+  const obj = JSON.parse(raw);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('必须是 JSON 对象（{"key":"value"}）');
+  }
+  return obj;
+}
+
+async function saveMetaMode(mode) {
+  let extra;
+  try {
+    extra = readMetaEditJSON();
+  } catch (e) {
+    showToast('JSON 解析失败: ' + e.message, 'error');
+    return;
+  }
+  const keys = Object.keys(extra);
+  if (keys.length === 0) {
+    showToast('请至少填写一个键', 'error');
+    return;
+  }
+  try {
+    const res = await sc.files.updateMeta(_metaModalFile, extra, mode);
+    if (res && res.success === false) {
+      showToast('保存失败: ' + (res.message || ''), 'error');
+      return;
+    }
+    showToast(mode === 'replace' ? '已整表替换' : mode === 'delete' ? '已删除指定键' : '已合并保存', 'success');
+    await showMetaModal(_metaModalFile, '');
+  } catch (e) {
+    showToast('保存失败: ' + e.message, 'error');
+  }
+}
+
+// 删键：把编辑框里的键作为待删集合（值忽略）
+async function deleteMetaKeys() {
+  let extra;
+  try {
+    extra = readMetaEditJSON();
+  } catch (e) {
+    showToast('JSON 解析失败: ' + e.message, 'error');
+    return;
+  }
+  const keys = Object.keys(extra);
+  if (keys.length === 0) {
+    showToast('请至少填写一个要删除的键', 'error');
+    return;
+  }
+  const del = {};
+  for (const k of keys) del[k] = null;
+  try {
+    const res = await sc.files.updateMeta(_metaModalFile, del, 'delete');
+    if (res && res.success === false) {
+      showToast('删除失败: ' + (res.message || ''), 'error');
+      return;
+    }
+    showToast('已删除 ' + keys.length + ' 个键', 'success');
+    await showMetaModal(_metaModalFile, '');
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+function bindMetaModalButtons() {
+  const save = document.getElementById('meta-save-btn');
+  const replace = document.getElementById('meta-replace-btn');
+  const del = document.getElementById('meta-delete-key-btn');
+  const close = document.getElementById('meta-close-btn');
+  const closeX = document.getElementById('meta-modal-close');
+  if (save) save.addEventListener('click', function () { void saveMetaMode('merge'); });
+  if (replace) replace.addEventListener('click', function () { void saveMetaMode('replace'); });
+  if (del) del.addEventListener('click', function () { void deleteMetaKeys(); });
+  if (close) close.addEventListener('click', closeMetaModal);
+  if (closeX) closeX.addEventListener('click', closeMetaModal);
+  // 点击遮罩（modal 本身）关闭。
+  const modal = document.getElementById('meta-modal');
+  if (modal) modal.addEventListener('click', function (e) {
+    if (e.target === modal) closeMetaModal();
+  });
 }
 
 function hideShareModal() {
@@ -1458,67 +2279,91 @@ function switchShareTab(tab) {
 }
 
 async function createShare() {
-  var filename = document.getElementById('share-filename').value.trim();
+  const filename = document.getElementById('share-filename').value.trim();
   if (!filename) { showToast('请输入文件名', 'error'); return; }
-  var ttl = document.getElementById('share-ttl').value.trim() || '24h';
-  var maxDownloads = Number.parseInt(document.getElementById('share-max-downloads').value) || 0;
-  var oneTime = document.getElementById('share-one-time').checked;
+  const ttl = document.getElementById('share-ttl').value.trim() || '24h';
+  const maxDownloads = Number.parseInt(document.getElementById('share-max-downloads').value) || 0;
+  const oneTime = document.getElementById('share-one-time').checked;
 
   try {
-    const data = await sc.share.create({ filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime });
-    if (!data.token) { showToast('创建分享失败: ' + ((data && data.message) || 'unknown'), 'error'); return; }
-    var shareUrl = location.origin + '/s/' + data.token;
+    // 卷来源：**文件行的卷优先**（多卷聚合/外部卷列表下最准确），其次「过滤卷」当前选中值；
+    // 皆空 = 不发送（服务端自动定位）。外部卷/加密卷分享依赖它消除多卷同名歧义。
+    const shareVol = (typeof appRender !== 'undefined' && appRender.shareVolumeFor)
+      ? appRender.shareVolumeFor(_shareVolume, (typeof currentVolume === 'function' ? currentVolume() : ''))
+      : (_shareVolume || '');
+    const data = await sc.share.create({
+      filename: filename, ttl: ttl, max_downloads: maxDownloads, one_time: oneTime,
+      volume: shareVol || undefined,
+    });
+    if (!data.token) { showToast('创建分享失败: ' + (data?.message || 'unknown'), 'error'); return; }
+    const shareUrl = location.origin + '/s/' + data.token;
     if (navigator.clipboard) {
       try {
         await navigator.clipboard.writeText(shareUrl);
         showToast('分享链接已复制到剪贴板: ' + shareUrl, 'success');
-      } catch (_) {
+      } catch { /* 剪贴板写入失败——降级显示链接文本 */
         showToast('分享链接: ' + shareUrl, 'success');
       }
     } else {
       showToast('分享链接: ' + shareUrl, 'success');
     }
-    refreshShareList();
+    void refreshShareList();
   } catch (e) { showToast('创建分享失败: ' + e.message, 'error'); }
+}
+
+// shareRowHtml(s) → 单行分享 HTML（状态/颜色/下载次数/过期/操作按钮）。
+function shareRowHtml(s) {
+  let statusText;
+  if (s.expired) statusText = '已过期';
+  else if (s.one_time) statusText = '一次性';
+  else statusText = '活跃';
+  let statusColor;
+  if (s.expired) statusColor = 'var(--text-muted)';
+  else if (s.one_time) statusColor = '#e67e22';
+  else statusColor = '#27ae60';
+  const downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
+  let expiresLabel;
+  if (s.expired) expiresLabel = '-';
+  else if (s.expires_at) expiresLabel = new Date(s.expires_at).toLocaleString();
+  else expiresLabel = '-';
+
+  // 源卷徽标（服务端 list 新增 volume 字段）：外部/加密卷的分享一眼可辨（空 = 旧服务端）。
+  const volBadge = s.volume
+    ? ' <span class="vol-badge" title="卷 ' + appRender.escHtml(s.volume) + '">' + appRender.escHtml(s.volume) + '</span>'
+    : '';
+  let html = '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(s.filename) + '">' + appRender.escHtml(s.filename) + volBadge + '</td>';
+  html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);color:' + statusColor + ';">' + statusText + '</td>';
+  html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + downloads + '</td>';
+  html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + expiresLabel + '</td>';
+  html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
+  if (!s.expired) {
+    html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + appRender.escHtml(s.token) + '">撤销</button>';
+  }
+  html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + appRender.escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
+  html += '</td></tr>';
+  return html;
 }
 
 async function refreshShareList() {
   if (!_shareModalVisible) return;
-  var body = document.getElementById('share-list-body');
+  const body = document.getElementById('share-list-body');
   try {
     const listData = await sc.share.list();
-    var shares = (listData && listData.shares) || [];
+    const shares = listData?.shares || [];
 
     if (shares.length === 0) {
       body.innerHTML = '<div class="empty-msg">暂无分享链接</div>';
       return;
     }
 
-    var html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
     html += '<thead><tr style="background:var(--bg-hover);"><th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">文件名</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">状态</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">下载次数</th>';
     html += '<th style="padding:6px 8px;text-align:left;border-bottom:1px solid var(--border-color);">过期时间</th>';
     html += '<th style="padding:6px 8px;text-align:center;border-bottom:1px solid var(--border-color);">操作</th></tr></thead><tbody>';
 
-    for (var i = 0; i < shares.length; i++) {
-      var s = shares[i];
-      var statusText = s.expired ? '已过期' : (s.one_time ? '一次性' : '活跃');
-      var statusColor = s.expired ? 'var(--text-muted)' : (s.one_time ? '#e67e22' : '#27ae60');
-      var downloads = s.max_downloads > 0 ? s.downloads + '/' + s.max_downloads : s.downloads + '/∞';
-      var expiresLabel = s.expired ? '-' : (s.expires_at ? new Date(s.expires_at).toLocaleString() : '-');
-
-      html += '<tr><td style="padding:6px 8px;border-bottom:1px solid var(--border-color);max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(s.filename) + '">' + appRender.escHtml(s.filename) + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);color:' + statusColor + ';">' + statusText + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);">' + downloads + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);font-size:12px;">' + expiresLabel + '</td>';
-      html += '<td style="padding:6px 8px;border-bottom:1px solid var(--border-color);text-align:center;">';
-      if (!s.expired) {
-        html += '<button class="btn btn-danger btn-sm share-revoke-btn" data-token="' + appRender.escHtml(s.token) + '">撤销</button>';
-      }
-      html += '<button class="btn btn-sm btn-secondary share-copy-btn" data-token="' + appRender.escHtml(s.token) + '" style="margin-left:4px;">复制</button>';
-      html += '</td></tr>';
-    }
+    for (const s of shares) html += shareRowHtml(s);
     html += '</tbody></table>';
     body.innerHTML = html;
   } catch (e) {
@@ -1531,12 +2376,12 @@ async function revokeShare(token) {
   try {
     await sc.share.revoke(token);
     showToast('分享链接已撤销', 'success');
-    refreshShareList();
+    void refreshShareList();
   } catch (e) { showToast('撤销失败: ' + e.message, 'error'); }
 }
 
 function copyShareLink(token) {
-  var url = location.origin + '/s/' + token;
+  const url = location.origin + '/s/' + token;
   if (navigator.clipboard) {
     navigator.clipboard.writeText(url).then(function() {
       showToast('链接已复制到剪贴板', 'success');
@@ -1592,7 +2437,7 @@ function filepathSafe(name) {
 // 服务器云任务/组对象 → TransferItem 形态。status 透传并须落入 statusText 映射
 // （pending/downloading/completed/failed/cancelled）。meta.raw 保留原始对象供操作读取。
 function normalizeCloudTaskItem(t) {
-  const filename = (t && t.filename) || (t && t.url) || '任务-' + (t && t.id ? t.id : '?');
+  const filename = t?.filename || t?.url || '任务-' + (t?.id ? t.id : '?');
   return {
     id: 'cloud-task-' + t.id,
     kind: 'cloud_task',
@@ -1600,7 +2445,7 @@ function normalizeCloudTaskItem(t) {
     // total_size<=0 归一为 0（避免负数/缺省值污染渲染）
     totalSize: (t && typeof t.total_size === 'number' && t.total_size > 0) ? t.total_size : 0,
     loaded: t && typeof t.downloaded === 'number' && t.downloaded > 0 ? t.downloaded : 0,
-    status: (t && t.status) || 'pending',
+    status: t?.status || 'pending',
     meta: { raw: t || {} },
   };
 }
@@ -1609,7 +2454,7 @@ function normalizeCloudTaskItem(t) {
 // 显示面积由 completed/total_tasks 进度串决定）；loaded 置 0——该字段语义是字节数，
 // 组 API 的 completed 是子任务个数，装入 loaded 会造成"已加载字节"误读，故不装。
 function normalizeCloudGroupItem(g) {
-  const name = (g && g.name) || ('group-' + (g && g.id ? g.id : '?'));
+  const name = g?.name || ('group-' + (g?.id ? g.id : '?'));
   return {
     id: 'cloud-group-' + g.id,
     kind: 'cloud_group',
@@ -1617,7 +2462,7 @@ function normalizeCloudGroupItem(g) {
     name: name,
     totalSize: 0,
     loaded: 0, // 非字节：组无单文件字节进度，避免混淆
-    status: (g && g.status) || 'pending',
+    status: g?.status || 'pending',
     meta: { raw: g || {} },
   };
 }
@@ -1626,26 +2471,26 @@ function normalizeCloudGroupItem(g) {
 // id 直接用服务端 id（sync 任务不入 localStorage，无 cloud-task- 前缀冲突）。
 // meta.sync 保留服务端完整快照（供 buildSyncRowMeta / 操作读取 files_done 等）。
 function normalizeSyncTaskItem(t) {
-  const src = (t && t.src) || '';
+  const src = t?.src || '';
   const total = (t && typeof t.bytes_total === 'number' && t.bytes_total > 0) ? t.bytes_total : 0;
   const loaded = (t && typeof t.bytes_done === 'number' && t.bytes_done > 0) ? t.bytes_done : 0;
   return {
-    id: t && t.id,
+    id: t?.id,
     kind: 'sync_task',
     filename: src || 'sync',
     src: src,
-    dst: (t && t.dst) || '',
-    direction: (t && t.direction) || '',
+    dst: t?.dst || '',
+    direction: t?.direction || '',
     totalSize: total,
     total: total,
     loaded: loaded,
-    status: (t && t.status) || 'pending',
+    status: t?.status || 'pending',
     // 载体可见性（W1）：服务端快照的 kind/transport/carriers。
     // 命名 `carrierKind`：行对象的 `kind` 已被「传输面板条目类型」（sync_task）占用。
     // 旧服务端无这些字段时为 undefined/空 ⇒ 渲染层不显示载体信息（向后兼容）。
-    carrierKind: (t && t.kind) || '',
-    transport: (t && t.transport) || '',
-    carriers: (t && t.carriers) || null,
+    carrierKind: t?.kind || '',
+    transport: t?.transport || '',
+    carriers: t?.carriers || null,
     meta: { sync: t || {} },
   };
 }
@@ -1675,7 +2520,7 @@ function refreshCloudTasks() {
   if (_cloudTasksInFlight) return;
   _cloudTasksInFlight = true;
   return sc.cloud.listTasks({}).then(function (data) {
-    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
+    const tasks = Array.isArray(data) ? data : data?.tasks || [];
     _cloudTasks = tasks || [];
     renderTransferChannel(); // 云任务名称/进度进统一传输页渲染管
   }).catch(function (e) {
@@ -1691,7 +2536,7 @@ function refreshCloudGroups() {
   if (_cloudGroupsInFlight) return;
   _cloudGroupsInFlight = true;
   return sc.cloud.listGroups({}).then(function (data) {
-    const groups = Array.isArray(data) ? data : (data && data.groups) || [];
+    const groups = Array.isArray(data) ? data : data?.groups || [];
     _cloudGroups = groups || [];
     renderTransferChannel(); // 云组进统一传输页渲染管
   }).catch(function (e) {
@@ -1711,16 +2556,16 @@ function refreshSyncTasks() {
   if (_syncTasksInFlight) return;
   _syncTasksInFlight = true;
   return sc.sync.listTasks().then(function (data) {
-    const tasks = Array.isArray(data) ? data : (data && data.tasks) || [];
+    const tasks = Array.isArray(data) ? data : data?.tasks || [];
     _syncTasks = tasks || [];
     renderTransferChannel();
   }).catch(function (e) {
-    if (e && e.status === 400) {
+    if (e?.status === 400) {
       _syncTasks = [];
       renderTransferChannel();
       return;
     }
-    showToast('同步任务刷新失败: ' + (e && e.message ? e.message : String(e)), 'error');
+    showToast('同步任务刷新失败: ' + (e?.message ? e.message : String(e)), 'error');
   }).finally(function () {
     _syncTasksInFlight = false;
   });
@@ -1751,7 +2596,7 @@ function stopCloudPolling() {
 function switchMainTab(tab) {
   if (tab !== 'files' && tab !== 'transfer') return;
   const cur = document.querySelector('.main-tab.active');
-  if (cur && cur.id === 'main-tab-' + tab) return; // 已在目标 tab，幂等返回
+  if (cur?.id === 'main-tab-' + tab) return; // 已在目标 tab，幂等返回
   const oldTab = cur ? cur.id.replace('main-tab-', '') : 'files';
   if (oldTab === 'transfer') hideTransferPage();
   const filesPage = document.getElementById('files-page');
@@ -1837,7 +2682,7 @@ function initTransferPage() {
     bar.addEventListener('click', function(e) {
       const btn = e.target.closest('button');
       if (!btn) return;
-      const ch = btn.dataset && btn.dataset.channel;
+      const ch = btn.dataset?.channel;
       if (!ch) return;
       switchTransferChannel(ch);
     });
@@ -1882,7 +2727,7 @@ function bindCloudUrlRowEvents() {
   const urlInput = document.getElementById('cloud-url');
   if (urlInput) {
     urlInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); createCloudTask(); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void createCloudTask(); }
     });
   }
 }
@@ -1893,7 +2738,7 @@ function bindCloudUrlRowEvents() {
 // TypeError、传输页云任务频道空白。这里重建输入行并重新绑定按钮事件。
 // 选择器 .cloud-url-row（URL 区在 #transfer-page 内，不依赖 #cloud-modal 祖先）。
 function restoreCloudUrlRow() {
-  var urlRow = document.querySelector('.cloud-url-row');
+  const urlRow = document.querySelector('.cloud-url-row');
   if (!urlRow || document.getElementById('cloud-url')) return;
   // 静态可信模板，无用户输入拼接；用户内容通过 .value 赋值。
   urlRow.innerHTML = '<textarea id="cloud-url" placeholder="输入下载链接，每行一个..." aria-label="下载链接" rows="3" style="flex:1;padding:8px;border:1px solid var(--border-input);border-radius:4px;font-size:14px;resize:vertical;font-family:inherit;"></textarea>' +
@@ -1914,7 +2759,7 @@ function bindSyncCreateEvents() {
   ['sync-remote', 'sync-src', 'sync-dst'].forEach(function (id) {
     const el = document.getElementById(id);
     if (el) el.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); createSyncTask(); }
+      if (e.key === 'Enter') { e.preventDefault(); void createSyncTask(); }
     });
   });
 }
@@ -1947,17 +2792,18 @@ async function createSyncTask() {
     document.getElementById('sync-dst').value = '';
     // 审查 M-4：先本地即时更新（新任务立即可见），再触发刷新——若恰逢轮询在途被
     // in-flight 守卫 no-op，本地已显示，下一轮轮询补齐。
-    if (data && data.id) {
-      (_syncTasks = _syncTasks || []).push(normalizeSyncTaskItem(data));
+    if (data?.id) {
+      _syncTasks = _syncTasks || [];
+      _syncTasks.push(normalizeSyncTaskItem(data));
       renderTransferChannel();
     }
     switchTransferChannel('sync');
     refreshSyncTasks();
   } catch (e) {
     // 审查 M-3：按 status 映射友好提示（SclientError 不带响应体 error，仅 HTTP 状态）。
-    let msg = e && e.message ? e.message : String(e);
-    if (e && e.status === 400) msg = '参数有误（请检查 remote 是否存在、src/dst/conflict 等）';
-    else if (e && e.status === 507) msg = '目标存储空间不足';
+    let msg = e?.message ? e.message : String(e);
+    if (e?.status === 400) msg = '参数有误（请检查 remote 是否存在、src/dst/conflict 等）';
+    else if (e?.status === 507) msg = '目标存储空间不足';
     showToast('创建同步失败: ' + msg, 'error');
   }
 }
@@ -1972,7 +2818,7 @@ async function cancelSyncTask(id) {
     _syncTasks = (_syncTasks || []).filter(function (x) { return x.id !== id; });
     renderTransferChannel();
     refreshSyncTasks();
-  } catch (e) { showToast('取消失败: ' + (e && e.message ? e.message : e), 'error'); }
+  } catch (e) { showToast('取消失败: ' + (e?.message ? e.message : e), 'error'); }
 }
 
 // deleteSyncTask：删除同步任务（终态清理）。
@@ -1985,7 +2831,7 @@ async function deleteSyncTask(id) {
     _syncTasks = (_syncTasks || []).filter(function (x) { return x.id !== id; });
     renderTransferChannel();
     refreshSyncTasks();
-  } catch (e) { showToast('删除失败: ' + (e && e.message ? e.message : e), 'error'); }
+  } catch (e) { showToast('删除失败: ' + (e?.message ? e.message : e), 'error'); }
 }
 
 // refreshSyncTaskStatus：单任务刷新（GET /api/sync/tasks/{id}）。
@@ -1994,10 +2840,39 @@ async function deleteSyncTask(id) {
 async function refreshSyncTaskStatus(id) {
   try {
     const t = await sc.sync.getTask(id);
-    if (!t || !t.id) throw new Error('任务不存在');
+    if (!(t?.id)) throw new Error('任务不存在');
     showToast('已刷新', 'success');
     refreshSyncTasks();
-  } catch (e) { showToast('刷新失败: ' + (e && e.message ? e.message : e), 'error'); }
+  } catch (e) { showToast('刷新失败: ' + (e?.message ? e.message : e), 'error'); }
+}
+
+// collectPreviewSelections 读取预览行输入 → {urls, filenames}（文件名先 filepathSafe 归一）。
+function collectPreviewSelections() {
+  const filenameInputs = document.querySelectorAll('.cloud-preview-filename');
+  const urls = [];
+  const filenames = [];
+  for (const input of filenameInputs) {
+    const lineIdx = Number(input.dataset.index);
+    const url = window._cloudPreviewLines[lineIdx].url;
+    urls.push(url);
+    const name = input.value.trim() || cloudfilename.safeDefaultFromURL(url);
+    filenames.push(filepathSafe(name));
+  }
+  return { urls: urls, filenames: filenames };
+}
+
+// findDuplicateNames(names) → 重复文件名数组（Map 判重，避免普通对象把原型属性误判为冲突）。
+function findDuplicateNames(names) {
+  const seenNames = new Map();
+  const conflicts = [];
+  for (const name of names) {
+    if (seenNames.has(name)) {
+      conflicts.push(name);
+    } else {
+      seenNames.set(name, true);
+    }
+  }
+  return conflicts;
 }
 
 // showCloudDownloadPreview 在提交前展示每个 URL 的默认文件名，供用户确认或修改。
@@ -2019,22 +2894,22 @@ async function showCloudDownloadPreview(action) {
   }
 
   // 解析每行：含 Tab 时按前两列拆分出 URL 与预填文件名（多余 Tab 忽略，与 CLI readEntriesFromFile 一致）
-  var parsedLines = [];
-  for (var i = 0; i < lines.length; i++) {
-    var parts = lines[i].split('\t');
-    var url = parts[0].trim();
-    var presetFilename = parts.length > 1 ? parts[1].trim() : '';
+  const parsedLines = [];
+  for (const line of lines) {
+    const parts = line.split('\t');
+    const url = parts[0].trim();
+    const presetFilename = parts.length > 1 ? parts[1].trim() : '';
     parsedLines.push({ url: url, preset: presetFilename });
   }
 
   // 生成预览信息
-  var previewHtml = '<div style="margin-bottom:12px;font-size:13px;color:var(--text-secondary);">共 ' + parsedLines.length + ' 个链接，请确认或修改保存文件名：</div>';
+  let previewHtml = '<div style="margin-bottom:12px;font-size:13px;color:var(--text-secondary);">共 ' + parsedLines.length + ' 个链接，请确认或修改保存文件名：</div>';
   previewHtml += '<div style="max-height:300px;overflow-y:auto;margin-bottom:12px;">';
 
-  for (var i = 0; i < parsedLines.length; i++) {
+  for (let i = 0; i < parsedLines.length; i++) {
     // 与服务端保存规则一致：展示清理后的最终文件名，避免"预览 a/b 实际保存 a_b"的落差
     // 显式指定的文件名也先 safe 化，保证预览即最终保存名
-    var defaultName = parsedLines[i].preset
+    const defaultName = parsedLines[i].preset
       ? cloudfilename.filepathSafe(parsedLines[i].preset)
       : cloudfilename.safeDefaultFromURL(parsedLines[i].url);
     previewHtml += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:4px 0;border-bottom:1px solid var(--border-color);">';
@@ -2044,6 +2919,18 @@ async function showCloudDownloadPreview(action) {
     previewHtml += '</div>';
   }
   previewHtml += '</div>';
+
+  // 「三行为」配置区：转存目标卷/路径 + save/download_local（restoreCloudUrlRow 会把
+  // 预览整个还原为输入行，故行为必须在 confirm 前读取，不得在 doXxx 内查 DOM）。卷列表
+  // 拉取失败不阻塞提交（留空 = 不转存 = 零回归）。
+  let behaviorFormOpts = { volumes: [], current: '' };
+  try {
+    const volRes = await sc.files.volumes();
+    // 传对象（含 type）而非仅卷名：cloudDownloadFormHtml 按 type 过滤掉服务端必然拒绝的
+    // 候选（本地卷无外部后端、secrets 密钥卷）——B-M1。
+    behaviorFormOpts.volumes = (volRes && Array.isArray(volRes.volumes) ? volRes.volumes : []);
+  } catch (e) { /* 卷面失败不阻断：不转存仍可提交 */ }
+  previewHtml += appRender.cloudDownloadFormHtml(behaviorFormOpts);
 
   previewHtml += '<div style="display:flex;gap:8px;justify-content:flex-end;">';
   previewHtml += '<button type="button" id="cloud-preview-cancel-btn" class="btn btn-secondary">取消</button>';
@@ -2055,7 +2942,7 @@ async function showCloudDownloadPreview(action) {
   window._cloudPreviewLines = parsedLines;
 
   // 替换 cloud-url 区域为预览界面
-  var urlRow = input.parentElement;
+  const urlRow = input.parentElement;
   urlRow.innerHTML = previewHtml;
 
   // 绑定按钮事件
@@ -2066,29 +2953,13 @@ async function showCloudDownloadPreview(action) {
   });
 
   document.getElementById('cloud-preview-confirm-btn').addEventListener('click', function() {
-    // 收集用户指定的文件名
-    var filenameInputs = document.querySelectorAll('.cloud-preview-filename');
-    var urls = [];
-    var filenames = [];
-    for (var j = 0; j < filenameInputs.length; j++) {
-      var url = window._cloudPreviewLines[j].url;
-      urls.push(url);
-      // 与服务端一致做 filepathSafe：用户输入的非法字符也会被清理，预览即最终保存名
-      var name = filenameInputs[j].value.trim() || cloudfilename.safeDefaultFromURL(url);
-      filenames.push(filepathSafe(name));
-    }
-
-    // 执行对应操作
-    var act = window._cloudPreviewAction;
+    // 收集用户指定的文件名（filepathSafe 归一，预览即最终保存名）
+    const sel = collectPreviewSelections();
+    const act = window._cloudPreviewAction;
     // 提交前做 URL 格式预校验（对齐 Go cloudfilename.ValidateEntry，提供"服务端别拒绝"的体验）：
     // 无效 URL 立即提示，避免发送后拿到 400/409 往返。组内重复 URL 由下方文件名冲突检测
     // 与服务端 409 兜底（validateEntries 的去重判断与文件名冲突检测冗余，此处不重复调用）。
-    var invalidURLs = [];
-    for (var u = 0; u < urls.length; u++) {
-      if (!cloudfilename.validateEntry(urls[u]).valid) {
-        invalidURLs.push(urls[u]);
-      }
-    }
+    const invalidURLs = sel.urls.filter(function(u) { return !cloudfilename.validateEntry(u).valid; });
     if (invalidURLs.length > 0) {
       showToast('以下链接无效（需以 http/https 开头且含主机名）: '
         + invalidURLs.slice(0, 3).join(', ') + (invalidURLs.length > 3 ? ' 等 ' + invalidURLs.length + ' 个' : ''), 'warning');
@@ -2097,16 +2968,7 @@ async function showCloudDownloadPreview(action) {
     if (act === 'group' || act === 'chain_group') {
       // 客户端预校验：组内保存文件名必须唯一（服务端 CreateGroup 也会校验并返回 409），
       // 这里在发送前拦截，避免 409 往返，直接提示用户修改冲突条目。
-      // 用 Map 判重，避免普通对象把 constructor/toString 等原型属性误判为冲突。
-      var seenNames = new Map();
-      var conflicts = [];
-      for (var k = 0; k < filenames.length; k++) {
-        if (seenNames.has(filenames[k])) {
-          conflicts.push(filenames[k]);
-        } else {
-          seenNames.set(filenames[k], k);
-        }
-      }
+      const conflicts = findDuplicateNames(sel.filenames);
       if (conflicts.length > 0) {
         showToast('组内文件名冲突: ' + conflicts.join(', ') + '，请修改保存文件名', 'error');
         return;
@@ -2114,19 +2976,56 @@ async function showCloudDownloadPreview(action) {
     }
     // 提交前立即恢复输入行，使"确认提交"按钮消失，防止链式等待（最长 20 分钟）期间
     // 用户重复点击同一批 URL；doXxx 使用已收集的 lines/filenames 局部变量，不受影响。
+    // 三行为（transfer/save/download_local）必须在 restore 前从表单读取（恢复后表单
+    // 已从 DOM 移除），连同行为一并传给 doXxx 透传给后端 create 方法。
+    const behavior = collectCloudBehavior();
     restoreCloudUrlRow();
-    var restoredInput = document.getElementById('cloud-url');
+    const restoredInput = document.getElementById('cloud-url');
     if (restoredInput) restoredInput.value = '';
     if (act === 'submit') {
-      doSubmitCloudTasks(urls, filenames);
+      void doSubmitCloudTasks(sel.urls, sel.filenames, behavior);
     } else if (act === 'group') {
-      doCreateCloudGroup(urls, filenames);
+      void doCreateCloudGroup(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain') {
-      doChainDownloadCloud(urls, filenames);
+      void doChainDownloadCloud(sel.urls, sel.filenames, behavior);
     } else if (act === 'chain_group') {
-      doChainDownloadCloudGroup(urls, filenames);
+      void doChainDownloadCloudGroup(sel.urls, sel.filenames, behavior);
     }
   });
+}
+
+// collectCloudBehavior 读取云端下载预览「三行为」配置（转存目标卷/路径 + save +
+// download_local + integrity_must_pass 复选框）→ {transfer:{volume,path}, save,
+// downloadLocal, integrityMustPass}。元素缺省/未选时返回 {}（三行为不发 → 后端空语义
+// = 不转存/不强制完整性，既有调用零回归）。
+function collectCloudBehavior() {
+  const volEl = document.querySelector('.cloud-behavior-form [name="transfer-volume"]');
+  const pathEl = document.querySelector('.cloud-behavior-form [name="transfer-path"]');
+  const saveEl = document.querySelector('.cloud-behavior-form [name="save"]');
+  const dlEl = document.querySelector('.cloud-behavior-form [name="download-local"]');
+  const impEl = document.querySelector('.cloud-behavior-form [name="integrity-must-pass"]');
+  const metaEl = document.querySelector('.cloud-behavior-form [name="meta-extra"]');
+  const opts = {};
+  if (volEl && volEl.value) {
+    opts.transfer = { volume: volEl.value };
+    if (pathEl && pathEl.value) opts.transfer.path = pathEl.value;
+  }
+  if (saveEl) opts.save = saveEl.checked;
+  if (dlEl) opts.downloadLocal = dlEl.checked;
+  if (impEl) opts.integrityMustPass = impEl.checked;
+  if (metaEl && metaEl.value.trim()) {
+    try {
+      const parsed = JSON.parse(metaEl.value.trim());
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        opts.metaExtra = parsed;
+      } else {
+        showToast('自定义元数据需为 JSON 对象', 'warning');
+      }
+    } catch (e) {
+      showToast('自定义元数据 JSON 解析失败: ' + e.message, 'warning');
+    }
+  }
+  return opts;
 }
 
 // triggerBrowserDownload 触发浏览器保存（下载型归档等）。
@@ -2141,36 +3040,55 @@ function triggerBrowserDownload(data, filename) {
 }
 
 async function chainDownloadCloud() {
-  showCloudDownloadPreview('chain');
+  void showCloudDownloadPreview('chain');
 }
 
-async function doChainDownloadCloud(lines, filenames) {
+// waitTasksSettled(taskList)：轮询任务直至全部终态（超时 600×2s）→ 返回终态任务数组。
+async function waitTasksSettled(taskList) {
+  for (let i = 0; i < 600; i++) {
+    await new Promise(function(r) { setTimeout(r, 2000); });
+    refreshCloudTasks();
+    // S9382：并行拉取各任务状态（各 getTask 相互独立、无顺序依赖），Promise.all 收集后统一判定。
+    const results = await Promise.all(taskList.map(function (item) {
+      return sc.cloud.getTask(stripCloudId(item.id))
+        .then(function (t) { return { ok: true, t: t }; })
+        .catch(function () { return { ok: false, t: null }; });
+    }));
+    let allDone = true;
+    for (let j = 0; j < results.length; j++) {
+      if (!results[j].ok) { allDone = false; continue; }
+      taskList[j] = results[j].t;
+      const st = results[j].t.status;
+      if (st === 'pending' || st === 'downloading') { allDone = false; }
+    }
+    if (allDone) { break; }
+  }
+  return taskList;
+}
+
+// cleanupTaskIds：删除云任务（任务间相互独立，并行删除；单任务失败不阻断其余，逐条提示）。
+async function cleanupTaskIds(taskIds) {
+  // S9382：各 deleteTask 无顺序依赖，Promise.all 并行清理（每条自带 catch 保持逐条失败隔离）。
+  await Promise.all(taskIds.map(function (taskId) {
+    return sc.cloud.deleteTask(taskId).catch(function (e) {
+      showToast('清理任务 ' + taskId + ' 失败: ' + e.message, 'error');
+    });
+  }));
+}
+
+async function doChainDownloadCloud(lines, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动（模态关闭后后台继续跑，重复点击会并发两轮）
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
     showToast('提交任务中...', 'info');
-    const tasks = await sc.cloud.createBatch(urls);
+    const tasks = await sc.cloud.createBatch(urls, behavior);
     refreshCloudTasks();
-    showToast((tasks && tasks.tasks ? tasks.tasks.length : 0) + ' 个任务已提交', 'success');
+    showToast((tasks?.tasks ? tasks.tasks.length : 0) + ' 个任务已提交', 'success');
     showToast('等待任务完成...', 'info');
-    let taskList = (tasks && tasks.tasks) || [];
-    for (let i = 0; i < 600; i++) {
-      await new Promise(function(r) { setTimeout(r, 2000); });
-      refreshCloudTasks();
-      let allDone = true;
-      for (let j = 0; j < taskList.length; j++) {
-        try {
-          const t = await sc.cloud.getTask(stripCloudId(taskList[j].id));
-          taskList[j] = t;
-          if (t.status === 'pending' || t.status === 'downloading') { allDone = false; }
-        } catch(e) {
-          allDone = false;
-        }
-      }
-      if (allDone) { break; }
-    }
+    let taskList = tasks?.tasks || [];
+    taskList = await waitTasksSettled(taskList);
     const succeeded = taskList.filter(function(t) { return t.status === 'completed'; });
     const failedCount = taskList.filter(function(t) { return t.status === 'failed' || t.status === 'cancelled'; }).length;
     if (succeeded.length === 0) { showToast('所有任务均未成功完成', 'error'); return; }
@@ -2188,13 +3106,7 @@ async function doChainDownloadCloud(lines, filenames) {
     // （服务端返回的 file 只含归档名，客户端不接触 .__ 内部路径）。
     const dlBlob = (await sc.files.download(archiveResult.file, { kind: 'cloud_archive' })).blob;
     triggerBrowserDownload(dlBlob, downloadName);
-    for (let i = 0; i < taskIds.length; i++) {
-      try {
-        await sc.cloud.deleteTask(taskIds[i]);
-      } catch (e) {
-        showToast('清理任务 ' + taskIds[i] + ' 失败: ' + e.message, 'error');
-      }
-    }
+    await cleanupTaskIds(taskIds);
     refreshCloudTasks();
     if (failedCount > 0) {
       showToast('链式下载完成（' + succeeded.length + ' 成功, ' + failedCount + ' 失败/取消）', 'success');
@@ -2210,12 +3122,46 @@ async function doChainDownloadCloud(lines, filenames) {
 
 // 组链式下载入口：复用预览界面，action 为 'chain_group'
 async function chainDownloadCloudGroup() {
-  showCloudDownloadPreview('chain_group');
+  void showCloudDownloadPreview('chain_group');
+}
+
+// waitGroupSettled(groupId, totalTasks)：轮询组详情直至全部任务终态。
+// 返回 'failed'（有失败/取消）/ 'completed' / 'timeout'（600×2s 超时）。
+async function waitGroupSettled(groupId) {
+  for (let i = 0; i < 600; i++) {
+    await new Promise(function(r) { setTimeout(r, 2000); });
+    refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
+    try {
+      // groupId 为 createGroup 返回的原始 id（无前缀），直接使用真实 id
+      const detail = await sc.cloud.getGroup(groupId);
+      const group = detail.group || detail;
+      // 检查是否有失败/取消的子任务
+      let failed = 0, cancelled = 0, completed = 0, active = 0;
+      const tasks = detail.tasks || [];
+      for (const task of tasks) {
+        switch (task.status) {
+          case 'completed': completed++; break;
+          case 'failed': failed++; break;
+          case 'cancelled': cancelled++; break;
+          default: active++;
+        }
+      }
+      if (failed + cancelled > 0) {
+        // 保留组供 resume（与 CLI 链语义一致，不因失败丢弃已下载文件）
+        showToast('组内 ' + (failed + cancelled) + ' 个任务失败/取消，无法完成链式下载', 'error');
+        return 'failed';
+      }
+      if (group.status === 'completed' || (active === 0 && completed > 0)) return 'completed';
+    } catch (e) {
+      /* 轮询失败继续尝试 */
+    }
+  }
+  return 'timeout';
 }
 
 // doChainDownloadCloudGroup 执行组链式下载完整流程：创建组→等待→组级打包→下载→删除组。
 // 与 batch chain 的语义一致：任一子任务 failed/cancelled → 整体失败。
-async function doChainDownloadCloudGroup(urls, filenames) {
+async function doChainDownloadCloudGroup(urls, filenames, behavior) {
   // 防重入：链式等待期间不允许再次启动
   if (window._busyChain) { showToast('已有链式下载在进行中', 'error'); return; }
   window._busyChain = true;
@@ -2230,47 +3176,21 @@ async function doChainDownloadCloudGroup(urls, filenames) {
 
     // 阶段 1: 创建组
     const entries = urls.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    const groupData = await sc.cloud.createGroup(name, entries);
+    const groupData = await sc.cloud.createGroup(name, entries, behavior);
     groupId = groupData.id;
-    let totalTasks = groupData.total_tasks || urls.length;
+    const totalTasks = groupData.total_tasks || urls.length;
     refreshCloudGroups();
     showToast('下载组已创建: ' + groupId, 'success');
 
     // 阶段 2: 等待组内全部任务完成（轮询组详情，与 CLI CloudDownloadGroupChain.waitForGroup 逻辑对齐）
     showToast('等待 ' + totalTasks + ' 个任务完成...', 'info');
-    let allDone = false;
-    for (let i = 0; i < 600; i++) {
-      await new Promise(function(r) { setTimeout(r, 2000); });
-      refreshCloudGroups().catch(function() { /* 轮询失败忽略，主轮询继续 */ });
-      try {
-        // groupId 为 createGroup 返回的原始 id（无前缀），直接使用真实 id
-        const detail = await sc.cloud.getGroup(groupId);
-        const group = detail.group || detail;
-        // 检查是否有失败/取消的子任务
-        let failed = 0, cancelled = 0, completed = 0, active = 0;
-        const tasks = detail.tasks || [];
-        for (let j = 0; j < tasks.length; j++) {
-          switch (tasks[j].status) {
-            case 'completed': completed++; break;
-            case 'failed': failed++; break;
-            case 'cancelled': cancelled++; break;
-            default: active++;
-          }
-        }
-        if (failed + cancelled > 0) {
-          showToast('组内 ' + (failed + cancelled) + ' 个任务失败/取消，无法完成链式下载', 'error');
-          // 保留组供 resume（与 CLI 链语义一致，不因失败丢弃已下载文件）
-          return;
-        }
-        if (group.status === 'completed' || (active === 0 && completed > 0)) {
-          allDone = true;
-          break;
-        }
-      } catch(e) {
-        // 轮询失败继续尝试
-      }
+    const outcome = await waitGroupSettled(groupId);
+    if (outcome === 'failed') {
+      showToast('组内任务失败/取消，无法完成链式下载', 'error');
+      // 保留组供 resume（与 CLI 链语义一致，不因失败丢弃已下载文件）
+      return;
     }
-    if (!allDone) {
+    if (outcome === 'timeout') {
       showToast('等待超时', 'error');
       // 保留组供 resume（与 CLI 链语义一致）
       return;
@@ -2314,20 +3234,20 @@ async function deleteCloudGroupForCleanup(groupId) {
   }
 }
 async function createCloudTask() {
-  showCloudDownloadPreview('submit');
+  void showCloudDownloadPreview('submit');
 }
 
-async function doSubmitCloudTasks(lines, filenames) {
+async function doSubmitCloudTasks(lines, filenames, behavior) {
   try {
     if (lines.length === 1) {
-      // 单 URL：使用原有 API，携带 filename
-      const task = await sc.cloud.createDownload(lines[0], filenames[0]);
+      // 单 URL：使用原有 API，携带 filename + 三行为（可选，空对象 = 不发）
+      const task = await sc.cloud.createDownload(lines[0], filenames[0], behavior);
       showToast('任务已创建: ' + task.id, 'success');
     } else {
-      // 多 URL：使用批量 API，携带每个 URL 的 filename
+      // 多 URL：使用批量 API，携带每个 URL 的 filename + 三行为
       const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-      const data = await sc.cloud.createBatch(urls);
-      const tasks = (data && data.tasks) || [];
+      const data = await sc.cloud.createBatch(urls, behavior);
+      const tasks = data?.tasks || [];
       const failed = tasks.filter(function(t) { return t.status === 'failed'; });
       const succeeded = tasks.filter(function(t) { return t.status !== 'failed'; });
       if (failed.length > 0) {
@@ -2342,16 +3262,16 @@ async function doSubmitCloudTasks(lines, filenames) {
 
 // 创建云端下载任务组：把输入框中的所有 URL 作为一个组提交
 async function createCloudGroup() {
-  showCloudDownloadPreview('group');
+  void showCloudDownloadPreview('group');
 }
 
-async function doCreateCloudGroup(lines, filenames) {
+async function doCreateCloudGroup(lines, filenames, behavior) {
   const name = prompt('组名称（可选）:', 'group-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (name === null) return;
 
   try {
     const urls = lines.map(function(url, idx) { return { url: url, filename: filenames[idx] }; });
-    await sc.cloud.createGroup(name, urls);
+    await sc.cloud.createGroup(name, urls, behavior);
     showToast('下载组已创建', 'success');
     switchTransferChannel('cloud_groups');
     refreshCloudGroups();
@@ -2423,11 +3343,80 @@ function hideVersioning() {
   document.getElementById('version-modal').style.display = 'none';
 }
 
+// --- 视频播放器（标准 Range 播放弹窗） ---
+// showVideoPlayer：渲染 videoPlayerModalHtml（含 <video src> + 标题 + data-close 关闭钮）
+// 到 #video-player-modal 容器并显示；关闭时暂停并卸载 video（避免播放续留内存/声音）。
+async function showVideoPlayer(filename, volume) {
+  const body = document.getElementById('video-player-body');
+  const query = await withUrlSig(
+    videoPlayerUrl({ filename: filename, volume: volume || '' }).split('?')[1] || ''
+  );
+  const src = '/download?' + query;
+  // 浏览器可播（mp4/m4v/webm/ogg/mov）→ 原生 <video>；其余（AVI/RMVB/WMV/FLV/MKV）
+  // 一律走「本地播放器」兜底：不再假装播放（黑屏无提示），用户裁定 2026-10-29。
+  if (isBrowserPlayable(filename)) {
+    body.innerHTML = videoPlayerModalHtml({ filename: filename, volume: volume || '' });
+    document.getElementById('video-player-modal').style.display = 'flex';
+    const video = body.querySelector('video');
+    if (!video) return;
+    video.src = src;
+    return;
+  }
+  body.innerHTML = unsupportedPlayerModalHtml({ filename: filename, url: src });
+  document.getElementById('video-player-modal').style.display = 'flex';
+}
+
+// openWithLocalPlayer(url)：依次尝试本地播放器协议（potplayer → vlc → iina）。
+// 协议拉起无法可靠检测成功，2s 后仍未离开页面即提示安装 VLC。
+function openWithLocalPlayer(url) {
+  const urls = playerProtocolUrls(url);
+  let i = 0;
+  const tryNext = function () {
+    if (i >= urls.length) {
+      const hint = document.querySelector('[data-player-hint]');
+      if (hint) hint.textContent = '未能唤起本地播放器：请安装 VLC/PotPlayer，或复制直链后手动拖入播放器。';
+      return;
+    }
+    const protocol = urls[i++];
+    try { window.location.href = protocol; } catch (e) { /* 继续下一个协议 */ }
+    setTimeout(tryNext, 600);
+  };
+  tryNext();
+}
+
+function hideVideoPlayer() {
+  const body = document.getElementById('video-player-body');
+  const video = body.querySelector('video');
+  if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+  document.getElementById('video-player-modal').style.display = 'none';
+}
+
+// --- 任务审计弹窗（传输页「审计」按钮 → 云任务 audit 行渲染） ---
+// showTaskAudit(id)：data-id 携带展示 id（'cloud-task-<id>'），剥前缀还原服务端真实 id 后
+// 到 _cloudTasks 取该任务快照的 audit 行（SnapshotTask 自动携带），经 auditRowsHtml 渲染到
+// #audit-body 并显示 #audit-modal。fallback：任务已从列表移除 / 无 audit → 占位文案。
+function showTaskAudit(id) {
+  const realId = stripCloudId(id);
+  const task = (_cloudTasks || []).find(function (t) { return String(t && t.id) === realId; }) || null;
+  const rows = task && Array.isArray(task.audit) ? task.audit : null;
+  const body = document.getElementById('audit-body');
+  if (!rows || rows.length === 0) {
+    body.innerHTML = '<div class="empty-msg">该任务无审计记录</div>';
+  } else {
+    body.innerHTML = auditRowsHtml({ rows: rows });
+  }
+  document.getElementById('audit-modal').style.display = 'flex';
+}
+
+function hideTaskAudit() {
+  document.getElementById('audit-modal').style.display = 'none';
+}
+
 // --- 云端下载组管理 ---
 // toggleGroupTasks 展开/收起组内子任务详情（组详情行 id = 'group-detail-' + 展示 id，
 // 展示 id 保留前缀）；getGroup 等 API 必须用剥前缀后的真实 id。
 async function toggleGroupTasks(groupId, btn) {
-  var detailRow = document.getElementById('group-detail-' + groupId);
+  const detailRow = document.getElementById('group-detail-' + groupId);
   if (!detailRow) return;
   if (detailRow.style.display !== 'none') {
     detailRow.style.display = 'none';
@@ -2436,17 +3425,16 @@ async function toggleGroupTasks(groupId, btn) {
   }
   detailRow.style.display = 'table-row';
   btn.textContent = '收起';
-  var container = detailRow.querySelector('.group-task-list');
+  const container = detailRow.querySelector('.group-task-list');
   try {
     const detail = await sc.cloud.getGroup(stripCloudId(groupId));
-    var tasks = detail.tasks || [];
+    const tasks = detail.tasks || [];
     if (tasks.length === 0) {
       container.innerHTML = '<span style="color:var(--text-muted);">暂无子任务数据</span>';
       return;
     }
-    var html = '<table class="file-table" style="width:100%;"><thead><tr><th style="text-align:left;padding:4px 8px;">ID</th><th style="text-align:left;padding:4px 8px;">URL</th><th style="text-align:left;padding:4px 8px;">状态</th><th style="text-align:left;padding:4px 8px;">进度</th><th style="text-align:left;padding:4px 8px;">ETag</th></tr></thead><tbody>';
-    for (var i = 0; i < tasks.length; i++) {
-      var t = tasks[i];
+    let html = '<table class="file-table" style="width:100%;"><thead><tr><th style="text-align:left;padding:4px 8px;">ID</th><th style="text-align:left;padding:4px 8px;">URL</th><th style="text-align:left;padding:4px 8px;">状态</th><th style="text-align:left;padding:4px 8px;">进度</th><th style="text-align:left;padding:4px 8px;">ETag</th></tr></thead><tbody>';
+    for (const t of tasks) {
       html += '<tr>' +
         '<td style="padding:4px 8px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">' + appRender.escHtml(t.id || '') + '</td>' +
         '<td style="padding:4px 8px;max-width:200px;overflow:hidden;text-overflow:ellipsis;" title="' + appRender.escHtml(t.url || '') + '">' + appRender.escHtml(t.url || '') + '</td>' +
@@ -2457,7 +3445,8 @@ async function toggleGroupTasks(groupId, btn) {
     }
     html += '</tbody></table>';
     container.innerHTML = html;
-  } catch (e) {
+  } catch {
+    /* 组详情加载失败——恢复行/按钮状态 */
     container.innerHTML = '<span style="color:var(--text-danger);">加载失败</span>';
     // 失败时恢复按钮文本和行状态
     detailRow.style.display = 'none';
@@ -2519,13 +3508,13 @@ async function resumeCloudTask(taskId) {
 }
 
 async function loadVersions() {
-  var filename = document.getElementById('version-filename').value.trim();
+  const filename = document.getElementById('version-filename').value.trim();
   if (!filename) { showToast('请输入文件名', 'warning'); return; }
-  var body = document.getElementById('version-body');
+  const body = document.getElementById('version-body');
   body.innerHTML = '<div class="empty-msg">加载中...</div>';
   try {
-    var data = await sc.files.versions.list(filename);
-    var versions = data.versions || [];
+    const data = await sc.files.versions.list(filename);
+    const versions = data.versions || [];
     if (versions.length === 0) { body.innerHTML = '<div class="empty-msg">该文件没有版本历史</div>'; return; }
     body.innerHTML = buildVersionTableHtml(versions, filename);
   } catch (e) { body.innerHTML = '<div class="empty-msg">加载失败: ' + e.message + '</div>'; }
@@ -2537,7 +3526,7 @@ async function restoreVersion(filename, versionId) {
   if (!confirm('确认恢复版本 ' + versionId + ' ？\n当前文件将被备份为新版本。')) return;
   try {
     const data = await sc.files.versions.restore(filename, versionId);
-    if (data.success) { showToast('版本恢复成功', 'success'); loadVersions(); refreshList(); }
+    if (data.success) { showToast('版本恢复成功', 'success'); void loadVersions(); void refreshList(); }
     else { showToast('恢复失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('恢复失败: ' + e.message, 'error'); }
 }
@@ -2546,7 +3535,7 @@ async function deleteVersion(filename, versionId) {
   if (!confirm('确认删除版本 ' + versionId + ' ？\n此操作不可恢复。')) return;
   try {
     const data = await sc.files.versions.delete(filename, versionId);
-    if (data.success) { showToast('版本已删除', 'success'); loadVersions(); }
+    if (data.success) { showToast('版本已删除', 'success'); void loadVersions(); }
     else { showToast('删除失败: ' + (data.message || 'unknown'), 'error'); }
   } catch (e) { showToast('删除失败: ' + e.message, 'error'); }
 }
@@ -2566,48 +3555,62 @@ document.addEventListener('DOMContentLoaded', function() {
   // 认证栏
   document.getElementById('save-access-btn').addEventListener('click', saveAccessKeys);
   // 主 tab 导航（文件/传输）
-  var tabFiles = document.getElementById('main-tab-files');
+  const tabFiles = document.getElementById('main-tab-files');
   if (tabFiles) tabFiles.addEventListener('click', function() { switchMainTab('files'); });
-  var tabTransfer = document.getElementById('main-tab-transfer');
+  const tabTransfer = document.getElementById('main-tab-transfer');
   if (tabTransfer) tabTransfer.addEventListener('click', function() { switchMainTab('transfer'); });
   // 传输页静态初始化（频道条渲染 + 点击委托），幂等
   initTransferPage();
   // 「走隧道（调试）」checkbox：初值取自 localStorage，change 即时生效（无需保存）
-  var transportCb = document.getElementById('use-tunnel-checkbox');
+  const transportCb = document.getElementById('use-tunnel-checkbox');
   if (transportCb) {
     transportCb.checked = cuTunnelOverride();
     transportCb.addEventListener('change', function() { toggleTransport(transportCb); });
   }
 
-  // 文件输入（上传前把「卷」下拉当前值写入 upload.js 卷上下文）
-  var uploadVolumeSel = document.getElementById('upload-volume');
-  if (uploadVolumeSel) {
-    uploadVolumeSel.addEventListener('change', function() {
-      if (typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
+  // 「卷」下拉（工具栏 #volume-select）——单一卷上下文：change → 列表过滤 + 上传目标同步
+  // + **自动跳到该卷上次所在目录**（用户裁定 2026-10-27：各卷独立记忆最新路径）。
+  // 选择持久化到 localStorage（VOLUME_STORE_KEY）——刷新/重开页面后保留（用户裁定）。
+  const volumeSel = document.getElementById('volume-select');
+  if (volumeSel) {
+    volumeSel.addEventListener('change', function() {
+      const v = volumeSel.value;
+      localStorage.setItem(VOLUME_STORE_KEY, v);
+      _volumeFilter = v;
+      if (typeof setVolumeContext === 'function') setVolumeContext(v);
+      // 切卷 → 恢复该卷上次访问的目录（无专用记录 → 卷根 ''）。
+      currentSubdir = savedSubdirFor(v);
+      navigateDir(currentSubdir);
     });
+    // DOMContentLoaded 时恢复持久化选择（下拉 value 由 initVolumeSelect 的 populate 设置）。
+    volumeSel.value = _volumeFilter;
+    if (typeof setVolumeContext === 'function') setVolumeContext(_volumeFilter);
   }
+  void initVolumeSelect();
+
+  // 文件输入（上传前把「卷」上下文同步到 upload.js——单一卷上下文下拉已在上方 change 时
+  // setVolumeContext；此处再兜底一次：文件选择发生在下拉 change 之后也保证一致）。
   document.getElementById('file-input').addEventListener('change', function() {
-    if (uploadVolumeSel && typeof setVolumeContext === 'function') setVolumeContext(uploadVolumeSel.value);
+    if (typeof setVolumeContext === 'function') setVolumeContext(_volumeFilter);
     uploadFiles(this.files);
   });
-  initUploadVolumeSelect();
 
   // 工具栏
-  document.getElementById('refresh-btn').addEventListener('click', refreshList);
+  document.getElementById('refresh-btn').addEventListener('click', function () { void forceRefreshList(); });
   document.getElementById('search-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') searchFiles();
+    if (e.key === 'Enter') void searchFiles();
   });
   document.getElementById('search-btn').addEventListener('click', searchFiles);
   document.getElementById('clear-search-btn').addEventListener('click', clearSearch);
   document.getElementById('stats-btn').addEventListener('click', showStats);
   // 回收站按钮：切换面板 + 拉取。
-  var trashBtn = document.getElementById('trash-btn');
+  const trashBtn = document.getElementById('trash-btn');
   if (trashBtn) {
     trashBtn.addEventListener('click', function () {
-      var panel = document.getElementById('trash-panel');
-      var show = panel.style.display === 'none';
+      const panel = document.getElementById('trash-panel');
+      const show = panel.style.display === 'none';
       panel.style.display = show ? 'block' : 'none';
-      if (show) showTrash();
+      if (show) void showTrash();
     });
   }
   document.getElementById('cloud-btn').addEventListener('click', showCloudDownload);
@@ -2633,7 +3636,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('hub-tab').addEventListener('click', function() { switchStatsTab('hub'); });
   document.getElementById('audit-tab').addEventListener('click', function() { switchStatsTab('audit'); });
   document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
+  document.getElementById('vol-manage-tab').addEventListener('click', function() { switchStatsTab('vol-manage'); });
   document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
+  document.getElementById('secret-tab').addEventListener('click', function() { switchStatsTab('secret'); });
   document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
   document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });
 
@@ -2648,7 +3653,7 @@ document.addEventListener('DOMContentLoaded', function() {
   // 版本管理弹窗
   document.getElementById('version-close-btn').addEventListener('click', hideVersioning);
   document.getElementById('version-filename').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') loadVersions();
+    if (e.key === 'Enter') void loadVersions();
   });
   document.getElementById('version-load-btn').addEventListener('click', loadVersions);
   document.getElementById('version-close-modal-btn').addEventListener('click', hideVersioning);
@@ -2660,6 +3665,12 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('share-create-btn').addEventListener('click', createShare);
   document.getElementById('share-list-refresh-btn').addEventListener('click', refreshShareList);
 
+  // 任务审计弹窗（关闭按钮；内容由 auditRowsHtml 渲染进 #audit-body）
+  const auditCloseBtn = document.getElementById('audit-close-btn');
+  if (auditCloseBtn) auditCloseBtn.addEventListener('click', hideTaskAudit);
+  const auditCloseModalBtn = document.getElementById('audit-close-modal-btn');
+  if (auditCloseModalBtn) auditCloseModalBtn.addEventListener('click', hideTaskAudit);
+
   // 事件委托：动态内容
   initDynamicEventDelegation();
 
@@ -2668,6 +3679,126 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // --- 事件委托：动态生成的 HTML 内容 ---
+
+// cloudSyncBtnAction(btn)：云任务/组/同步任务按钮（return true=已处理）。
+function cloudSyncBtnAction(btn) {
+  if (btn.classList.contains('cloud-download-btn')) { void downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum); return true; }
+
+  if (btn.classList.contains('cloud-remove-btn')) { void removeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-audit-btn')) { void showTaskAudit(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-cancel-btn')) { void cancelCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('cloud-resume-btn')) { void resumeCloudTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-archive-btn')) { void archiveCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-resume-btn')) { void resumeCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-cancel-btn')) { void cancelCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-delete-btn')) { void deleteCloudGroup(btn.dataset.id); return true; }
+  if (btn.classList.contains('group-toggle-btn')) { void toggleGroupTasks(btn.dataset.id, btn); return true; }
+  // sync 任务操作（data-id = 服务端任务 id，无展示前缀）
+  if (btn.classList.contains('sync-cancel-btn')) { void cancelSyncTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('sync-delete-btn')) { void deleteSyncTask(btn.dataset.id); return true; }
+  if (btn.classList.contains('sync-refresh-btn')) { void refreshSyncTaskStatus(btn.dataset.id); return true; }
+  return false;
+}
+
+// transferPause：暂停下载（mgr.pauseDownload）或上传（真暂停置标志 + 写回 paused）。
+function transferPause(tItem, tId) {
+  const mgr = getDownloadManager();
+  if (tItem?.kind === 'download' && mgr && typeof mgr.pauseDownload === 'function') { mgr.pauseDownload(tId); renderTransferChannel(); return; }
+  // 上传真暂停：置 per-upload 取消标志 + 把本地会话写回 paused（保会话供续传）——
+  // 在途 for 检查点抛 E_CANCELLED，uploadFiles catch 归一「已暂停」；checkResumableUploads
+  // 探 /upload/status readiness 后走既存 resume 续传（选择文件/补缺失块）。
+  if (tItem?.kind === 'upload') { pauseUploadSession(tItem); renderTransferChannel(); return; }
+  showToast('上传不支持暂停，可取消后重选续传', 'info');
+}
+
+// transferResume：恢复下载（stat 校验 + 只拉缺失块）或上传（选择文件/句柄续传）。
+function transferResume(tItem, tId) {
+  const mgr = getDownloadManager();
+  if (tItem?.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); }, onMismatch: function () { showToast('存储文件已变更，无法续传——可先重新下载', 'warning'); } }); return; }
+  if (tItem?.kind === 'upload' && typeof resumeUpload === 'function') { resumeUpload(tId); return; }
+  showToast('恢复失败：传输项不存在', 'error');
+}
+
+// transferCancel：取消下载（清 IDB + removeItem）或上传（真删会话）。
+function transferCancel(tItem, tId) {
+  const mgr = getDownloadManager();
+  if (tItem?.kind === 'download' && mgr && typeof mgr.cancelDownload === 'function') { mgr.cancelDownload(tId); renderTransferChannel(); return; }
+  if (tItem?.kind === 'upload') { clearCancelledUpload(tId); removeUploadSession(tId); renderTransferChannel(); return; }
+  showToast('取消失败：传输项不存在', 'error');
+}
+
+// transferDelete：删除本地传输项记录（upload/download）。
+function transferDelete(tItem, tId) {
+  const store = getTransferStore();
+  if (tItem && store && typeof store.removeItem === 'function') { store.removeItem(tId); renderTransferChannel(); return; }
+  showToast('删除失败：传输项不存在', 'error');
+}
+
+// transferRedownload：按存档 meta 重新下载（不续传）。
+function transferRedownload(tItem) {
+  if (!tItem) return;
+  void downloadFile(tItem.filename, tItem.meta?.checksum);
+}
+
+// transferOpenDir：跳转文件 tab 并导航到上传文件所在目录。
+function transferOpenDir(tItem) {
+  if (!tItem) return;
+  switchMainTab('files');
+  const parent = itemParentDir(tItem.filename);
+  navigateDir(parent);
+  showToast('存储目录：上传根目录/' + (parent || ''), 'info');
+}
+
+// transferItemBtnAction(btn)：通用 TransferItem 行操作分派（upload/download 类，非云）。
+// 按钮类名 transfer-pause/resume/cancel/delete/redownload/open-dir（app-render 生成）；
+// id = item.id（upload 即 upload_id；download 为文件名哈希）。
+function transferItemBtnAction(btn) {
+  const tId = btn.dataset.itemId;
+  if (tId === undefined || tId === '') return;
+  const store = getTransferStore();
+  const tItem = (store && typeof store.loadItems === 'function')
+    ? store.loadItems().find(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })
+    : null;
+  const actions = [
+    ['transfer-pause-btn', transferPause],
+    ['transfer-resume-btn', transferResume],
+    ['transfer-cancel-btn', transferCancel],
+    ['transfer-delete-btn', transferDelete],
+    ['transfer-redownload-btn', transferRedownload],
+    ['transfer-open-dir-btn', transferOpenDir],
+  ];
+  for (const [cls, fn] of actions) {
+    if (btn.classList.contains(cls)) {
+      fn(tItem, tId);
+      return;
+    }
+  }
+}
+
+// transferBodyClick(e)：传输列表事件委托——云/组/同步任务与本地项操作分派。
+// 转存 URL span（cloud-transfer-url-text）复制走 P1 修复（await+catch），见上；按钮走分派。
+function transferBodyClick(e) {
+  const urlSpan = e.target.closest('span.cloud-transfer-url-text');
+  if (urlSpan) {
+    const url = urlSpan.dataset.url || '';
+    if (!url) return;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () {
+        urlSpan.textContent = '已复制';
+      }).catch(function () {
+        showToast('复制转存 URL 失败（浏览器拒绝剪贴板）', 'error');
+      });
+    } else {
+      showToast(url, 'success');
+    }
+    return;
+  }
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  if (cloudSyncBtnAction(btn)) return;
+  transferItemBtnAction(btn);
+}
+
 function initDynamicEventDelegation() {
   // 文件列表内的动态内容
   const fileList = document.getElementById('file-list');
@@ -2677,25 +3808,34 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
 
-      // 文件操作按钮
+      // 文件操作按钮（行卷优先：data-volume；空则回落当前过滤卷）
       if (btn.classList.contains('file-download-btn')) {
-        downloadFile(btn.dataset.filename, btn.dataset.checksum);
+        void downloadFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-delete-btn')) {
-        deleteFile(btn.dataset.filename, btn.dataset.checksum);
+        void deleteFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-rename-btn')) {
-        renameFile(btn.dataset.filename, btn.dataset.checksum);
+        void renameFile(btn.dataset.filename, btn.dataset.checksum, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-share-btn')) {
-        showShareModal(btn.dataset.filename);
+        showShareModal(btn.dataset.filename, btn.dataset.volume || '');
+        return;
+      }
+      if (btn.classList.contains('file-meta-btn')) {
+        void showMetaModal(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
       if (btn.classList.contains('file-preview-btn')) {
-        previewFile(btn.dataset.filename);
+        previewFile(btn.dataset.filename, btn.dataset.volume || '');
+        return;
+      }
+      // 视频行「▶ 播放」→ 标准 <video> Range 播放弹窗（data-volume 空 = 服务端 auto 路由）。
+      if (btn.hasAttribute('data-video-play')) {
+        void showVideoPlayer(btn.dataset.filename, btn.dataset.volume || '');
         return;
       }
 
@@ -2707,19 +3847,18 @@ function initDynamicEventDelegation() {
       }
       if (btn.classList.contains('dir-archive-btn')) {
         e.stopPropagation();
-        downloadDirArchive(btn.dataset.subdir);
+        void downloadDirArchive(btn.dataset.subdir);
         return;
       }
       if (btn.classList.contains('dir-delete-btn')) {
         e.stopPropagation();
-        rmdirDir(btn.dataset.subdir);
+        void rmdirDir(btn.dataset.subdir);
         return;
       }
 
       // 加载更多按钮
       if (btn.closest('#load-more-container')) {
-        loadMore();
-        return;
+        void loadMore();
       }
     });
 
@@ -2754,107 +3893,31 @@ function initDynamicEventDelegation() {
     }
   });
 
+  // 视频播放器关闭按钮（data-close 由 videoPlayerModalHtml 动态生成，走委托）。
+  document.addEventListener('click', function(e) {
+    if (e.target.closest('#video-player-modal [data-close]')) {
+      hideVideoPlayer();
+    }
+    // 不可播格式：用本地播放器打开（协议拉起）/ 复制直链（由 unsupportedPlayerModalHtml 生成）。
+    const openBtn = e.target.closest('#video-player-modal [data-open-local-player]');
+    if (openBtn) {
+      openWithLocalPlayer(openBtn.dataset.url || '');
+      return;
+    }
+    const copyBtn = e.target.closest('#video-player-modal [data-copy-stream-url]');
+    if (copyBtn) {
+      const url = (copyBtn.dataset.url || '');
+      const abs = url.indexOf('http') === 0 ? url : window.location.origin + url;
+      navigator.clipboard.writeText(abs).then(function() {
+        showToast('直链已复制（有效期 3 小时，可直接拖入 VLC）', 'success');
+      }).catch(function() { showToast('复制失败', 'error'); });
+    }
+  });
+
   // 云任务操作（事件委托挂 #transfer-body，云行由 buildTransferRowHtml 输出，类名复用既有）
   const transferBody = document.getElementById('transfer-body');
   if (transferBody) {
-    transferBody.addEventListener('click', function (e) {
-      const btn = e.target.closest('button');
-      if (!btn) return;
-      if (btn.classList.contains('cloud-download-btn')) {
-        downloadCloudFile(btn.dataset.id, btn.dataset.filename, btn.dataset.checksum);
-        return;
-      }
-      if (btn.classList.contains('cloud-remove-btn')) {
-        removeCloudTask(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('cloud-cancel-btn')) {
-        cancelCloudTask(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('cloud-resume-btn')) {
-        resumeCloudTask(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('group-archive-btn')) {
-        archiveCloudGroup(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('group-resume-btn')) {
-        resumeCloudGroup(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('group-cancel-btn')) {
-        cancelCloudGroup(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('group-delete-btn')) {
-        deleteCloudGroup(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('group-toggle-btn')) {
-        toggleGroupTasks(btn.dataset.id, btn);
-        return;
-      }
-      // sync 任务操作（data-id = 服务端任务 id，无展示前缀）
-      if (btn.classList.contains('sync-cancel-btn')) {
-        cancelSyncTask(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('sync-delete-btn')) {
-        deleteSyncTask(btn.dataset.id);
-        return;
-      }
-      if (btn.classList.contains('sync-refresh-btn')) {
-        refreshSyncTaskStatus(btn.dataset.id);
-        return;
-      }
-      // ---- 通用 TransferItem 行操作（upload/download 类，非云）----
-      // 按钮类名 transfer-pause/resume/cancel/delete/redownload/open-dir（app-render 生成）。
-      // id = item.id（upload 即 upload_id；download 为文件名哈希）。
-      const tId = btn.dataset.itemId;
-      if (tId === undefined || tId === '') return;
-      const store = getTransferStore();
-      const mgr = getDownloadManager();
-      const tItem = (store && typeof store.loadItems === 'function')
-        ? store.loadItems().filter(function (it) { return it.id === tId && (it.kind === 'upload' || it.kind === 'download'); })[0]
-        : null;
-      if (btn.classList.contains('transfer-pause-btn')) {
-        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.pauseDownload === 'function') { mgr.pauseDownload(tId); renderTransferChannel(); return; }
-        // 上传真暂停：置 per-upload 取消标志 + 把本地会话写回 paused（保会话供续传）——
-        // 在途 for 检查点抛 E_CANCELLED，uploadFiles catch 归一「已暂停」；checkResumableUploads
-        // 探 /upload/status readiness 后走既存 resume 续传（选择文件/补缺失块）。
-        if (tItem && tItem.kind === 'upload') { pauseUploadSession(tItem); renderTransferChannel(); return; }
-        showToast('上传不支持暂停，可取消后重选续传', 'info');
-        return;
-      }
-      if (btn.classList.contains('transfer-resume-btn')) {
-        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.resumeDownload === 'function') { mgr.resumeDownload(tId, { onComplete: downloadCompleteHandler, onError: function (err) { showToast('恢复下载失败: ' + err.message, 'error'); }, onMismatch: function () { showToast('存储文件已变更，无法续传——可先重新下载', 'warning'); } }); return; }
-        if (tItem && tItem.kind === 'upload' && typeof resumeUpload === 'function') { resumeUpload(tId); return; }
-        showToast('恢复失败：传输项不存在', 'error');
-        return;
-      }
-      if (btn.classList.contains('transfer-cancel-btn')) {
-        if (tItem && tItem.kind === 'download' && mgr && typeof mgr.cancelDownload === 'function') { mgr.cancelDownload(tId); renderTransferChannel(); return; }
-        if (tItem && tItem.kind === 'upload') { clearCancelledUpload(tId); removeUploadSession(tId); renderTransferChannel(); return; }
-        showToast('取消失败：传输项不存在', 'error');
-        return;
-      }
-      if (btn.classList.contains('transfer-delete-btn')) {
-        if (tItem && store && typeof store.removeItem === 'function') { store.removeItem(tId); renderTransferChannel(); return; }
-        showToast('删除失败：传输项不存在', 'error');
-        return;
-      }
-      if (btn.classList.contains('transfer-redownload-btn') && tItem) { downloadFile(tItem.filename, tItem.meta && tItem.meta.checksum); return; }
-      if (btn.classList.contains('transfer-open-dir-btn') && tItem) {
-        // 打开本地存储目录：跳转文件 tab 并导航到上传文件所在目录 + toast 绝对路径。
-        switchMainTab('files');
-        const parent = itemParentDir(tItem.filename);
-        navigateDir(parent);
-        showToast('存储目录：上传根目录/' + (parent || ''), 'info');
-        return;
-      }
-    });
+    transferBody.addEventListener('click', transferBodyClick);
   }
 
   // 版本管理操作
@@ -2864,12 +3927,11 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
       if (btn.classList.contains('version-restore-btn')) {
-        restoreVersion(btn.dataset.filename, btn.dataset.versionId);
+        void restoreVersion(btn.dataset.filename, btn.dataset.versionId);
         return;
       }
       if (btn.classList.contains('version-delete-btn')) {
-        deleteVersion(btn.dataset.filename, btn.dataset.versionId);
-        return;
+        void deleteVersion(btn.dataset.filename, btn.dataset.versionId);
       }
     });
   }
@@ -2881,12 +3943,11 @@ function initDynamicEventDelegation() {
       const btn = e.target.closest('button');
       if (!btn) return;
       if (btn.classList.contains('share-revoke-btn')) {
-        revokeShare(btn.getAttribute('data-token'));
+        void revokeShare(btn.dataset.token);
         return;
       }
       if (btn.classList.contains('share-copy-btn')) {
-        copyShareLink(btn.getAttribute('data-token'));
-        return;
+        copyShareLink(btn.dataset.token);
       }
     });
   }
@@ -2896,19 +3957,19 @@ function initDynamicEventDelegation() {
   if (configPanel) {
     configPanel.addEventListener('click', function(e) {
       if (e.target.id === 'cfg-update-log-level') {
-        var val = document.getElementById('cfg-log-level').value;
-        updateConfigField('log_level', val);
+        const val = document.getElementById('cfg-log-level').value;
+        void updateConfigField('log_level', val);
       } else if (e.target.id === 'cfg-update-log-format') {
-        var val = document.getElementById('cfg-log-format').value;
-        updateConfigField('log_format', val);
+        const val = document.getElementById('cfg-log-format').value;
+        void updateConfigField('log_format', val);
       } else if (e.target.id === 'cfg-update-rate-limit') {
-        var req = document.getElementById('cfg-rate-limit').value;
-        updateConfigField('rate_limit_requests', parseInt(req) || 0);
-        var win = document.getElementById('cfg-rate-window').value;
-        updateConfigField('rate_limit_window', win);
+        const req = document.getElementById('cfg-rate-limit').value;
+        void updateConfigField('rate_limit_requests', Number.parseInt(req) || 0);
+        const win = document.getElementById('cfg-rate-window').value;
+        void updateConfigField('rate_limit_window', win);
       } else if (e.target.id === 'cfg-update-storage') {
-        var val = document.getElementById('cfg-max-storage').value;
-        updateConfigField('max_storage_bytes', parseInt(val) || 0);
+        const val = document.getElementById('cfg-max-storage').value;
+        void updateConfigField('max_storage_bytes', Number.parseInt(val) || 0);
       }
     });
   }
@@ -2918,7 +3979,7 @@ function initDynamicEventDelegation() {
   if (hubPanel) {
     hubPanel.addEventListener('click', function(e) {
       if (e.target.classList.contains('hub-remove-btn')) {
-        removeHubNode(e.target.getAttribute('data-node-id'));
+        void removeHubNode(e.target.dataset.nodeId);
       }
     });
   }
@@ -2939,10 +4000,10 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // --- 拖拽上传 ---
-var dragCounter = 0;
+let dragCounter = 0;
 
 function initDragAndDrop() {
-  var container = document.getElementById('app');
+  const container = document.getElementById('app');
 
   container.addEventListener('dragenter', function(e) {
     e.preventDefault();
@@ -2977,7 +4038,7 @@ function initDragAndDrop() {
     container.style.outline = 'none';
     container.style.backgroundColor = '';
 
-    var files = e.dataTransfer.files;
+    const files = e.dataTransfer.files;
     if (files.length > 0) {
       handleDroppedFiles(files);
     }
@@ -2985,62 +4046,75 @@ function initDragAndDrop() {
 }
 
 function handleDroppedFiles(files) {
-  var fileInput = document.getElementById('file-input');
+  const fileInput = document.getElementById('file-input');
 
-  var dataTransfer = new DataTransfer();
-  for (var i = 0; i < files.length; i++) {
-    dataTransfer.items.add(files[i]);
+  const dataTransfer = new DataTransfer();
+  for (const f of files) {
+    dataTransfer.items.add(f);
   }
   fileInput.files = dataTransfer.files;
 
-  var event = new Event('change', { bubbles: true });
+  const event = new Event('change', { bubbles: true });
   fileInput.dispatchEvent(event);
 }
 
 // --- 文件预览 ---
-function previewFile(filename) {
-  var ext = filename.split('.').pop().toLowerCase();
+function previewFile(filename, volume) {
+  const ext = filename.split('.').pop().toLowerCase();
 
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].indexOf(ext) !== -1) {
-    previewImage(filename);
-  } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].indexOf(ext) !== -1) {
-    previewText(filename);
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
+    void previewImage(filename, volume);
+  } else if (['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'].includes(ext)) {
+    void previewText(filename, volume);
   } else {
-    downloadFile(filename);
+    void downloadFile(filename, '', volume);
   }
 }
 
-function previewImage(filename) {
-  var modal = document.createElement('div');
+// previewImage 展示图片预览弹窗（登录态下用 URL 票，2026-10-21）：
+// `<img>` 无法自定义 Authorization 头 ⇒ 经 previewImageUrlAsync/previewOriginalUrlAsync
+// 附加 `?spx_sig=`（无凭据时原样回落，无认证部署不受影响）。
+async function previewImage(filename, volume) {
+  const modal = document.createElement('div');
   modal.className = 'modal-overlay-img';
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;cursor:pointer;';
 
-  var img = document.createElement('img');
+  const img = document.createElement('img');
   img.style.cssText = 'max-width:90vw;max-height:90vh;object-fit:contain;border-radius:4px;box-shadow:0 4px 24px rgba(0,0,0,.5);';
   img.alt = filename;
-  // B4：先加载缩略图（?transform=thumb&width=1600 省带宽；服务端按需生成）。
-  // 缩略图加载失败（transform 未注册/生成失败）回退原图；点击 modal 切换原图。
-  var thumbLoaded = false;
-  img.onerror = function () {
-    if (!thumbLoaded) { img.src = previewOriginalUrl(filename); thumbLoaded = true; }
-  };
-  img.src = previewImageUrl(filename, 1600);
-  thumbLoaded = true; // 首次即视为加载原图级（onerror 只在初次失败时回退）
-  // 点击：缩略图 → 原图 → 关闭（两态轮换后关闭）。
-  var stage = 0;
-  modal.addEventListener('click', function () {
-    if (stage === 0) { img.src = previewOriginalUrl(filename); stage = 1; }
-    else if (document.body.contains(modal)) document.body.removeChild(modal);
-  });
   modal.appendChild(img);
   document.body.appendChild(modal);
+
+  // B4：先加载缩略图（?transform=thumb&width=1600 省带宽；服务端按需生成）。
+  // 缩略图加载失败（transform 未注册/生成失败）回退原图；点击 modal 切换原图。
+  // 先插入 DOM（显示空白 img）再 await 签名 —— 避免签名期间的视觉空白无反馈。
+  let thumbLoaded = false;
+  img.onerror = function () {
+    if (!thumbLoaded) {
+      thumbLoaded = true;
+      void previewOriginalUrlAsync(filename, volume).then(function (u) { img.src = u; });
+    }
+  };
+  const thumbUrl = await previewImageUrlAsync(filename, 1600, volume);
+  img.src = thumbUrl;
+  thumbLoaded = true; // 首次即视为加载原图级（onerror 只在初次失败时回退）
+  // 点击：缩略图 → 原图 → 关闭（两态轮换后关闭）。
+  let stage = 0;
+  modal.addEventListener('click', function () {
+    if (stage === 0) {
+      stage = 1;
+      void previewOriginalUrlAsync(filename, volume).then(function (u) { img.src = u; });
+    } else if (document.body.contains(modal)) {
+      modal.remove();
+    }
+  });
 }
 
-async function previewText(filename) {
+async function previewText(filename, volume) {
   try {
-    const { blob } = await sc.files.download(filename);
+    const { blob } = await sc.files.download(filename, { volume: volume });
     let text = await blob.text();
-    var lines = text.split('\n');
+    const lines = text.split('\n');
     if (lines.length > 100) {
       text = lines.slice(0, 100).join('\n') + '\n\n... (共 ' + lines.length + ' 行，仅显示前 100 行)';
     }
@@ -3049,27 +4123,27 @@ async function previewText(filename) {
 }
 
 function showTextPreview(filename, text) {
-  var modal = document.createElement('div');
+  const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.style.cssText = 'position:fixed;inset:0;z-index:2000;display:flex;align-items:center;justify-content:center;';
 
-  var content = document.createElement('div');
+  const content = document.createElement('div');
   content.style.cssText = 'background:var(--modal-bg,#fff);border-radius:8px;padding:16px;width:700px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;';
 
-  var header = document.createElement('div');
+  const header = document.createElement('div');
   header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;';
   header.innerHTML = '<span style="font-size:14px;font-weight:600;color:var(--text-primary,#333);">' + appRender.escHtml(filename) + '</span>' +
     '<button style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-secondary,#888);line-height:1;">&times;</button>';
-  header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) document.body.removeChild(modal); });
+  header.querySelector('button').addEventListener('click', function() { if (document.body.contains(modal)) modal.remove(); });
 
-  var pre = document.createElement('pre');
+  const pre = document.createElement('pre');
   pre.style.cssText = 'margin:0;padding:12px;background:var(--bg-hover,#f8f9fa);border-radius:4px;font-size:13px;line-height:1.5;overflow:auto;white-space:pre-wrap;word-break:break-all;max-height:60vh;color:var(--text-primary,#333);';
   pre.textContent = text;
 
   content.appendChild(header);
   content.appendChild(pre);
   modal.appendChild(content);
-  modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) document.body.removeChild(modal); });
+  modal.addEventListener('click', function(e) { if (e.target === modal && document.body.contains(modal)) modal.remove(); });
   document.body.appendChild(modal);
 }
 

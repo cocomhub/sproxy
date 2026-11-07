@@ -25,6 +25,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
@@ -404,22 +405,7 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	us1.CreateSession("crash-test-id", "crash-recover.bin", int64(len(fileData)), chunkSize, totalChunks, fileChecksum, 0)
 	for i := range 2 {
 		chunkData := fileData[i*int(chunkSize) : (i+1)*int(chunkSize)]
-		chunkCS := sha256hex(chunkData)
-
-		// 任务 4：在 user 桶临时名上 seek 直写分片（模拟 chunk 写路径）。
-		tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, "crash-test-id"))
-		os.MkdirAll(filepath.Dir(tempPath), 0755)
-		tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			t.Fatalf("open temp: %v", err)
-		}
-		if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
-			tmpF.Close()
-			t.Fatalf("write temp: %v", err)
-		}
-		tmpF.Close()
-
-		us1.MarkChunkReceived("crash-test-id", i, chunkCS)
+		helperChaosCrashDuringChunkedUpload_writeChunk(t, us1, uploadDir, "crash-test-id", chunkData, i, chunkSize)
 	}
 	us1.Stop() // 模拟 crash
 
@@ -443,24 +429,34 @@ func TestChaos_CrashDuringChunkedUpload(t *testing.T) {
 	for i := 2; i < totalChunks; i++ {
 		start := i * int(chunkSize)
 		end := start + int(chunkSize)
-		chunkData := fileData[start:end]
-		chunkCS := sha256hex(chunkData)
-		tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, "crash-test-id"))
-		tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
-		if err != nil {
-			t.Fatalf("open temp: %v", err)
-		}
-		if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
-			tmpF.Close()
-			t.Fatalf("write temp: %v", err)
-		}
-		tmpF.Close()
-		us2.MarkChunkReceived("crash-test-id", i, chunkCS)
+		helperChaosCrashDuringChunkedUpload_writeChunk(t, us2, uploadDir, "crash-test-id", fileData[start:end], i, chunkSize)
 	}
 
 	if !us2.AllChunksReceived("crash-test-id") {
 		t.Fatal("all chunks should be received after resume")
 	}
+}
+
+// helperChaosCrashDuringChunkedUpload_writeChunk 在 user 桶临时名上 seek 直写单个
+// 分片（模拟 chunk 写路径）并标记该分片已接收。
+func helperChaosCrashDuringChunkedUpload_writeChunk(t *testing.T, us *files.UploadStore, uploadDir, uploadID string, chunkData []byte, i int, chunkSize int64) {
+	t.Helper()
+	chunkCS := sha256hex(chunkData)
+
+	// 任务 4：在 user 桶临时名上 seek 直写分片（模拟 chunk 写路径）。
+	tempPath := filepath.Join(uploadDir, fmt.Sprintf(".inflight-%d-%s.part", i, uploadID))
+	os.MkdirAll(filepath.Dir(tempPath), 0755)
+	tmpF, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("open temp: %v", err)
+	}
+	if _, err := tmpF.WriteAt(chunkData, int64(i)*chunkSize); err != nil {
+		tmpF.Close()
+		t.Fatalf("write temp: %v", err)
+	}
+	tmpF.Close()
+
+	us.MarkChunkReceived(uploadID, i, chunkCS)
 }
 
 func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
@@ -494,20 +490,35 @@ func TestChaos_PartialChunkWrittenThenRecover(t *testing.T) {
 	t.Logf("recovered session: received=%v", s.ReceivedChunks)
 }
 
+// openRootForTest 在 dir 上打开 storage.Root（本文件属**外部**测试包 server_test，
+// 看不到内部包的 testRootAt；口径一致：台账一律经卷句柄读写）。
+func openRootForTest(t *testing.T, dir string) *storage.Root {
+	t.Helper()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("打开 Root 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
 func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	cs := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
+	if err := cs.Flush(); err != nil { // 写合并窗口内需显式 flush，才代表「已完成落盘」的崩溃语义
+		t.Fatalf("flush: %v", err)
+	}
 
 	// 模拟 crash: 创建一个 .tmp 残留文件（与新 storePath 一致：checksums.json.tmp）
 	tmpFile := filepath.Join(tmpDir, "checksums.json.tmp")
 	os.WriteFile(tmpFile, []byte(`{"stale":"data"}`), 0644)
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
-	cs2 := checksum.NewChecksumStore(filepath.Join(tmpDir, "checksums.json"), nil)
+	cs2 := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))

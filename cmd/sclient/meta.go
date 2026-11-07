@@ -4,12 +4,16 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/spf13/cobra"
 )
 
@@ -20,6 +24,10 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 		Short: "查询文件元信息（含版本历史摘要）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
@@ -34,9 +42,13 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 			}
 			fm := buildFormatterWithWriter(ios.Out, cmd)
 			fm.PrintStat(info, filename)
+			// 元数据 extra（KV）：读失败不阻断主查询（Stat 已成功），仅提示。
+			printMetaExtraFor(cmd, ios, fm, svc, filename)
 			return nil
 		},
 	}
+	// --raw：Text 模式下也输出 meta extra 原始 JSON（不做时间/URL 人类化转换；--json 已原始）
+	cmd.Flags().Bool("raw", false, "Text 模式输出 meta extra 原始 JSON 文本（不做时间/URL 人类化；--json 亦原始）")
 	// 文件版本管理子命令
 	versionCmd := &cobra.Command{
 		Use:   "version",
@@ -46,6 +58,8 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 	versionCmd.AddCommand(NewCmdMetaVersionRestore(factory, ios, st))
 	versionCmd.AddCommand(NewCmdMetaVersionDelete(factory, ios, st))
 	cmd.AddCommand(versionCmd)
+	// extra 补录/修正（方案②：已上传文件的元数据）
+	cmd.AddCommand(newCmdMetaSet(factory, ios, st))
 	return cmd
 }
 
@@ -55,6 +69,10 @@ func NewCmdMetaVersionList(factory clientfactory.Factory, ios cli.IOStreams, st 
 		Short: "列出文件版本历史",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
@@ -80,6 +98,10 @@ func NewCmdMetaVersionRestore(factory clientfactory.Factory, ios cli.IOStreams, 
 		Short: "恢复文件到指定版本",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
@@ -107,6 +129,10 @@ func NewCmdMetaVersionDelete(factory clientfactory.Factory, ios cli.IOStreams, s
 		Short: "删除文件的指定版本",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷 URI 寻址（`<卷名>:/<路径>` ⇒ --volume + 纯路径；用户要求 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
 				return err
@@ -125,5 +151,154 @@ func NewCmdMetaVersionDelete(factory clientfactory.Factory, ios cli.IOStreams, s
 			fmt.Fprintf(ios.Out, "已删除文件 '%s' 的版本 %s\n", filename, args[1])
 			return nil
 		},
+	}
+}
+
+// newCmdMetaSet 创建 `meta set <filename> --extra=<json|@file>`。
+func newCmdMetaSet(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "set <filename>",
+		Short: "补录/修正文件的元数据 extra（合并语义）",
+		Long: `把 extra 合并进目标文件的 .meta sidecar。
+要求文件已上传且已有 sidecar（无内容基线时拒绝，fail-closed）。
+
+示例：
+  sclient meta set dir/movie.mp4 --extra='{"code":"MOVIE-001","maker":"STUDIO X"}'
+  sclient meta set dir/movie.mp4 --extra=@meta.json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			extra, mode, perr := parseMetaSetArgs(cmd)
+			if perr != nil {
+				return perr
+			}
+			if err := applyStateVolume(cmd, st); err != nil {
+				return err
+			}
+			svc, cerr := factory.NewClient(cmd)
+			if cerr != nil {
+				ios.WriteErrLine(errFmtInitClientPrint, cerr)
+				return fmt.Errorf(errFmtInitClient, cerr)
+			}
+			remotePath, rerr := st.ResolveRemotePathOrErr(args[0])
+			if rerr != nil {
+				return rerr
+			}
+			if uerr := svc.UpdateFileMetaWithMode(cmd.Context(), remotePath, extra, client.MetaUpdateOptions{Mode: mode}); uerr != nil {
+				return uerr
+			}
+			ios.WriteOutLine("meta extra 已%s: %s（%d 个字段）", modeVerb(mode), remotePath, len(extra))
+			return nil
+		},
+	}
+	cmd.Flags().String("extra", "", "要合并的元数据（JSON 或 @file.json）")
+	cmd.Flags().Bool("replace", false, "整表替换（丢弃所有旧键；默认是合并/新增）")
+	cmd.Flags().String("delete", "", "删除指定键（逗号分隔，如 code,maker）")
+	return cmd
+}
+
+// parseMetaSetArgs 解析 meta set 的 --extra/--replace/--delete 为（extra, mode）。
+// 三模式归一：--delete 优先（删键）；否则 --replace 整表替换；否则默认合并。
+func parseMetaSetArgs(cmd *cobra.Command) (map[string]any, client.MetaUpdateMode, error) {
+	raw, _ := cmd.Flags().GetString("extra")
+	delRaw, _ := cmd.Flags().GetString("delete")
+	replace, _ := cmd.Flags().GetBool("replace")
+	extra, perr := parseMetaExtraFlag(raw)
+	if perr != nil {
+		return nil, "", perr
+	}
+	if strings.TrimSpace(delRaw) != "" {
+		if len(extra) > 0 {
+			return nil, "", fmt.Errorf("--delete 与 --extra 不能同时使用")
+		}
+		del := map[string]any{}
+		for k := range strings.SplitSeq(delRaw, ",") {
+			if key := strings.TrimSpace(k); key != "" {
+				del[key] = nil // value 占位，服务端只取 key 集合
+			}
+		}
+		if len(del) == 0 {
+			return nil, "", fmt.Errorf("--delete 至少指定一个键")
+		}
+		return del, client.MetaUpdateDelete, nil
+	}
+	if len(extra) == 0 {
+		return nil, "", fmt.Errorf("--extra 不能为空（或用 --delete=<keys> 删键）")
+	}
+	if replace {
+		return extra, client.MetaUpdateReplace, nil
+	}
+	return extra, client.MetaUpdateMerge, nil
+}
+
+// modeVerb 返回更新模式的中文动词（CLI 输出文案）。
+func modeVerb(m client.MetaUpdateMode) string {
+	switch m {
+	case client.MetaUpdateReplace:
+		return "替换"
+	case client.MetaUpdateDelete:
+		return "删除"
+	default:
+		return "更新"
+	}
+}
+
+// parseMetaExtraFlag 解析 --extra（JSON 或 @file.json）。
+func parseMetaExtraFlag(raw string) (map[string]any, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var payload []byte
+	if rest, ok := strings.CutPrefix(raw, "@"); ok {
+		b, err := os.ReadFile(rest)
+		if err != nil {
+			return nil, fmt.Errorf("读 %s: %w", rest, err)
+		}
+		payload = b
+	} else {
+		payload = []byte(raw)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return nil, fmt.Errorf("JSON 解析失败: %w", err)
+	}
+	return obj, nil
+}
+
+// useJSONOutput 判断命令是否 --json 模式（buildFormatterWithWriter 同源）。
+func useJSONOutput(cmd *cobra.Command) bool {
+	ok, _ := cmd.Flags().GetBool("json")
+	return ok
+}
+
+// printMetaExtraFor 输出 meta extra：--json / --raw 输出**原始 JSON 文本**（时间/URL 原样，
+// 供脚本/修复）；Text 默认 human 可视化（时间转本地、URL 解码可见）。读失败仅提示。
+func printMetaExtraFor(cmd *cobra.Command, ios cli.IOStreams, fm OutputFormatter, svc *client.FileClient, filename string) {
+	info, xerr := svc.GetFileMetaInfo(cmd.Context(), filename)
+	if xerr != nil {
+		ios.WriteErrLine("（读取 meta extra 失败: %v）", xerr)
+		return
+	}
+	if rawJSON, _ := cmd.Flags().GetBool("raw"); rawJSON && !useJSONOutput(cmd) {
+		b, _ := json.MarshalIndent(map[string]any{
+			"extra": info.Extra, "mtime": info.MTime, "ctime": info.CTime,
+		}, "", "  ")
+		fmt.Fprintln(ios.Out, string(b))
+		return
+	}
+	// 原始文件时间（sidecar 记录）：Text 模式转本地时区展示（--json 由 formatter 原样输出 extra）。
+	if !useJSONOutput(cmd) {
+		printFileTimes(ios, info.MTime, info.CTime)
+	}
+	fm.PrintMetaExtra(info.Extra) // JSONFormatter 原始 / Text human 可视化
+}
+
+// printFileTimes 打印原始文件 mtime/ctime（UTC RFC3339Nano 存储 → 本地时区展示）。
+func printFileTimes(ios cli.IOStreams, mtime, ctime string) {
+	if d := localTimeDisplay("mtime", mtime); d != "" {
+		fmt.Fprintf(ios.Out, "mtime:    %s\n", d)
+	}
+	if d := localTimeDisplay("ctime", ctime); d != "" {
+		fmt.Fprintf(ios.Out, "ctime:    %s\n", d)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -194,20 +195,16 @@ func (f *FTPFS) openData(cmd string) (net.Conn, func(), error) {
 	}
 	// PASV 常返回 0.0.0.0/127.0.0.1（NAT/网关简化实现）；控制连接是真实目标时
 	// 用控制主机地址回退（与 curl/lftp 同策略）。
-	if ip := net.ParseIP(host); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
-		if cip := net.ParseIP(f.dialHost); cip != nil && !cip.IsUnspecified() && !cip.IsLoopback() {
-			host = f.dialHost
-		}
-	}
+	host = f.resolveDataHost(host)
 	if err := f.command(cmd); err != nil { //nolint:govet // 命令发送与读响应成对，短变量域清晰
 		return nil, nil, err
 	}
-	code, _, err = f.readReply()
+	code, msg, err = f.readReply()
 	if err != nil {
 		return nil, nil, err
 	}
-	if code != 150 && code != 125 {
-		return nil, nil, fmt.Errorf("ftp: %s 被拒（%d）", cmd, code)
+	if rerr := ftpOpenRejectErr(cmd, code, msg); rerr != nil {
+		return nil, nil, rerr
 	}
 	dn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 30*time.Second)
 	if err != nil {
@@ -218,6 +215,19 @@ func (f *FTPFS) openData(cmd string) (net.Conn, func(), error) {
 		f.consumeTailReply()
 	}
 	return dn, cleanup, nil
+}
+
+// resolveDataHost 在 PASV 返回通配/回环地址时回退到控制连接主机（与 curl/lftp 同策略）；
+// 控制连接主机同样非真实地址时保留 PASV 原值。
+func (f *FTPFS) resolveDataHost(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil || (!ip.IsUnspecified() && !ip.IsLoopback()) {
+		return host
+	}
+	if cip := net.ParseIP(f.dialHost); cip != nil && !cip.IsUnspecified() && !cip.IsLoopback() {
+		return f.dialHost
+	}
+	return host
 }
 
 // consumeTailReply 消费数据命令的尾部响应（226）。数据连接读尽后服务端已在控制连接
@@ -381,13 +391,54 @@ func (f *FTPFS) Stat(ctx context.Context, relPath string) (*syncpkg.Entry, error
 	// 文件：SIZE 成功 → 文件条目。
 	code, sizeMsg, err := f.exec("SIZE " + abs)
 	if err != nil {
-		return nil, nil
+		// I1：执行错误（网络断开/超时/命令失败）必须 fail-closed 返回 err——不能吞成
+		// (nil,nil) 当「缺失」：降级写路径（writeTargetUnique Stat 预检）把 (nil,nil)
+		// 判为缺失放行 STOR（无条件覆盖），瞬态错误后会把已存在目标静默覆盖（W1/W3 绕过）。
+		return nil, err
 	}
 	if code == 213 {
 		size, _ := strconv.ParseInt(sizeMsg, 10, 64)
 		return &syncpkg.Entry{Path: strings.TrimPrefix(relPath, "/"), Name: name, Size: size}, nil
 	}
-	return nil, nil
+	// SIZE 负回复：仅明确的「550 + not found/no such 类文案」映射缺失（幂等判定目标缺失）；
+	// 其余负回复（500/502 命令不支持、530 未登录、450/451 瞬时忙、550 权限拒绝等）必须
+	// fail-closed 返回 err——SIZE 不被支持的服务器上 500 回复若被当缺失，降级写会 STOR
+	// 无条件覆盖已存在目标（I1 声称要关的向量，只关传输错误不完整）。
+	if code == 550 && ftpIsNotFoundMsg(sizeMsg) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("ftp: SIZE %q 负回复 %d: %s", abs, code, sizeMsg)
+}
+
+// ftpIsNotFoundMsg 判定 SIZE 负回复文案是否为「文件不存在」（550 同时承载 not found 与
+// permission denied 语义，须按文案区分——缺失才放行降级写，权限拒绝必须 fail-closed）。
+func ftpIsNotFoundMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, frag := range []string{"no such file", "not found", "no such", "does not exist", "missing"} {
+		if strings.Contains(lower, frag) {
+			return true
+		}
+	}
+	return false
+}
+
+// ftpOpenRejectErr 把数据命令（LIST/RETR/STOR）的**控制连接回复**映射为错误。
+//
+// 返回 nil 表示回复是 150/125（数据连接已建立，非负回复）。
+//
+// **项目 not-exist 约定**（见 pkg/sync/notexist.go）：`550 + not-found 文案` 必须包装
+// `os.ErrNotExist` —— 卷内账本据「不存在 vs 真错误」区分「空账本（首次运行）」与
+// 「不可确定 => 判损坏 => fail-closed 拒写」；裸错误会被判真错误 => 该 FTP 卷账本恒拒写
+// （整卷不可用）。其余负回复（含 550 权限拒绝：550 同时承载 not-found 与 permission
+// denied，须按文案区分）必须 fail-closed，与 SIZE 同口径。
+func ftpOpenRejectErr(cmd string, code int, msg string) error {
+	if code == 150 || code == 125 {
+		return nil
+	}
+	if code == 550 && ftpIsNotFoundMsg(msg) {
+		return fmt.Errorf("ftp: %s 目标不存在: %w", cmd, os.ErrNotExist)
+	}
+	return fmt.Errorf("ftp: %s 被拒（%d）", cmd, code)
 }
 
 // OpenRead 读取文件（RETR）→ io.ReadCloser。
@@ -419,7 +470,7 @@ func (d *dataReadCloser) Close() error {
 
 // WriteFile 全量覆盖写入（STOR；先建父目录）。
 // mtime 由服务端决定（FTP 无标准 mtime 设置；需要时 backend 层可扩展）。
-func (f *FTPFS) WriteFile(ctx context.Context, relPath string, r io.Reader, size, mtime int64) error {
+func (f *FTPFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relPath string, r io.Reader, size, mtime int64) error {
 	if err := f.ensureParentDirs(ctx, relPath); err != nil {
 		return err
 	}

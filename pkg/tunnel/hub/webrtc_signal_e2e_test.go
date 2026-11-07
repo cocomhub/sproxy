@@ -43,48 +43,63 @@ func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
 	// listener 先就绪：收 ping → 写 pong → 收 done → 关闭
 	listenDone := make(chan error, 1)
 	go func() {
-		conn, err := webrtc.ListenWithSignaler("node-B", sigListener)
-		if err != nil {
-			listenDone <- err
-			return
-		}
-		defer conn.Close()
-		readLine := func() ([]byte, error) {
-			buf := make([]byte, 32)
-			n, rerr := conn.Read(buf)
-			return buf[:n], rerr
-		}
-		ping, rerr := readLine()
-		if rerr != nil {
-			listenDone <- rerr
-			return
-		}
-		if string(ping) != "ping" {
-			listenDone <- &errUnexpected{got: string(ping)}
-			return
-		}
-		if _, werr := conn.Write([]byte("pong")); werr != nil {
-			listenDone <- werr
-			return
-		}
-		done, rerr2 := readLine()
-		if rerr2 != nil {
-			listenDone <- rerr2
-			return
-		}
-		if string(done) != "done" {
-			listenDone <- &errUnexpected{got: string(done)}
-			return
-		}
-		listenDone <- nil
+		listenDone <- runWebrtcEchoListener(ctx, sigListener)
 	}()
 
-	// 拨号方连接并写入 ping
+	// 拨号方连接并完成 ping/pong/done 协议。
+	webrtcDialerRoundTrip(t, ctx, sigDialer)
+
+	// 确认 listener 侧也成功
+	select {
+	case err := <-listenDone:
+		if err != nil {
+			t.Fatalf("listener 侧失败: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("listener 侧未在超时内完成")
+	}
+}
+
+// runWebrtcEchoListener 作为 listener 侧：收 ping → 写 pong → 收 done → 正常关闭。
+func runWebrtcEchoListener(ctx context.Context, sig webrtc.Signaler) error {
+	conn, err := webrtc.ListenWithSignaler("node-B", sig)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	readLine := func() ([]byte, error) {
+		buf := make([]byte, 32)
+		n, rerr := conn.Read(buf)
+		return buf[:n], rerr
+	}
+	ping, rerr := readLine()
+	if rerr != nil {
+		return rerr
+	}
+	if string(ping) != "ping" {
+		return &errUnexpected{got: string(ping)}
+	}
+	if _, werr := conn.Write([]byte("pong")); werr != nil {
+		return werr
+	}
+	done, rerr2 := readLine()
+	if rerr2 != nil {
+		return rerr2
+	}
+	if string(done) != "done" {
+		return &errUnexpected{got: string(done)}
+	}
+	return nil
+}
+
+// webrtcDialerRoundTrip 拨号方侧完整协议：Dial → 写 ping → 读 pong → 写 done。
+func webrtcDialerRoundTrip(t *testing.T, ctx context.Context, sigDialer webrtc.Signaler) *webrtc.Conn {
+	t.Helper()
 	dialConn, err := webrtc.DialWithSignaler("node-B", sigDialer)
 	if err != nil {
 		t.Fatalf("DialWithSignaler: %v", err)
 	}
-	defer dialConn.Close()
+	t.Cleanup(func() { _ = dialConn.Close() })
 
 	if _, werr := dialConn.Write([]byte("ping")); werr != nil {
 		t.Fatalf("write ping: %v", werr)
@@ -105,16 +120,7 @@ func TestWebrtcDialListen_WithHubSignaler(t *testing.T) {
 	if _, werr := dialConn.Write([]byte("done")); werr != nil {
 		t.Fatalf("write done: %v", werr)
 	}
-
-	// 确认 listener 侧也成功
-	select {
-	case err := <-listenDone:
-		if err != nil {
-			t.Fatalf("listener 侧失败: %v", err)
-		}
-	case <-ctx.Done():
-		t.Fatal("listener 侧未在超时内完成")
-	}
+	return dialConn
 }
 
 // TestWebrtcXferConn_FramingLargeMessage 验证 webrtcXferConn 的 [4B len][payload]

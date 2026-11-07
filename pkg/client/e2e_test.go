@@ -15,11 +15,12 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/server/credentials"
 )
 
 // startFullTestServer 启动完整 sproxy 服务（含所有路由和分块上传支持）。
 // 凭据 store 化（task3）后：无 ring/store 时不生成 anonymous（U3 零凭据启动），
-// 裸请求会被 authMiddleware 401 拒绝；这里经 BootstrappServerCredentials 载入——
+// 裸请求会被 authMiddleware 401 拒绝；这里经 BootstrapServerCredentials 载入——
 // **U3 后不再自动生成 anonymous**，故显式种入一条用户级凭据再注入 opts，并把
 // AK/SK/skeyID 通过返回值传给调用方（I2：以返回值注入替代包级全局，消 data race
 // 隐患），由调用方 WithAccessKey(ak, skHex) 传入 FileClient，使 e2e 走真实签名路径。
@@ -36,7 +37,7 @@ func startFullTestServer(t *testing.T) (url string, cfg *server.Config, ak, skHe
 
 	// U3：BootstrapServerCredentials 不再生成匿名凭据——显式种入一条 plain user 凭据
 	// （与旧 anonymous 产物同构：入口 SK 32B、条目 ID 确定性生成），供 e2e 签名使用。
-	ring, store, berr := server.BootstrapServerCredentials(cfg, nil)
+	ring, store, berr := credentials.BootstrapServerCredentials(cfg, nil)
 	if berr != nil {
 		t.Fatalf("BootstrapServerCredentials: %v", berr)
 	}

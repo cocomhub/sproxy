@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/server/metrics"
 )
 
 // newTestServerWithMetrics 创建带 Metrics 的测试服务器，并挂载 /metrics 路由。
@@ -25,7 +26,7 @@ func newTestServerWithMetrics(t *testing.T) (*httptest.Server, *Handlers) {
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	h := &Handlers{
 		cfgPtr:  &cfgPtr,
 		version: "test",
@@ -68,7 +69,7 @@ func TestMetricsHandler_Empty(t *testing.T) {
 }
 
 func TestMetrics_RecordRequest(t *testing.T) {
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordRequest(200)
 	m.RecordRequest(201)
 	m.RecordRequest(404)
@@ -89,7 +90,7 @@ func TestMetrics_RecordRequest(t *testing.T) {
 }
 
 func TestMetrics_RecordUploadDownloadDelete(t *testing.T) {
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordUpload(1024)
 	m.RecordUpload(2048)
 	m.RecordDownload(512)
@@ -161,6 +162,7 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 	h.metrics.RecordUpload(100)
 	h.metrics.RecordDownload(200)
 	h.metrics.RecordDelete()
+	h.metrics.RecordKeyframeFragmented()
 
 	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
@@ -175,6 +177,8 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 		"sproxy_bytes_uploaded 100",
 		"sproxy_bytes_downloaded 200",
 		"sproxy_files_deleted 1",
+		"# TYPE sproxy_keyframe_fmp4_total counter",
+		"sproxy_keyframe_fmp4_total 1",
 		"# TYPE sproxy_active_connections gauge",
 	}
 	for _, c := range checks {
@@ -187,7 +191,7 @@ func TestMetricsHandler_PrometheusFormat(t *testing.T) {
 func TestMetricsSnapshot(t *testing.T) {
 	t.Parallel()
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	m.RecordRequest(200)
 	m.RecordRequest(404)
 	m.RecordDownload(1024)
@@ -218,7 +222,7 @@ func TestMetricsSnapshot(t *testing.T) {
 func TestMetricsSnapshot_Empty(t *testing.T) {
 	t.Parallel()
 
-	m := NewMetrics()
+	m := metrics.NewMetrics()
 	s := m.Snapshot()
 	if s["requests_total"] != 0 {
 		t.Errorf("empty metrics: requests_total = %d, want 0", s["requests_total"])
@@ -231,7 +235,7 @@ func TestMetricsSnapshot_Empty(t *testing.T) {
 func TestMetricsSnapshot_Nil(t *testing.T) {
 	t.Parallel()
 
-	var m *Metrics
+	var m *metrics.Metrics
 	s := m.Snapshot()
 	if s != nil {
 		t.Errorf("nil metrics: expected nil snapshot, got %v", s)
@@ -274,6 +278,18 @@ func TestMetricsHandler_FullOutput(t *testing.T) {
 	for _, c := range checks {
 		if !strings.Contains(output, c) {
 			t.Errorf("expected metrics output to contain %q", c)
+		}
+	}
+	// 配额账本健康面（I3 接线钉住）：三个指标必须出现在 /metrics 输出——
+	// 「降级/损坏/内存回退必须可观测」是配额功能硬要求，漏接线即静默放宽。
+	// 值随进程级计数浮动，只断言指标名出现（不锁具体值）。
+	for _, name := range []string{
+		"sproxy_quota_ledger_corrupt_total",
+		"sproxy_quota_ledger_degraded_total",
+		"sproxy_quota_ledger_mem_fallback_total",
+	} {
+		if !strings.Contains(output, name) {
+			t.Errorf("expected metrics output to contain %q", name)
 		}
 	}
 }

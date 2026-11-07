@@ -23,11 +23,11 @@ func TestIndexSnapshot_RoundTrip(t *testing.T) {
 		"b.png":     {name: "b.png", base: "b.png", size: 20, modTime: 200},
 	}
 	owner := "alice"
-	if err := saveIndexSnapshot(tnt, owner, entries); err != nil {
+	if err := saveIndexSnapshot(tnt, owner, entries, 0); err != nil {
 		t.Fatalf("saveIndexSnapshot: %v", err)
 	}
 
-	got, ok := loadIndexSnapshot(tnt, owner)
+	got, _, ok := loadIndexSnapshot(tnt, owner)
 	if !ok {
 		t.Fatal("loadIndexSnapshot 应命中")
 	}
@@ -72,7 +72,7 @@ func TestEnsureOwner_SnapshotLoadFallback(t *testing.T) {
 	}
 	// 搜索触发 ensureOwner：损坏快照 → 全量重建（命中 x.txt）。
 	svc := env.newService()
-	if n, err := svc.Search(SearchQuery{Owner: "alice", Query: "x.txt"}); err != nil || len(n.Files) != 1 {
+	if n, err := svc.Search(t.Context(), SearchQuery{Owner: "alice", Query: "x.txt"}); err != nil || len(n.Files) != 1 {
 		t.Fatalf("损坏快照应回退重建, hits=%d err=%v", len(n.Files), err)
 	}
 }
@@ -83,7 +83,7 @@ func TestIndexSnapshot_MissingCorrupt(t *testing.T) {
 	tnt := newCacheTenant(t)
 
 	// 缺失 → false。
-	if _, ok := loadIndexSnapshot(tnt, "nobody"); ok {
+	if _, _, ok := loadIndexSnapshot(tnt, "nobody"); ok {
 		t.Fatal("缺失快照应返回 false")
 	}
 
@@ -98,7 +98,7 @@ func TestIndexSnapshot_MissingCorrupt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "alice.json"), []byte("not json"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if _, ok := loadIndexSnapshot(tnt, "alice"); ok {
+	if _, _, ok := loadIndexSnapshot(tnt, "alice"); ok {
 		t.Fatal("损坏快照应返回 false（回退全量重建）")
 	}
 }

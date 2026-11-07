@@ -248,12 +248,12 @@ func TestVerify_ConcurrentSkip(t *testing.T) {
 
 	go func() {
 		defer close(done)
-		h.verifyOnce(context.Background(), "", "")
+		h.verifyService().VerifyOnce(context.Background(), "", "")
 	}()
 	<-started
 
 	// 第二次触发应跳过（busy → Concurrent）。
-	rep := h.verifyOnce(context.Background(), "", "")
+	rep := h.verifyService().VerifyOnce(context.Background(), "", "")
 	if !rep.Concurrent {
 		t.Fatal("busy 时第二次触发应返回 Concurrent=true")
 	}

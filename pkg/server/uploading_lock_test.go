@@ -240,28 +240,32 @@ func TestUploadComplete_BlockedWhenFileLocked(t *testing.T) {
 // TestMoveVsDelete_LockSerializes 真并发（seam 确定性阻塞）：move 持锁期间 delete 409，
 // 释放后 move 完成；文件最终只存在于目标卷（无跨卷双份 / 无账本错配）。
 func TestMoveVsDelete_LockSerializes(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
 		{Name: "disk2", Root: dirs[1], VolCapacity: 1 << 20},
 	}
-	baseURL, _, _ := uploadingLockServer(t, "alice", volumes, nil)
+	baseURL, h, _ := uploadingLockServer(t, "alice", volumes, nil)
 
 	content := []byte("move-vs-delete payload")
 	if status, _, body := volumeUpload(t, baseURL, "mvdel.txt", content, ""); status != http.StatusOK {
 		t.Fatalf("上传应 200, got %d %s", status, body)
 	}
 
-	// seam：move 复制完成后、删源前阻塞，暴露「持锁窗口」供并发 delete 观测。
+	// removeMovedSource 实例字段注入：move 复制完成后、删源前阻塞，暴露「持锁窗口」供
+	// 并发 delete 观测（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam——
+	// 经 Handlers 实例字段创建时注入，运行期不可变）。构造前捕获默认实现（闭包内不读
+	// 实例字段——防止重入/并发修改读到 nil）。
 	reached := make(chan struct{})
 	proceed := make(chan struct{})
-	orig := removeMovedSource
-	removeMovedSource = func(root *storage.Root, rel string) error {
+	defaultRemove := h.removeMovedSourceOrDefault()
+	h.removeMovedSource = func(root *storage.Root, rel string) error {
 		close(reached)
 		<-proceed
-		return orig(root, rel)
+		return defaultRemove(root, rel)
 	}
-	t.Cleanup(func() { removeMovedSource = orig })
+	t.Cleanup(func() { h.removeMovedSource = nil })
 
 	moveDone := make(chan int, 1)
 	go func() {
@@ -373,4 +377,33 @@ func postNoBody(t *testing.T, url string) (int, []byte) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, body
+}
+
+// TestLockRelFor_NormalizesVolumeFSKey 回归（M2，第 7 轮 MAJOR）：转存取锁传的是**卷 FS 键**
+// （共享外部卷含 `<owner>/` 前缀），必须归一为域侧锁键（`user/<rel>`）才能与 HTTP 上传/
+// 删除/move 的锁**互斥**。变异：直接透传 fsKey（不归一）→ 两写面锁互不可见 → 红。
+func TestLockRelFor_NormalizesVolumeFSKey(t *testing.T) {
+	t.Parallel()
+	h := &Handlers{}
+	cases := []struct{ owner, in, want string }{
+		{"alice", "alice/user/docs/a.txt", "user/docs/a.txt"}, // 共享卷（FSPath 带 owner 前缀）
+		{"alice", "/alice/user/a.txt", "user/a.txt"},          // 前导斜杠
+		{"alice", "user/a.txt", "user/a.txt"},                 // 私有卷（无前缀）：原样
+		{"", "anonymous/user/a.txt", "user/a.txt"},            // 空 owner 归一 anonymous
+		{"alice", "alice/meta/a.txt.meta", "meta/a.txt.meta"}, // meta 桶键同理
+	}
+	for _, c := range cases {
+		if got := h.lockRelFor(c.owner, c.in); got != c.want {
+			t.Errorf("lockRelFor(%q, %q) = %q, want %q", c.owner, c.in, got, c.want)
+		}
+	}
+	// 实际互斥性：以转存 FS 键取锁后，HTTP 上传侧的域侧键必须被拒。
+	release, ok := h.transferWriteLock("alice", "alice/user/a.txt")
+	if !ok {
+		t.Fatal("首次取锁应成功")
+	}
+	if _, ok2 := h.tryMarkUploadingFile("alice", "user/a.txt", uploadingLockUpload); ok2 {
+		t.Fatal("转存锁与上传锁必须同键互斥（M2：键不归一 → 并发写主文件/sidecar 错位）")
+	}
+	release()
 }

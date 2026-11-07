@@ -46,6 +46,91 @@ type ActorResolver interface {
 	Actor(*http.Request) string
 }
 
+// ExternalVolumeOps 是装配层注入的**外部卷对象操作**接缝（评审 F1）。
+//
+// 为什么需要：外部卷没有 `*storage.Root`（`locateForRead`/`volumeFileExists` 恒未命中）⇒ 其
+// 对象**没有任何用户可见的删除入口**；卷写满（`used==capacity`）后该卷一切写入恒 507（含覆盖
+// 写缩小），只能靠同步删除传播或运维手工删计数文件 + 重启 = **功能死路**。
+//
+// 接缝语义（实现方在装配层）：经**同一可信链** `Guard(Wrap(CapacityFS(raw)))` 执行 Delete——
+// 链上 `TrustedVolumeFS.Delete` 天然完成「删主文件 + 联动删 sidecar」，`CapacityFS.Delete`
+// 完成「释放卷级计数」。领域层不感知卷/键空间/装饰器细节。
+type ExternalVolumeOps interface {
+	// ExternalDelete 删除 owner 在 volName 上的 remotePath（用户可见相对路径）。
+	//
+	// expectedChecksum 非空 → 与 sidecar **记录**的整文件 SHA-256 交叉比对（**不重算**：远端
+	// 整文件回读不可接受）；不一致 → `*HTTPError{409}`。sidecar 缺失/不可读 → 跳过该判据
+	// （无记录值可比），删除继续。
+	//
+	// 返回 (false, nil) = 卷未装配 / owner 未授权 / 对象不存在（调用方按 404 处理）。
+	ExternalDelete(ctx context.Context, owner, volName, remotePath, expectedChecksum string) (bool, error)
+
+	// ExternalStat 取外部卷对象的元信息（用户可见相对路径）。返回 size<0 = 不存在/未命中；
+	// checksum = 该卷记录的**明文**整文件 SHA-256（无记录 → 空串）。
+	ExternalStat(ctx context.Context, owner, volName, remotePath string) (size int64, checksum string, err error)
+
+	// ExternalCopy 在 volName（外部卷）内**复制**对象（同卷语义；源保留）。卷实现 blob 直拷
+	// 能力时走「底层 blob 直拷 + 新 meta」（不重新加解密）；不支持时返回 Supported=false，
+	// 调用方回落统一写内核（读源 + 写目标）。
+	ExternalCopy(ctx context.Context, owner, volName, fromRemote, fromRel, toRemote, toRel string, force bool) (ExternalCopyResult, error)
+
+	// ExternalMkdir 在 volName（外部卷）内创建目录（用户可见相对路径；祖先链由该卷自建）。
+	//
+	// 返回 (true, nil) = 已在该外部卷创建（幂等：目录已存在视为成功）；
+	// (false, nil) = 卷未装配 / 非外部卷 / owner 未授权（调用方回落本地流程）。
+	//
+	// 为什么必须走该卷：此前 `mkdir --volume <加密卷>` 静默落到**本地卷**（用户看到
+	// 「目录已创建」，卷上却找不到）；目录必须建在目标卷自己的键空间里。
+	ExternalMkdir(ctx context.Context, owner, volName, dir string) (bool, error)
+
+	// ExternalRemoveDir 删除 volName（外部卷）上的目录（用户可见相对路径）。force=true 时
+	// **递归删除**整棵子树（先子后父）；force=false → 400（与本地 rmdir 的「必须显式确认」
+	// 语义一致——绝不静默递归删用户内容）。
+	//
+	// 返回 (true, err) = 已裁决（err 为 *HTTPError：400 非法路径/不是目录/未确认、404 目录
+	// 不存在、409 封印、500 IO）；(false, nil) = 卷未装配 / 非外部卷 / owner 未授权
+	// （调用方回落本地流程，零回归）。
+	ExternalRemoveDir(ctx context.Context, owner, volName, dir string, force bool) (bool, error)
+
+	// ExternalRename 在 volName（外部卷）内把 owner 的 fromRemote 重命名为 toRemote
+	// （两者均为用户可见相对路径；**同卷内**语义——跨卷移动由 move API 承担，涉及外部/加密卷
+	// 时经域侧组合：复制（统一写内核）+ 删源（接缝/delete））。
+	//
+	// expectedChecksum 非空 → 与 sidecar/meta **记录**的整文件 SHA-256 交叉比对（**不重算**）；
+	// 不一致 → `*HTTPError{409}`。目标已存在 → `*HTTPError{409}`（不静默覆盖）。
+	// 返回 (false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 源不存在（调用方回落既有语义）。
+	ExternalRename(ctx context.Context, owner, volName, fromRemote, toRemote, expectedChecksum string) (bool, error)
+
+	// ExternalMeta 读外部卷对象的自定义元数据 extra（用户可见相对路径）。
+	//
+	// 返回 (extra, true, nil) = 已裁决（extra 可为空 map——文件存在但无 extra，或卷无
+	// sidecar 载体）；(nil, false, nil) = 卷未装配 / 非外部卷 / owner 未授权 / 对象不存在
+	// —— 调用方按「未命中」处理（回落到本地卷路径或报 404）。
+	//
+	// 为什么需要（2026-10-26 读闭环）：extra 读写必须先定位到文件所在的卷，而外部卷
+	// 没有 *storage.Root（`locateForRead` 恒未命中）⇒ 必须经本接缝（与 ExternalStat 同路）。
+	ExternalMeta(ctx context.Context, owner, volName, remotePath string) (extra map[string]any, ok bool, err error)
+	// ExternalMetaInfo 是可选能力：额外返回原始文件 mtime/ctime（RFC3339Nano UTC；空=未知）。
+	// 未实现时调用方回落 ExternalMeta（无时间信息），保持向后兼容。
+	// ExternalMetaInfoReader 表达该可选能力（类型断言查询，不扩必选接口）。
+
+	// ExternalMetaUpdate 把 extra **合并**进外部卷对象的 meta（读-校验-合并-写 sidecar，
+	// 不重算内容哈希）。语义与本地卷 `FileMetaPolicy` 的补录一致；无 sidecar 载体（裸外部
+	// 卷无 trusted 装饰链）→ `ErrMetaUnavailable`（fail-closed，不假成功）。
+	//
+	// 返回 (true, nil) = 已裁决（含失败）。(false, nil) = 卷未装配 / 非外部卷 / owner
+	// 未授权 / 对象不存在 —— 调用方按「未命中」处理。
+	ExternalMetaUpdate(ctx context.Context, owner, volName, remotePath string, extra map[string]any) (bool, error)
+}
+
+// ExternalCopyResult 是 ExternalCopy 的返回：Supported=false 表示该卷未实现 blob 直拷能力
+// （调用方回落写内核）；Supported=true 时给出结果元信息。
+type ExternalCopyResult struct {
+	Supported bool
+	Checksum  string
+	Size      int64
+}
+
 // VolumeRouter 是**多卷能力**（运行时卷集合 + 卷租户 + 读定位 + 写路由）。
 //
 // 为什么是一个接口而不是多个字段：这四件事共同描述「多卷部署」这一个能力，拆开只会让
@@ -59,23 +144,50 @@ type VolumeRouter interface {
 	// Locate 在 owner 卷视图内定位 rel 所在卷（读定位，不创建目录）。
 	Locate(owner, rel string) (FileLocation, bool)
 	// Route 为写路径定卷并预留双账本（owner 全局 Scope + 卷容量池）。
-	Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	// 显式卷（explicitVol 非空）语义：ACL 校验 + **唯一性查重**（HTTP 上传覆盖策略）。
+	Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error)
+	// RouteTarget 为**统一写内核**显式卷定卷（ACL 校验 + 双预留，**不做唯一性查重**——
+	// 覆盖写语义：S3/DAV/版本恢复允许覆盖同 rel）。
+	RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error)
 }
 
-// QuotaScopes 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
-type QuotaScopes interface {
+// VolumePhysFootprinter 由**掌握物理布局**的卷实现（secretdata 等）：向配额账本报告对象的
+// **真实物理落盘字节**与「逻辑 → 物理上界」换算（配额模型 v3，用户裁定 2026-10-14：只按物理
+// 占用记账）。未装配（nil）= 无该能力 ⇒ 写内核回落 `UploadRoute.PhysSize`（加密卷公式折算）
+// ⇒ 明文/加密本地/可信卷零回归。
+//
+// 为什么必须由卷自报：物理量含**逻辑不可推**的部分——secretdata 的 meta blob pad 到
+// [base, 2·base)（默认 1–2MB/文件、1–2MB/目录，与文件逻辑大小**无关**，是尺寸混淆设计）、
+// XOR parity（可达逻辑 2×）。按逻辑记账在小文件/多目录场景下物理可达逻辑的**千倍**。
+type VolumePhysFootprinter interface {
+	// PhysFootprint 返回 volName 卷上**用户可见路径** remotePath 对应对象的**真实物理字节**
+	// （含 parity/meta pad 等；实测）。owner 用于把用户路径解析为卷内键（`Location.FSPath()`）。
+	PhysFootprint(volName, owner, remotePath string) (int64, bool)
+	// PhysBound 返回 volName 卷上 logical 字节的**物理上界**（预占用用；结算按实测收敛）。
+	// 无该能力/未知卷 ⇒ 0（调用方回落既有折算）。
+	PhysBound(volName string, logical int64) int64
+	// DirChainFootprint 返回 remotePath **及其全部祖先**已存在目录的物理足迹之和（目录 meta
+	// blob；secretdata 每级 1–2MB）。调用方用「操作前后差分」得到本次新增/移除目录的物理字节
+	// （覆盖祖先链，且不必知道 FS 内部创建/回收了哪几级）。恒 ok=true（本层支持目录足迹）。
+	DirChainFootprint(volName, owner, remotePath string) (int64, bool)
+	// DirPhysBound 返回**单个目录** meta blob 的物理上界（预占用用）。无该能力 ⇒ 0。
+	DirPhysBound(volName string) int64
+}
+
+// QuotaScopeProvider 按文件相对路径解析最长前缀配额子 Scope；nil 实现 = 不记账。
+type QuotaScopeProvider interface {
 	ScopeFor(owner, rel string) *quota.Scope
 }
 
-// ChecksumLedgers 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
+// ChecksumLedgerProvider 返回 owner 的 per-tenant 校验和台账；nil 实现 = 不落台账（下载/stat 仍
 // 实时计算 checksum 响应头）。
-type ChecksumLedgers interface {
-	ChecksumStoreFor(owner string) *checksum.ChecksumStore
+type ChecksumLedgerProvider interface {
+	ChecksumStoreFor(owner string) checksum.ChecksumStoreIface
 }
 
-// DownloadPaths 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
+// DownloadPathResolver 把下载/stat 请求解析为 (租户, 根内相对路径, 用户可见名)。默认实现只支持
 // 普通文件；云端任务/归档等 kind 需装配层注入。
-type DownloadPaths interface {
+type DownloadPathResolver interface {
 	Resolve(*http.Request) (DownloadPath, error)
 }
 
@@ -142,20 +254,41 @@ type config struct {
 	logger        func() *slog.Logger
 	actor         ActorResolver
 	volumes       VolumeRouter
-	quota         QuotaScopes
-	ledger        ChecksumLedgers
+	quota         QuotaScopeProvider
+	ledger        ChecksumLedgerProvider
 	chunkSize     func() int64
 	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
-	downloadPaths DownloadPaths
+	downloadPaths DownloadPathResolver
 	locks         FileLocks
 	metrics       Metrics
 	audit         Auditor
-	eventSink     EventSink
+	eventSink     EventListener
 	dedup         DedupPolicy
 	bandwidth     BandwidthLimiter
 	contentIndex  bool
+	fileMeta      FileMetaPolicy
+	externalOps   ExternalVolumeOps
+	phys          VolumePhysFootprinter
+	volTypes      VolumeTypeClassifier
+	retrySleep    func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
+	quotaWait     func() time.Duration // 配额排队等待上限（nil = DefaultWaitTimeout 30s）
+}
+
+// WithRetrySleep 注入外部卷转存重试的退避等待函数（默认 time.Sleep）。
+// 测试注入恒 0 等待（或可推进的假时钟）即可**即时**跑完重试循环，避免 10×2^n 真实退避
+// 拖慢用例——比 synctest 气泡轻量（无虚拟时钟独占限制，可保持 t.Parallel）。
+func WithRetrySleep(fn func(time.Duration)) Option {
+	return func(c *config) { c.retrySleep = fn }
+}
+
+// WithQuotaWait 注入配额排队等待上限（nil = quota.DefaultWaitTimeout 30s）。
+// 与 WithRetrySleep 同型：测试注入返回短值（如 50ms）即可把「配额故意打满断言 507」的用例
+// 从白等 30s 降为 ~0s（生产恒 nil，语义不变）。所有 `WaitReserve(ctx, n, quota.DefaultWaitTimeout)`
+// 调用点统一走 `runtime.waitTimeout()` 获得该上限。
+func WithQuotaWait(fn func() time.Duration) Option {
+	return func(c *config) { c.quotaWait = fn }
 }
 
 // WithLogger 注入业务日志器访问器（取用函数；日志配置热更新需要每次读实时实例）。
@@ -170,22 +303,38 @@ func WithActor(a ActorResolver) Option {
 }
 
 // WithVolumes 注入多卷能力。默认：由 TenantResolver 派生的单卷实现。
+// WithExternalOps 注入外部卷对象操作接缝（F1；未装配 → 外部卷对象无删除入口，零回归）。
+// WithPhysFootprinter 注入卷物理足迹能力（未注入 = 无该能力；明文/加密本地卷不需要）。
+func WithPhysFootprinter(p VolumePhysFootprinter) Option {
+	return func(c *config) { c.phys = p }
+}
+
+func WithExternalOps(ops ExternalVolumeOps) Option {
+	return func(c *config) { c.externalOps = ops }
+}
+
+// WithVolumeTypeClassifier 注入卷类型分类能力（wrapper 展示分类的事实源，见
+// VolumeTypeClassifier）。默认：未注入 → 领域侧回落内置基线名单（零回归；生产装配恒注入）。
+func WithVolumeTypeClassifier(tc VolumeTypeClassifier) Option {
+	return func(c *config) { c.volTypes = tc }
+}
+
 func WithVolumes(v VolumeRouter) Option {
 	return func(c *config) { c.volumes = v }
 }
 
 // WithQuota 注入配额能力。默认：不记账。
-func WithQuota(q QuotaScopes) Option {
+func WithQuota(q QuotaScopeProvider) Option {
 	return func(c *config) { c.quota = q }
 }
 
 // WithChecksumLedger 注入校验和台账。默认：不落台账。
-func WithChecksumLedger(l ChecksumLedgers) Option {
+func WithChecksumLedger(l ChecksumLedgerProvider) Option {
 	return func(c *config) { c.ledger = l }
 }
 
 // WithDownloadPaths 注入下载路径解析（云端 kind 等）。默认：仅普通文件。
-func WithDownloadPaths(d DownloadPaths) Option {
+func WithDownloadPaths(d DownloadPathResolver) Option {
 	return func(c *config) { c.downloadPaths = d }
 }
 
@@ -273,7 +422,7 @@ func (l *mapFileLocks) Acquire(owner, rel string) (func(), bool) {
 // quota 非 nil 时写路由在 owner 全局 Scope 上做单账本预留（无卷容量池——单卷无卷池语义）。
 type singleVolume struct {
 	tenants TenantResolver
-	quota   QuotaScopes
+	quota   QuotaScopeProvider
 }
 
 func (s singleVolume) Volumes() VolumeSet { return nil }
@@ -298,11 +447,12 @@ func (s singleVolume) Locate(owner, rel string) (FileLocation, bool) {
 // Route 复刻单卷写路由语义（pkg/server.routeUpload 的 h.volSet == nil 分支）：恒默认租户；
 // 装配了配额时在 owner 全局 Scope 上预留（单卷无卷容量池）；未装配时无预留。
 // 租户不可用时 Tenant 为 nil，由 Upload 回 400；配额不足回 507。
-func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
-	route := UploadRoute{Tenant: s.tenants.TenantFor(owner)}
+func (s singleVolume) Route(ctx context.Context, owner, rel, explicitVol string, size int64, forceHomeVol string) (UploadRoute, error) {
+	route := UploadRoute{Tenant: s.tenants.TenantFor(owner), PhysSize: TenantPhysSizer(s.tenants.TenantFor(owner))}
 	if s.quota != nil {
 		if scope := s.quota.ScopeFor(owner, rel); scope != nil {
-			res, err := scope.TryReserve(size)
+			// 预留与结算同口径（加密卷按物理占用预留，见 UploadRoute.PhysSize）。
+			res, err := scope.WaitReserve(ctx, route.PhysicalSize(size), quota.DefaultWaitTimeout)
 			if err != nil {
 				return UploadRoute{}, &HTTPError{Status: http.StatusInsufficientStorage, Message: "存储配额不足"}
 			}
@@ -319,6 +469,11 @@ func (s singleVolume) Route(owner, rel, explicitVol string, size int64, forceHom
 	return route, nil
 }
 
+// RouteTarget 单卷形态：唯一根即目标（同 Route，不查重）。
+func (s singleVolume) RouteTarget(ctx context.Context, owner, rel, volName string, size int64) (UploadRoute, error) {
+	return s.Route(ctx, owner, rel, volName, size, "")
+}
+
 // defaultDownloadPaths 未注入下载路径解析时的默认：仅普通文件（kind 为空）。
 // 云端任务/归档 kind 需要装配层注入（依赖跨族能力）。
 type defaultDownloadPaths struct {
@@ -327,7 +482,7 @@ type defaultDownloadPaths struct {
 }
 
 func (d defaultDownloadPaths) Resolve(r *http.Request) (DownloadPath, error) {
-	if kind := r.URL.Query().Get("kind"); kind != "" {
+	if r.URL.Query().Get("kind") != "" {
 		return DownloadPath{}, &HTTPError{Status: http.StatusNotFound, Message: errMsgFileNotFound}
 	}
 	name := r.URL.Query().Get("filename")
@@ -361,17 +516,19 @@ type actorResolverFunc func(*http.Request) string
 
 func (f actorResolverFunc) Actor(r *http.Request) string { return f(r) }
 
-// quotaScopesFunc 以函数适配 QuotaScopes。
+// quotaScopesFunc 以函数适配 QuotaScopeProvider。
 type quotaScopesFunc func(owner, rel string) *quota.Scope
 
 func (f quotaScopesFunc) ScopeFor(owner, rel string) *quota.Scope { return f(owner, rel) }
 
-// checksumLedgersFunc 以函数适配 ChecksumLedgers。
-type checksumLedgersFunc func(owner string) *checksum.ChecksumStore
+// checksumLedgersFunc 以函数适配 ChecksumLedgerProvider。
+type checksumLedgersFunc func(owner string) checksum.ChecksumStoreIface
 
-func (f checksumLedgersFunc) ChecksumStoreFor(owner string) *checksum.ChecksumStore { return f(owner) }
+func (f checksumLedgersFunc) ChecksumStoreFor(owner string) checksum.ChecksumStoreIface {
+	return f(owner)
+}
 
-// downloadPathsFunc 以函数适配 DownloadPaths。
+// downloadPathsFunc 以函数适配 DownloadPathResolver。
 type downloadPathsFunc func(*http.Request) (DownloadPath, error)
 
 func (f downloadPathsFunc) Resolve(r *http.Request) (DownloadPath, error) { return f(r) }
@@ -394,18 +551,18 @@ func WithBandwidthLimiter(l BandwidthLimiter) Option {
 	return func(c *config) { c.bandwidth = l }
 }
 
-// EventSink 接收文件变更事件（upload/rename/delete/mkdir/rmdir/version）。
+// EventListener 接收文件变更事件（upload/rename/delete/mkdir/rmdir/version）。
 // 装配层实现（事件总线/SSE）；nil = 不推送（默认零回归）。
-type EventSink interface {
+type EventListener interface {
 	OnFileEvent(action, owner, rel string, size int64)
 }
 
 // WithEventSink 注入文件事件接收器。默认：不推送。
-func WithEventSink(s EventSink) Option {
+func WithEventSink(s EventListener) Option {
 	return func(c *config) { c.eventSink = s }
 }
 
-// 文件变更事件动作（EventSink.OnFileEvent 的 action 参数；装配层 SSE 原样透传）。
+// 文件变更事件动作（EventListener.OnFileEvent 的 action 参数；装配层 SSE 原样透传）。
 const (
 	EventUpload  = "upload"
 	EventRename  = "rename"
@@ -420,4 +577,50 @@ const (
 // 构建文件索引时对文本文件首 4KiB 抽样抽取词元，搜索命中正文词元也返回文件。
 func WithContentIndex(enabled bool) Option {
 	return func(cfg *config) { cfg.contentIndex = enabled }
+}
+
+// FileMetaPolicy 是**可信卷 meta 能力**（用户裁定 2026-10-07：本地卷上传到达即建
+// meta——新文件到达系统立刻计算 sha256/md5（含分块）并创建配套 .meta 文件，隐藏
+// 占配额）。默认：未装配（零回归，不落 .meta）。装配层（pkg/server）注入实现
+// （meta 恒生成——skip_verify 只关读侧校验不关 meta；secretdata 等自带 Provider 的卷
+// 不在本地写路径）。
+type FileMetaPolicy interface {
+	// Enabled 恒 true（meta 恒生成；装配层注入即生效）。
+	Enabled() bool
+	// WriteMeta 在文件落盘成功后生成并写入配套 .meta（隐藏、占配额）。实现方负责
+	// 计算 FileMeta（从已落盘文件计算总/分块 sha256+md5）与失败兜底（失败＝读侧不校验）。
+	// owner 为文件归属（配额记账按 owner 的 meta 桶 Scope）；root 为文件所在租户根；
+	// rel 为根内相对路径（含 user/ 前缀）。extra 为随上传写入的自定义元数据
+	// （A/B/C 档，见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。
+	WriteMeta(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error
+	// VerifyDownload 返回下载流的**逐分块校验包装**（信任保证演进：下载路径读回比对
+	// meta，异常 fail-closed——跨信任边界静默损坏在下发客户端前被拦截）。无 meta /
+	// 跳过校验（skip_verify）→ 返回 nil（直通）。实现方读 meta sidecar（root 相对
+	// meta.MetaPath(rel)）后 meta.VerifyReadSeeker 包装。
+	VerifyDownload(ctx context.Context, root *storage.Root, rel string, r SeekReadCloser) (SeekReadCloser, error)
+	// ReadMetaRaw 读取本地卷 meta sidecar 原始字节（root 相对 mrel）。
+	//
+	// 语义（2026-10-26 读闭环）：sidecar 缺失 → `os.ErrNotExist`（调用方按「无 extra」
+	// 处理）；存在但不可读/损坏 → fail-closed 错误（不返回半份数据）。
+	ReadMetaRaw(ctx context.Context, root *storage.Root, mrel string) ([]byte, error)
+	// UpdateMetaExtra 旁路更新本地卷文件 meta 的 Extra（读-校验-合并-写 sidecar，
+	// **不重算内容哈希**）。模式由 ctx 的 `syncpkg.MetaUpdateModeFrom` 决定：
+	// merge（默认新增，同名键更新）/ replace（整表替换）/ delete（删指定键）。
+	//
+	// 语义（2026-10-26）：`merge`/`replace` 下值为 **null 的键视为删除**（JSON 直觉，
+	// 与 `--delete` 等价）；sidecar 缺失 → `ErrMetaUnavailable`（无内容基线，拒绝盲写）；
+	// 主文件已变（与 sidecar 不符）→ 拒绝更新（与 trusted 同口径，防污染新 meta）。
+	UpdateMetaExtra(ctx context.Context, owner string, root *storage.Root, rel string, extra map[string]any) error
+}
+
+// WithFileMeta 注入可信卷 meta 能力。默认：不装配（零回归）。
+func WithFileMeta(p FileMetaPolicy) Option {
+	return func(c *config) { c.fileMeta = p }
+}
+
+// ExternalMetaInfoReader 是 ExternalVolumeOps 的**可选**能力：读外部卷对象的 meta extra
+// 及原始文件时间（mtime/ctime，RFC3339Nano UTC）。实现方（装配层）在卷 FS 支持 meta.Provider
+// 时返回真实时间；否则时间字段为空（调用方回落 ExternalMeta）。
+type ExternalMetaInfoReader interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
+	ExternalMetaInfo(ctx context.Context, owner, volName, remotePath string) (extra map[string]any, mtime, ctime string, ok bool, err error)
 }

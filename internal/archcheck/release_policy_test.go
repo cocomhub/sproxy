@@ -36,7 +36,7 @@ const releasePleaseConfigRel = "release-please-config.json"
 
 // TestReleasePleaseIsChangelogSingleSource 断言 release-please 配置是 CHANGELOG 的落点，
 // 且该策略在 AGENTS.md / CLAUDE.md 两处硬规则中都有记载。
-func TestReleasePleaseIsChangelogSingleSource(t *testing.T) {
+func TestReleasePleaseIsChangelogSingleSource(t *testing.T) { // NOSONAR: S3776 — 门禁扫描全仓的固有复杂度（archcheck 豁免，重构无收益）
 	root := moduleRoot(t)
 
 	cfgPath := filepath.Join(root, releasePleaseConfigRel)

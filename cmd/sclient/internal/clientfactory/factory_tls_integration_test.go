@@ -15,7 +15,7 @@ import (
 
 	"github.com/adrg/xdg"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
-	"github.com/cocomhub/sproxy/cmd/sclient/internal/sclientcfg"
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/contextcfg"
 	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -82,13 +82,36 @@ func newXferTLSTestClient(t *testing.T, hubAddr string, flags map[string]string,
 	xdg.ConfigHome = dir
 	t.Cleanup(func() { xdg.ConfigHome = oldHome })
 
-	cfgBody := "server_url: https://127.0.0.1:1\nhub_url: " + hubAddr + "\n" + strings.Join(cfgExtra, "\n")
-	cfgFile := filepath.Join(dir, "sclient.yaml")
-	if err := os.WriteFile(cfgFile, []byte(cfgBody), 0600); err != nil {
+	// 统一 context 配置：config.yaml 模型（env 段 server_url/hub_url/peer_fingerprints）。
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	env := &contextcfg.Environment{Name: "sg", ServerURL: "https://127.0.0.1:1", HubURL: hubAddr}
+	for _, extra := range cfgExtra {
+		if after, ok := strings.CutPrefix(extra, "xfer_ca_file: "); ok {
+			env.CAFile = after
+		}
+	}
+	ccfg.Environments = append(ccfg.Environments, env)
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	cfgFile := filepath.Join(dir, "sproxy", "config.yaml")
+	if mkErr := os.MkdirAll(filepath.Dir(cfgFile), 0o700); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if err := contextcfg.Save(ccfg, cfgFile); err != nil {
 		t.Fatal(err)
 	}
-	provider := sclientcfg.New(cfgFile)
-	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return provider })
+	factory := clientfactory.NewWithContext(cfgFile, nil, func() *contextcfg.Resolved {
+		cc, lerr := contextcfg.Load(cfgFile)
+		if lerr != nil {
+			return nil
+		}
+		resolved, rerr := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
+		if rerr != nil {
+			return nil
+		}
+		return resolved
+	})
 
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
@@ -226,13 +249,30 @@ func TestFactory_NewClient_XferTLS_NonTLSTransportNotAffected(t *testing.T) {
 	xdg.ConfigHome = dir
 	t.Cleanup(func() { xdg.ConfigHome = oldHome })
 
-	cfgBody := "server_url: https://127.0.0.1:1\nhub_url: 127.0.0.1:9999\n"
-	cfgFile := filepath.Join(dir, "sclient.yaml")
-	if err := os.WriteFile(cfgFile, []byte(cfgBody), 0600); err != nil {
+	// 统一 context 配置。
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "https://127.0.0.1:1", HubURL: "127.0.0.1:9999"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	cfgFile := filepath.Join(dir, "sproxy", "config.yaml")
+	if mkErr := os.MkdirAll(filepath.Dir(cfgFile), 0o700); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if err := contextcfg.Save(ccfg, cfgFile); err != nil {
 		t.Fatal(err)
 	}
-	provider := sclientcfg.New(cfgFile)
-	factory := clientfactory.New(cfgFile, func() clientfactory.CfgBinder { return provider })
+	factory := clientfactory.NewWithContext(cfgFile, nil, func() *contextcfg.Resolved {
+		cc, lerr := contextcfg.Load(cfgFile)
+		if lerr != nil {
+			return nil
+		}
+		resolved, rerr := contextcfg.Resolve(cc, contextcfg.ResolveArgs{})
+		if rerr != nil {
+			return nil
+		}
+		return resolved
+	})
 
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")

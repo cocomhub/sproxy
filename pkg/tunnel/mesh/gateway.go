@@ -152,20 +152,24 @@ func (g *Gateway) Serve(ctx context.Context, addr string) (string, error) {
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
-	go func() {
-		for {
-			c, aerr := ln.Accept()
-			if aerr != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				g.logger.Warn("mesh 本地网关 accept 失败", "error", aerr)
-				continue
-			}
-			go func(cc net.Conn) { g.handleConn(ctx, cc) }(c)
-		}
-	}()
+	go g.serveAcceptLoop(ctx, ln)
 	return ln.Addr().String(), nil
+}
+
+// serveAcceptLoop 运行网关 accept 循环：ctx 取消（listener 已关）结束；单条 accept
+// 失败（瞬时/半开）记日志后继续，不终止网关。
+func (g *Gateway) serveAcceptLoop(ctx context.Context, ln net.Listener) {
+	for {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			g.logger.Warn("mesh 本地网关 accept 失败", "error", aerr)
+			continue
+		}
+		go func(cc net.Conn) { g.handleConn(ctx, cc) }(c)
+	}
 }
 
 // handleConn 处理一条网关连接：先读一帧请求（connect 或 status），然后按类型响应。
@@ -186,12 +190,8 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 	// 认证（防御纵深）：mesh node 配置了信令 token 时，connect/status 请求必须携带
 	// 相同 token（恒时比较），未授权进程无法复用网关路由。token 为空则不认证（仅
 	// loopback 安全边界兜底，典型为未配置 auth_token 的开发环境）。
-	if g.token != "" {
-		if len(req.Token) != len(g.token) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(g.token)) != 1 {
-			g.logger.Warn("mesh 本地网关拒绝未授权请求", "remote", c.RemoteAddr().String())
-			_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadToken, Message: "网关 token 校验失败（需与 mesh node 相同的 auth_token）"})
-			return
-		}
+	if !g.checkGatewayToken(c, &req) {
+		return
 	}
 
 	if req.Status {
@@ -199,25 +199,62 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 		return
 	}
 	// 虚拟 IP 路由分支：req.Peer 为空且 Addr host ∈ 虚拟子网 → 查 vipTable 定位节点
-	// （mesh connect <vip>:<port> 经网关复用已建链路）。表内无该 VIP → 拒绝（防未知
-	// 地址注入）；Addr 非虚拟子网 → 回落既有逻辑（req.Peer 必须非空）。
+	// （mesh connect <vip>:<port> 经网关复用已建链路）；Addr 非虚拟子网 → 回落既有
+	// 逻辑（req.Peer 必须非空）。
 	peer := req.Peer
 	if peer == "" && g.vipTable != nil {
-		if host, _, herr := net.SplitHostPort(req.Addr); herr == nil {
-			if vip, ok := ParseVirtualAddr(host); ok && IsVirtualAddr(vip, g.vipTable.Subnet()) {
-				if p, ok2 := g.vipTable.NodeByAddr(vip); ok2 {
-					peer = p
-				} else {
-					_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadRequest, Message: "虚拟 IP 未在 mesh 节点列表中找到对应节点"})
-					return
-				}
-			}
+		var rejected bool
+		peer, rejected = g.resolveGatewayPeer(c, &req)
+		if rejected {
+			return
 		}
 	}
 	if peer == "" || req.Addr == "" {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadRequest, Message: "peer 与 addr 必填"})
 		return
 	}
+	g.pumpGatewayStream(ctx, c, peer, req.Addr)
+}
+
+// checkGatewayToken 校验网关请求 token（防御纵深）：mesh node 配置了信令 token 时，
+// connect/status 请求必须携带相同 token（恒时比较），未授权进程无法复用网关路由。
+// token 为空不认证（仅 loopback 安全边界兜底）。拒绝时已写失败应答，返回 false。
+func (g *Gateway) checkGatewayToken(c net.Conn, req *gatewayRequest) bool {
+	if g.token == "" {
+		return true
+	}
+	if len(req.Token) != len(g.token) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(g.token)) != 1 {
+		g.logger.Warn("mesh 本地网关拒绝未授权请求", "remote", c.RemoteAddr().String())
+		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadToken, Message: "网关 token 校验失败（需与 mesh node 相同的 auth_token）"})
+		return false
+	}
+	return true
+}
+
+// resolveGatewayPeer 解析请求目标节点：req.Peer 为空且 Addr host ∈ 虚拟子网 → 查
+// vipTable 定位节点（mesh connect <vip>:<port> 经网关复用已建链路）；表内无该 VIP →
+// 已写拒绝应答并返回 rejected=true（防未知地址注入）。Addr 非虚拟子网 → 回落 req.Peer。
+func (g *Gateway) resolveGatewayPeer(c net.Conn, req *gatewayRequest) (peer string, rejected bool) {
+	peer = req.Peer
+	host, _, herr := net.SplitHostPort(req.Addr)
+	if herr != nil {
+		return peer, false
+	}
+	vip, ok := ParseVirtualAddr(host)
+	if !ok || !IsVirtualAddr(vip, g.vipTable.Subnet()) {
+		return peer, false
+	}
+	if p, ok2 := g.vipTable.NodeByAddr(vip); ok2 {
+		return p, false
+	}
+	_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrBadRequest, Message: "虚拟 IP 未在 mesh 节点列表中找到对应节点"})
+	return "", true
+}
+
+// pumpGatewayStream 在已建链路上写拨号帧并双向泵送：先写 ok 应答再进入泵送（客户端
+// 读到 ok 后把连接视为原始数据流，无帧边界）。C1 半关闭语义由 Pump 处理；收尾用
+// Abort（非阻塞），避免 writeCh 满时 Close 永久阻塞（P0-3）。
+func (g *Gateway) pumpGatewayStream(ctx context.Context, c net.Conn, peer, addr string) {
 	m, ok := g.links.get(peer)
 	if !ok {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrNoPeerLink, Message: ErrNoPeerLink.Error()})
@@ -228,16 +265,14 @@ func (g *Gateway) handleConn(ctx context.Context, c net.Conn) {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrOpenStream, Message: err.Error()})
 		return
 	}
-	defer func() { _ = stream.Abort() }() // P0-3：收尾用 Abort（非阻塞），避免 writeCh 满时 Close 永久阻塞
-	if err := WriteDialFrame(stream, req.Addr); err != nil {
+	defer func() { _ = stream.Abort() }()
+	if err := WriteDialFrame(stream, addr); err != nil {
 		_ = writeGatewayFrame(c, gatewayAck{OK: false, Error: gatewayErrDialFrame, Message: err.Error()})
 		return
 	}
-	// 先写 ok 应答再进入泵送：客户端读到 ok 后把连接视为原始数据流（无帧边界）。
 	if err := writeGatewayFrame(c, gatewayAck{OK: true}); err != nil {
 		return
 	}
-	// 双向泵送（C1 半关闭：本地客户端 CloseWrite → 对端流 EOF → 服务读尾；反之亦然）。
 	iostream.Pump(c, stream, iostream.PumpGrace)
 }
 

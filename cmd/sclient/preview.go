@@ -81,11 +81,11 @@ var openViewer = func(path string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", path)
+		cmd = exec.Command("open", path) // NOSONAR: S4036 — 系统 opener 经 PATH 解析是平台惯例；参数为本地下载路径，非注入面
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", path)
+		cmd = exec.Command("cmd", "/c", "start", "", path) // NOSONAR: S4036 — 同上（固定命令名）
 	default:
-		cmd = exec.Command("xdg-open", path)
+		cmd = exec.Command("xdg-open", path) // NOSONAR: S4036 — 同上（固定命令名 xdg-open）
 	}
 	return cmd.Start()
 }
@@ -156,6 +156,10 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 		下载到临时目录并使用系统图片查看器打开。`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 卷上下文（URI / 当前工作目录所在卷 ⇒ --volume；用户口径 2026-10-13）。
+			if err := applyVolumeContext(cmd, st, args); err != nil {
+				return err
+			}
 			filename, err := st.ResolveRemotePathOrErr(args[0])
 			if err != nil {
 				return err
@@ -163,7 +167,7 @@ func NewCmdPreview(factory clientfactory.Factory, ios cli.IOStreams, st *state.S
 
 			svc, err := factory.NewClient(cmd)
 			if err != nil {
-				ios.WriteErrLine("初始化客户端失败: %v", err)
+				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 

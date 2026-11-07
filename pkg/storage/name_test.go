@@ -24,7 +24,8 @@ func TestValidSegmentName(t *testing.T) {
 		{"foo.", false}, {"foo ", false}, // 尾点/尾空格
 		{"a:b", false}, {`a<b`, false}, {`a>b`, false}, {`a"b`, false},
 		{"a|b", false}, {"a?b", false}, {"a*b", false},
-		{".__cloud__", false}, // 魔法前缀禁止
+		{".__cloud__", false},                                 // 魔法前缀禁止
+		{"a\x00b", false}, {"a\x01b", false}, {"\x1f", false}, // m3：NUL/控制字符（C0 段）
 		{strings.Repeat("x", 256), false},
 	}
 	for _, c := range cases {

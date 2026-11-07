@@ -1,0 +1,5 @@
+# list/search 数据源直调点登记（R41：`.index.list(` 与 `ExternalList(` 均已硬禁）
+# 口径：`.index.search(` 的出现次数；list 的唯一实现 = 装配层 `VolumeViewLister.ListDirView`
+# （本地卷与外部卷共用，键空间由 ResolveUserLocation 统一处理）；searchIndex 只服务搜索。
+# 格式：file<TAB>max<TAB>reason
+pkg/files/read_ops.go	1	index.search（搜索的唯一数据源）

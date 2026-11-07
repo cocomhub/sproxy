@@ -425,46 +425,58 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 			}
 			read, write, err := buildMeshDialers(deps, tc.transport, newCarrierStats())
 			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("应报错（含 %q）", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("错误应提及 %q, got %v", tc.wantErr, err)
-				}
-				if read != nil || write != nil {
-					t.Fatal("失败时不应返回拨号器")
-				}
+				assertDialerErr(t, err, tc.wantErr, read, write)
 				return
 			}
 			if err != nil {
 				t.Fatalf("不应报错: %v", err)
 			}
 			for _, d := range []remote.Dialer{read, write} {
-				switch tc.wantKind {
-				case "relay":
-					// relay 载体给出 RelayDialer；W1 起外层套了 `countingDialer`（载体统计：
-					// 纯中继的载体静态可知，用装饰器与 mesh 拨号器的 OnCarrier 口径对齐）。
-					switch v := d.(type) {
-					case *remote.RelayDialer:
-					case countingDialer:
-						if v.carrier != "relay" {
-							t.Fatalf("relay 包装器的载体名应为 relay, got %q", v.carrier)
-						}
-						if _, ok := v.inner.(*remote.RelayDialer); !ok {
-							t.Fatalf("relay 包装器的内层应为 *remote.RelayDialer, got %T", v.inner)
-						}
-					default:
-						t.Fatalf("relay 载体应给出 *remote.RelayDialer（可套计数包装）, got %T", d)
-					}
-				case "mesh":
-					if _, ok := d.(*mesh.RemoteDialer); !ok {
-						t.Fatalf("auto/webrtc 载体应给出 *mesh.RemoteDialer, got %T", d)
-					}
-				}
+				assertDialerKind(t, d, tc.wantKind)
 			}
-			// 读/写两面服务名不同（volread / volwrite）——由 mesh dialer 内部持有，行为级验证在
-			// TestMeshFSFactory_WiresReadAndWriteFaces（真隧道）。
 		})
+	}
+}
+
+// assertDialerErr 校验 wantErr 分支：应报错（错误文本含 wantErr）、且失败时不应返回
+// 任何拨号器（read/write 均 nil）。
+func assertDialerErr(t *testing.T, err error, wantErr string, read, write remote.Dialer) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("应报错（含 %q）", wantErr)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("错误应提及 %q, got %v", wantErr, err)
+	}
+	if read != nil || write != nil {
+		t.Fatal("失败时不应返回拨号器")
+	}
+}
+
+// assertDialerKind 校验载体类型：relay → *remote.RelayDialer（W1 起外层可套
+// countingDialer 载体统计装饰器——纯中继的载体静态可知，用装饰器与 mesh 拨号器的
+// OnCarrier 口径对齐）；mesh → *mesh.RemoteDialer。
+func assertDialerKind(t *testing.T, d remote.Dialer, wantKind string) {
+	t.Helper()
+	switch wantKind {
+	case "relay":
+		// relay 载体给出 RelayDialer；W1 起外层套了 `countingDialer`。
+		switch v := d.(type) {
+		case *remote.RelayDialer:
+		case countingDialer:
+			if v.carrier != "relay" {
+				t.Fatalf("relay 包装器的载体名应为 relay, got %q", v.carrier)
+			}
+			if _, ok := v.inner.(*remote.RelayDialer); !ok {
+				t.Fatalf("relay 包装器的内层应为 *remote.RelayDialer, got %T", v.inner)
+			}
+		default:
+			t.Fatalf("relay 载体应给出 *remote.RelayDialer（可套计数包装）, got %T", d)
+		}
+	case "mesh":
+		if _, ok := d.(*mesh.RemoteDialer); !ok {
+			t.Fatalf("auto/webrtc 载体应给出 *mesh.RemoteDialer, got %T", d)
+		}
 	}
 }
 
@@ -473,70 +485,76 @@ func TestBuildMeshDialers_TransportSemantics(t *testing.T) {
 //   - 信令：仅当配置了 mesh.node_id 才构造（无 node_id ⇒ 无打洞能力）；
 //   - ICE：仅当 mesh 段写了 STUN/TURN 才给出实例配置（全空 ⇒ nil = 用包级全局，零回归）。
 func TestMeshFactoryDeps_HubAndICE(t *testing.T) {
-	newHandlers := func(t *testing.T) *server.Handlers {
-		t.Helper()
-		cfg := server.Default()
-		cfg.StorageRoot = t.TempDir()
-		cfg.LogLevel = "error"
-		var cp atomic.Pointer[server.Config]
-		cp.Store(cfg)
-		opts := server.RegisterRoutesOpts{
-			Mux: http.NewServeMux(), CfgPtr: &cp, Version: "test", BuildAt: "test",
-			Logger:         discardLoggerMain(),
-			CredentialRing: accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: "ak-" + strings.Repeat("a", 32), Secret: strings.Repeat("b", 64)}}),
-		}
-		h := server.RegisterRoutes(t.Context(), opts)
-		t.Cleanup(func() { _ = h.Close() })
-		return h
+	t.Run("本机 hub + 无信令 + 无实例 ICE", testMeshFactoryDepsHubLocal)
+	t.Run("远端 hub + 信令 + 实例 ICE", testMeshFactoryDepsHubRemote)
+}
+
+// meshFactoryTestHandlers 构造带凭据的测试 Handlers（装配判定依赖本机凭据）。
+func meshFactoryTestHandlers(t *testing.T) *server.Handlers {
+	t.Helper()
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.LogLevel = "error"
+	var cp atomic.Pointer[server.Config]
+	cp.Store(cfg)
+	opts := server.RegisterRoutesOpts{
+		Mux: http.NewServeMux(), CfgPtr: &cp, Version: "test", BuildAt: "test",
+		Logger:         discardLoggerMain(),
+		CredentialRing: accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: "ak-" + strings.Repeat("a", 32), Secret: strings.Repeat("b", 64)}}),
 	}
+	h := server.RegisterRoutes(t.Context(), opts)
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
 
-	t.Run("本机 hub + 无信令 + 无实例 ICE", func(t *testing.T) {
-		cfg := server.Default()
-		cfg.Addr = ":18083"
-		cfg.StorageRoot = t.TempDir()
-		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
-		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
-		if err != nil {
-			t.Fatalf("buildMeshFactoryDeps: %v", err)
-		}
-		if deps.Identity == nil {
-			t.Fatal("应加载 A 侧身份")
-		}
-		if deps.Signaler != nil {
-			t.Fatal("未配 mesh.node_id 时不应构造信令")
-		}
-		if deps.ICE != nil {
-			t.Fatal("mesh 段未写 STUN/TURN 时 ICE 应为 nil（用包级全局）")
-		}
-	})
+// testMeshFactoryDepsHubLocal 断言本机 hub（留空）+ 无信令 + 无实例 ICE。
+func testMeshFactoryDepsHubLocal(t *testing.T) {
+	cfg := server.Default()
+	cfg.Addr = ":18083"
+	cfg.StorageRoot = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+	deps, err := buildMeshFactoryDeps(cfg, meshFactoryTestHandlers(t), discardLoggerMain())
+	if err != nil {
+		t.Fatalf("buildMeshFactoryDeps: %v", err)
+	}
+	if deps.Identity == nil {
+		t.Fatal("应加载 A 侧身份")
+	}
+	if deps.Signaler != nil {
+		t.Fatal("未配 mesh.node_id 时不应构造信令")
+	}
+	if deps.ICE != nil {
+		t.Fatal("mesh 段未写 STUN/TURN 时 ICE 应为 nil（用包级全局）")
+	}
+}
 
-	t.Run("远端 hub + 信令 + 实例 ICE", func(t *testing.T) {
-		cfg := server.Default()
-		cfg.StorageRoot = t.TempDir()
-		cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
-		cfg.Mesh = server.MeshConfig{
-			HubURL: "https://hub.example.com:18083", NodeID: "nodeA",
-			AccessKey: "ak-x", AccessKeySecret: strings.Repeat("c", 64), SkeyID: "skey-0123456789ab",
-			STUN: []string{"stun:instance.example:3478"}, TURN: []string{"turn:instance.example:3478"},
-			TURNUser: "u", TURNPassword: "p",
-		}
-		deps, err := buildMeshFactoryDeps(cfg, newHandlers(t), discardLoggerMain())
-		if err != nil {
-			t.Fatalf("buildMeshFactoryDeps: %v", err)
-		}
-		if deps.Signaler == nil {
-			t.Fatal("配了 mesh.node_id 应构造信令")
-		}
-		if deps.ICE == nil || len(deps.ICE.STUNServers) != 1 || deps.ICE.TURNUser != "u" {
-			t.Fatalf("实例 ICE 应来自 mesh 段, got %+v", deps.ICE)
-		}
-		// hub 客户端指向远端配置 URL（ServerURL 可观测）。
-		fc, ok := deps.RelayFor(remote.ServiceName).(*client.FileClient)
-		if !ok {
-			t.Fatalf("RelayFor 应给出 *client.FileClient, got %T", deps.RelayFor(remote.ServiceName))
-		}
-		if got := fc.ServerURL(); got != "https://hub.example.com:18083" {
-			t.Fatalf("远端 hub 客户端 URL=%q want 配置值", got)
-		}
-	})
+// testMeshFactoryDepsHubRemote 断言远端 hub + 信令 + 实例 ICE。
+func testMeshFactoryDepsHubRemote(t *testing.T) {
+	cfg := server.Default()
+	cfg.StorageRoot = t.TempDir()
+	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "id.json")
+	cfg.Mesh = server.MeshConfig{
+		HubURL: "https://hub.example.com:18083", NodeID: "nodeA",
+		AccessKey: "ak-x", AccessKeySecret: strings.Repeat("c", 64), SkeyID: "skey-0123456789ab",
+		STUN: []string{"stun:instance.example:3478"}, TURN: []string{"turn:instance.example:3478"},
+		TURNUser: "u", TURNPassword: "p",
+	}
+	deps, err := buildMeshFactoryDeps(cfg, meshFactoryTestHandlers(t), discardLoggerMain())
+	if err != nil {
+		t.Fatalf("buildMeshFactoryDeps: %v", err)
+	}
+	if deps.Signaler == nil {
+		t.Fatal("配了 mesh.node_id 应构造信令")
+	}
+	if deps.ICE == nil || len(deps.ICE.STUNServers) != 1 || deps.ICE.TURNUser != "u" {
+		t.Fatalf("实例 ICE 应来自 mesh 段, got %+v", deps.ICE)
+	}
+	// hub 客户端指向配置 URL（ServerURL 可观测）。
+	fc, ok := deps.RelayFor(remote.ServiceName).(*client.FileClient)
+	if !ok {
+		t.Fatalf("RelayFor 应给出 *client.FileClient, got %T", deps.RelayFor(remote.ServiceName))
+	}
+	if got := fc.ServerURL(); got != "https://hub.example.com:18083" {
+		t.Fatalf("远端 hub 客户端 URL=%q want 配置值", got)
+	}
 }

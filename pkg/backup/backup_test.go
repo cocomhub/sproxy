@@ -87,6 +87,14 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 	if prefix != "" {
 		prefix += "/"
 	}
+	out := m.listFilesLocked(prefix)
+	out = append(out, m.listDirsLocked(prefix)...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+// listFilesLocked 列出 prefix 下单层文件条目（锁持有者调用）。
+func (m *memFS) listFilesLocked(prefix string) []syncpkg.Entry {
 	var out []syncpkg.Entry
 	for k, f := range m.files {
 		if !strings.HasPrefix(k, prefix) {
@@ -98,6 +106,12 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 		}
 		out = append(out, m.entryLocked(k, f))
 	}
+	return out
+}
+
+// listDirsLocked 列出 prefix 下单层目录条目（锁持有者调用）。
+func (m *memFS) listDirsLocked(prefix string) []syncpkg.Entry {
+	var out []syncpkg.Entry
 	for d := range m.dirs {
 		if !strings.HasPrefix(d, prefix) {
 			continue
@@ -108,8 +122,7 @@ func (m *memFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) 
 		}
 		out = append(out, syncpkg.Entry{Name: rest, Path: d, IsDir: true})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	return out, nil
+	return out
 }
 
 func (m *memFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
@@ -145,7 +158,7 @@ func (m *memFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(f.data)), nil
 }
 
-func (m *memFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *memFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -218,9 +231,11 @@ func (m *memFS) MakeDir(ctx context.Context, p string) error {
 }
 
 // meterFS 包住任意 sync.FS，用原子计数观测 WriteFile 并发峰值
-// （变异点 6：去掉信号量 → 峰值 > Concurrent → 红）。
+// （变异点 6：去掉信号量 → 峰值 > Concurrent → 红）。want = 测试期望的并发数
+// （=Concurrent，>0 时启用确定性汇合；0 时不等待、退化为纯观测）。
 type meterFS struct {
 	syncpkg.FS
+	want   int64
 	active atomic.Int64
 	peak   atomic.Int64
 }
@@ -234,17 +249,26 @@ func (m *meterFS) trackPeak(n int64) {
 	}
 }
 
-func (m *meterFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *meterFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	cur := m.active.Add(1)
 	m.trackPeak(cur)
-	// 让位循环：给其它并发 worker 进入的机会（无固定 sleep；有信号量时最多
-	// Concurrent 个同时活跃，无信号量时全部汇聚 → 峰值必然超过）。
-	for range 1000 {
+	// 两段式确定性汇合：
+	// ① 等 peer 进入 WriteFile（Concurrent>=2 时信号量保证第二个 worker 到达）——保证正确
+	//    并发下峰值**确定性达到** want。原「1000 次 Gosched」自旋是 best-effort：副本过快时
+	//    整个自旋+copy 可能先于 peer 进入结束，峰值被观测为 1（flaky：got 1 want 2）。
+	//    带 deadline 防病态调度死锁（peer 始终不来则超时继续，峰值将 < want → 红，仍正确）。
+	// ② 再让位一段观测——无信号量（变异点 6）时后续 worker 在此窗口涌入，active 累积超过
+	//    want → 峰值 > want → 红（变异仍被检出；正确场景下信号量封顶、active 恒 <= want）。
+	deadline := time.Now().Add(2 * time.Second)
+	for m.active.Load() < m.want && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	for range 2000 {
 		runtime.Gosched()
 		m.trackPeak(m.active.Load())
 	}
 	defer m.active.Add(-1)
-	return m.FS.WriteFile(ctx, p, r, size, mtime)
+	return m.FS.WriteFile(ctx, key, p, r, size, mtime)
 }
 
 // ---- 测试 ----
@@ -280,6 +304,69 @@ func TestBackup_FullCopiesAllAndWritesManifest(t *testing.T) {
 	man := dst.manifestFiles(t)
 	if len(man) != 3 {
 		t.Fatalf("manifest 应有 3 个条目，got %d", len(man))
+	}
+}
+
+// TestBackup_ManifestOnSeparateFS 断言 Options.ManifestFS/ManifestRel 把 manifest 写到
+// **另一个 FS**（装配层用独立功能桶隔离 manifest 的最小单元）：数据写 dst、manifest 写 mfs，
+// 且增量判定跨 Run 生效（同一 manifest FS）。
+// 变异：manifestTarget 忽略 ManifestFS/ManifestRel → manifest 落 dst → 红。
+func TestBackup_ManifestOnSeparateFS(t *testing.T) {
+	t.Parallel()
+	src := newMemFS()
+	src.setFile("a.txt", "hello", 1000)
+	dst := newMemFS()
+	mfs := newMemFS()
+	opts := Options{ManifestFS: mfs, ManifestRel: "manifest.json"}
+
+	rep1, err := Run(context.Background(), src, dst, opts)
+	if err != nil || rep1.Files != 1 {
+		t.Fatalf("首次全量失败: rep=%+v err=%v", rep1, err)
+	}
+	if st, _ := mfs.Stat(context.Background(), "manifest.json"); st == nil {
+		t.Fatal("manifest 应写在 ManifestFS 上（变异：忽略 ManifestFS → 红）")
+	}
+	// dst 上不得出现任何 manifest（含旧默认键）。
+	for _, k := range []string{"manifest.json", "manifest.json.tmp", ManifestRel} {
+		if st, _ := dst.Stat(context.Background(), k); st != nil {
+			t.Fatalf("数据 FS 不应出现 manifest 键 %q", k)
+		}
+	}
+
+	rep2, err := Run(context.Background(), src, dst, opts)
+	if err != nil {
+		t.Fatalf("第二次 Run error: %v", err)
+	}
+	if rep2.Skipped != 1 || rep2.Files != 0 {
+		t.Fatalf("第二次应命中独立 FS 上的 manifest（Skipped=1 Files=0）: %+v", rep2)
+	}
+}
+
+// TestBackup_ManifestChecksumMismatchForcesFullRescan 断言 manifest 校验和不符时
+// **不据其跳过任何文件**（截断/半写/被篡改 → 全量重扫，绝不静默漏备份）。
+// 变异：readManifest 不校验 checksum → 第二次 Skipped=1 → 红。
+func TestBackup_ManifestChecksumMismatchForcesFullRescan(t *testing.T) {
+	t.Parallel()
+	src := newMemFS()
+	src.setFile("a.txt", "hello", 1000)
+	dst := newMemFS()
+
+	if rep, err := Run(context.Background(), src, dst, Options{}); err != nil || rep.Files != 1 {
+		t.Fatalf("首次全量失败: rep=%+v err=%v", rep, err)
+	}
+	// 篡改：保留条目但把 checksum 改成另一值（验证**损坏/篡改**语义：不可信 manifest 不得导致跳过）。
+	tampered := `{"files":{"a.txt":{"size":5,"mtime":1000}},"checksum":"deadbeef"}`
+	if err := dst.WriteFile(context.Background(), syncpkg.LogicalKey{}, ManifestRel,
+		strings.NewReader(tampered), int64(len(tampered)), 0); err != nil {
+		t.Fatalf("写入篡改 manifest 失败: %v", err)
+	}
+
+	rep2, err := Run(context.Background(), src, dst, Options{})
+	if err != nil {
+		t.Fatalf("第二次 Run error: %v", err)
+	}
+	if rep2.Skipped != 0 || rep2.Files != 1 {
+		t.Fatalf("校验和不符应全量重扫（Skipped=0 Files=1）: %+v", rep2)
 	}
 }
 
@@ -473,7 +560,7 @@ func TestBackup_ConcurrencyPeak(t *testing.T) {
 		src.setFile(fmt.Sprintf("f%d.txt", i), strings.Repeat("x", 64), int64(i)+1)
 	}
 	dst := newMemFS()
-	meter := &meterFS{FS: dst}
+	meter := &meterFS{FS: dst, want: 2}
 
 	rep, err := Run(context.Background(), src, meter, Options{Concurrent: 2})
 	if err != nil {

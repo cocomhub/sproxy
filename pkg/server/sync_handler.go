@@ -4,6 +4,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +12,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cocomhub/sproxy/pkg/files"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -103,6 +107,33 @@ func (h *Handlers) SyncScopeFor() func(owner, rel string) *quota.Scope {
 // 排除面边界（F4 review 成文）：sync pull 目标解析到**默认卷** user 根属默认卷 ACL 排除面的
 // 设计内例外（服务端自有 meta/sync 桶 + 同步目标按 owner 逻辑树解析，非 T6b 门禁入口）。
 // 见 volumes.go defaultVolumeAllows 边界注释。不改行为，仅记录避免未来误判为漏洞。
+// SyncTenantRootFS 是「Root 感知本地 FS 提供者」（供 syncexec 本地侧使用）：返回根在该
+// 租户**租户根**的 FS——经 `storage.Root` 入口 ⇒ 本地侧自动获得 at-rest 透明加解密与封印
+// 语义（评审 P0：sync pull/push 此前用裸 LocalFS，加密卷上落明文/传密文）。
+// 返回 ok=false 时调用方回落路径式 LocalFS（fail-open 仅限未装配场景；生产恒注入）。
+func (h *Handlers) SyncTenantRootFS(owner string) (syncpkg.FS, bool) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil, false
+	}
+	return NewRootFS(tnt.Root()), true
+}
+
+// SyncTenantPhysSize 返回该租户卷的**记账口径折算**（加密卷 ⇒ 密文长度；明文 ⇒ 恒等 / nil），
+// 供 `pkg/syncexec` 的逐文件配额记账按同一口径折算（2026-10-16 高风险区审核修复）。
+//
+// 为何必须：sync pull 的本地目标经 `SyncTenantRootFS` = `NewRootFS(tnt.Root())` ⇒ **透明加密
+// 落盘**（物理 > 逻辑），而逐文件记账此前用源条目 `size`（**逻辑**）⇒ owner Scope **少记**
+// （且 owner 配额侧**永不收敛**，只有卷池靠磁盘扫描收敛）⇒ **可超真实配额**（违反 G1）。
+// 与 `pkg/files` 的 `RootPhysSizer` **同源**（同一事实源，禁各写一份公式）。
+func (h *Handlers) SyncTenantPhysSize(owner string) func(int64) int64 {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return nil
+	}
+	return files.RootPhysSizer(tnt.Root())
+}
+
 func (h *Handlers) syncTenantRoot(owner string) (userRootAbs, persistDirAbs string, ok bool) {
 	tnt := h.tenantFor(owner)
 	if tnt == nil {
@@ -140,12 +171,12 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 
 	var req syncmgr.CreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	// I-3：读完全部 body 触发 bodyValidator EOF 哈希校验（Decode 不读到 EOF）。
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	// 多租户：owner 由请求认证上下文派生（SproxySig→AK，api_keys→key 名，未认证→空）。
@@ -179,6 +210,10 @@ func (h *Handlers) syncCreateTask(w http.ResponseWriter, r *http.Request) {
 	if !isNew {
 		status = http.StatusOK
 	}
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "sync_task_create", ObjectType: "task", Object: snapshot.ID, Result: AuditResultSuccess,
+		Detail: "同步任务已创建",
+	})
 	sendJSONResponse(w, snapshot, status)
 }
 
@@ -247,11 +282,11 @@ func (h *Handlers) syncRetryTask(w http.ResponseWriter, r *http.Request) {
 		Files []string `json:"files"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]string{"error": "invalid request body"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, UploadResponse{Success: false, Message: "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, UploadResponse{Success: false, Message: msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 	id := r.PathValue("id")
@@ -365,10 +400,17 @@ func (h *Handlers) syncResolveConflict(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": fmt.Sprintf("写回冲突文件失败: %v", werr)}, http.StatusInternalServerError)
 		return
 	}
+	// 冲突解决 = 覆盖写入（破坏性）⇒ 必须审计（记路径与选择）。
+	h.RecordAudit(r.Context(), AuditEvent{
+		Action: "sync_conflict_resolve", ObjectType: "file", Object: item.Path, Result: AuditResultSuccess,
+		Detail: "choice=" + body.Choice + " id=" + id,
+	})
 	sendJSONResponse(w, map[string]any{"success": true, "path": item.Path}, http.StatusOK)
 }
 
-// writeConflictFile 把解决内容写回冲突文件（Path 相对 user 桶 → tenant user 根解析）。
+// writeConflictFile 把解决内容写回冲突文件。Path 是**引擎相对路径**（`sync` 引擎 dst 侧
+// rel，如 `docs/a.txt`；见 merge3_engine.go 的 `ConflictRecord{Path: f.dstPath}`），物理落
+// `<租户 user 根>/<Path>`，即租户根相对键 `user/<Path>`。
 func (h *Handlers) writeConflictFile(rel string, content []byte) error {
 	// Path 形如 "user/dir/f.txt"（相对 user 桶）——tenantRoot 返回 user 根，拼 rel。
 	userRoot, _, ok := h.syncTenantRoot("")
@@ -385,5 +427,32 @@ func (h *Handlers) writeConflictFile(rel string, content []byte) error {
 			return mkErr
 		}
 	}
-	return os.WriteFile(full, content, 0o644)
+	if werr := os.WriteFile(full, content, 0o644); werr != nil {
+		return werr
+	}
+	// M1 修复（第 7 轮 MAJOR）：写回内容替换了带冲突标记的文件，而 sidecar 仍描述 marker
+	// 内容 → 不联动会让后续下载/转存逐分块校验恒失配（fail-closed 固化不可读、幂等重传
+	// 不自愈）。重建 sidecar（失败则失效旧 sidecar，读侧不校验）。
+	h.relinkConflictMeta("", clean)
+	return nil
+}
+
+// relinkConflictMeta 冲突解决写回后重建 sidecar（M1）：写回内容替换了带冲突标记的文件，
+// 旧 sidecar 描述的是 marker 内容 → 必须重建；重建失败则**失效**旧 sidecar（读侧不校验），
+// 绝不保留陈旧证据（否则该文件永久校验失配、无法下载）。
+//
+// rel 是**引擎相对路径**（如 `docs/a.txt`）；writeConflictFile 把它落在 user 桶根下，故
+// 租户根相对键 = `user/<rel>`（与下载路径 `user/<rel>` → `meta/<rel>.meta` 同一键空间）。
+func (h *Handlers) relinkConflictMeta(owner, rel string) {
+	tnt := h.tenantFor(owner)
+	if tnt == nil || tnt.Root() == nil {
+		return
+	}
+	root := tnt.Root()
+	bucketRel := "user/" + rel
+	if err := (filesMetaPolicy{h: h}).WriteMeta(context.Background(), owner, root, bucketRel, nil); err != nil {
+		h.logger.Warn("同步冲突写回：重建 sidecar 失败，已失效旧 sidecar（读侧将不校验）",
+			"path", bucketRel, "error", err)
+		_ = root.Remove(meta.MetaPath(bucketRel))
+	}
 }

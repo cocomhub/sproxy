@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files"
@@ -24,6 +25,9 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 	t.Helper()
 	cfg := Default()
 	cfg.StorageRoot = storageRoot
+	// 存量语义测试默认跳过 filesMetaPolicy 装配（meta 不生成）：避免配额/统计/账本
+	// 断言被 sidecar 字节干扰（零回归——可信卷行为由 trusted_volume_test.go 显式装配
+	// 验证）。生产恒装配（meta 恒生成，用户裁定）。
 	var cfgPtr atomic.Pointer[Config]
 	cfgPtr.Store(cfg)
 
@@ -32,19 +36,23 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 		t.Fatal(err)
 	}
 	h := &Handlers{
-		cfgPtr:         &cfgPtr,
-		logger:         testLogger(),
-		auditLogger:    testLogger(),
-		uploadingStop:  make(chan struct{}),
-		globalRoot:     globalRoot,
-		globalPool:     quota.NewPool(cfg.MaxStorageBytes),
-		tenants:        storage.NewTenantCache(globalRoot, storage.WithMetaBucket(), storage.WithLogger(testLogger())),
-		checksumStores: make(map[string]*checksum.ChecksumStore),
-		uploadStores:   make(map[string]*files.UploadStore),
-		quotaScopes:    make(map[string]*quota.Scope),
-		quotaBuckets:   make(map[string]map[string]*quota.Scope),
+		cfgPtr:               &cfgPtr,
+		logger:               testLogger(),
+		auditLogger:          testLogger(),
+		uploadingStop:        make(chan struct{}),
+		globalRoot:           globalRoot,
+		globalPool:           quota.NewPool(cfg.MaxStorageBytes),
+		tenants:              storage.NewTenantCache(globalRoot, storage.WithMetaBucket(), storage.WithLogger(testLogger())),
+		checksumStores:       make(map[string]checksum.ChecksumStoreIface),
+		uploadStores:         make(map[string]*files.UploadStore),
+		quotaScopes:          make(map[string]*quota.Scope),
+		quotaBuckets:         make(map[string]map[string]*quota.Scope),
+		skipFileMetaAssembly: true,
 	}
 	t.Cleanup(func() { _ = h.Close() })
+	// 测试夹具：把「配额不足 ⇒ 排队重试」的等待上限压到最小（生产恒 0 = 30s 默认，语义不变）——
+	// 否则大量「能放下但当前用量不够」的用例各白等 30s，累计触发 5min 包超时（CI 实测）。
+	h.quotaWaitTimeout = 50 * time.Millisecond
 	return h
 }
 
@@ -95,6 +103,11 @@ func TestHandlers_ChecksumStoreFor(t *testing.T) {
 		t.Fatal("checksumStoreFor(alice)=nil")
 	}
 	cs.Set("user/dir/f.txt", "sha256hex")
+	if f, ok := cs.(checksum.Flusher); ok {
+		if err := f.Flush(); err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+	}
 	if got, ok := h.checksumStoreFor("alice").Get("user/dir/f.txt"); !ok || got != "sha256hex" {
 		t.Fatalf("checksum 读写失败 got=%q ok=%v", got, ok)
 	}

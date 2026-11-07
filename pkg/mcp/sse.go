@@ -188,7 +188,7 @@ func (s *sseSession) dispatch(ctx context.Context, body []byte) {
 		}
 	}()
 	var req request
-	if uerr := json.Unmarshal(body, &req); uerr != nil {
+	if json.Unmarshal(body, &req) != nil {
 		// 帧损坏：回 ParseError（id 为 null），与 stdio 语义一致。
 		_ = s.enqueueEncoded(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{Code: CodeParseError, Message: "Parse error"}})
 		return

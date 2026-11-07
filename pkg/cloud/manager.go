@@ -23,10 +23,16 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/slogutil"
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/units/sizex"
+	"github.com/cocomhub/sproxy/pkg/volume"
+	"golang.org/x/sync/semaphore"
 )
 
 // CloudTask 表示一个云端下载任务。
@@ -35,6 +41,36 @@ import (
 // 空 owner（全局/旧任务/未认证创建）对所有人可见；非空 owner 只对匹配用户
 // （或空 owner 的管理员/未认证）可见。List/Get/Cancel/Delete/Resume 均按 owner 过滤，
 // 跨 owner 视为不存在（404 防枚举）。
+// DownloadStats 是下载实测统计（用户裁定 2026-10-28）：从 downloader.Result 落库，
+// 同时写入转存产物 meta extra（x_download_* 键），便于后续审计与统计。
+type DownloadStats struct {
+	StartedAt      time.Time `json:"started_at"`
+	FinishedAt     time.Time `json:"finished_at"`
+	DurationMs     int64     `json:"duration_ms,omitempty"`
+	AnonymousBytes int64     `json:"anonymous_bytes,omitempty"` // 匿名（免账号）通道字节
+	AccountBytes   int64     `json:"account_bytes,omitempty"`   // 账号通道字节
+	BytesPerSecond int64     `json:"bytes_per_second,omitempty"`
+	SourceCreated  time.Time `json:"source_created_at"` // 源文件创建时间（带外）
+	SourceModified time.Time `json:"source_modified_at"`
+}
+
+// newDownloadStats 从下载结果构造统计（零值字段省略语义由 omitempty 承担）。
+func newDownloadStats(res *downloader.Result) *DownloadStats {
+	if res == nil {
+		return nil
+	}
+	st := &DownloadStats{
+		StartedAt: res.StartedAt, FinishedAt: res.FinishedAt,
+		AnonymousBytes: res.AnonymousBytes, AccountBytes: res.AccountBytes,
+		BytesPerSecond: res.BytesPerSecond,
+		SourceCreated:  res.SourceCreatedTime, SourceModified: res.ModTime,
+	}
+	if !res.StartedAt.IsZero() && !res.FinishedAt.IsZero() && res.FinishedAt.After(res.StartedAt) {
+		st.DurationMs = res.FinishedAt.Sub(res.StartedAt).Milliseconds()
+	}
+	return st
+}
+
 type CloudTask struct {
 	ID           string    `json:"id"`
 	Owner        string    `json:"owner,omitempty"` // 任务归属（创建者 AK / API key 名；空 = 全局兼容）
@@ -53,6 +89,71 @@ type CloudTask struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 	ReservedSize int64     `json:"-"`                  // 实际预留量（storageMgr + Scope），不持久化
 	GroupID      string    `json:"group_id,omitempty"` // 所属组 ID（可选）
+	// Submitted 表示「已被 SubmitAndStart/SubmitAndStartGroup 接管」（可能仍在排队等并发槽）。
+	// 为什么需要（评审 R14 C1）：磁盘状态要等拿到并发槽才写成 downloading ⇒ 排队中的任务在
+	// 重启时仍是 pending，被当作「从未启动的孤儿」转 failed（批量任务重启后大面积不继续）。
+	// 用独立布尔而不是新增 status：pending 的**去重语义**（findByURL 吸收同 URL）必须保持不变。
+	Submitted bool `json:"submitted,omitempty"`
+	// DownloadDone/DownloadedSize/DownloadedChecksum 记录「下载产物已完整落盘」。
+	// 为什么需要（评审 R14 C2）：下载完成后产物由 `.partial` 改名而来，重启时续传逻辑只认
+	// `.partial` ⇒ 已下完的字节被丢弃、整文件重下。有了该标记，恢复时可直接进入转存。
+	DownloadDone       bool   `json:"download_done,omitempty"`
+	DownloadedSize     int64  `json:"downloaded_size,omitempty"`
+	DownloadedChecksum string `json:"downloaded_checksum,omitempty"`
+	// Transfer 是转存目标（客户端任务参数）：下载完成后把产物转存到指定卷
+	// （secretdata 自动加密 / 普通卷纯上传）。null = 不转存（仅下载本地）。
+	Transfer *TransferSpec `json:"transfer,omitempty"`
+	// TransferURL 是转存成功后的目标 URL（secretdata://<卷>/<rel> 或卷路径），
+	// 供客户端经 ResolveURL 取用。
+	TransferURL string `json:"transfer_url,omitempty"`
+	// TransferErr 是转存失败原因（重试耗尽后记录；后续告警接入）。
+	TransferErr string `json:"transfer_err,omitempty"`
+	// DownloadStats 是**下载实测统计**（下载器上报；供审计/统计：耗时、起止、分通道字节、
+	// 带宽）。零值 = 下载器未统计（不得编造）。随任务持久化，客户端可经 GET 任务读取。
+	DownloadStats *DownloadStats `json:"download_stats,omitempty"`
+	// MetaExtra 是客户端随转存提供的自定义元数据（转存成功后合并进目标卷 meta.Extra）。
+	// 服务端另叠加来源信息（source=transfer / source_url / etag / transferred_at），
+	// 供下游区分「转存产物」与「直接上传」并溯源（用户裁定 2026-10-27）。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
+	// DownloadLocal 客户端是否下载本地（链式拉取 cloud 桶文件）。false = 服务端可
+	// 转存后即删（不需保留给客户端拉取）。true 时即便无 transfer/save 语义也成立
+	// （客户端会拉取），创建期真空洞校验以此消歧。
+	DownloadLocal bool `json:"download_local,omitempty"`
+	// Save 是否保留 cloud 桶副本（服务端化 keep-files 语义；默认 true 零回归）。
+	// false = 任务完成（含转存）后服务端自动删除 cloud 桶文件——客户端异常也不残留，
+	// 清理状态记入 CleanupStatus 供审计。
+	Save bool `json:"save"`
+	// CleanupStatus 是 cloud 桶文件清理状态（审计）。当前实现只写两值（见 cleanupTaskCloud）：
+	//   - cleaned：Save=false 任务完成后 cloud 桶文件已删除（成功）；
+	//   - failed：删除失败（文件仍在盘，CleanupErr 供告警；前端据此保留下载按钮）。
+	// pending/skipped 为预留枚举（尚无生产者；前端把非 cleaned 一律视为「文件存在」）。
+	CleanupStatus string `json:"cleanup_status,omitempty"`
+	// CleanupAt 清理时间（审计）。
+	CleanupAt time.Time `json:"cleanup_at"`
+	// CleanupErr 清理失败原因（后续告警接入）。
+	CleanupErr string `json:"cleanup_err,omitempty"`
+	// Audit 是本任务执行阶段（download/transfer，以及加密卷写路径的 encrypt）的审计行，
+	// 终态收口时由 executeDownload 从审计 sink 复制并经 saveTask 随任务持久化。
+	// 不泄密：Row.Meta 与持久化不含原始凭据/口令/secret 明文。
+	Audit []audit.Entry `json:"audit,omitempty"`
+
+	// IntegrityStatus 是下载完整性判定结果（校验管道写入；"" = 未校验/未生效）：
+	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
+	//   - damaged：语义校验两次一致仍异常（默认放行，文件标记损坏）。
+	IntegrityStatus string `json:"integrity_status,omitempty"`
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
+	// integritySames 是「本地 checksum 一致但语义校验仍失败」的累计次数（跨 attempt 保留，
+	// 判定永久损坏用）。2 次 → 不再重下（permanent）。运行时状态，不持久化。
+	integritySames int
+	// integrityLastChecksum 是上次校验失败 attempt 的本地 checksum（R1-C2：仅当两次
+	// checksum 一致才累计 integritySames；不同 = 瞬态损坏可恢复 → 重置重试）。
+	integrityLastChecksum string
+	// resumeSelfOverwrite 是 ResumeTask 恢复 completed+damaged 任务时置的运行时标记
+	// （E-M2 修复，不持久化）：damaged 任务重下自愈——目标卷旧损坏副本允许被本任务
+	// 覆盖（W1/W3 拒绝覆写只对他人/外部存在生效，任务自愈语义）。executeDownload
+	// 的转存路径读取后清除。
+	resumeSelfOverwrite bool
 
 	// 以下为 P4 租户配额（Scope）运行时状态，不持久化（json:"-"）。
 	// account 是本任务在 Scope 中的配额唯一所有权（TaskAccount：reserved+committed），
@@ -85,25 +186,63 @@ type CloudTaskGroup struct {
 
 // CloudDownloadConfig 云端下载配置。
 type CloudDownloadConfig struct {
-	SyncThreshold   int64         // 同步模式阈值（字节），默认 20 MiB
-	MaxConcurrent   int           // 最大并发下载数，默认 3
-	MaxBatchURLs    int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
-	TaskTTL         time.Duration // 完成任务保留时间，默认 24h
-	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 1h
-	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
-	DownloadTimeout time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
-	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
-	MaxRetries      int           // 失败重试次数，默认 10
-	RetryDelay      time.Duration // 重试间隔，默认 10s
-	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	SyncThreshold int64 // 同步模式阈值（字节），默认 20 MiB
+	MaxConcurrent int   // 最大并发下载数，默认 3
+	// TransferConcurrency 转存并发上限（NM5：转存写卷独立限流，默认与 MaxConcurrent 同）。
+	TransferConcurrency int
+	MaxBatchURLs        int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
+	TaskTTL             time.Duration // 完成任务保留时间，默认 24h
+	FailedTaskTTL       time.Duration // 失败任务保留时间，默认 1h
+	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
+	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
+	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
+	MaxRetries          int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
+	RetryDelay          time.Duration // 重试间隔，默认 10s
+	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
+	// 默认 512 MiB**——用户裁定 2026-10-07：0 处理成默认大小，配额治理默认生效）。
+	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
+	// 标记 unverified（无校验能力 ≠ 损坏，不误判 damaged）。
+	MaxCheckMemBytes sizex.ByteSize
+	// SkipVerify 跳过转存写后读侧校验（trusted_volume.skip_verify 接线；缺省 false =
+	// 校验开启——默认可信行为）。**只关读侧校验，不关 meta 生成/桶隔离**（meta 恒生成、
+	// 凭据保护恒生效；skip_verify 仅放宽读侧下载校验，极端性能场景）。
+	SkipVerify bool
 	// ExitDial 是下载器出站拨号函数注入（装配层构造）：nil = 默认直连。
 	// 非 nil 时覆写下载器 http.Transport.DialContext（本地直连优先 → 失败回退经 mesh 出口）。
 	// 领域包不依赖 mesh（R1 分层）——函数字段注入解耦，对齐 downloader 的 httpClient 注入模式。
 	ExitDial func(ctx context.Context, addr string) (net.Conn, error)
 }
 
-// cloudReservePlaceholder 未知大小任务的存储占位大小（1 GiB）。
+// cloudReservePlaceholder 未知大小任务的存储占位**上界**（1 GiB）。
 const cloudReservePlaceholder = int64(1024 * 1024 * 1024)
+
+// cloudReservePlaceholderMin 是未知大小任务的占位**下限**（低于此值视为真的没空间）。
+const cloudReservePlaceholderMin = int64(16 * 1024 * 1024)
+
+// placeholderFor 返回未知大小任务的存储占位：取「上界 1 GiB」与「**当前可用空间 / 并发槽**」
+// 的较小值，下限 cloudReservePlaceholderMin。
+//
+// 为何不能是固定 1 GiB（独立审核 P3，2026-10-18）：固定常量**既不是上界也不是紧估计** ✗ ——
+// 批量/组下载（MaxBatchURLs 默认 100）创建 N 条未知大小任务时各占 1 GiB ⇒ 50 GiB 上限下
+// N≥50 即把额度吃光 ⇒ **合法的中小文件下载被 507 拒**（用户可见故障），而占位本就只是估计
+// （完成/失败时按磁盘真值收敛：reconcileReservedSize / stored.ReservedSize = result.Size）。
+// 改为「可用空间按并发分摊」⇒ 单任务不能独占、N 条并发不耗尽额度；可用空间极小时仍由下限
+// 兜住 ⇒ 真正没空间时照旧 fail-closed（507）。
+func (m *CloudDownloadManager) placeholderFor() int64 {
+	placeholder := cloudReservePlaceholder
+	if maxBytes := m.storage.MaxBytes(); maxBytes > 0 {
+		free := maxBytes - m.storage.Usage()
+		slots := max(int64(m.maxConcurrent), 1)
+		if share := free / slots; share < placeholder {
+			placeholder = share
+		}
+	}
+	if placeholder < cloudReservePlaceholderMin {
+		placeholder = cloudReservePlaceholderMin
+	}
+	return placeholder
+}
 
 // ownerVisible 判定任务 owner 对请求者 owner 是否可见（多租户隔离规则，与
 // syncmgr.ownerVisible 一致）：
@@ -126,6 +265,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	}
 	if cfg.MaxConcurrent < 1 {
 		cfg.MaxConcurrent = 3
+	}
+	if cfg.TransferConcurrency < 1 {
+		cfg.TransferConcurrency = cfg.MaxConcurrent
 	}
 	if cfg.MaxBatchURLs == 0 {
 		cfg.MaxBatchURLs = 100
@@ -151,6 +293,13 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 	if cfg.Downloader == "" {
 		cfg.Downloader = "http"
 	}
+	// MaxCheckMemBytes<=0（含 0/负值/缺省）一律按默认 512 MiB 处理（用户裁定 2026-10-07：
+	// **0 处理成默认大小，保证服务默认行为安全可用**——完整性校验内存配额治理默认生效，
+	// 不因缺省/显式 0 而禁用，防并发校验 OOM）。配额信号量由 newCheckMemSem 构造，
+	// 永不因配置缺省而 nil（nil 仅防御性保留：直接构造 manager 时）。
+	if cfg.MaxCheckMemBytes <= 0 {
+		cfg.MaxCheckMemBytes = sizex.ByteSize(512) * (1 << 20) // 默认 512 MiB（ByteSize 语义）
+	}
 }
 
 // TenantResolver 按 owner 返回租户（空 owner → anonymous；非法 owner 或存储根不可用返回 nil）。
@@ -159,7 +308,9 @@ type TenantResolver func(owner string) *storage.Tenant
 
 // ChecksumResolver 按 owner 返回 per-tenant checksum 存储（不可用返回 nil）。
 // 与 Handlers.checksumStoreFor 同签名，RegisterRoutes 装配时直接传 h.checksumStoreFor。
-type ChecksumResolver func(owner string) *checksum.ChecksumStore
+// 2026-09 F2a：返回类型放宽为 checksum.ChecksumStoreIface（StateStore 适配器或本地
+// JSON 实现），领域包（pkg/cloud）只消费接口方法，不依赖具体类型。
+type ChecksumResolver func(owner string) checksum.ChecksumStoreIface
 
 // QuotaResolver 按 owner 返回租户配额 Scope（未装配返回 nil）。
 // 与 Handlers.quotaFor 同签名，RegisterRoutes 装配时直接传 h.quotaFor。
@@ -179,8 +330,14 @@ type StorageManager interface {
 }
 
 type CloudDownloadManager struct {
-	tasks            map[string]*CloudTask
-	mu               sync.RWMutex
+	// recovered 是 RecoverAll 的幂等守卫（M3 统一恢复协调器；重复调用不得重复挂载任务）。
+	recovered atomic.Bool
+
+	tasks map[string]*CloudTask
+	mu    sync.RWMutex
+	// maxConcurrent 是下载并发上限（构造时从配置固化）：placeholderFor 用它把**未知大小任务**的
+	// 占位按「可用空间 / 并发槽」分摊（避免固定 1 GiB 占位在批量创建时吃光额度 ⇒ 虚假 507）。
+	maxConcurrent    int
 	uploadsDir       string
 	tenantFor        TenantResolver   // 按任务 owner 解析租户（空 owner → anonymous）
 	checksumStoreFor ChecksumResolver // 按任务 owner 解析 per-tenant checksum 存储
@@ -189,11 +346,57 @@ type CloudDownloadManager struct {
 	storage          StorageManager
 	logger           *slog.Logger
 	semaphore        chan struct{}
-	config           *CloudDownloadConfig
-	dl               downloader.Downloader
-	cancelFuncs      map[string]context.CancelFunc // 任务取消函数
-	running          map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
-	metrics          *CloudMetrics
+	// transferSem 转存并发限流（NM5）：转存写卷独立于下载槽（下载完成后转存不占
+	// MaxConcurrent 槽阻塞后续下载），自身有界防风暴（容量 TransferConcurrency）。
+	transferSem chan struct{}
+	config      *CloudDownloadConfig
+	dl          downloader.Downloader
+	// transferFSFor 解析转存目标卷 (FS, scheme, shared)（编排层注入；nil = 转存不可用）。
+	// 远程性不在此返回（由 FS 自述 syncpkg.LocalVolume，transfer.go 查询）。
+	transferFSFor func(volume string) (syncpkg.FS, string)
+	// volumeFor 解析转存目标卷的 volume.Volume（供 ResolveLocation 键空间计算）。
+	// 装配层注入 vs.ByName；nil = 转存不可用（与 transferFSFor 同门）。
+	volumeFor func(volume string) (volume.Volume, bool)
+	// targetScopeFor 解析转存产物所在的 owner 配额 Scope（见 CloudManagerOptions 同名选项）。
+	targetScopeFor func(owner, userBucketRel string) *quota.Scope
+	// recordBypassWrite 登记旁路写产物的**派生状态**（checksum 台账 + 搜索索引）——转存
+	// 产物直接写目标卷 user 桶（不经 pkg/files 写内核）⇒ 不登记则 list 条目缺失 /
+	// checksum 空（R16 缺陷族）。装配层注入 files.Service.RecordBypassWrite；nil = 跳过。
+	recordBypassWrite func(owner, rel string, size int64, checksum, volume string, root *storage.Root)
+	// volumePoolChargeFor 解析转存目标**本地卷**的卷级容量池（R16 P1：本地卷 rootfs 无
+	// CapacityFS，卷池权威在路由层 Pool；装配层注入 h.volSet.Pool）。nil = 不结算本地卷
+	// 卷池（零回归）。外部卷不经此（CapacityFS 层已记）。
+	volumePoolChargeFor func(volName string) *quota.Pool
+	// targetPhysChargeFor 测量转存目标对象的记账字节（与删除侧同一测量函数；见同名选项）。
+	targetPhysChargeFor func(volume, owner, remotePath string) (int64, bool)
+	// stagingQuotaFor 返回 owner 的本地 staging 配额钩子（装配层注入；nil = 无独立
+	// staging 配额，转存不包 gate——零回归）。
+	stagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// targetWriteLock 是 per-(owner,rel) 写锁获取钩子（装配层注入；nil = 不加锁）。
+	targetWriteLock func(owner, rel string) (release func(), ok bool)
+	// integrityLookup 按文件名分发完整性校验器（装配层注入 integrity.Lookup 代理；
+	// nil = 无校验器，语义校验跳过视为通过——Review Focus 1）。
+	integrityLookup func(name string) integrity.Checker
+	// removeFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：绝对禁止测试依赖全局函数——包级 seam 可被并发替换/恢复
+	// 制造 race）**：结构体内部变量，只能在**创建时**注入，运行期不可变（无外部修改行为）。
+	// 测试用 newCloudTestManager 等构造点注入本地实现模拟删除失败/钉住时序。
+	removeFile func(string) error
+	// checkMemSem 完整性校验内存配额信号量（Weighted，按 Check 前估算字节排队等待释放；
+	// nil = 配额禁用。单文件估算超配额 → 跳过校验标记 unverified，不误判 damaged）。
+	checkMemSem *semaphore.Weighted
+	// checkMemMax 校验内存配额总预算（构造时快照 cfg.MaxCheckMemBytes；Weighted 无 size 查询）。
+	checkMemMax int64
+	// registry 是下载器注册表（自动发现用）；nil = 默认 DefaultRegistry。
+	// 测试可注入本地 NewRegistry 避免全局注册表竞态。
+	registry    *downloader.Registry
+	cancelFuncs map[string]context.CancelFunc // 任务取消函数
+	running     map[string]bool               // 任务是否有执行中的下载 goroutine（含排队）
+	// runningDone 是「running 清除」的事件通知：taskID → 关闭即表示 goroutine 已退出。
+	// waitTaskStopped 用它做**事件等待**（而非 100ms 轮询 + 墙钟上限）——CI 低配 runner 上
+	// 轮询粒度会把「退出耗时」放大成误判（flake）。`running[id]=true` 时创建、清除时 close+删。
+	runningDone map[string]chan struct{}
+	metrics     *CloudMetrics
 
 	// 批量持久化进度更新
 	dirtyTasks  map[string]struct{}
@@ -221,7 +424,15 @@ type CloudMetrics struct {
 	TasksCancelled  atomic.Int64 // 取消的任务数
 	TasksRetried    atomic.Int64 // 重试的任务数
 	BytesDownloaded atomic.Int64 // 云端下载总字节数
+	// RecoverySkipped 是启动恢复时**读不出/解析不了**而被跳过的任务数（评审 R14 NEW-2：
+	// 此前仅 Warn 跳过，不计入任何指标 ⇒ 「重启续传看起来全部成功」）。
+	RecoverySkipped atomic.Int64
 	ActiveDownloads atomic.Int64 // 当前活跃下载数
+	// 转存（transfer）指标：下载后转存到目标卷的次数/失败（含目标卷异常、文件异常）。
+	TransfersSucceeded   atomic.Int64 // 转存成功次数
+	TransfersFailed      atomic.Int64 // 转存失败次数（重试耗尽终止）
+	TransferTargetErrors atomic.Int64 // 目标卷异常次数（转存层写失败；告警接入点）
+	TransferFileErrors   atomic.Int64 // 文件内容异常次数（两次校验和一致仍转存失败）
 }
 
 // recoveryGuard 包装一个需要 panic recovery 的 goroutine 循环函数。
@@ -243,6 +454,72 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 	fn()
 }
 
+// CloudManagerOptions 是 NewCloudDownloadManager 的装配参数（S107：8 参数 → 结构体）。
+// 除 Config 外均可省略（对应 resolver 为 nil 时回退为不可用，写路径 fail-closed）。
+type CloudManagerOptions struct {
+	// DeferRecovery 为 true 时**构造期不执行**任务恢复，改由统一恢复协调器
+	// （pkg/recovery legacy 注册）在启动恢复阶段调用 RecoverAll 触发（M3）。
+	// 默认 false ⇒ 构造期恢复（既有行为，零变更）。
+	DeferRecovery bool
+
+	UploadsDir       string
+	Storage          StorageManager
+	TenantFor        TenantResolver
+	ChecksumStoreFor ChecksumResolver
+	ListTenants      func() []string
+	Logger           *slog.Logger
+	Config           *CloudDownloadConfig
+	QuotaFor         []QuotaResolver
+	// TransferFSFor 解析转存目标卷的 (FS 视图, 协议 scheme)。scheme 用于生成可被
+	// ResolveURL 解析的转存 URL。**注意**：历史第三个返回值「是否共享」已删除（m5，第 7 轮
+	// MINOR）——共享卷的 owner 前缀隔离现由 `volume.ResolveLocation` 唯一入口承担，
+	// 该值在转存路径上从未被消费（死值）。
+	TransferFSFor func(volume string) (syncpkg.FS, string)
+	// StagingQuotaFor 返回 owner 的本地 staging 配额钩子（用户裁定 2026-10-10：外部卷
+	// 转存写本地暂存统一过独立 staging 配额——防本地磁盘打满；转存目标 FS 未实现
+	// StagingQuotaExempt/StagingQuotaCapable 时包 StagingQuotaGateFS 强制预留）。
+	// nil = 无独立 staging 配额（零回归，不包 gate）。装配层注入（pkg/server 实现）。
+	StagingQuotaFor func(owner string) syncpkg.StagingQuotaTracker
+	// TargetWriteLock 返回 owner+rel 的**文件级写锁**（与 HTTP 上传/删除/改名/DAV/S3
+	// 共用同一键空间；装配层注入 filesRuntime.Acquire 语义）。转存不经 pkg/files 写路径，
+	// 若无此锁，与其它写面同 rel 并发写会产出「主文件与 sidecar 错位」的固化状态
+	// （远端卷写后回读交叉校验被跳过 → 读侧逐分块校验恒失配、永久 fail-closed）。
+	// nil = 不加锁（零回归：单写面装配不受影响）。
+	TargetWriteLock func(owner, rel string) (release func(), ok bool)
+	// VolumeFor 解析转存目标卷的 volume.Volume（用于 ResolveLocation 键空间计算——
+	// 权限门/路径安全/共享前缀由 volume 唯一入口承担）。装配层注入 vs.ByName；
+	// nil = 转存不可用（与 TransferFSFor 同门）。
+	VolumeFor func(volume string) (volume.Volume, bool)
+	// RecordBypassWrite 登记转存产物的派生状态（checksum 台账 + 搜索索引）：转存写目标卷
+	// user 桶不经写内核 ⇒ 不登记则 list 缺条目 / checksum 空（R16）。装配层注入
+	// `h.fileService().RecordBypassWrite`；nil = 跳过（零回归）。
+	RecordBypassWrite func(owner, rel string, size int64, checksum, volume string, root *storage.Root)
+	// VolumePoolChargeFor 返回转存目标**本地卷**的卷级容量池（R16 P1 修复②/③）：
+	// 本地卷 rootfs 无 ReserveSpace/CapacityFS ⇒ 卷池漏记 + 删除幻影释放。装配层注入
+	// `h.volSet.Pool`；nil = 不结算（零回归）。**只对本地卷**生效（外部卷 CapacityFS 已记，
+	// 双记会重复占用）。
+	VolumePoolChargeFor func(volName string) *quota.Pool
+	// TargetQuotaScopeFor 返回转存**产物所在**的 owner 配额 Scope：键空间为「用户桶相对路径」
+	// （`user/<rel>`，与 HTTP 上传路由的预留/结算、删除侧的释放是**同一个解析器**——装配层
+	// 注入 Handlers.quotaScopeFor / files.Runtime.ScopeFor）。转存写成功后按它结算（见
+	// transfer.go 的 settleTransferCharge）：否则删除该产物时 `releaseExternalDeleteQuota`
+	// 会做「未曾提交的释放」（幻影释放 ⇒ 扣同账本其它占用 ⇒ 少计/过度准入）。nil = 不结算
+	// （零回归：未装配配额的部署无 Scope 可结算）。
+	TargetQuotaScopeFor func(owner, userBucketRel string) *quota.Scope
+	// TargetPhysChargeFor 返回转存目标对象的**记账字节**（物理足迹优先，与删除侧
+	// `files.physChargeFor` 同一测量函数；装配层注入 filesPhysFootprinter.PhysFootprint）。
+	// nil / ok=false ⇒ 回落目标卷 Stat 大小（与删除侧 ExternalStat 回落同义）。
+	// **必须与释放侧同源**：写入侧按逻辑字节记、释放侧按物理字节放会让账本恒偏。
+	TargetPhysChargeFor func(volume, owner, remotePath string) (int64, bool)
+	// IntegrityLookup 按文件名分发完整性校验器（integrity.Lookup 代理）。
+	// nil = 无校验器（语义校验跳过视为通过——Review Focus 1：未装配不误报 damaged）。
+	IntegrityLookup func(name string) integrity.Checker
+	// RemoveFile 是任务产物删除的单次尝试实现（nil = os.Remove 默认）。**测试注入
+	// opt（2026-10-07 用户裁定：禁止测试依赖全局函数/并发修改包级 seam）**：构造时
+	// 注入结构体内部变量，运行期不可变。生产装配不传（零回归）。
+	RemoveFile func(string) error
+}
+
 // NewCloudDownloadManager 创建云端下载管理器。
 //
 // 迁移后云任务文件与状态按任务 owner 落租户桶：
@@ -253,12 +530,21 @@ func recoveryGuard(name string, logger *slog.Logger, wg *sync.WaitGroup, stopCh 
 // tenantFor/checksumStoreFor/listTenants 由 RegisterRoutes 装配传入（h.tenantFor /
 // h.checksumStoreFor / h.listTenantIDs）；任一为 nil 时回退为不可用（写路径 fail-closed，
 // 不 panic）。空 owner 任务落 anonymous 租户。
-func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor TenantResolver, checksumStoreFor ChecksumResolver, listTenants func() []string, logger *slog.Logger, cfg *CloudDownloadConfig, quotaFor ...QuotaResolver) *CloudDownloadManager {
+func NewCloudDownloadManager(opts CloudManagerOptions) *CloudDownloadManager {
+	uploadsDir := opts.UploadsDir
+	sm := opts.Storage
+	tenantFor := opts.TenantFor
+	checksumStoreFor := opts.ChecksumStoreFor
+	listTenants := opts.ListTenants
+	logger := opts.Logger
+	cfg := opts.Config
+	quotaFor := opts.QuotaFor
+
 	if tenantFor == nil {
 		tenantFor = func(string) *storage.Tenant { return nil }
 	}
 	if checksumStoreFor == nil {
-		checksumStoreFor = func(string) *checksum.ChecksumStore { return nil }
+		checksumStoreFor = func(string) checksum.ChecksumStoreIface { return nil }
 	}
 	if listTenants == nil {
 		listTenants = func() []string { return nil }
@@ -272,25 +558,41 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 	applyCloudConfigDefaults(cfg)
 
 	mgr := &CloudDownloadManager{
-		tasks:            make(map[string]*CloudTask),
-		uploadsDir:       uploadsDir,
-		tenantFor:        tenantFor,
-		checksumStoreFor: checksumStoreFor,
-		quotaFor:         qf,
-		listTenants:      listTenants,
-		storage:          sm,
-		logger:           slogutil.Default(logger),
-		semaphore:        make(chan struct{}, cfg.MaxConcurrent),
-		config:           cfg,
-		dl:               downloader.NewFromConfig(cfg.Downloader),
-		cancelFuncs:      make(map[string]context.CancelFunc),
-		running:          make(map[string]bool),
-		metrics:          &CloudMetrics{},
-		dirtyTasks:       make(map[string]struct{}),
-		flushNow:         make(chan struct{}, 1),
-		stopFlush:        make(chan struct{}),
-		stopCleanup:      make(chan struct{}),
-		groups:           make(map[string]*CloudTaskGroup),
+		tasks:               make(map[string]*CloudTask),
+		uploadsDir:          uploadsDir,
+		tenantFor:           tenantFor,
+		checksumStoreFor:    checksumStoreFor,
+		quotaFor:            qf,
+		listTenants:         listTenants,
+		storage:             sm,
+		logger:              slogutil.Default(logger),
+		semaphore:           make(chan struct{}, cfg.MaxConcurrent),
+		transferSem:         make(chan struct{}, cfg.TransferConcurrency),
+		checkMemSem:         newCheckMemSem(int64(cfg.MaxCheckMemBytes)),
+		checkMemMax:         int64(cfg.MaxCheckMemBytes),
+		config:              cfg,
+		dl:                  newDefaultDownloader(cfg),
+		transferFSFor:       opts.TransferFSFor,
+		volumeFor:           opts.VolumeFor,
+		stagingQuotaFor:     opts.StagingQuotaFor,
+		targetWriteLock:     opts.TargetWriteLock,
+		maxConcurrent:       cfg.MaxConcurrent,
+		targetScopeFor:      opts.TargetQuotaScopeFor,
+		volumePoolChargeFor: opts.VolumePoolChargeFor,
+		recordBypassWrite:   opts.RecordBypassWrite,
+		targetPhysChargeFor: opts.TargetPhysChargeFor,
+		integrityLookup:     opts.IntegrityLookup,
+		removeFile:          opts.RemoveFile, // 测试注入 opt；nil = 默认 os.Remove
+		cancelFuncs:         make(map[string]context.CancelFunc),
+		running:             make(map[string]bool),
+		runningDone:         make(map[string]chan struct{}),
+		metrics:             &CloudMetrics{},
+		recovered:           atomic.Bool{}, // M3：RecoverAll 幂等守卫
+		dirtyTasks:          make(map[string]struct{}),
+		flushNow:            make(chan struct{}, 1),
+		stopFlush:           make(chan struct{}),
+		stopCleanup:         make(chan struct{}),
+		groups:              make(map[string]*CloudTaskGroup),
 	}
 
 	mgr.logger.Info("cloud download manager initialized",
@@ -328,10 +630,10 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 	// 顺序不能倒：recoverGroups 会按 m.tasks 修剪组内已不存在的任务引用，故必须先恢复任务；
 	// 而孤儿 pending 所属的组记录要到 recoverGroups 之后才在内存里，故组状态刷新只能放在其后
 	// （否则 UpdateGroupStatus 会因组不存在而空转，Web UI 会一直看到 downloading）。
-	orphanPendingGroups := mgr.recoverTasks()
-	mgr.recoverGroups()
-	for _, gid := range orphanPendingGroups {
-		mgr.UpdateGroupStatus(gid)
+	// M3：抽成 RecoverAll（唯一入口，幂等）。默认构造期即执行（零行为变更 ✓）；
+	// 装配层置 DeferRecovery=true 时改由统一恢复协调器触发。
+	if !opts.DeferRecovery {
+		mgr.recoverOnConstruct()
 	}
 
 	// 启动过期任务清理 (wg 跟踪)
@@ -345,6 +647,14 @@ func NewCloudDownloadManager(uploadsDir string, sm StorageManager, tenantFor Ten
 	})
 
 	return mgr
+}
+
+// recoverOnConstruct 是构造期的默认恢复调用（M3：真正实现在 RecoverAll；此处只负责告警）。
+// 拆成 helper 只为把 NewCloudDownloadManager 的认知复杂度留在门禁阈值内。
+func (mgr *CloudDownloadManager) recoverOnConstruct() {
+	if _, err := mgr.RecoverAll(context.Background()); err != nil {
+		mgr.logger.Warn("cloud download recovery failed", "error", err)
+	}
 }
 
 // cloudDirFor 返回 owner 租户 cloud 桶的绝对路径（<root>/<tenant>/cloud）。
@@ -368,11 +678,23 @@ func (m *CloudDownloadManager) CloudDirFor(owner string) string {
 	return abs
 }
 
+// cloudStateRootFor 返回 owner 租户状态目录（meta/cloud）所在的 Root；租户不可用 → nil。
+// 状态 JSON 一律经该 Root 读写（卷自己的语义：加密卷由卷加密、封印区间写入恒拒），
+// 见 manager_persist.go 的 cloudStateRel。
+func (m *CloudDownloadManager) cloudStateRootFor(owner string) *storage.Root {
+	tnt := m.tenantFor(owner)
+	if tnt == nil {
+		return nil
+	}
+	return tnt.Root()
+}
+
 // persistDirFor 返回 owner 租户云任务状态目录（<root>/<tenant>/meta/cloud）。
 // 租户不可用时返回 ""。
 // PersistDirFor 返回 owner 租户的云任务**状态**目录（`<租户根>/meta/cloud`），
 // 任务状态落 `<PersistDirFor>/<taskID>.json`、组状态落 `<PersistDirFor>/groups/<groupID>.json`。
-// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。
+// 导出理由同 CloudDirFor（装配层测试需按布局断言/构造磁盘状态）。**仅供布局断言/排查**：
+// 状态 I/O 一律经 cloudStateRootFor（加密卷由卷加密、封印区间写入恒拒）。
 func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	tnt := m.tenantFor(owner)
 	if tnt == nil {
@@ -380,16 +702,6 @@ func (m *CloudDownloadManager) PersistDirFor(owner string) string {
 	}
 	abs, _ := tnt.Root().Abs("meta/cloud")
 	return abs
-}
-
-// groupsDirFor 返回 owner 租户云任务组状态目录（<root>/<tenant>/meta/cloud/groups）。
-// 租户不可用时返回 ""。
-func (m *CloudDownloadManager) groupsDirFor(owner string) string {
-	base := m.PersistDirFor(owner)
-	if base == "" {
-		return ""
-	}
-	return filepath.Join(base, "groups")
 }
 
 // taskDirFor 返回 owner 租户下任务文件目录（<root>/<tenant>/cloud/<taskID>）。
@@ -404,12 +716,14 @@ func (m *CloudDownloadManager) TaskDirFor(owner, taskID string) string {
 }
 
 // removeTaskDir 尽力删除 owner 租户下任务文件目录（租户不可用时为空操作）。
-func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) {
+// removeTaskDir 删除任务目录；返回错误供调用方做「删除确认后再归还」（os.RemoveAll 对不存在的
+// 路径返回 nil ⇒ nil 即"确认消失"）。独立复审 P2，2026-10-18：此前恒忽略错误。
+func (m *CloudDownloadManager) removeTaskDir(owner, taskID string) error {
 	dir := m.TaskDirFor(owner, taskID)
 	if dir == "" {
-		return
+		return nil
 	}
-	_ = os.RemoveAll(dir)
+	return os.RemoveAll(dir)
 }
 
 // removeTaskDirWithRetry 删除任务文件目录，并对瞬时占用做有界重试（见 removeWithRetry）。
@@ -459,10 +773,61 @@ func (a *quotaSinkAdapter) Committed() int64 { return a.acc.Committed() }
 func (a *quotaSinkAdapter) Finish(success bool, oldSize int64) {
 	if success {
 		a.acc.ReleaseReserve()
-		a.scope.ReleaseUsage(oldSize)
+		// **必须走 account 的 ReleaseCommitted**（独立复审 P1，2026-10-18）：旧实现只
+		// `a.scope.ReleaseUsage(oldSize)` ⇒ 只回拨 bucket，**不减 acc.committed** ⇒ 账户与 Scope
+		// 分叉（账户恒大于磁盘足迹）。后果：`discardTaskOutputForRedownload` 用账户作「唯一权威」
+		// 回拨时会**多释放**（ReleaseCommittedUp 只钳本层 committed，层内无归属）⇒ 吃掉同桶
+		// 邻居的份额（邻居欠计 ⇒ 短时可越 owner/卷配额，fail-open）。ReleaseCommitted 幂等、
+		// 钳上界，并**同时**回拨 Scope ⇒ 一处收敛、两账同源。
+		a.acc.ReleaseCommitted(oldSize)
 	} else {
 		a.acc.ReleaseReserve()
 	}
+}
+
+// newDefaultDownloader 返回配置指定的默认下载器（m.dl 兜底）。
+// 与旧 `downloader.NewFromConfig(cfg.Downloader)` 的区别：**不依赖注册表 Active() 回退**。
+// 原因：注册表 Active() 返回最高优先级插件——若 pikpak 等外部下载器已注册（Priority>0），
+// `NewFromConfig("http")` 查不到名为 "http" 的注册条目时回退 Active()，会**返回 pikpak**，
+// 使默认下载器被插件劫持（SSRF/超时/出口拨号 clone 配置全部丢失，普通 URL 也走 pikpak
+// 而 parseShareID 失败）。默认下载器语义必须稳定为内置 HTTP。
+func newDefaultDownloader(cfg *CloudDownloadConfig) downloader.Downloader {
+	name := cfg.Downloader
+	if name == "" || name == "http" {
+		return downloader.NewHTTPDownloader()
+	}
+	// 显式配置非 http 名称（如未来注册的其它下载器）：按名取。
+	if d, ok := downloader.DefaultRegistry.Get(name); ok {
+		return d
+	}
+	return downloader.NewHTTPDownloader()
+}
+
+// downloaderFor 按 URL 自动发现下载器：注册表里 Supports(url) 的非默认插件
+// （如 pikpak 匹配 mypikpak.com/s/ 分享 URL）命中时返回；否则回落配置默认
+// 下载器 m.dl。
+//
+// 关键：内置 HTTPDownloader（名字 "http"）**不参与自动发现**——它是注册表兜底，
+// 且 manager 构造时已 clone 注入 AllowPrivate/超时/出口拨号配置（m.dl）；直接
+// 用注册表原始实例会丢失这些配置（SSRF 私有 IP 拦截等行为回归）。
+func (m *CloudDownloadManager) downloaderFor(url string) downloader.Downloader {
+	reg := m.registry
+	if reg == nil {
+		reg = downloader.DefaultRegistry
+	}
+	for _, name := range reg.Names() {
+		if name == "http" {
+			continue // 内置 HTTP 回落 m.dl（已 clone 配置）
+		}
+		d, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		if d.Supports(url) {
+			return d
+		}
+	}
+	return m.dl
 }
 
 // downloadSinkFactory 返回把写盘目标包装为 QuotaWriter 的 SinkFactory（每次写盘会话调用）。
@@ -587,3 +952,31 @@ func (m *CloudDownloadManager) AllowPrivate() bool { return m.config.AllowPrivat
 
 // MaxBatchURLs 返回单次批量请求允许的最大 URL 数（装配层做请求校验时需要）。
 func (m *CloudDownloadManager) MaxBatchURLs() int { return m.config.MaxBatchURLs }
+
+// TransferSpec 是云下载任务的转存目标配置（客户端创建任务时指定）。
+// 转存与「本地保存文件」独立：本地文件恒落 cloud 桶（现状），转存是额外行为——
+// 下载完成后把产物复制到目标卷（secretdata 加密卷自动加密 / 普通卷纯上传），
+// 流程层不感知加密（secretdata wrapper 的 WriteFile 透明加密）。
+type TransferSpec struct {
+	// Volume 是目标卷名（registry.Set.External(name) → sync.FS 视图；必填）。
+	Volume string `json:"volume"`
+	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
+	Path string `json:"path,omitempty"`
+	// 注：曾有 OwnerPrefix 字段（注释称「共享卷的 owner 隔离前缀，服务端注入」）——**无任何
+	// 生产者/消费者**（独立审核 2026-10-18 确证）⇒ 已删除。owner 隔离由 `volume.ResolveLocation`
+	// 恒 owner 前缀承担（pkg/volume/volume_path.go），该字段声称的「注入」从未存在。
+}
+
+// TaskParams 是云端下载任务的「三行为」语义参数（S107 收敛 + 正交性显式化）：
+// 转存目标 / 是否下载本地 / 是否保留 cloud 桶副本——三个独立行为正交，任一可独立开关。
+// 既有调用方（group/旧语义）用零值 Save=false 需显式传 TaskParams{Save:true}。
+type TaskParams struct {
+	Transfer      *TransferSpec
+	DownloadLocal bool
+	Save          bool
+	// IntegrityMustPass 强制完整性：语义校验失败（即使两次一致）不放行，任务失败（阻断）。
+	IntegrityMustPass bool
+	// MetaExtra 是转存产物的自定义元数据（客户端传入；转存成功后与来源信息合并写入
+	// 目标卷 meta.Extra）。仅 Transfer 非 nil 时有意义（无转存则丢弃）。
+	MetaExtra map[string]any
+}

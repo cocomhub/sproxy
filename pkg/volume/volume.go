@@ -28,6 +28,11 @@ const (
 // Type 恒为本地卷）。
 const TypeLocal = "local"
 
+// TypeSecretdata 是 secretdata 加密卷的卷后端类型字面量（内容密文必须服务端解密，
+// 恒不经直链外出）。单一事实源：生产装配（cmd/sproxy/secret_register.go）与读路径
+// 私密判定（pkg/server/volumes.go volumePrivate）共用，避免裸字面量散落。
+const TypeSecretdata = "secretdata"
+
 // ACL 是卷访问控制（装配期由 config 解析而来）。零值 = ModeDeny + 空名单（默认开放）。
 type ACL struct {
 	Mode   Mode
@@ -204,6 +209,11 @@ type Volume struct {
 	MirrorOf string         // 镜像目标卷名（0 = 无镜像策略；仅本地卷消费）
 	Mirrors  []string       // 多副本镜像目标卷列表（空 = 单目标/无；仅本地卷消费）
 	Tier     string         // 热冷分层（hot|warm|cold；空 = hot 缺省，零回归）
+	// DirectLink 是「允许明文外部卷 302 直链」开关（2026-10-05 用户裁定反义命名）：
+	// 零值 false = 私密（外部卷经服务端转发，不暴露原始存储 URL）；true = 允许下载
+	// 302 跳到后端直链（流量不经服务端）。仅明文外部卷消费；secretdata 密文卷恒
+	// 服务端解密，装配后不可变。
+	DirectLink bool
 	// Retention 是卷级数据保留策略（volumes[].retention，装配层从 server.VolumeRetentionConfig
 	// 解析填充）：版本/分享/审计的卷级 TTL + 周期 GC 间隔。零值 = 全部关闭（零回归）。
 	Retention Retention
@@ -272,6 +282,17 @@ func AllowedVolumes(vols []Volume, owner string) []Volume {
 		}
 	}
 	return out
+}
+
+// Shared 判定卷是否多用户共享（2026-10-05 用户裁定：共享卷键加 owner 前缀隔离，
+// 独享卷——用户外部网盘——无前缀直接路径存取）。
+//
+// 判定（与既有转存 shared 判定同源）：
+//   - ACL ModeDeny / 零值（默认开放）：任何 owner 可写 → 共享；
+//   - ModeAllow + 多 owner 白名单 → 共享；
+//   - ModeAllow + 单 owner（用户自己的外部网盘）→ 独享（键无 owner 前缀）。
+func (v Volume) Shared() bool {
+	return v.ACL.Mode == "" || v.ACL.Mode == ModeDeny || len(v.ACL.Owners) > 1
 }
 
 // DefaultVolume 返回默认卷（首个）。空列表返回零值 Volume{Name:"<none>"}。

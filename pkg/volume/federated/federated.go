@@ -136,6 +136,17 @@ func (f *FS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 	return f.r.OpenRead(ctx, path)
 }
 
+// OpenRangeRead 实现 syncpkg.RangeReader（集群出口/播放器随机访问地基，
+// 2026-10-05）：底层 Reader 支持 RangeReader 时透传（remoteFS.OpenRangeRead）；
+// 否则报错 fail-closed（调用方回落整流 200）。
+func (f *FS) OpenRangeRead(ctx context.Context, path string, offset, size int64) (io.ReadCloser, error) {
+	rr, ok := f.r.(syncpkg.RangeReader)
+	if !ok {
+		return nil, fmt.Errorf("federated: 底层 Reader 未实现 RangeReader（无法随机访问）")
+	}
+	return rr.OpenRangeRead(ctx, path, offset, size)
+}
+
 // WriteFile 写文件：注入 Writer 时按冲突策略分派；否则 ErrReadOnly（fail-closed）。
 //
 //   - lww（默认）：直转 Writer（现状零回归，无版本检查）。
@@ -144,7 +155,7 @@ func (f *FS) OpenRead(ctx context.Context, path string) (io.ReadCloser, error) {
 //   - conflict：CheckVersion 发现远端已存在 → 旧文件改名 `<path>.conflict-<ts>` 保留双方
 //     （sync 既有惯例命名，冲突文件进用户卷视图可被冲突索引/API 消费），再以
 //     「期望不存在」写新内容；rename 失败 → 500（不写新内容，防丢旧内容）。
-func (f *FS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtime int64) error {
+func (f *FS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, path string, r io.Reader, size, mtime int64) error {
 	if f.w == nil {
 		return ErrReadOnly
 	}
@@ -178,7 +189,7 @@ func (f *FS) WriteFile(ctx context.Context, path string, r io.Reader, size, mtim
 		}
 		return vw.WriteFileVersioned(ctx, path, r, size, mtime, -1)
 	default: // ConflictLWW：直转，零回归
-		return f.w.WriteFile(ctx, path, r, size, mtime)
+		return f.w.WriteFile(ctx, key, path, r, size, mtime)
 	}
 }
 

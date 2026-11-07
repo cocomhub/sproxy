@@ -24,18 +24,19 @@ import (
 
 // ChunkedUploadSession 表示一个分块上传会话。
 type ChunkedUploadSession struct {
-	UploadID       string    `json:"upload_id"`
-	Filename       string    `json:"filename"`
-	TotalSize      int64     `json:"total_size"`
-	ChunkSize      int64     `json:"chunk_size"`
-	TotalChunks    int       `json:"total_chunks"`
-	ReceivedChunks []bool    `json:"received_chunks"`
-	ChunkChecksums []string  `json:"chunk_checksums"`
-	FileChecksum   string    `json:"file_checksum"`
-	FileModTime    int64     `json:"file_mod_time"` // UnixNano, 0 = unknown
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Completed      bool      `json:"completed"`
+	UploadID       string         `json:"upload_id"`
+	Filename       string         `json:"filename"`
+	TotalSize      int64          `json:"total_size"`
+	ChunkSize      int64          `json:"chunk_size"`
+	TotalChunks    int            `json:"total_chunks"`
+	ReceivedChunks []bool         `json:"received_chunks"`
+	ChunkChecksums []string       `json:"chunk_checksums"`
+	FileChecksum   string         `json:"file_checksum"`
+	FileModTime    int64          `json:"file_mod_time"`        // UnixNano, 0 = unknown
+	MetaExtra      map[string]any `json:"meta_extra,omitempty"` // 首次初始化携带（complete 落 sidecar）
+	CreatedAt      time.Time      `json:"created_at"`
+	ExpiresAt      time.Time      `json:"expires_at"`
+	Completed      bool           `json:"completed"`
 
 	// gen 是**注册世代**（store 内单调递增，注册进 us.sessions 时赋值；此后只读，未导出故不持久化）。
 	// 用途：「发布」时的**身份门控** —— 同 id 被新会话接管后世代不同，持有旧对象（或其副本）的
@@ -67,6 +68,22 @@ type ChunkedUploadSession struct {
 	// 全部为空 → 解析为默认租户，零回归）。version/chunk 桶与目标 user 文件同卷（AD-5）。
 	// 持久化：重启恢复时按 Volume 在对应卷租户根解析 TempPath。
 	Volume string `json:"volume,omitempty"`
+
+	// ExternalTarget 标记会话目标卷是**外部卷**（无本地 *storage.Root，写入经 UploadRoute.Sink）：
+	// complete 时不做本地 rename，而是把已校验的 staging 整文件**转存**到目标外部卷。
+	// 持久化（重启后续传的 complete 必须知道走哪条落位路径）。
+	ExternalTarget bool `json:"external_target,omitempty"`
+
+	// StagingVolume 是分块**内容**（在途临时文件）实际落盘的卷名。
+	//
+	// 为什么与 Volume 分离（2026-10-22 缺陷修复）：**外部卷目标**（baidupcs/secretdata 等
+	// 无本地 *storage.Root）无法承载分块链路（init 建在途文件 / chunk seek 直写 / complete
+	// 原子 rename 全部依赖本地租户根）⇒ 此前 `route.Tenant == nil` 直接 400「无效的文件路径」，
+	// 外部卷 + 大文件（>100MiB 自动分块 / >1GiB 普通上传上限）完全不可用。修复后：分块内容落
+	// **默认卷**（本地 staging 区，逐块 SHA-256 校验 + complete 全文件校验），complete 通过后经
+	// UploadRoute.Sink 转存到 Volume（目标外部卷）。
+	// 空 = 与 Volume 同卷（本地卷目标，零回归；存量 session.json 无该字段亦走此分支）。
+	StagingVolume string `json:"staging_volume,omitempty"`
 
 	// Reservation 是分块上传的租户配额预留句柄（P4）。init 预留、complete Commit、
 	// 会话删除/过期 Release。不持久化（json:"-"），重启后内存预留丢失，由上游对账补齐。
@@ -101,7 +118,7 @@ type UploadStoreIface interface {
 	ListSessions() []ChunkedUploadSessionMeta
 	LockChunkIO(uploadID string) func()
 	LockChunkMerge(uploadID string) func()
-	// 幂等/持久化现状（原 TODO 审计结论，2026-09-14）：会话元数据由 writeSessionJSON 原子写入
+	// 幂等/持久化现状（审计结论（原待办）——已定，2026-09-14）：会话元数据由 writeSessionJSON 原子写入
 	// （CreateTemp + Rename）且由 writeMu 串行化（防 Windows rename 竞争，见本文件 writeMu 注释）；
 	// 分块重传以同 index 覆盖写实现幂等。不扩 SyncPersistSession/RollbackChunkReceived：
 	// 它们会要求调用方持有跨请求事务语义，收益不抵复杂度。
@@ -219,6 +236,19 @@ func (us *UploadStore) tenantRootFor(volume string) string {
 		}
 	}
 	return filepath.Dir(us.baseDir)
+}
+
+// tenantRootForStaging 返回分块**内容**（在途临时文件）所在卷的租户根：优先
+// session.StagingVolume（外部卷目标时为**默认卷**），否则回落 session.Volume（本地卷目标，
+// 与既有语义完全一致——存量会话无 StagingVolume 字段即走此分支，零回归）。
+func (us *UploadStore) tenantRootForStaging(session *ChunkedUploadSession) string {
+	if session != nil && session.StagingVolume != "" {
+		return us.tenantRootFor(session.StagingVolume)
+	}
+	if session != nil {
+		return us.tenantRootFor(session.Volume)
+	}
+	return us.tenantRootFor("")
 }
 
 // InflightPrefix 是任务 4 分块在途整文件临时名前缀（user 桶目标同目录）：
@@ -379,8 +409,27 @@ func (us *UploadStore) Stop() {
 	})
 }
 
+// newSessionParams 是 ChunkedUploadSession 的创建参数（S107：收敛 newSession 8 参数 → 结构体）。
+type newSessionParams struct {
+	UploadID     string
+	Filename     string
+	TotalSize    int64
+	ChunkSize    int64
+	TotalChunks  int
+	FileChecksum string
+	FileModTime  int64
+	SessionTTL   time.Duration
+}
+
 // newSession 创建 ChunkedUploadSession 对象（不持久化）。
-func newSession(uploadID, filename string, totalSize, chunkSize int64, totalChunks int, fileChecksum string, fileModTime int64, sessionTTL time.Duration) *ChunkedUploadSession {
+
+func newSession(p newSessionParams) *ChunkedUploadSession {
+	uploadID, filename := p.UploadID, p.Filename
+	totalSize, chunkSize := p.TotalSize, p.ChunkSize
+	totalChunks := p.TotalChunks
+	fileChecksum, fileModTime := p.FileChecksum, p.FileModTime
+	sessionTTL := p.SessionTTL
+
 	now := time.Now()
 	return &ChunkedUploadSession{
 		UploadID:       uploadID,
@@ -430,7 +479,7 @@ func (us *UploadStore) CreateSession(uploadID, filename string, totalSize, chunk
 		return nil, fmt.Errorf("upload_id 不能为空")
 	}
 
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(newSessionParams{UploadID: uploadID, Filename: filename, TotalSize: totalSize, ChunkSize: chunkSize, TotalChunks: totalChunks, FileChecksum: fileChecksum, FileModTime: fileModTime, SessionTTL: us.sessionTTL})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
@@ -522,7 +571,24 @@ func (us *UploadStore) MarkChunkReceived(uploadID string, chunkIndex int, checks
 		us.mu.Unlock()
 		return fmt.Errorf("chunk_index %d 超出范围 [0, %d)", chunkIndex, s.TotalChunks)
 	}
+	us.mu.Unlock()
 
+	// **确认即持久化**（2026-10-29，崩溃恢复契约）：`POST /upload/chunk` 返回 200 之前，
+	// 该块的校验值必须已落盘。session.json 仍是异步批量持久化（整份 bitmap 重写成本高），
+	// 若 kill -9 落在窗口内，重启会因 `ChunkChecksums[i]==""` 判该块需重传——客户端白传，
+	// 且 `TestE2E_Restart_ChunkedUploadResumesAfterKill9` 偶发红。每块一个独立 sidecar
+	// （原子 rename，代价 ~百字节）⇒ 恢复时与临时文件内容交叉校验后即可判为已接收。
+	if err := us.persistChunkChecksum(uploadID, chunkIndex, checksum); err != nil {
+		return fmt.Errorf("持久化分块校验值失败（upload_id=%s, chunk=%d）: %w", uploadID, chunkIndex, err)
+	}
+
+	us.mu.Lock()
+	s, ok = us.sessions[uploadID]
+	if !ok {
+		// 校验值已落盘但会话在窗口内被删除：保守报错（客户端重试会得到 404）。
+		us.mu.Unlock()
+		return fmt.Errorf("upload_id 不存在: %s", uploadID)
+	}
 	s.ReceivedChunks[chunkIndex] = true
 	s.ChunkChecksums[chunkIndex] = checksum
 
@@ -859,6 +925,68 @@ func (us *UploadStore) persistLoop() {
 //
 // 并发持久化的顺序保证：会话内嵌锁（s.persistMu）覆盖「RLock 拍快照 → 落盘」两阶段（见
 // persistSnapshot），使快照拍序 == 落盘序，旧快照不会覆盖新快照（RV10-SLICE3 审计的既有缺陷）。
+// chunkChecksumSidecarPath 返回分块校验值 sidecar 的路径（`<baseDir>/<uploadID>/chunk-<i>.sha256`）。
+func (us *UploadStore) chunkChecksumSidecarPath(uploadID string, chunkIndex int) string {
+	return filepath.Join(us.baseDir, uploadID, fmt.Sprintf("chunk-%d.sha256", chunkIndex))
+}
+
+// persistChunkChecksum 原子写入单块校验值（tmp + rename；同进程内 rename 立即可见）。
+// 失败 ⇒ 调用方必须让本次 chunk ACK 失败（客户端重试），不得返回 200 假承诺。
+func (us *UploadStore) persistChunkChecksum(uploadID string, chunkIndex int, checksum string) error {
+	us.writeMu.Lock()
+	defer us.writeMu.Unlock()
+	dir := filepath.Join(us.baseDir, uploadID)
+	f, err := os.CreateTemp(dir, "chunk.sha256.tmp.*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.WriteString(checksum)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Rename(tmp, us.chunkChecksumSidecarPath(uploadID, chunkIndex)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// loadChunkChecksumSidecars 用已落盘的每块校验值补齐/覆盖会话的 `ChunkChecksums`。
+// 旧会话（无 sidecar）保持 session.json 原值（向后兼容）。
+func (us *UploadStore) loadChunkChecksumSidecars(s *ChunkedUploadSession) {
+	if s == nil || s.TotalChunks <= 0 {
+		return
+	}
+	if len(s.ChunkChecksums) < s.TotalChunks {
+		grown := make([]string, s.TotalChunks)
+		copy(grown, s.ChunkChecksums)
+		s.ChunkChecksums = grown
+	}
+	if len(s.ReceivedChunks) < s.TotalChunks {
+		grown := make([]bool, s.TotalChunks)
+		copy(grown, s.ReceivedChunks)
+		s.ReceivedChunks = grown
+	}
+	for i := 0; i < s.TotalChunks; i++ {
+		b, err := os.ReadFile(us.chunkChecksumSidecarPath(s.UploadID, i))
+		if err != nil {
+			continue
+		}
+		if sum := strings.TrimSpace(string(b)); sum != "" {
+			s.ChunkChecksums[i] = sum
+			// 有 sidecar = 该块已向客户端 ACK ⇒ 先乐观置为已接收；随后 `verifyTempChunks`
+			// 用临时文件内容**重新校验**，不匹配再降级为需重传（数据丢失仍安全）。
+			s.ReceivedChunks[i] = true
+		}
+	}
+}
+
 func (us *UploadStore) persistSession(uploadID string) {
 	us.mu.RLock()
 	s, ok := us.sessions[uploadID]
@@ -996,7 +1124,7 @@ func (us *UploadStore) writeSessionJSON(s *ChunkedUploadSession) error {
 				return nil
 			}
 			// 回退：直接覆盖写入目标路径（writeMu 已串行化，不会并发竞争同一文件）。
-			if writeErr := os.WriteFile(finalPath, data, 0644); writeErr == nil {
+			if os.WriteFile(finalPath, data, 0644) == nil {
 				os.Remove(tmpPath)
 				return nil
 			}
@@ -1215,6 +1343,9 @@ func (us *UploadStore) restoreSession(uploadID, sessionDir string, data []byte) 
 	}
 	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
 	// 内容与 checksum 表匹配的分片保留，不匹配/缺失的分片需重传（bitmap 置 false）。
+	// 先采信「确认即持久化」的每块校验 sidecar（session.json 可能落后于最近 ACK 的块）。
+	us.loadChunkChecksumSidecars(&session)
+	// 任务 4：按临时名（user 桶在途整文件）逐分片重算校验，校准 bitmap——
 	if session.TempPath != "" {
 		us.verifyTempChunks(&session)
 	}
@@ -1235,7 +1366,7 @@ func (us *UploadStore) tempAbsPath(session *ChunkedUploadSession) (string, bool)
 	if session == nil || !strings.HasPrefix(session.TempPath, "user/") {
 		return "", false
 	}
-	tenantRoot := us.tenantRootFor(session.Volume)
+	tenantRoot := us.tenantRootForStaging(session)
 	abs := filepath.Join(tenantRoot, filepath.FromSlash(session.TempPath))
 	// 纵深防御：clean 后必须仍在该租户根内（防 session.json 篡改逃逸）。
 	clean := filepath.Clean(abs)
@@ -1402,7 +1533,7 @@ func (us *UploadStore) GetOrCreateSession(uploadID, filename string, totalSize, 
 	if uploadID == "" {
 		return nil, false, fmt.Errorf("upload_id 不能为空")
 	}
-	session := newSession(uploadID, filename, totalSize, chunkSize, totalChunks, fileChecksum, fileModTime, us.sessionTTL)
+	session := newSession(newSessionParams{UploadID: uploadID, Filename: filename, TotalSize: totalSize, ChunkSize: chunkSize, TotalChunks: totalChunks, FileChecksum: fileChecksum, FileModTime: fileModTime, SessionTTL: us.sessionTTL})
 
 	us.logger.Info("创建上传会话", "upload_id", uploadID, "file_name", filename,
 		"total_size", totalSize, "chunk_size", chunkSize, "total_chunks", totalChunks)
@@ -1484,6 +1615,19 @@ func (us *UploadStore) setSessionRouteIfCurrent(expect *ChunkedUploadSession, vo
 		s.Pool = pool
 		s.PoolRes = poolRes
 	})
+}
+
+// setSessionStagingVolumeIfCurrent 发布会话的 staging 落点卷（身份门控，语义同
+// setSessionRouteIfCurrent）。外部卷目标时把分块内容落点钉在**默认卷**——temp 解析
+// （tenantRootForStaging）据此定位本地 staging 租户根。
+func (us *UploadStore) setSessionStagingVolumeIfCurrent(expect *ChunkedUploadSession, stagingVolume string) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.StagingVolume = stagingVolume })
+}
+
+// setSessionExternalTargetIfCurrent 发布会话的「外部卷目标」标记（身份门控，语义同
+// setSessionRouteIfCurrent）。complete 据此决定走「本地 rename」还是「staging 转存外部卷」。
+func (us *UploadStore) setSessionExternalTargetIfCurrent(expect *ChunkedUploadSession) bool {
+	return us.publishSessionIfCurrent(expect, func(s *ChunkedUploadSession) { s.ExternalTarget = true })
 }
 
 // setSessionStorageMgrReservedIfCurrent 是 SetSessionStorageMgrReserved 的身份门控版本

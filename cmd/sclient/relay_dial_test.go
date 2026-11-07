@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// fakeRelayDialClient 是 relayDialClient 的测试桩：RelayStream 从预置的 conns 通道
+// fakeRelayDialClient 是 relayDialer 的测试桩：RelayStream 从预置的 conns 通道
 // 取一条 net.Conn（每次调用取一条），并记录 target/addr 调用。
 type fakeRelayDialClient struct {
 	mu    sync.Mutex

@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/hex"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -191,23 +192,20 @@ func TestTrustRegister_ContextServerURL(t *testing.T) {
 	}
 }
 
-// TestTrustRegister_NoContext_FallsBackToFlat：config.yaml 不存在（context 模式
-// 无配置）→ 回落旧平铺路径（register 用 cfgSvc 的 server_url，回填平铺配置）。
+// TestTrustRegister_NoContext_FailsClosed（统一 context 后）：config.yaml 不存在
+// → register fail-closed 报错指引创建（不再静默回落平铺——v1 双源分裂的根治）。
 func TestTrustRegister_NoContext_FallsBackToFlat(t *testing.T) {
 	env := newTrustLoginEnv(t, false)
-	// 既有平铺 cfgPath（sclient.yaml）已配置 srv.URL。
-	out, _, err := env.register(t, "eve")
-	if err != nil {
-		t.Fatalf("trust register (flat) failed: %v", err)
+	// newTrustLoginEnv 现在也写 config.yaml（统一 context），故改为：删除 config.yaml
+	// 模拟无配置首启 → register 应 fail-closed。
+	if rerr := os.Remove(env.cfgPath); rerr != nil {
+		t.Fatalf("remove config.yaml: %v", rerr)
 	}
-	if !strings.Contains(out.String(), "ak-totp-0123456789abcdef") {
-		t.Errorf("输出应含注册 AK: %s", out.String())
+	_, errOut, err := env.register(t, "eve")
+	if err == nil {
+		t.Fatal("无 config.yaml 时 register 应报错（fail-closed）")
 	}
-	cfg := env.reload(t)
-	if cfg.AccessKey != "ak-totp-0123456789abcdef" {
-		t.Errorf("平铺回填 access_key: %q", cfg.AccessKey)
-	}
-	if cfg.AccessKeySecret != "" || cfg.AccessKeyID != "" {
-		t.Errorf("平铺 register 不应回填 secret/id: %+v", cfg)
+	if !strings.Contains(err.Error()+errOut.String(), "config.yaml") {
+		t.Errorf("错误应提示 config.yaml，got: %v %s", err, errOut.String())
 	}
 }

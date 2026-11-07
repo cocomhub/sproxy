@@ -51,8 +51,9 @@ func (c *FileClient) CloudDownloadChain(ctx context.Context,
 		Status:  runner.Status(),
 		raw:     runner,
 		extra: map[string]any{
-			"local_path": runner.LocalPath,
-			"keep_files": runner.KeepFiles,
+			"local_path":     runner.LocalPath,
+			"keep_files":     runner.KeepFiles,
+			"download_local": runnerDownloadLocal(runner),
 		},
 	}, nil
 }
@@ -117,6 +118,24 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 	}
 
 	runner.SetClient(c)
+	runner.SetOptions(resumeChainOptions(runner))
+
+	if err := c.chainManager.Run(ctx, runner); err != nil {
+		return nil, err
+	}
+
+	return &ChainResult{
+		ChainID: runner.ID(),
+		Phase:   runner.Phase(),
+		Status:  runner.Status(),
+		raw:     runner,
+		extra:   resumeChainExtra(runner),
+	}, nil
+}
+
+// resumeChainOptions 从持久化的链式操作取回轮询/超时/keepFiles 选项（CloudDownloadChain
+// 与 CloudDownloadGroupChain 均取回，否则中断的链式操作恢复后会退回默认值 3s/30m/false）。
+func resumeChainOptions(runner ChainRunner) chainOptions {
 	opts := chainOptions{
 		pollInterval: 3 * time.Second,
 		timeout:      30 * time.Minute,
@@ -130,9 +149,12 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 			opts.timeout = cdc.Timeout
 		}
 		opts.keepFiles = cdc.KeepFiles
+		// H2：resume 须回填转存/保留/下载本地参数（否则 SetOptions 清零 → resume 后
+		// 命中 !DownloadLocal 直接完成、本地文件缺失——默认链 resume 报完成但无文件）。
+		opts.transfer = cdc.Transfer
+		opts.save = cdc.Save
+		opts.downloadLocal = cdc.DownloadLocal
 	}
-	// CloudDownloadGroupChain 恢复同样需要取回持久化的轮询/超时/keepFiles 选项，
-	// 否则中断的组链式操作恢复后会退回默认值（3s/30m/false）。
 	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
 		if gdc.PollInterval > 0 {
 			opts.pollInterval = gdc.PollInterval
@@ -141,33 +163,43 @@ func (c *FileClient) ResumeChain(ctx context.Context, chainID string) (*ChainRes
 			opts.timeout = gdc.Timeout
 		}
 		opts.keepFiles = gdc.KeepFiles
+		// F3：resume 须回填三参（与单链 H2 一致）——否则 SetOptions 清零 → 恢复后
+		// transfer/save/download_local 丢失，组链重建为纯下载（服务端组重提交降级）。
+		opts.transfer = gdc.Transfer
+		opts.save = gdc.Save
+		opts.downloadLocal = gdc.DownloadLocal
 	}
-	runner.SetOptions(opts)
+	return opts
+}
 
-	if err := c.chainManager.Run(ctx, runner); err != nil {
-		return nil, err
-	}
-
+// resumeChainExtra 构造恢复链式操作的摘要附加字段（local_path/keep_files/group_id）。
+func resumeChainExtra(runner ChainRunner) map[string]any {
 	extra := map[string]any{}
 	if cdc, ok := runner.(*CloudDownloadChain); ok {
 		extra["local_path"] = cdc.LocalPath
 		extra["keep_files"] = cdc.KeepFiles
+		extra["download_local"] = cdc.DownloadLocal
 	}
 	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
 		extra["local_path"] = gdc.LocalPath
 		extra["keep_files"] = gdc.KeepFiles
+		extra["download_local"] = gdc.DownloadLocal
 		if gdc.GroupID != "" {
 			extra["group_id"] = gdc.GroupID
 		}
 	}
+	return extra
+}
 
-	return &ChainResult{
-		ChainID: runner.ID(),
-		Phase:   runner.Phase(),
-		Status:  runner.Status(),
-		raw:     runner,
-		extra:   extra,
-	}, nil
+// runnerDownloadLocal 返回 runner 的 download_local 生效值（extra 构造用）。
+func runnerDownloadLocal(runner ChainRunner) bool {
+	if cdc, ok := runner.(*CloudDownloadChain); ok {
+		return cdc.DownloadLocal
+	}
+	if gdc, ok := runner.(*CloudDownloadGroupChain); ok {
+		return gdc.DownloadLocal
+	}
+	return true
 }
 
 // ListChains 列出所有活跃链式操作。

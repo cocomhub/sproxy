@@ -66,6 +66,11 @@ func CAHTTPClient(caFile string) (*http.Client, error) {
 // 它是**零引用**导出（生产与测试均无调用方，仅自身测试引用），留着只会让读者以为
 // 「信令 token」仍是现行机制。
 func MeshAccessKey(flagKey, cfgKey string) string {
+	return accessKeyOrConfig(flagKey, cfgKey)
+}
+
+// accessKeyOrConfig 是 AK/SK/ID 三导出助手共用的「显式 flag 优先，否则配置值」回落逻辑。
+func accessKeyOrConfig(flagKey, cfgKey string) string {
 	if flagKey != "" {
 		return flagKey
 	}
@@ -73,20 +78,15 @@ func MeshAccessKey(flagKey, cfgKey string) string {
 }
 
 // MeshAccessKeySecret 返回 SproxySig 认证 AccessKeySecret：显式 flag 优先，否则配置值。
+// 与 MeshAccessKey 同构（flag-or-config 回落），委托共享实现避免重复。
 func MeshAccessKeySecret(flagKey, cfgKey string) string {
-	if flagKey != "" {
-		return flagKey
-	}
-	return cfgKey
+	return accessKeyOrConfig(flagKey, cfgKey)
 }
 
 // MeshAccessKeyID 返回 SproxySig 认证 SK 条目 ID（skey-id，v2 协议必传）：
 // 显式 flag 优先，否则配置值。信令/节点列表/网关签名须携带，否则 hub 验签 401。
 func MeshAccessKeyID(flagID, cfgID string) string {
-	if flagID != "" {
-		return flagID
-	}
-	return cfgID
+	return accessKeyOrConfig(flagID, cfgID)
 }
 
 // MeshTargetRefresher 按需解析 mesh 目标，带 TTL 缓存与单飞（single-flight）刷新。
@@ -191,11 +191,17 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 	r.mu.Lock()
 	r.refreshing = false
 	close(r.done) // 等待者唤醒后先抢锁再读最终状态，无竞态
+	defer r.mu.Unlock()
 	if err != nil {
 		r.refreshErr = fmt.Errorf("查询 mesh 服务失败: %w", err)
-		r.mu.Unlock()
 		return nil, r.refreshErr
 	}
+	return r.storeCandidatesLocked(svcs)
+}
+
+// storeCandidatesLocked 在 mu 保护下收集同名服务候选并固化候选池，返回 RR 取到的目标。
+// svcs 为一次 MeshServices 查询结果；服务不存在（无同名候选）返回 ErrMeshServiceUnavailable。
+func (r *MeshTargetRefresher) storeCandidatesLocked(svcs []MeshService) (*MeshService, error) {
 	// 收集所有同名服务候选，按 NodeID 排序固化（map/遍历序不稳定，排序保证 RR
 	// 序列确定性可测），TTL 内每次 Resolve 从池轮询取下一个。
 	cands := make([]MeshService, 0, 4)
@@ -208,14 +214,11 @@ func (r *MeshTargetRefresher) Resolve(ctx context.Context) (*MeshService, error)
 	if len(cands) == 0 {
 		r.candidates = nil
 		r.lastRefresh = time.Time{}
-		r.mu.Unlock()
 		return nil, ErrMeshServiceUnavailable(r.service)
 	}
 	r.candidates = cands
 	r.lastRefresh = r.now()
-	t := r.pickNextLocked()
-	r.mu.Unlock()
-	return t, nil
+	return r.pickNextLocked(), nil
 }
 
 // pickNextLocked 在 mu 保护下从候选池按轮询游标取下一个候选。

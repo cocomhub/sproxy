@@ -46,7 +46,6 @@ ms-playwright/
 
 # git worktree 目录（并行任务隔离工作区，不入库）
 .worktrees/
-pkg/server/alice/
 deploy/sproxy.yaml
 
 # pi-memory 项目记忆（仅 MEMORY.md 入库；SCRATCHPAD/daily/archive 本地保留）
@@ -57,3 +56,14 @@ deploy/sproxy.yaml
 /.pi/memory/*.md
 TASK.md
 TASK.md
+
+# golangci-lint 每仓库缓存（pre-commit hook 隔离用，不入库）
+.cache/
+
+# 本地临时/备份/机器专属文件（一律不入库；作用域=全仓任意目录）
+# 覆盖：提交信息与 PR 正文的临时文件（.cm.tmp/.pb.tmp/.mb.tmp）、任意 *.tmp/*.bak、
+# 机器专属配置（*.local）、本地覆盖目录（local/）。
+*.tmp
+*.bak
+*.local
+local/

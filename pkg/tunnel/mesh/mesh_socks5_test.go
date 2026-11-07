@@ -5,7 +5,6 @@ package mesh
 
 import (
 	"context"
-	"io"
 	"net"
 	"testing"
 	"time"
@@ -39,48 +38,14 @@ func TestMeshSocks5_Exit(t *testing.T) {
 	probeMDNSLoopback(t, port)
 
 	// 出口节点本地 echo 服务（出口 dial 放行目标）。
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("监听 echo: %v", err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cc net.Conn) {
-				defer cc.Close()
-				_, _ = io.Copy(cc, cc)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
+	echoAddr := startMDNSEchoService(t)
 
-	logger := testMDNSLogger()
-	nodeCtx := t.Context()
-	nodeErr := make(chan error, 1)
-	go func() {
-		nodeErr <- RunNode(nodeCtx, NodeConfig{
-			NodeID:         "node-exit",
-			Services:       []hub.Service{{Name: "echo", Addr: echoAddr}},
-			ServiceAddrs:   []string{echoAddr},
-			DialAllow:      true,
-			EnableMDNS:     true,
-			MDNSOnly:       true,
-			MDNSPort:       port,
-			SignalAddr:     "127.0.0.1:0",
-			EnableWebRTC:   true,
-			DiscoveryPeers: make(chan string, 8),
-			Logger:         logger,
-		})
-	}()
+	startSocksExitNode(t, port, echoAddr)
 
 	// SOCKS5 代理侧 mDNS 浏览：发现出口节点信令端点。
 	browseCtx, browseCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer browseCancel()
-	mdnsSrv, err := NewMDNS(MDNSConfig{NodeID: "node-socks", BrowseOnly: true, Port: port, Logger: logger})
+	mdnsSrv, err := NewMDNS(MDNSConfig{NodeID: "node-socks", BrowseOnly: true, Port: port, Logger: testMDNSLogger()})
 	if err != nil {
 		t.Fatalf("NewMDNS: %v", err)
 	}
@@ -91,24 +56,7 @@ func TestMeshSocks5_Exit(t *testing.T) {
 
 	// mesh 路由 Dial：CONNECT 目标经 mDNS 直连信令到出口节点，写 dial 帧由出口拨号。
 	dial := func(ctx context.Context, addr string) (net.Conn, error) {
-		peer, perr := mdnsSrv.LookupPeer(ctx, "node-exit", 15*time.Second)
-		if perr != nil {
-			return nil, perr
-		}
-		if verr := ValidateSignalAddr(peer.SignalAddr); verr != nil {
-			return nil, verr
-		}
-		sig, serr := DialDirectSignaler(ctx, peer.SignalAddr, "node-socks")
-		if serr != nil {
-			return nil, serr
-		}
-		target := &client.MeshService{Name: "socks", Node: "node-exit", Addr: addr}
-		res, derr := DialDirect(ctx, sig, target)
-		_ = sig.Close()
-		if derr != nil {
-			return nil, derr
-		}
-		return res.Conn, nil
+		return socksMeshDial(ctx, mdnsSrv, addr)
 	}
 
 	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -116,7 +64,7 @@ func TestMeshSocks5_Exit(t *testing.T) {
 		t.Fatalf("监听 socks: %v", err)
 	}
 	defer socksLn.Close()
-	ss := socks5.New(socks5.Config{Dial: dial, Logger: logger})
+	ss := socks5.New(socks5.Config{Dial: dial, Logger: testMDNSLogger()})
 	socksCtx := t.Context()
 	go func() { _ = ss.Serve(socksCtx, socksLn) }()
 
@@ -130,6 +78,62 @@ func TestMeshSocks5_Exit(t *testing.T) {
 		t.Fatalf("经 mesh SOCKS5 CONNECT 到 echo 失败: %v", err)
 	}
 	defer conn.Close()
+	socksEchoRoundTrip(t, conn)
+
+	// SSRF 边界（安全审查）：CONNECT 到出口未宣告的内网/loopback 目标应被出口
+	// dial 策略拒绝（NewServiceDialPolicy 拒绝 loopback，除非在 ServiceAddrs）。
+	// SOCKS5 握手先回「成功」（mesh relay 无结果帧，代理无法预知出口拨号结果），
+	// 但出口拒绝拨号 → 流立即关闭，无数据可达（目标从未建立）。
+	socksAssertSSRFBlocked(t, proxyDialer)
+}
+
+// startSocksExitNode 起出口 mesh 节点（node-exit）：宣告 echo 服务 + 出口拨号放行。
+func startSocksExitNode(t *testing.T, port int, echoAddr string) {
+	t.Helper()
+	nodeCtx := t.Context()
+	go func() {
+		_ = RunNode(nodeCtx, NodeConfig{
+			NodeID:         "node-exit",
+			Services:       []hub.Service{{Name: "echo", Addr: echoAddr}},
+			ServiceAddrs:   []string{echoAddr},
+			DialAllow:      true,
+			EnableMDNS:     true,
+			MDNSOnly:       true,
+			MDNSPort:       port,
+			SignalAddr:     "127.0.0.1:0",
+			EnableWebRTC:   true,
+			DiscoveryPeers: make(chan string, 8),
+			Logger:         testMDNSLogger(),
+		})
+	}()
+}
+
+// socksMeshDial mesh 路由 Dial：CONNECT 目标经 mDNS 直连信令到出口节点，写 dial 帧由
+// 出口拨号。返回数据面连接（出口已就绪）。
+func socksMeshDial(ctx context.Context, mdnsSrv *MDNSServer, addr string) (net.Conn, error) {
+	peer, perr := mdnsSrv.LookupPeer(ctx, "node-exit", 15*time.Second)
+	if perr != nil {
+		return nil, perr
+	}
+	if verr := ValidateSignalAddr(peer.SignalAddr); verr != nil {
+		return nil, verr
+	}
+	sig, serr := DialDirectSignaler(ctx, peer.SignalAddr, "node-socks")
+	if serr != nil {
+		return nil, serr
+	}
+	target := &client.MeshService{Name: "socks", Node: "node-exit", Addr: addr}
+	res, derr := DialDirect(ctx, sig, target)
+	_ = sig.Close()
+	if derr != nil {
+		return nil, derr
+	}
+	return res.Conn, nil
+}
+
+// socksEchoRoundTrip 经 SOCKS5 连接写读 echo，断言数据往返一致。
+func socksEchoRoundTrip(t *testing.T, conn net.Conn) {
+	t.Helper()
 	if _, werr := conn.Write([]byte("ping-socks-mesh")); werr != nil {
 		t.Fatalf("写失败: %v", werr)
 	}
@@ -144,11 +148,11 @@ func TestMeshSocks5_Exit(t *testing.T) {
 	if string(buf[:n]) != "ping-socks-mesh" {
 		t.Fatalf("echo = %q, want ping-socks-mesh", buf[:n])
 	}
+}
 
-	// SSRF 边界（安全审查）：CONNECT 到出口未宣告的内网/loopback 目标应被出口
-	// dial 策略拒绝（NewServiceDialPolicy 拒绝 loopback，除非在 ServiceAddrs）。
-	// SOCKS5 握手先回「成功」（mesh relay 无结果帧，代理无法预知出口拨号结果），
-	// 但出口拒绝拨号 → 流立即关闭，无数据可达（目标从未建立）。
+// socksAssertSSRFBlocked SSRF 边界断言：CONNECT 到出口未放行的内网目标应无数据可达。
+func socksAssertSSRFBlocked(t *testing.T, proxyDialer proxy.Dialer) {
+	t.Helper()
 	conn2, err := proxyDialer.Dial("tcp", "127.0.0.1:1")
 	if err == nil {
 		defer conn2.Close()

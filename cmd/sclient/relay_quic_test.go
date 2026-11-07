@@ -4,30 +4,22 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"encoding/pem"
-	"fmt"
-	"io"
-	"log/slog"
 	"math/big"
 	"net"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
-	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
@@ -55,31 +47,30 @@ func TestRelayStart_QUICTransport_NoWS_RelayDial(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// 1. echo server
-	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer echoLn.Close()
-	go func() {
-		for {
-			c, aerr := echoLn.Accept()
-			if aerr != nil {
-				return
-			}
-			go func(cn net.Conn) {
-				defer cn.Close()
-				_, _ = io.Copy(cn, cn)
-			}(c)
-		}
-	}()
-	echoAddr := echoLn.Addr().String()
-
-	// 2. hub：仅 QUIC（无 WS/无 TCP），SproxySig 准入
 	const (
 		ak = "ak-relay-quic-00000000000000000000"
 		sk = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	)
+	echoAddr := startTestEchoServer(t)
+	rt, hubAddr := startTestQUICHub(ctx, t, ak, sk)
+	leafErr := startTestRelayLeaf(ctx, "quic", "leaf-cli-quic", hubAddr, echoAddr, ak, sk)
+
+	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-cli-quic") },
+		"leaf-cli-quic not registered in time")
+
+	assertRelayStreamEcho(t, rt, "leaf-cli-quic", echoAddr, []byte("cli-quic-relay-dial-ok"))
+
+	cancel()
+	select {
+	case <-leafErr:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runRelayOnce 未退出")
+	}
+}
+
+// startTestQUICHub 起一个仅 QUIC 传输的 hub（SproxySig 准入），返回路由表与地址。
+func startTestQUICHub(ctx context.Context, t *testing.T, ak, sk string) (*hub.MeshRouteTable, string) {
+	t.Helper()
 	rt := hub.NewMeshRouteTable()
 	hs := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: ak, Secret: sk}})), testutil.DiscardLogger())
 	qTP := xfer.Get("quic")
@@ -90,81 +81,9 @@ func TestRelayStart_QUICTransport_NoWS_RelayDial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hub QUIC listen 失败: %v", err)
 	}
-	defer qln.Close()
+	t.Cleanup(func() { _ = qln.Close() })
 	go func() { _ = hs.AcceptTCP(ctx, qln) }()
-	hubAddr := qln.(interface{ Addr() string }).Addr()
-
-	// 3. leaf：真实 runRelayOnce，transport=quic，声明 echo 服务 + 出口模式
-	leafErr := make(chan error, 1)
-	go func() {
-		leafErr <- runRelayOnce(ctx, "quic", "leaf-cli-quic", hubAddr, "http://127.0.0.1:1",
-			ak, sk, "", false, "", "", true, []string{"echo:" + echoAddr}, nil, hub.DefaultVirtualSubnet, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	}()
-
-	// 4. 等待叶子注册进路由表
-	testutil.WaitFor(t, 30*time.Second, func() bool { return rt.Has("leaf-cli-quic") },
-		"leaf-cli-quic not registered in time")
-
-	// 5. RelayStreamHandler + httptest（等价 relay dial 的 HTTP 面）
-	h := server.NewRelayStreamHandler(rt, testutil.DiscardLogger())
-	tsrv := httptest.NewServer(h)
-	defer tsrv.Close()
-
-	// 6. 原始 TCP CONNECT 风格拨号（等价 FileClient.RelayStream）
-	srvAddr := strings.TrimPrefix(tsrv.URL, "http://")
-	conn, err := net.Dial("tcp", srvAddr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	body, _ := json.Marshal(server.RelayStreamRequest{Target: "leaf-cli-quic", Type: "tcp", Addr: echoAddr})
-	reqLine := fmt.Sprintf("POST /api/relay/stream HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", srvAddr, len(body))
-	if _, werr := io.WriteString(conn, reqLine); werr != nil {
-		t.Fatal(werr)
-	}
-	if _, werr := conn.Write(body); werr != nil {
-		t.Fatal(werr)
-	}
-
-	br := bufio.NewReader(conn)
-	statusLine, err := br.ReadString('\n')
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(statusLine, " 200 ") {
-		rest, _ := io.ReadAll(io.LimitReader(br, 4<<10))
-		t.Fatalf("hub 返回 %s%s", strings.TrimSpace(statusLine), rest)
-	}
-	for {
-		line, rerr := br.ReadString('\n')
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if line == "\r\n" || line == "\n" {
-			break
-		}
-	}
-
-	// 7. 双向字节流：写 payload 读回 echo
-	payload := []byte("cli-quic-relay-dial-ok")
-	if _, werr := conn.Write(payload); werr != nil {
-		t.Fatalf("写失败: %v", werr)
-	}
-	got := make([]byte, len(payload))
-	if _, rerr := io.ReadFull(conn, got); rerr != nil {
-		t.Fatalf("读失败: %v", rerr)
-	}
-	if string(got) != string(payload) {
-		t.Fatalf("echo 不匹配: got %q want %q", got, payload)
-	}
-
-	cancel()
-	select {
-	case <-leafErr:
-	case <-time.After(2 * time.Second):
-		t.Fatal("runRelayOnce 未退出")
-	}
+	return rt, qln.(interface{ Addr() string }).Addr()
 }
 
 // setupQUICTestCertEnv 生成一套可互相校验的 QUIC TLS 证书环境并注入 env：

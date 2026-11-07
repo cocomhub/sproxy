@@ -389,7 +389,7 @@ func TestSignalBroker_PurgeOnNodeRemove(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", w.Code)
 	}
-	if m := b.queue.Peek("peer-b", ""); m == nil {
+	if b.queue.Peek("peer-b", "") == nil {
 		t.Fatal("expected message in peer-b inbox before removal")
 	}
 

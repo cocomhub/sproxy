@@ -111,6 +111,9 @@ type frozenChunkedInitRequest struct {
 	FileChecksum string `json:"file_checksum"`
 	FileModTime  int64  `json:"file_mod_time"`
 	Volume       string `json:"volume,omitempty"`
+	// MetaExtra 首次初始化即携带的自定义元数据（A/B/C 档；body 可装 24KiB JSON，
+	// 比 X-File-Meta-Extra 头更可靠——无 24KiB 头长度截断风险）。complete 落 .meta sidecar。
+	MetaExtra map[string]any `json:"meta_extra,omitempty"`
 }
 
 type frozenChunkedCompleteRequest struct {

@@ -322,43 +322,8 @@ func DialE2EStream(ctx context.Context, outer net.Conn, addr string, path string
 	// 静态密钥由对端指纹派生（pin 非空或本端有身份时）；纯 ECDH（无 pin 且无身份）时 nil。
 	// F-1：与 ServeE2EStream 条件对称（len(pin)>0 || Identity != nil）——两端必须镜像，
 	// 否则一端派生 staticKey 另一端 nil 导致 deriveSessionKey 走不同分支，握手密钥不一致。
-	var staticKey []byte
-	if len(opts.PeerFingerprints) > 0 || opts.Identity != nil {
-		if len(opts.PeerFingerprints) > 0 {
-			staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
-		} else {
-			staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
-		}
-	}
-	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
-	defer hcancel()
-	// ctx 感知握手（Minor-1）：PerformHandshakeConn 的 io.ReadFull 不响应 ctx 取消
-	// （裸阻塞在连接上）——握手放 goroutine，select ctx.Done 时关闭 outer 解除阻塞，
-	// 防裸 ctx 无限滞留（DoS 面）。握手成功/失败经 ch 回传。
-	type hsResult struct {
-		key []byte
-		fp  string
-		err error
-	}
-	hsCh := make(chan hsResult, 1)
-	go func() {
-		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, true, opts.Identity, opts.PeerFingerprints, staticKey)
-		hsCh <- hsResult{key: key, fp: fp, err: herr}
-	}()
-	select {
-	case r := <-hsCh:
-		if r.err != nil {
-			return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", r.err)
-		}
-		sc, cerr := newE2EStreamConn(outer, r.key)
-		if cerr != nil {
-			return nil, cerr
-		}
-		return sc, nil
-	case <-hctx.Done():
-		_ = outer.Close() // 解除握手 goroutine 的 ReadFull 阻塞
-		return nil, fmt.Errorf("endtoend: ECDH 握手超时/取消: %w", hctx.Err())
-	}
+	staticKey := deriveE2EDialStaticKey(opts)
+	return e2eHandshake(ctx, outer, opts, staticKey, true)
 }
 
 // DialE2EHandshake 是 DialE2EStream 的「仅握手」变体：**不写 e2e dial 帧**，
@@ -440,36 +405,60 @@ func serveE2EStreamAfterFrame(ctx context.Context, outer net.Conn, meta []byte, 
 	}
 	// 读 e2e dial 帧（校验 e2e:true——fail-closed，非 e2e 帧拒绝）。
 	// meta 非 nil = 首帧已由调用方读取（跳过读帧，仅校验）；nil = 本函数读帧。
-	var d hub.DialRequest
-	if meta != nil {
-		if uerr := json.Unmarshal(meta, &d); uerr != nil || d.Dial == "" {
-			return nil, fmt.Errorf("endtoend: 非法已读 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
-		}
-	} else {
-		head, err := readLenFrame(outer, maxDialFrameBytes)
-		if err != nil {
-			return nil, fmt.Errorf("endtoend: 读 e2e dial 帧失败: %w", err)
-		}
-		if uerr := json.Unmarshal(head, &d); uerr != nil || d.Dial == "" {
-			return nil, fmt.Errorf("endtoend: 非法 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
-		}
+	d, derr := readE2EDialFrame(outer, meta)
+	if derr != nil {
+		return nil, derr
 	}
 	if !d.E2E {
 		return nil, fmt.Errorf("endtoend: 非 e2e dial 帧（缺少 e2e:true 标记），拒绝按加密流处理")
 	}
 	// 静态密钥由本端指纹派生（Identity 非空或对端 pin 非空时）；纯 ECDH 时 nil。
 	// F-1：与 DialE2EStream 条件对称（len(pin)>0 || Identity != nil）。
-	var staticKey []byte
-	if len(opts.PeerFingerprints) > 0 || opts.Identity != nil {
-		if opts.Identity != nil {
-			staticKey = tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
-		} else {
-			staticKey = tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+	staticKey := deriveE2EStaticKey(opts)
+	return e2eHandshake(ctx, outer, opts, staticKey, false)
+}
+
+// readE2EDialFrame 取 e2e dial 帧并校验首字段非空：meta 非 nil = 首帧已由调用方读取
+// （跳过读帧，仅校验）——修复首帧双读（relay.Serve dOK 分支读 dial 帧后传回，避免错位）；
+// nil = 从 outer 读一帧。两者都要求 Dial 非空（合法帧，fail-closed）。
+func readE2EDialFrame(outer net.Conn, meta []byte) (hub.DialRequest, error) {
+	var d hub.DialRequest
+	if meta != nil {
+		if uerr := json.Unmarshal(meta, &d); uerr != nil || d.Dial == "" {
+			return d, fmt.Errorf("endtoend: 非法已读 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
 		}
+		return d, nil
 	}
+	head, err := readLenFrame(outer, maxDialFrameBytes)
+	if err != nil {
+		return d, fmt.Errorf("endtoend: 读 e2e dial 帧失败: %w", err)
+	}
+	if uerr := json.Unmarshal(head, &d); uerr != nil || d.Dial == "" {
+		return d, fmt.Errorf("endtoend: 非法 e2e dial 帧（需 {\"dial\":addr,\"e2e\":true}）")
+	}
+	return d, nil
+}
+
+// deriveE2EStaticKey 派生静态密钥：Identity 非空 → 本端指纹；否则对端 pin 首项 → 其
+// 指纹；两者皆空（纯 ECDH）→ nil。F-1：与 DialE2EStream 条件对称（len(pin)>0 ||
+// Identity != nil）。
+func deriveE2EStaticKey(opts EndToEndOptions) []byte {
+	switch {
+	case opts.Identity != nil:
+		return tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+	case len(opts.PeerFingerprints) > 0:
+		return tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+	default:
+		return nil
+	}
+}
+
+// e2eHandshake 执行 ctx 感知的 ECDH 握手：后台 goroutine 跑 PerformHandshakeConn
+// （isClient 区分拨号/接受角色），select 等待结果或超时/取消（到时关闭 outer 解除
+// ReadFull 阻塞）。成功返回新建的加密流连接；失败返回（含超时/取消）错误。
+func e2eHandshake(ctx context.Context, outer net.Conn, opts EndToEndOptions, staticKey []byte, isClient bool) (net.Conn, error) {
 	hctx, hcancel := handshakeCtx(ctx, opts.HandshakeTimeout)
 	defer hcancel()
-	// ctx 感知握手（Minor-1，与 DialE2EStream 对称）：关闭 outer 解除 ReadFull 阻塞。
 	type hsResult struct {
 		key []byte
 		fp  string
@@ -477,7 +466,7 @@ func serveE2EStreamAfterFrame(ctx context.Context, outer net.Conn, meta []byte, 
 	}
 	hsCh := make(chan hsResult, 1)
 	go func() {
-		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, false, opts.Identity, opts.PeerFingerprints, staticKey)
+		key, fp, herr := tunnel.PerformHandshakeConn(hctx, outer, isClient, opts.Identity, opts.PeerFingerprints, staticKey)
 		hsCh <- hsResult{key: key, fp: fp, err: herr}
 	}()
 	select {
@@ -485,15 +474,24 @@ func serveE2EStreamAfterFrame(ctx context.Context, outer net.Conn, meta []byte, 
 		if r.err != nil {
 			return nil, fmt.Errorf("endtoend: ECDH 握手失败: %w", r.err)
 		}
-		sc, cerr := newE2EStreamConn(outer, r.key)
-		if cerr != nil {
-			return nil, cerr
-		}
-		return sc, nil
+		return newE2EStreamConn(outer, r.key)
 	case <-hctx.Done():
 		_ = outer.Close() // 解除握手 goroutine 的 ReadFull 阻塞
 		return nil, fmt.Errorf("endtoend: ECDH 握手超时/取消: %w", hctx.Err())
 	}
+}
+
+// deriveE2EDialStaticKey 派生静态密钥（拨号侧）：对端 pin 首项优先，否则本端身份
+// 指纹；两者皆空（纯 ECDH）→ nil。F-1：与 ServeE2EStream 条件对称
+// （len(pin)>0 || Identity != nil）——两端镜像，避免 deriveSessionKey 分支不一致。
+func deriveE2EDialStaticKey(opts EndToEndOptions) []byte {
+	if len(opts.PeerFingerprints) > 0 {
+		return tunnel.DeriveRemoteStaticKey(opts.PeerFingerprints[0])
+	}
+	if opts.Identity != nil {
+		return tunnel.DeriveRemoteStaticKey(opts.Identity.Fingerprint())
+	}
+	return nil
 }
 
 // handshakeCtx 为 E2E 握手构造带超时的 ctx（0 = 调用方 ctx 原样，不额外设超时）。

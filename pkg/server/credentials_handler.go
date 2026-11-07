@@ -124,7 +124,7 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 	actor := ActorFrom(r.Context())
 	if actor == "" || actor != targetAK {
 		// 非本人：按 404 处理（不泄露目标 AK 是否存在）。
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -132,12 +132,12 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 	var req renewCredentialRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 			return
 		}
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -182,7 +182,7 @@ func (h *Handlers) renewCredentialHandler(w http.ResponseWriter, r *http.Request
 
 // errCredentialRingUnavailable 是「凭据 Ring 未装配」的哨兵错误（服务端配置错误，
 // renew 出错映射为 500，见 renewCredentialHandler）。
-var errCredentialRingUnavailable = errors.New("凭据 Ring 未装配")
+var errCredentialRingUnavailable = errors.New(msgCredRingMissing)
 
 // errCredentialPersistFailed 是「凭据持久化失败」的哨兵错误（由 renewCredential
 // 在 Store.Save 失败时返回；renewCredentialHandler 据其映射为
@@ -325,11 +325,11 @@ func (h *Handlers) skListHandler(w http.ResponseWriter, r *http.Request) {
 	targetAK := r.PathValue("ak")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -342,7 +342,7 @@ func (h *Handlers) skListHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -382,7 +382,7 @@ func (h *Handlers) skDeleteHandler(w http.ResponseWriter, r *http.Request) {
 	skID := r.PathValue("skID")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -391,7 +391,7 @@ func (h *Handlers) skDeleteHandler(w http.ResponseWriter, r *http.Request) {
 			Action: auditActionCredSKDelete, ObjectType: "credential", Object: targetAK,
 			Detail: skID, Result: AuditResultError,
 		})
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -425,19 +425,19 @@ func (h *Handlers) skExpireHandler(w http.ResponseWriter, r *http.Request) {
 	skID := r.PathValue("skID")
 	actor := ActorFrom(r.Context())
 	if actor == "" || (actor != targetAK && h.getRole(actor) != "admin") {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
 	var req skExpireRequest
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-			sendJSONResponse(w, map[string]any{"error": "invalid request body"}, http.StatusBadRequest)
+			sendJSONResponse(w, map[string]any{"error": msgInvalidRequestBody}, http.StatusBadRequest)
 			return
 		}
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -456,7 +456,7 @@ func (h *Handlers) skExpireHandler(w http.ResponseWriter, r *http.Request) {
 			Action: auditActionCredSKExpire, ObjectType: "credential", Object: targetAK,
 			Detail: skID, Result: AuditResultError,
 		})
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, msgNotFound, http.StatusNotFound)
 		return
 	}
 
@@ -498,7 +498,7 @@ func (h *Handlers) akListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -552,58 +552,17 @@ type akAddRequest struct {
 // akAddHandler 处理 POST /api/credentials——admin 新增 AK（4B 注册用；4A 无 admin → 403）。
 // 实现保留（任务 5 端点表）；4A 因恒无 admin 条目，逻辑上不可达，但仍完整实现供 4B 启用。
 func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
-	actor := ActorFrom(r.Context())
-	if actor == "" || h.getRole(actor) != "admin" {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	req, ok := h.readAKAddRequest(w, r)
+	if !ok {
 		return
 	}
-	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+	sk, ok := akAddResolveSecret(w, req)
+	if !ok {
 		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, MaxCredentialsBodyBytes)
-	var req akAddRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendJSONResponse(w, map[string]any{"error": credentialBodyDecodeError(err)}, http.StatusBadRequest)
-		return
-	}
-	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
-		return
-	}
-	if req.AK == "" {
-		sendJSONResponse(w, map[string]any{"error": "ak 不能为空"}, http.StatusBadRequest)
-		return
-	}
-
-	// 新增 AK（plain 条目）。显式 secret 未给则生成 32B 随机（accesskey.RandomHexHex 收归
-	// 随机段生成，避免 handler 直接 rand），返回给 admin 一次。
-	var sk string
-	if req.Secret != "" {
-		dec, derr := hex.DecodeString(req.Secret)
-		if derr != nil || len(dec) != 32 {
-			sendJSONResponse(w, map[string]any{"error": "secret 需为 64-hex（32 字节）"}, http.StatusBadRequest)
-			return
-		}
-		sk = req.Secret
-	} else {
-		gen, gerr := accesskey.RandomHexHex(32)
-		if gerr != nil {
-			sendJSONResponse(w, map[string]any{"error": "生成 secret 失败"}, http.StatusInternalServerError)
-			return
-		}
-		sk = gen
 	}
 	skBytes, _ := hex.DecodeString(sk)
-
-	// role 解析（I6/DEC-A）：'node'/'user'/'空' 合法（''/user → user）；role:"admin"
-	// 拒绝（400）——admin 只经 register 首注册原子授予，管理端点不可创建（防二主接管）。
-	role := accesskey.RoleUser
-	if req.Role == string(accesskey.RoleNode) {
-		role = accesskey.RoleNode
-	} else if req.Role != "" && req.Role != string(accesskey.RoleUser) {
-		sendJSONResponse(w, map[string]any{"error": "role 仅支持 node/user（admin 不可经此创建）"}, http.StatusBadRequest)
+	role, ok := parseAKAddRole(w, req.Role)
+	if !ok {
 		return
 	}
 
@@ -647,6 +606,71 @@ func (h *Handlers) akAddHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, map[string]any{"ak": req.AK, "sk_id": newID}, http.StatusOK)
 }
 
+// readAKAddRequest 校验 admin 角色 + Ring 装配，并解析 ak add 请求体（MaxBytesReader
+// 上限 + drain 哈希校验 + ak 非空）。失败已写响应，返回 false。
+func (h *Handlers) readAKAddRequest(w http.ResponseWriter, r *http.Request) (*akAddRequest, bool) {
+	actor := ActorFrom(r.Context())
+	if actor == "" || h.getRole(actor) != "admin" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	if h.credentialRing == nil {
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
+		return nil, false
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, MaxCredentialsBodyBytes)
+	var req akAddRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendJSONResponse(w, map[string]any{"error": credentialBodyDecodeError(err)}, http.StatusBadRequest)
+		return nil, false
+	}
+	if err := drainAndVerifyBody(r); err != nil {
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
+		return nil, false
+	}
+	if req.AK == "" {
+		sendJSONResponse(w, map[string]any{"error": "ak 不能为空"}, http.StatusBadRequest)
+		return nil, false
+	}
+	return &req, true
+}
+
+// akAddResolveSecret 解析新增 AK 的 SK：显式 secret 需为 64-hex（32 字节）；未给则
+// accesskey.RandomHexHex 生成 32B 随机（收归随机段生成），返回给 admin 一次。非法返回 false。
+func akAddResolveSecret(w http.ResponseWriter, req *akAddRequest) (string, bool) {
+	var sk string
+	if req.Secret != "" {
+		dec, derr := hex.DecodeString(req.Secret)
+		if derr != nil || len(dec) != 32 {
+			sendJSONResponse(w, map[string]any{"error": "secret 需为 64-hex（32 字节）"}, http.StatusBadRequest)
+			return "", false
+		}
+		sk = req.Secret
+	} else {
+		gen, gerr := accesskey.RandomHexHex(32)
+		if gerr != nil {
+			sendJSONResponse(w, map[string]any{"error": "生成 secret 失败"}, http.StatusInternalServerError)
+			return "", false
+		}
+		sk = gen
+	}
+	return sk, true
+}
+
+// parseAKAddRole 解析 AK 角色（I6/IP）：'node'/'user'/'空' 合法（”/user → user）；
+// role:"admin" 拒绝（400）——admin 只经 register 首条原子授予，管理端点不可创建（防二主接管）。
+func parseAKAddRole(w http.ResponseWriter, r string) (accesskey.Role, bool) {
+	role := accesskey.RoleUser
+	if r == string(accesskey.RoleNode) {
+		role = accesskey.RoleNode
+	} else if r != "" && r != string(accesskey.RoleUser) {
+		sendJSONResponse(w, map[string]any{"error": "role 仅支持 node/user（admin 不可经此创建）"}, http.StatusBadRequest)
+		return "", false
+	}
+	return role, true
+}
+
 // akDeleteRequest 是 DELETE /api/credentials/{ak} 的请求体（admin + 二次确认）。
 type akDeleteRequest struct {
 	Confirm string `json:"confirm"`
@@ -687,7 +711,7 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.credentialRing == nil {
-		sendJSONResponse(w, map[string]any{"error": "凭据 Ring 未装配"}, http.StatusInternalServerError)
+		sendJSONResponse(w, map[string]any{"error": msgCredRingMissing}, http.StatusInternalServerError)
 		return
 	}
 
@@ -698,7 +722,7 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := drainAndVerifyBody(r); err != nil {
-		sendJSONResponse(w, map[string]any{"error": "请求体校验失败"}, http.StatusBadRequest)
+		sendJSONResponse(w, map[string]any{"error": msgBadRequest}, http.StatusBadRequest)
 		return
 	}
 
@@ -728,9 +752,9 @@ func (h *Handlers) akDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, accesskey.ErrNotFound) {
 			h.RecordAudit(r.Context(), AuditEvent{
 				Action: auditActionCredAKDelete, ObjectType: "credential", Object: targetAK,
-				Result: AuditResultError, Detail: "not found",
+				Result: AuditResultError, Detail: msgNotFound,
 			})
-			http.Error(w, "not found", http.StatusNotFound)
+			http.Error(w, msgNotFound, http.StatusNotFound)
 			return
 		}
 		sendJSONResponse(w, map[string]any{"error": err.Error()}, http.StatusInternalServerError)
@@ -768,5 +792,14 @@ func credentialBodyDecodeError(err error) string {
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		return "request body too large (max 1 KiB)"
 	}
-	return "invalid request body"
+	return msgInvalidRequestBody
+}
+
+// urlSigTTLFromCfg 返回 URL 票形态的 TTL 上限（`registration.download_token_ttl`；
+// 0/缺省 → defaultURLSigTTL=1h）。装配后只读。
+func (h *Handlers) urlSigTTLFromCfg() time.Duration {
+	if cfg := h.cfgPtr.Load(); cfg != nil && cfg.Registration.DownloadTokenTTL > 0 {
+		return cfg.Registration.DownloadTokenTTL
+	}
+	return 0 // 0 → RingAuthenticator.urlSigTTL() 回落 defaultURLSigTTL
 }

@@ -81,21 +81,31 @@ func (m *mockFS) resolvePath(p string) (*mockEntry, string) {
 			return nil, p
 		}
 		// 父路径可能是符号链接目录：先解析父，再在解析后的父下查子项
-		pe, pr := m.resolvePath(parent)
-		if pe == nil || !pe.IsDir {
-			return nil, p
+		e, resolved, nextP, done := m.resolvePathViaParent(p)
+		if done {
+			return e, resolved
 		}
-		child := joinSlash(pr, name)
-		if e, ok := m.entries[child]; ok {
-			if !e.IsSymlink {
-				return e, child
-			}
-			p = e.Target
-			continue
-		}
-		return nil, p
+		p = nextP
 	}
 	return nil, p
+}
+
+// resolvePathViaParent 父路径可能是符号链接目录：先解析父，再在解析后的父下查子项。
+// done=true 时返回最终结果；done=false 表示子项为符号链接，调用方以 nextP 继续解析。
+func (m *mockFS) resolvePathViaParent(p string) (e *mockEntry, resolved, nextP string, done bool) {
+	parent := path.Dir(p)
+	pe, pr := m.resolvePath(parent)
+	if pe == nil || !pe.IsDir {
+		return nil, p, "", true
+	}
+	child := joinSlash(pr, path.Base(p))
+	if e, ok := m.entries[child]; ok {
+		if !e.IsSymlink {
+			return e, child, "", true
+		}
+		return nil, "", e.Target, false
+	}
+	return nil, p, "", true
 }
 
 func (m *mockFS) entry(p string, e *mockEntry) Entry {
@@ -159,7 +169,7 @@ func (m *mockFS) OpenRead(ctx context.Context, p string) (io.ReadCloser, error) 
 	return io.NopCloser(bytes.NewReader(e.Data)), nil
 }
 
-func (m *mockFS) WriteFile(ctx context.Context, p string, r io.Reader, size, mtime int64) error {
+func (m *mockFS) WriteFile(ctx context.Context, key LogicalKey, p string, r io.Reader, size, mtime int64) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err

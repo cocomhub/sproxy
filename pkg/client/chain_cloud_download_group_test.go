@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,19 +23,10 @@ import (
 	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
-// newMockGroupChainServer 创建覆盖组链式操作完整 API 的 mock 服务端。
-// groupStatusFn 每次查询组详情时调用，返回组状态与子任务列表。
-func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll int) (string, []CloudTask)) *httptest.Server {
-	t.Helper()
-	archiveDir := filepath.Join(dir, archiveDirName)
-	if err := os.MkdirAll(archiveDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	var poll atomic.Int32
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerCreateHandler 返回 POST /api/cloud/groups 的 mock handler：
+// 解码请求体并回填一个 pending 组（含子任务 ID 列表）。
+func mockGroupChainServerCreateHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Name string                `json:"name"`
 			URLs []cloudfilename.Entry `json:"urls"`
@@ -55,9 +48,13 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(group)
-	})
+	}
+}
 
-	mux.HandleFunc("GET /api/cloud/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerStatusHandler 返回 GET /api/cloud/groups/{id} 的 mock handler：
+// 调用 groupStatusFn 获取组状态与子任务，统计 completed/failed 并返回组详情。
+func mockGroupChainServerStatusHandler(groupStatusFn func(poll int) (string, []CloudTask), poll *atomic.Int32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if id != "group-test" {
 			http.Error(w, `{"error":"group not found"}`, http.StatusNotFound)
@@ -86,9 +83,13 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 		detail := map[string]any{"group": group, "tasks": tasks}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(detail)
-	})
+	}
+}
 
-	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerArchiveHandler 返回 POST /api/cloud/groups/{id}/archive 的 mock handler：
+// 在归档目录写入固定归档内容并返回成功结果。
+func mockGroupChainServerArchiveHandler(archiveDir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		archivePath := filepath.Join(archiveDir, "group-archive.tar.gz")
 		if err := os.WriteFile(archivePath, []byte("group-archive-content"), 0644); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -100,28 +101,35 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 			File:    "group-archive.tar.gz",
 			Size:    int64(len("group-archive-content")),
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("DELETE /api/cloud/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerDeleteHandler 返回 DELETE /api/cloud/groups/{id} 的 mock handler。
+func mockGroupChainServerDeleteHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted"})
-	})
+	}
+}
 
-	// Stat endpoint for chunked download
-	mux.HandleFunc("HEAD /api/files/stat", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerStatHandler 返回 HEAD /api/files/stat 的 mock handler：
+// 确保归档文件存在并回填元信息头。
+func mockGroupChainServerStatHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		os.MkdirAll(filepath.Dir(archiveFile), 0755)
-		if _, err := os.Stat(archiveFile); err != nil {
-			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644)
+		os.MkdirAll(filepath.Dir(archiveFile), 0755)    // NOSONAR: S2083 — mock 镜像生产 stat 路由；archiveFile 由测试自控 resolveMockDownloadFile 解析
+		if _, err := os.Stat(archiveFile); err != nil { // NOSONAR: S6549 + S2083 — mock 镜像生产 stat 路由；archiveFile 测试自控
+			os.WriteFile(archiveFile, []byte("group-archive-content"), 0644) // NOSONAR: S2083 — 同上（测试自控路径）
 		}
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Error("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		sum := testutil.SHA256Hex(data)
-		info, err := os.Stat(archiveFile)
+		info, err := os.Stat(archiveFile) // NOSONAR: S6549 — mock 镜像生产 stat 路由；archiveFile 测试自控
 		if err != nil {
 			t.Error("Stat:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -131,19 +139,42 @@ func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll i
 		w.Header().Set("X-File-Checksum", sum)
 		w.Header().Set("X-File-MTime", fmt.Sprintf("%d", info.ModTime().UnixNano()))
 		w.WriteHeader(http.StatusOK)
-	})
+	}
+}
 
-	// Chunk download endpoint
-	mux.HandleFunc("GET /download/chunk", func(w http.ResponseWriter, r *http.Request) {
+// mockGroupChainServerChunkHandler 返回 GET /download/chunk 的 mock handler：
+// 直接回写归档文件内容。
+func mockGroupChainServerChunkHandler(t *testing.T, dir string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
 		archiveFile := resolveMockDownloadFile(dir, r)
-		data, err := os.ReadFile(archiveFile)
+		data, err := os.ReadFile(archiveFile) // NOSONAR: S2083 — 同上（测试自控路径）
 		if err != nil {
 			t.Error("ReadFile:", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Write(data)
-	})
+	}
+}
+
+// newMockGroupChainServer 创建覆盖组链式操作完整 API 的 mock 服务端。
+// groupStatusFn 每次查询组详情时调用，返回组状态与子任务列表。
+func newMockGroupChainServer(t *testing.T, dir string, groupStatusFn func(poll int) (string, []CloudTask)) *httptest.Server {
+	t.Helper()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	var poll atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/groups", mockGroupChainServerCreateHandler())
+	mux.HandleFunc("GET /api/cloud/groups/{id}", mockGroupChainServerStatusHandler(groupStatusFn, &poll))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", mockGroupChainServerArchiveHandler(archiveDir))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", mockGroupChainServerDeleteHandler())
+	mux.HandleFunc("HEAD /api/files/stat", mockGroupChainServerStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", mockGroupChainServerChunkHandler(t, dir))
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
@@ -494,7 +525,8 @@ func TestCloudDownloadGroupChain_CleanupRemoteError(t *testing.T) {
 			Success: true, File: "cleanup-archive.tar.gz", Size: 7,
 		})
 	})
-	// 删除组失败：cleanupGroup 应容忍（Run 仍成功）
+	// 删除组失败：cleanupGroup 返回 err（G1：Run 的 PhaseCleaning 显式报错——组链不再
+	// 静默吞清理失败报「完成」，与单链一致；云端组/桶残留必须可见）。
 	mux.HandleFunc("DELETE /api/cloud/groups/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
@@ -667,6 +699,9 @@ func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
 		"updated_at":    time.Now(),
 		"poll_interval": int64(100 * time.Millisecond),
 		"timeout":       int64(10 * time.Second),
+		// F3：三参已入 State——模拟按新语义持久化（download_local=true：中断的组链
+		// 恢复后继续下载到本地，而非被 F2 守卫当作只转存跳过）。
+		"download_local": true,
 	}
 	if err := store.Save(t.Context(), "chain-group-chain-resume-options", phaseState); err != nil {
 		t.Fatal(err)
@@ -686,5 +721,79 @@ func TestCloudDownloadGroupChain_ResumeRestoresOptions(t *testing.T) {
 	// 验证返回的 extra 字段包含 local_path
 	if resumed.LocalPath() == "" {
 		t.Error("expected non-empty local_path after resume")
+	}
+}
+
+// TestCloudDownloadGroupChain_PassesTransferOpts M6 回归：组下载链创建时透传三参
+// （transfer/save/download_local）到 /api/cloud/groups body——此前 CloudCreateGroupEntries
+// cfg 解析了三参但 body 未带（死参数面），组无法声明转存目标。
+func TestCloudDownloadGroupChain_PassesTransferOpts(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	archiveDir := filepath.Join(dir, archiveDirName)
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var createBodies []map[string]any
+	baseCreate := mockGroupChainServerCreateHandler()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/cloud/groups", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		createBodies = append(createBodies, body)
+		mu.Unlock()
+		// 重建 body 给 baseCreate（原 body 已消费）
+		rebuilt, _ := json.Marshal(body)
+		r.Body = io.NopCloser(strings.NewReader(string(rebuilt)))
+		baseCreate(w, r)
+	})
+	mux.HandleFunc("GET /api/cloud/groups/{id}", mockGroupChainServerStatusHandler(
+		func(poll int) (string, []CloudTask) { return "completed", completedGroupTasks() }, &atomic.Int32{}))
+	mux.HandleFunc("POST /api/cloud/groups/{id}/archive", mockGroupChainServerArchiveHandler(archiveDir))
+	mux.HandleFunc("DELETE /api/cloud/groups/{id}", mockGroupChainServerDeleteHandler())
+	mux.HandleFunc("HEAD /api/files/stat", mockGroupChainServerStatHandler(t, dir))
+	mux.HandleFunc("GET /download/chunk", mockGroupChainServerChunkHandler(t, dir))
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	client := NewFileClient(ts.URL)
+	entries := []cloudfilename.Entry{{URL: "https://example.com/f1"}, {URL: "https://example.com/f2"}}
+	opts := defaultChainOptions()
+	opts.pollInterval = 20 * time.Millisecond
+	opts.timeout = 10 * time.Second
+	opts.transfer = &TransferSpec{Volume: "vault", Path: "pikpak/grp.mp4"}
+	sv := false
+	opts.save = &sv
+	opts.downloadLocal = true
+	opts.forceIntegrity = true
+
+	chain, err := NewCloudDownloadGroupChain(client, "gm6", entries, "ga", dir, opts)
+	if err != nil {
+		t.Fatalf("NewCloudDownloadGroupChain failed: %v", err)
+	}
+	if err := chain.Run(t.Context(), func(ctx context.Context, info ProgressInfo) {}); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]map[string]any(nil), createBodies...)
+	mu.Unlock()
+	if len(got) < 1 {
+		t.Fatalf("应有组创建请求，实际 %d", len(got))
+	}
+	body := got[len(got)-1]
+	if body["transfer"] == nil {
+		t.Fatalf("组创建缺 transfer（M6），body=%v", body)
+	}
+	if body["save"] == nil {
+		t.Fatalf("组创建缺 save（M6），body=%v", body)
+	}
+	if body["download_local"] == nil {
+		t.Fatalf("组创建缺 download_local（M6），body=%v", body)
+	}
+	if body["integrity_must_pass"] == nil {
+		t.Fatalf("组创建缺 integrity_must_pass（任务5），body=%v", body)
 	}
 }

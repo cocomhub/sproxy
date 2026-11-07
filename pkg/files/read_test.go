@@ -333,7 +333,7 @@ func TestService_Download_ServesRangeAndChecksumHeaders(t *testing.T) {
 	if cr := rr.Header().Get("Content-Range"); cr != "bytes 2-5/10" {
 		t.Fatalf("Content-Range=%q want bytes 2-5/10", cr)
 	}
-	if cd := rr.Header().Get("Content-Disposition"); cd == "" {
+	if rr.Header().Get("Content-Disposition") == "" {
 		t.Fatal("应设置 Content-Disposition")
 	}
 	if ar := rr.Header().Get("Accept-Ranges"); ar != "bytes" {
@@ -342,7 +342,7 @@ func TestService_Download_ServesRangeAndChecksumHeaders(t *testing.T) {
 	if cs := rr.Header().Get(headerFileChecksum); cs != sha256Hex([]byte(body)) {
 		t.Fatalf("X-File-Checksum=%q want %q", cs, sha256Hex([]byte(body)))
 	}
-	if mt := rr.Header().Get(headerFileMTime); mt == "" {
+	if rr.Header().Get(headerFileMTime) == "" {
 		t.Fatal("应设置 X-File-MTime")
 	}
 }
@@ -407,7 +407,7 @@ func TestService_Stat_ReturnsMetadataHeaders(t *testing.T) {
 	if got := rr.Header().Get(headerFileChecksum); got != sha256Hex([]byte(body)) {
 		t.Fatalf("X-File-Checksum=%q want %q", got, sha256Hex([]byte(body)))
 	}
-	if got := rr.Header().Get(headerFileMTime); got == "" {
+	if rr.Header().Get(headerFileMTime) == "" {
 		t.Fatal("应设置 X-File-MTime")
 	}
 
