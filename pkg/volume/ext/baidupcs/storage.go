@@ -19,12 +19,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
+	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -49,6 +51,13 @@ type StorageConfig struct {
 	// AllowLibraryUpload 允许**上传**在二进制失败时回退到库实现（默认 false = 禁止）。
 	// 见 `AdapterConfig.AllowLibraryUpload`：库上传实测小文件 ~90s 且不响应 ctx ⇒ 默认 fail-closed。
 	AllowLibraryUpload bool
+	// UploadCore 选择上传编排内核（见 uploadcore_wiring.go）：
+	// 空/"" = auto（内核优先，失败一次降级既有路径 + WARN）；"nucleus" 只用内核；
+	// "legacy" 只用既有路径。**默认空字符串**（硬规则 7c：string 配置默认空值）。
+	UploadCore string
+	// Audit 是可选审计服务：装配后内核用 `pkg/audit` 作用域 WAL（崩溃续传）；
+	// nil ⇒ 内核用空 WAL（流程一致，但无跨进程续传）。
+	Audit *audit.Service
 }
 
 // _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
@@ -89,6 +98,13 @@ type Storage struct {
 	// statVisibleWait 是「上传后等待目标可见」的总窗口（0 = DefaultStatVisibleMaxWait）。
 	// 结构体内部字段（只经 NewStorage 注入），便于测试用短窗口覆盖 90s 常量。
 	statVisibleWait time.Duration
+
+	// auditSvc 是可选审计服务（内核 WAL/续传用，见 uploadcore_wiring.go）。
+	auditSvc *audit.Service
+	// coreMode 是归一化后的上传内核开关（"auto"/"nucleus"/"legacy"）。
+	coreMode string
+	// coreDisabled 是本进程的降级标记（auto 模式内核失败一次即置位，避免每个文件都踩同一坑）。
+	coreDisabled atomic.Bool
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -131,7 +147,24 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
-	return &Storage{root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger, httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0)}, nil
+	st := &Storage{
+		root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger,
+		httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
+		auditSvc: cfg.Audit, coreMode: normalizeUploadCoreMode(cfg.UploadCore),
+	}
+	return st, nil
+}
+
+// normalizeUploadCoreMode 归一化上传内核开关（""/未知 ⇒ "auto"）。构造期调用并存入 Storage。
+func normalizeUploadCoreMode(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "legacy":
+		return "legacy"
+	case "nucleus":
+		return "nucleus"
+	default:
+		return "auto"
+	}
 }
 
 // newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
@@ -467,7 +500,9 @@ func (s *Storage) putAttempt(ctx context.Context, key, remote string, st *staged
 		return meta, "", nil // 秒传命中：目标已存在且 ETag == 本地 md5
 	}
 	upStart := time.Now()
-	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+	// 上传一步走 `uploadStaged`：按 `UploadCore` 开关选择「自研内核」或「既有路径」
+	// （见 uploadcore_wiring.go；空/auto = 内核优先，失败一次降级既有路径 + WARN）。
+	if upErr := s.uploadStaged(ctx, key, remote, st); upErr != nil {
 		s.logPhase(ctx, "upload", key, upStart, upErr)
 		return nil, "", mapPCSError(upErr)
 	}

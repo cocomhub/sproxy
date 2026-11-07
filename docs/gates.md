@@ -115,6 +115,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
 | `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）： |
 | `web_assets_test.go` | R10 | web_assets_test.go 是「**Web 前端每个 JS 文件都必须被自动化测试覆盖**」的门禁（R10）。 |
+| `http_client_ratchet_test.go` | R57 | 裸 HTTP 客户端/传输构造点棘轮（2026-11-08）：生产代码（`pkg`/`cmd`/`internal`，排除 `_test.go` 与**已写明理由**的豁免目录 `pkg/httpc`〔基座本体〕、`pkg/netutil`〔Transport 唯一构造点〕、`pkg/testutil`〔测试辅助〕、`tools/`）中 `&http.Client{` / `&http.Transport{` / `http.DefaultTransport` 逐文件计数**只减不增**（基线 `internal/archcheck/http_client_budgets.tsv`）；新增文件出现构造点即红。背景：裸构造曾达 89 处（含测试），超时字段 90 处各写一遍、指数退避 ≥5 处、裸 worker 池 10 处 —— 没有任何一处能统一回答「这个请求会不会卡、能不能取消」（baidupcs 上传卡 ~90s 且不可取消，正是该病根的第三方库版本）。新代码请用 `pkg/httpc.New`（默认 Transport = `netutil.IsolatedTransport()`）+ `pkg/pipe` 编排。 （**2026-11-08 变异验证**：新增文件出现构造点 ⇒ 红；既有文件 +1 ⇒ 红） |
 | `alias_ratchet_test.go` | R51 | 迁移期别名文件 `pkg/server/*_alias.go` **只减不增**（文件数 + 行数双层棘轮）；清理别名后必须同步下调基线，锁定收益。 |
 | `arch_test.go` | R1 · R2 · R3 · R4 | 分层与作用域的基础门禁：R1 已登记包不得导入更高层级的包；R2 子包只允许父域子树与装配层导入；R3 全仓遍历三条规则的空断言防护（实测包数 > 0）；R4 `pkg/**` 非 `pkg/server/**` 不得导入装配层。 |
 | `build_flags_alignment_test.go` | — | GoReleaser 发布产物与 `make build` 的构建标志一致（仅允许 `-w -s` strip 差异），防「本地能跑、发布二进制行为不同」。 |

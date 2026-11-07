@@ -1,0 +1,40 @@
+# 裸 HTTP 客户端/传输构造点基线（棘轮：只减不增）。
+# 生成：ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run TestHTTPClientConstructionRatchet
+# 新增必须写明理由；豁免目录理由见 http_client_ratchet_test.go 头注释。
+cmd/sclient/diag.go	1
+cmd/sclient/p2p.go	1
+cmd/sclient/relay.go	1
+cmd/sclient/upload_direct.go	1
+cmd/sproxy/graceful_restart_unix.go	1
+cmd/sproxy/mesh_sync.go	1
+cmd/sproxy/pikpak_register.go	2
+pkg/accesskey/vault_storer.go	1
+pkg/aiembed/aiembed.go	1
+pkg/authn/ext/oidcldap/oidc.go	2
+pkg/certmgr/ext/dnspod/dnspod.go	1
+pkg/client/client.go	1
+pkg/client/client_request.go	3
+pkg/client/mesh_refresh.go	2
+pkg/client/options.go	4
+pkg/downloader/http_downloader.go	2
+pkg/llmgate/llmgate.go	1
+pkg/selfupdate/selfupdate.go	1
+pkg/server/notify/center.go	1
+pkg/sync/httptransport/http_transport.go	1
+pkg/tunnel/handler_client.go	4
+pkg/tunnel/hub/federation.go	1
+pkg/tunnel/hub/signaling_client.go	1
+pkg/tunnel/mesh/discovery.go	1
+pkg/tunnel/mesh/mdns_node.go	1
+pkg/tunnel/mesh/node.go	1
+pkg/tunnel/relay/leaf.go	1
+pkg/tunnel/xfer/ext/webrtc/turnrest.go	1
+pkg/volume/ext/baidupcs/storage.go	1
+pkg/volume/ext/pikpak/anonymous_limit.go	1
+pkg/volume/ext/pikpak/api.go	1
+pkg/volume/ext/pikpak/cli.go	1
+pkg/volume/ext/pikpak/hybrid.go	1
+pkg/volume/ext/pikpak/resolver.go	1
+pkg/volume/ext/pikpak/share_source.go	1
+pkg/volume/ext/pikpak/urlresolver.go	4
+pkg/volume/webdav/webdav_fs.go	1
