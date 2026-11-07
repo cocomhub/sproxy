@@ -460,3 +460,77 @@ func (f *flakyRenameFS) Rename(ctx context.Context, from, to string) error {
 	}
 	return f.FS.Rename(ctx, from, to)
 }
+
+// TestNormalizeContainerNames_InvalidatesSnapshotOnPartialFailure 钉住**迁移中途失败也要
+// 失效快照**（2026-11-07 实测缺陷）：迁移已改名部分容器（物理已变），若因失败提前 return 而
+// 不失效快照，下次启动会命中**陈旧快照**（记录迁移前的 dirSegs）⇒ 采样校验恒报漂移。
+func TestNormalizeContainerNames_InvalidatesSnapshotOnPartialFailure(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	snapPath := filepath.Join(t.TempDir(), "snap.enc")
+	sfs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret: []byte("test-secret-key-000"), Algorithm: testAlgo, TempDir: t.TempDir(),
+		Block:             shardseal.BlockPolicy{Min: 32 << 10, Max: 32 << 10},
+		IndexSnapshotPath: snapPath,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if merr := sfs.MakeDir(ctx, "a/b"); merr != nil {
+		t.Fatalf("MakeDir: %v", merr)
+	}
+	// 新容器已是确定性名 ⇒ 人为改名制造「历史随机名」才能触发迁移（自底向上，保父子一致）
+	sfs.mu.Lock()
+	type rc struct{ rel, c string }
+	var list []rc
+	for rel, c := range sfs.dirSegs {
+		if rel != "" {
+			list = append(list, rc{rel, c})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool { return strings.Count(list[i].rel, "/") > strings.Count(list[j].rel, "/") })
+	for _, it := range list {
+		if rerr := os.Rename(filepath.Join(root, filepath.FromSlash(it.c)), filepath.Join(root, filepath.FromSlash(it.c+"X"))); rerr != nil {
+			sfs.mu.Unlock()
+			t.Fatalf("夹具改名失败: %v", rerr)
+		}
+		sfs.dirSegs[it.rel] = it.c + "X"
+	}
+	sfs.mu.Unlock()
+	// 写一个占位快照，模拟「装配期已落盘」
+	if werr := os.WriteFile(snapPath, []byte("stale"), 0o600); werr != nil {
+		t.Fatalf("写占位快照: %v", werr)
+	}
+	// 让第二次 rename 失败（b 容器），制造「部分成功后失败」
+	sfs.inner = &failOnSecondRenameFS{FS: sfs.inner}
+	moved, _, merr := sfs.NormalizeContainerNames(ctx, false)
+	if merr == nil {
+		t.Skip("夹具未触发失败（实现可能已全部成功），跳过")
+	}
+	if moved == 0 {
+		t.Fatalf("应有部分容器已迁移，got moved=0 err=%v", merr)
+	}
+	// 关键断言：失败路径也必须让快照失效（否则下次启动命中陈旧索引）
+	if _, serr := os.Stat(snapPath); !os.IsNotExist(serr) {
+		t.Fatalf("迁移部分成功后失败 ⇒ 快照必须失效，stat err=%v", serr)
+	}
+}
+
+// failOnSecondRenameFS 让**第二次** Rename 失败（制造部分成功）。
+type failOnSecondRenameFS struct {
+	syncpkg.FS
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *failOnSecondRenameFS) Rename(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	if n >= 2 {
+		return os.ErrPermission // 第 2 次起全部失败（覆盖退避重试的 3 轮）
+	}
+	return f.FS.Rename(ctx, from, to)
+}

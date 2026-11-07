@@ -2584,6 +2584,14 @@ func (s *SecretdataFS) NormalizeContainerNames(ctx context.Context, dryRun bool)
 		moved += m
 		skipped += sk
 		if rerr != nil {
+			// **失败也要失效快照**（已改名部分 ⇒ 物理已变）：否则下次启动命中陈旧快照
+			// （记录迁移前的 dirSegs）⇒ 采样校验恒报漂移。
+			if moved > 0 && !dryRun {
+				s.mu.Lock()
+				maps.Copy(s.dirSegs, newSegs)
+				s.mu.Unlock()
+				s.invalidateSnapshotAfterPartialMove()
+			}
 			return moved, skipped, rerr
 		}
 	}
@@ -2704,6 +2712,13 @@ func (s *SecretdataFS) containerMovedByPeer(ctx context.Context, cur, want strin
 		}
 	}
 	return !hasCur && hasWant, true
+}
+
+// invalidateSnapshotAfterPartialMove 在**迁移中途失败**时也须使快照失效（2026-11-07 实测
+// 缺陷）：迁移已改名部分容器（物理已变），若因失败提前 return 而不失效快照，下次启动会命中
+// **陈旧快照**（记录迁移前的 dirSegs）⇒ 采样校验恒报漂移、甚至读到已不存在的路径。
+func (s *SecretdataFS) invalidateSnapshotAfterPartialMove() {
+	s.invalidateIndexSnapshot()
 }
 
 // normalizeBlockedRels 返回因「重复容器争议内容」需跳过规范化的逻辑路径集合。
