@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -279,9 +280,7 @@ func (u *Uploader) uploadSlices(ctx context.Context, req Request, res Result, up
 			uploadID = u.o.Resume.UploadID
 			res.UploadID = uploadID
 		}
-		for k, v := range u.o.Resume.PartsDone {
-			completed[k] = v
-		}
+		maps.Copy(completed, u.o.Resume.PartsDone)
 	}
 	plan, err := u.o.Slicer.Plan(ctx, req)
 	if err != nil {

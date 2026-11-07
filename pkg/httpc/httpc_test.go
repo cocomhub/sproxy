@@ -80,8 +80,7 @@ func TestDo_NoRetryOn4xx(t *testing.T) {
 
 	c := newTestClient(Options{Retry: pipe.Policy{Attempts: 5, Base: time.Millisecond}})
 	resp, err := c.Get(context.Background(), srv.URL)
-	var he *HTTPError
-	if !errors.As(err, &he) {
+	if _, ok := errors.AsType[*HTTPError](err); !ok {
 		t.Fatalf("4xx 应返回 *HTTPError，got %v", err)
 	}
 	if n.Load() != 1 {
@@ -335,7 +334,6 @@ func TestRetryAfter_Parses(t *testing.T) {
 		{"负数", "-1", 0},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			resp := &http.Response{Header: http.Header{}}

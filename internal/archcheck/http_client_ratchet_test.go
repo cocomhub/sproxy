@@ -154,7 +154,7 @@ func httpClientDirExempt(rel string) bool {
 // 避免把文档里的字面量误判为构造点——历史教训：注释中的字面量曾导致门禁误报）。
 func countHTTPClientConstructions(src string) int {
 	n := 0
-	for _, line := range strings.Split(src, "\n") {
+	for line := range strings.SplitSeq(src, "\n") {
 		if i := strings.Index(line, "//"); i >= 0 {
 			line = line[:i]
 		}

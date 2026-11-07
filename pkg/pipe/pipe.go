@@ -179,9 +179,7 @@ func RunParts[T any](ctx context.Context, items []T, conc int, fn func(ctx conte
 			break
 		}
 		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
 			if err := fn(ctx, item); err != nil {
 				mu.Lock()
@@ -191,7 +189,7 @@ func RunParts[T any](ctx context.Context, items []T, conc int, fn func(ctx conte
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

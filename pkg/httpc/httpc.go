@@ -313,15 +313,13 @@ func retryableErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	var at *attemptTimeoutError
-	if errors.As(err, &at) {
+	if _, ok := errors.AsType[*attemptTimeoutError](err); ok {
 		return true // 单次尝试超时属瞬时故障 ⇒ 可重试
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false // 整体取消/预算到期 ⇒ 不重试
 	}
-	var he *HTTPError
-	if errors.As(err, &he) {
+	if he, ok := errors.AsType[*HTTPError](err); ok {
 		return retryableStatus(he.StatusCode)
 	}
 	return true // 网络类错误可重试
