@@ -224,6 +224,9 @@ func (u *Uploader) Upload(ctx context.Context, req Request) (Result, error) {
 		return res, fmt.Errorf("uploadcore rapid: %w", err)
 	}
 	res.UploadID = uploadID
+	if err := u.stage(ctx, "upload", start, map[string]any{"upload_id": uploadID}); err != nil {
+		return res, err
+	}
 	if done {
 		return res, u.finishRapid(ctx, req, &res)
 	}
