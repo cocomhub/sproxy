@@ -30,6 +30,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/pipe"
 )
 
 // Via 表示本次上传**走通哪条路径**（用于观测与降级判定）。
@@ -126,7 +128,8 @@ type Options struct {
 	Resume *ScopeState // 有序恢复态（nil = 全新上传）
 	Logger *slog.Logger
 	Clock  func() time.Time
-	Sleep  func(ctx context.Context, d time.Duration) error // 可注入退避（测试不真等）
+	// Env 提供可注入睡眠（复用 pkg/pipe；nil ⇒ 默认可取消等待，测试可零等待）。
+	Env pipe.Env
 
 	BlockSize       int64         // < 该值走单请求（默认 4MiB，PCS 约束）
 	Concurrency     int           // 分片并发（默认 4，上限 16）
@@ -142,8 +145,8 @@ const (
 	defaultPartAttempts = 4
 	defaultPartTimeout  = 60 * time.Second
 	defaultBudget       = 30 * time.Minute
-	backoffBase         = 1 * time.Second
-	backoffCap          = 8 * time.Second
+	partBackoffBase     = 1 * time.Second
+	partBackoffCap      = 8 * time.Second
 )
 
 // Uploader 是内核（并发安全：Upload 可被多 goroutine 调用）。
@@ -178,37 +181,10 @@ func New(o Options) (*Uploader, error) {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	if o.Sleep == nil {
-		o.Sleep = sleepCtx
-	}
 	if o.Clock == nil {
 		o.Clock = time.Now
 	}
 	return &Uploader{o: o}, nil
-}
-
-// sleepCtx 是可取消的等待（**不用 time.Sleep**：那是库 90s 不可取消的根因之一）。
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return ctx.Err()
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
-// backoff 是指数退避 + 封顶（1s/2s/4s/8s…→8s）。
-func backoff(attempt int) time.Duration {
-	d := backoffBase << (attempt - 1)
-	if d > backoffCap || d <= 0 {
-		d = backoffCap
-	}
-	return d
 }
 
 // Upload 执行一次上传（幂等：同目标同内容重复调用 ⇒ probe 短路）。
@@ -330,80 +306,52 @@ func (u *Uploader) uploadSlices(ctx context.Context, req Request, res Result, up
 	return res, nil
 }
 
-// runParts 用受限并发执行分片（首个致命错误取消其余；已完成片跳过 ⇒ 续传）。
+// runParts 用受限并发执行分片（**复用 pkg/pipe.RunParts** —— 机制只有一份实现）。
+// 已完成片跳过 ⇒ 续传；首错取消兄弟 ⇒ 快速失败。
 func (u *Uploader) runParts(ctx context.Context, uploadID string, plan []Part, completed map[int]bool) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	sem := make(chan struct{}, u.o.Concurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var firstErr error
-
+	todo := make([]Part, 0, len(plan))
 	for i := range plan {
-		p := plan[i]
-		if completed[p.Seq] {
-			continue
+		if !completed[plan[i].Seq] {
+			todo = append(todo, plan[i])
+		}
+	}
+	var mu sync.Mutex
+	if err := pipe.RunParts(ctx, todo, u.o.Concurrency, func(ctx context.Context, p Part) error {
+		if err := u.partWithRetry(ctx, uploadID, p); err != nil {
+			return err
 		}
 		mu.Lock()
-		stop := firstErr != nil
+		completed[p.Seq] = true
 		mu.Unlock()
-		if stop || ctx.Err() != nil {
-			break
-		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if err := u.partWithRetry(ctx, uploadID, p); err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-					cancel() // 首个致命错误：尽快中止其余分片
-				}
-				mu.Unlock()
-				return
-			}
-			mu.Lock()
-			completed[p.Seq] = true
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if firstErr != nil {
-		return firstErr
+		return nil
+	}); err != nil {
+		return err
 	}
 	return ctx.Err()
 }
 
-// partWithRetry 上传单片：次数上限 + 指数退避（退避**可被 ctx 打断**）+ 成功后写 WAL。
+// errWALPart 标记 WAL 写失败（**不可重试**：重试只会重复写同一条记录）。
+var errWALPart = errors.New("uploadcore: WAL 分片记录失败")
+
+// partWithRetry 上传单片（**复用 pkg/pipe.Retry**：次数上限 + 可中断指数退避 + 成功后写 WAL）。
 func (u *Uploader) partWithRetry(ctx context.Context, uploadID string, p Part) error {
-	var last error
-	for attempt := 1; attempt <= u.o.MaxPartAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
+	pol := pipe.Policy{
+		Attempts: u.o.MaxPartAttempts,
+		Base:     partBackoffBase,
+		Cap:      partBackoffCap,
+		Factor:   2,
+		// 仅"分片上传失败"可重试；WAL 写失败属本地状态错误，重试无意义。
+		Retryable: func(err error) bool { return !errors.Is(err, errWALPart) },
+	}
+	return pipe.Retry(ctx, u.o.Env, pol, func(attemptCtx context.Context, _ int) error {
+		if err := u.attemptPart(attemptCtx, uploadID, p); err != nil {
 			return err
 		}
-		err := u.attemptPart(ctx, uploadID, p)
-		if err == nil {
-			if werr := u.o.WAL.PartDone(ctx, p.Seq, ""); werr != nil {
-				return fmt.Errorf("uploadcore wal part %d: %w", p.Seq, werr)
-			}
-			return nil
+		if werr := u.o.WAL.PartDone(ctx, p.Seq, ""); werr != nil {
+			return fmt.Errorf("%w: part %d: %w", errWALPart, p.Seq, werr)
 		}
-		last = err
-		if attempt == u.o.MaxPartAttempts {
-			break
-		}
-		// 退避可被 ctx 打断：取消/预算到期 ⇒ 立即返回，不再重试（不热循环）。
-		if serr := u.o.Sleep(ctx, backoff(attempt)); serr != nil {
-			return serr
-		}
-	}
-	return fmt.Errorf("uploadcore 分片 %d 失败 %d 次: %w", p.Seq, u.o.MaxPartAttempts, last)
+		return nil
+	})
 }
 
 // attemptPart 发出单次分片请求（可选单片超时；与库 200s 不可注入超时形成对照）。

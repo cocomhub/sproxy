@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/pipe"
 )
 
 // ---- fakes ----
@@ -141,7 +143,7 @@ func baseOpts(p *fakeParts) Options {
 		BlockSize:       4 << 20,
 		Concurrency:     2,
 		MaxPartAttempts: 3,
-		Sleep:           func(context.Context, time.Duration) error { return nil },
+		Env:             pipe.Env{Sleep: func(context.Context, time.Duration) error { return nil }},
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
@@ -236,10 +238,10 @@ func TestUpload_CancelStopsPromptly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &fakeParts{plan: plan3(), fail: map[int]int{0: 99, 1: 99, 2: 99}}
 	o := baseOpts(p)
-	o.Sleep = func(c context.Context, _ time.Duration) error {
+	o.Env = pipe.Env{Sleep: func(c context.Context, _ time.Duration) error {
 		cancel() // 首次退避时取消
 		return c.Err()
-	}
+	}}
 	u, _ := New(o)
 	_, err := u.Upload(ctx, bigReq())
 	if !errors.Is(err, context.Canceled) {
