@@ -141,3 +141,14 @@
 
 为何锁定：CDN 限流（429）与网关超时（408）在真实直链下载中常见；此前只重试 5xx，
 一次限流即让任务直接 failed，且固定退避会持续冲击已限流的源。
+
+### keepshare 镜像重定向（2026-11-01 观测）
+
+- **正常**：`keepshare.org/<容器id>/magnet:?...` → 301 `keepshare.cc` → 302 `mypikpak.com/s/<id>`。
+- **2026-11-01 实测异常**：对**同一 URL** 返回 `301` 指向**自身**（链长无限，永不抵达 mypikpak）。
+  复现：连此前已成功解析过的分享 URL（NHDTA-360）现在也自跳。
+- **影响**：`/api/resolve` 对这批分享全部 502；`--upload-local` 无法拿到文件清单 ⇒ 无法上传。
+- **sproxy 侧适配**：`followKeepshareShareID` 上限 5 → **10** 跳，并新增**循环检测**
+  （重复 URL 立即 `循环` 失败，不再空转跳数）。锁定测试：
+  `TestFollowKeepshareShareID_LongChain`（7 跳可达）、`TestFollowKeepshareShareID_LoopDetected`。
+- **判定**：属**上游行为变化/故障**，非实现回归。恢复后无需改代码（10 跳仍覆盖正常链路）。
