@@ -21,7 +21,7 @@ import (
 // 在本地 sproxy 服务端创建同步任务，由 SyncManager 托管执行；--remote 是服务端
 // sync_remotes 配置的远程节点名（HTTP 直连远程 sproxy 文件服务，非 mesh node）。
 func NewCmdSync(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "sync <push|pull|retry>",
 		Short: "节点间文件同步（push/pull）",
 		Long: `在本地 sproxy 服务端创建同步任务，把文件/目录复制到远程节点（push）或从远程节点拉取（pull）。
@@ -68,7 +68,7 @@ type syncCmdOptions struct {
 func newCmdSyncDirection(factory clientfactory.Factory, ios cli.IOStreams, direction string) *cobra.Command {
 	var o syncCmdOptions
 
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   direction,
 		Short: syncShort(direction),
 		Long:  syncLong(direction),
@@ -390,7 +390,7 @@ type syncRetryOptions struct {
 // 无 --files 时重试全部失败文件；--files a,b 指定部分。默认表格输出明细，--json 结构化。
 func newCmdSyncRetry(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var o syncRetryOptions
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "retry <task-id>",
 		Short: "重试同步任务的失败文件",
 		Long: `对指定同步任务（completed/failed 任务的 Results 中 error/verify_failed 条目）发起单文件重试。

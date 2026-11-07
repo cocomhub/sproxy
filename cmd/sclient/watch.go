@@ -46,7 +46,7 @@ type syncWatchOptions struct {
 func newCmdSyncWatch(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
 	var o syncWatchOptions
 
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "watch",
 		Short: "连续同步：事件流驱动增量 pull/push/both（替代轮询）",
 		Long: `订阅本地 sproxy 的文件变更事件流（/api/events），每次变更触发一次同步任务，

@@ -22,9 +22,12 @@ func NewCmdVersion(ios cli.IOStreams) *cobra.Command {
 	info.BuiltAt = BuildAt
 	info.DirtyInfo = buildmeta.DirtyInfo()
 	cmd := buildinfo.NewVersionCmd(info)
+	// buildinfo 生成的命令不带 silence（本仓统一要求：不转储 Usage、错误交由入口打印）⇒ 显式补齐。
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
 
 	// dirty-info 子命令：输出内嵌 diff（对应 cocom version dirty-info）。
-	dirty := &cobra.Command{
+	dirty := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "dirty-info",
 		Short: "显示自上次提交以来的未提交变更",
 		Run: func(c *cobra.Command, args []string) {

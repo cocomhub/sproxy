@@ -18,7 +18,7 @@ import (
 
 // newCmdTrash 创建 trash 命令族（list/restore/empty）。
 func newCmdTrash(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "trash",
 		Short: "回收站管理（list/restore/empty）",
 		Long: `查看与操作回收站（软删除的文件，防误删可恢复）。
@@ -39,7 +39,7 @@ func newCmdTrash(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comman
 // newCmdTrashList 创建 trash list。
 func newCmdTrashList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var volume string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出回收站条目",
 		Long: "列出回收站条目。默认**汇总** owner 可见的全部卷；--volume 只看该卷。" +
@@ -84,7 +84,7 @@ func newCmdTrashList(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Co
 // newCmdTrashRestore 创建 trash restore <trash_rel>。
 func newCmdTrashRestore(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var volume string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "restore <trash_rel>",
 		Short: "恢复回收站条目（trash_rel 来自 list 输出）",
 		Long: "恢复回收站条目。缺省**跨卷定位**（条目只存在于软删时所在卷）；" +
@@ -114,7 +114,7 @@ func newCmdTrashEmpty(factory clientfactory.Factory, ios cli.IOStreams) *cobra.C
 		volume string
 		all    bool
 	)
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "empty",
 		Short: "清空回收站（不可恢复，需 --yes 确认）",
 		Long: "清空回收站（不可恢复）。**安全默认只清默认卷**；用 --volume <卷> 清指定卷、" +

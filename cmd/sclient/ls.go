@@ -16,7 +16,7 @@ import (
 
 // NewCmdLs 创建独立的 ls 命令工厂函数（Linux 习惯名；旧名 list 保留为别名）。
 func NewCmdLs(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:     "ls [path]",
 		Aliases: []string{"list"},
 		Short:   "列出服务器上的文件/目录（Linux 习惯；支持卷 URI）",

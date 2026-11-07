@@ -40,7 +40,7 @@ const meshVPNSubnet = "100.64.0.0/10" // NOSONAR: S1313 — CGNAT 共享地址�
 // 默认委托 socks 命令（用户态 SOCKS5，零回归）；--tun 时走内核 VPN 装配。
 func newCmdMeshUp(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	socksCmd := newCmdSocks(factory, ios, cfgSvc)
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "up [-l :port] [--exit <node>] | up --tun --vip <addr>",
 		Short: "启动虚拟子网接入（本地 SOCKS5 代理，或 --tun 内核 VPN）",
 		Long: `启动虚拟子网接入。默认启动本地 SOCKS5 代理（curl --socks5-hostname /

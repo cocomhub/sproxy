@@ -25,7 +25,7 @@ import (
 // 默认单次模式：连接建立后把 stdin/stdout 与远端双向泵送（适合脚本/SSH -J 风格）。
 // 指定 -l :port 时改为本地端口转发：监听本地端口，每个连接都经 hub 中继到目标。
 func NewCmdRelayDial(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "dial",
 		Short: "经 hub 中继拨号到目标叶子出口（任意 TCP）",
 		Long: `通过 hub 的流中继建立到目标叶子的任意 TCP 通道。

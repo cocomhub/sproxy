@@ -47,7 +47,7 @@ func NewCmdP2P(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ...Confi
 	if len(cfgSvc) > 0 {
 		provider = cfgSvc[0]
 	}
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "p2p",
 		Short: "WebRTC 点对点直连（经 hub 信令桥打洞）",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -204,7 +204,7 @@ func (f *p2pFlags) localNode() string {
 // newCmdP2PConnect 创建 p2p connect：拨号到对端建立 WebRTC 直连。
 func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var f p2pFlags
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "connect --peer <id> --tcp <addr> [-l :port]",
 		Short: "与对端建立 WebRTC 直连（打洞成功则数据面不经 hub）",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -232,7 +232,7 @@ func newCmdP2PConnect(ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 // newCmdP2PListen 创建 p2p listen：作为对端等待入站 WebRTC 直连。
 func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var f p2pFlags
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "listen",
 		Short: "作为对端监听 WebRTC 直连（信令经 hub 或手工 SDP）",
 		RunE: func(cmd *cobra.Command, args []string) error {

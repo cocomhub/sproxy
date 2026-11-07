@@ -31,7 +31,7 @@ import (
 
 // NewCmdTrust 创建 trust 命令族。
 func NewCmdTrust(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "trust",
 		Short: "凭据信任管理（renew 轮换 SK / SK 条目管理 / AK 管理）",
 	}
@@ -68,7 +68,7 @@ func newTrustDirectClient(cmd *cobra.Command, factory clientfactory.Factory, cfg
 
 // newCmdTrustRenew 创建 trust renew 命令：用当前本端 SK 轮换出新 SK，并回填配置。
 func newCmdTrustRenew(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "renew",
 		Short: "轮换当前 AK 的 SK（新 SK 立即生效，旧 SK 服务端仍可用）",
 		Args:  cobra.NoArgs,
@@ -142,7 +142,7 @@ func trustSKExpiryText(t time.Time) string {
 
 // newCmdTrustSK 创建 trust sk 命令族（list / delete / expire）。
 func newCmdTrustSK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "sk",
 		Short: "SK 条目管理（list / delete / expire）",
 	}
@@ -155,7 +155,7 @@ func newCmdTrustSK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Conf
 
 // newCmdTrustSKList 创建 trust sk list 命令：列出目标 AK 的 SK 条目，只展示能解开的条目。
 func newCmdTrustSKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出 AK 的 SK 条目（只展示本端能解开 secret 的条目，其余 masked）",
 		Args:  cobra.NoArgs,
@@ -212,7 +212,7 @@ func printTrustSKRow(ios cli.IOStreams, s client.SKInfo) {
 
 // newCmdTrustSKDelete 创建 trust sk delete 命令。
 func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <sk_id>",
 		Short: "删除单条 SK（删除后该 SK 签名立即失效）",
 		Args:  cobra.ExactArgs(1),
@@ -242,7 +242,7 @@ func newCmdTrustSKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSv
 // newCmdTrustSKExpire 创建 trust sk expire 命令。
 func newCmdTrustSKExpire(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var until string
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "expire <sk_id> [--until RFC3339]",
 		Short: "设单条 SK 的生效截止时间（--until 缺省清空=恢复永久有效）",
 		Args:  cobra.ExactArgs(1),
@@ -292,7 +292,7 @@ func trustSKExpireRunE(cmd *cobra.Command, factory clientfactory.Factory, ios cl
 
 // newCmdTrustAK 创建 trust ak 命令族（list / add / delete，admin-only）。
 func newCmdTrustAK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "ak",
 		Short: "AccessKey 管理（list / add / delete，需要 admin 权限）",
 	}
@@ -304,7 +304,7 @@ func newCmdTrustAK(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Conf
 
 // newCmdTrustAKList 创建 trust ak list 命令（admin）。
 func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list",
 		Short: "列出全部 AccessKey（admin）",
 		Args:  cobra.NoArgs,
@@ -338,7 +338,7 @@ func newCmdTrustAKList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 // 唯一事实源，替代已删除的 cmd generateAccessKeyPair）——ak=ak-<mesh>-<32hex>、
 // sk=32B hex；mesh flag 已有（仅未指定 ak 参数时生效）。
 func newCmdTrustAKAdd(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "add [ak]",
 		Short: "新增 AccessKey（admin；不指定 SK 时服务端生成并单次回传）",
 		Args:  cobra.MaximumNArgs(1),
@@ -396,7 +396,7 @@ var errDeleteAKNotConfirmed = errors.New("删除已中止：未收到确认输�
 // newCmdTrustAKDelete 创建 trust ak delete 命令（admin + 交互确认 AK 名）。
 func newCmdTrustAKDelete(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
 	var force bool
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <ak>",
 		Short: "删除整个 AccessKey（admin；需交互确认 AK 名，--force 跳过活跃检查）",
 		Args:  cobra.ExactArgs(1),

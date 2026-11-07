@@ -30,7 +30,7 @@ import (
 //
 //	1 directory, 2 files
 func NewCmdTree(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "tree [path]",
 		Short: "以树形递归显示目录结构（Linux 习惯；支持卷 URI）",
 		Long: `以树形递归显示远端目录结构。

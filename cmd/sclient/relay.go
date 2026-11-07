@@ -332,7 +332,7 @@ func relayRegisterCaps(dialAllow bool) []string {
 
 // NewCmdRelay 创建 relay 父命令的工厂函数。
 func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "relay",
 		Short: "中继节点管理",
 		Run: func(cmd *cobra.Command, args []string) {
@@ -350,7 +350,7 @@ func NewCmdRelay(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Config
 
 // NewCmdRelayStart 创建 relay start 命令的工厂函数。
 func NewCmdRelayStart(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "start",
 		Short: "启动中继节点，连接到 Hub",
 		Long: `作为中继节点连接到 Hub，注册自身，然后等待远程请求并通过隧道转发到本地 HTTP 服务。
@@ -471,7 +471,7 @@ func relayStartCredRotation(ctx context.Context, cmd *cobra.Command, factory cli
 
 // NewCmdRelayStatus 创建 relay status 命令的工厂函数。
 func NewCmdRelayStatus(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "status",
 		Short: "查看 Hub 节点状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -509,7 +509,7 @@ func NewCmdRelayStatus(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 
 // NewCmdRelayStop 创建 relay stop 命令的工厂函数。
 func NewCmdRelayStop(ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "stop",
 		Short: "停止中继节点",
 		Long: `向正在运行的中继节点发送停止信号。

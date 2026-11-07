@@ -15,7 +15,7 @@ import (
 
 // NewCmdCloudCancel 创建 cloud cancel 命令的工厂函数。
 func NewCmdCloudCancel(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "cancel <task-id>",
 		Short: "取消云端下载任务",
 		Args:  cobra.ExactArgs(1),

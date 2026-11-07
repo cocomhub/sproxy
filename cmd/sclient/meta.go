@@ -19,7 +19,7 @@ import (
 
 // NewCmdMeta 创建 meta 命令：查询文件元信息（含版本历史摘要）。
 func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "meta <filename>",
 		Short: "查询文件元信息（含版本历史摘要）",
 		Args:  cobra.ExactArgs(1),
@@ -50,7 +50,7 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 	// --raw：Text 模式下也输出 meta extra 原始 JSON（不做时间/URL 人类化转换；--json 已原始）
 	cmd.Flags().Bool("raw", false, "Text 模式输出 meta extra 原始 JSON 文本（不做时间/URL 人类化；--json 亦原始）")
 	// 文件版本管理子命令
-	versionCmd := &cobra.Command{
+	versionCmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "version",
 		Short: "文件版本管理",
 	}
@@ -64,7 +64,7 @@ func NewCmdMeta(factory clientfactory.Factory, ios cli.IOStreams, st *state.Stat
 }
 
 func NewCmdMetaVersionList(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "list <filename>",
 		Short: "列出文件版本历史",
 		Args:  cobra.ExactArgs(1),
@@ -93,7 +93,7 @@ func NewCmdMetaVersionList(factory clientfactory.Factory, ios cli.IOStreams, st 
 }
 
 func NewCmdMetaVersionRestore(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "restore <filename> <version_id>",
 		Short: "恢复文件到指定版本",
 		Args:  cobra.ExactArgs(2),
@@ -124,7 +124,7 @@ func NewCmdMetaVersionRestore(factory clientfactory.Factory, ios cli.IOStreams, 
 }
 
 func NewCmdMetaVersionDelete(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <filename> <version_id>",
 		Short: "删除文件的指定版本",
 		Args:  cobra.ExactArgs(2),
@@ -156,7 +156,7 @@ func NewCmdMetaVersionDelete(factory clientfactory.Factory, ios cli.IOStreams, s
 
 // newCmdMetaSet 创建 `meta set <filename> --extra=<json|@file>`。
 func newCmdMetaSet(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "set <filename>",
 		Short: "补录/修正文件的元数据 extra（合并语义）",
 		Long: `把 extra 合并进目标文件的 .meta sidecar。

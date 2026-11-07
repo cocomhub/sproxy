@@ -77,7 +77,7 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 // NewCmdCloudDownload 创建云端下载命令的工厂函数。
 // 默认行为是完整链式操作：提交 → 等待 → 打包 → 下载 → 清理。
 func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *state.State, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "cloud-download <url> [url...]",
 		Short: "从云端下载文件（链式操作：提交→等待→打包→下载→清理）",
 		Long: `通过 sproxy 服务端从外部 URL 下载文件，自动执行完整链式操作：
@@ -194,7 +194,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 		"group-resume <group-id>", "恢复下载组内所有失败任务"))
 
 	// 兼容性 stub：resume 已改名 resume-chain，保留空壳提示迁移路径
-	cmd.AddCommand(&cobra.Command{
+	cmd.AddCommand(&cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "resume <chain-id>",
 		Short: "恢复中断的链式操作",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -208,7 +208,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 // migratedGroupSubcommand 为已迁移到 cloud-download-group 的子命令创建兼容 stub。
 // 用户执行旧命令时打印迁移指引并返回非零退出码，避免静默 unknown command。
 func migratedGroupSubcommand(name, newName, use, short string) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -220,7 +220,7 @@ func migratedGroupSubcommand(name, newName, use, short string) *cobra.Command {
 
 // NewCmdCloudSubmit 创建 submit 子命令，仅提交云端下载任务。
 func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "submit <url> [url...]",
 		Short: "提交云端下载任务（不等待完成）",
 		Long: `提交 URL 到服务端进行云端下载，返回任务 ID 和状态。
@@ -244,7 +244,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 
 // NewCmdCloudWait 创建 wait 子命令，等待云端下载任务完成。
 func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "wait <task-id> [task-id...]",
 		Short: "等待云端下载任务完成",
 		Long:  `轮询等待指定云端下载任务完成，显示下载进度。`,
@@ -261,7 +261,7 @@ func NewCmdCloudWait(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 
 // NewCmdCloudResume 创建 resume-chain 子命令，恢复中断的链式操作。
 func NewCmdCloudResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "resume-chain <chain-id>",
 		Short: "恢复中断的链式操作",
 		Long: `从缓存恢复并继续执行中断的链式操作。
@@ -300,7 +300,7 @@ func NewCmdCloudResume(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 
 // NewCmdCloudDownloadFile 创建 download 子命令，下载云端下载任务的原始文件到本地。
 func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "download <task-id> [task-id...]",
 		Short: "下载云端下载任务的原始文件到本地",
 		Args:  cobra.MinimumNArgs(1),
@@ -347,7 +347,7 @@ func NewCmdCloudDownloadFile(factory clientfactory.Factory, ios cli.IOStreams, c
 
 // NewCmdCloudDownloadArchive 创建 download-archive 子命令，下载已归档的 tar.gz 文件到本地。
 func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "download-archive <archive-file> [archive-file...]",
 		Short: "下载已归档的 tar.gz 文件到本地",
 		Args:  cobra.MinimumNArgs(1),
@@ -389,7 +389,7 @@ func NewCmdCloudDownloadArchive(factory clientfactory.Factory, ios cli.IOStreams
 
 // NewCmdCloudDeleteTask 创建 delete 子命令，删除云端下载任务。
 func NewCmdCloudDeleteTask(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "delete <task-id>",
 		Short: "删除云端下载任务及关联文件",
 		Args:  cobra.ExactArgs(1),
@@ -417,7 +417,7 @@ func NewCmdCloudDeleteTask(factory clientfactory.Factory, ios cli.IOStreams, cfg
 
 // NewCmdCloudResumeDownload 创建 resume-download 子命令，恢复云端下载任务。
 func NewCmdCloudResumeDownload(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "resume-download <task-id>",
 		Short: "恢复云端下载任务（续传/重新下载；completed+damaged 任务重下修复）",
 		Args:  cobra.ExactArgs(1),

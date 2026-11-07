@@ -14,7 +14,7 @@ import (
 // NewCmdStat 创建 stat 命令：无参显示本地 client 状态；server 显示远端服务状态。
 // 原 stat <file> 文件元信息功能迁移至 meta。
 func NewCmdStat(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "stat [server]",
 		Short: "显示本地 client 或远端服务状态",
 		Args:  cobra.MaximumNArgs(1),
@@ -34,7 +34,7 @@ func NewCmdStat(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigP
 
 // NewCmdStatServer 创建 stat server 命令：查询远端服务统计。
 func NewCmdStatServer(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "server",
 		Short: "显示远端服务状态",
 		Args:  cobra.NoArgs,

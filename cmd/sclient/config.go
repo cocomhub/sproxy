@@ -17,7 +17,7 @@ import (
 // NewCmdConfig 创建独立的 config 命令工厂函数，接收 IOStreams 用于输出。
 // cfgFile 为配置文件路径指针，用于 config set 时的回写。
 func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *string, cfgSvc ConfigProvider) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "config [show|set <key> <value>|remote]",
 		Short: "配置管理",
 		Long:  "查看或修改 sclient 配置（统一 context 模型 config.yaml）。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  access_key      SproxySig 认证 AccessKey（服务端凭据 Ring 登记了该 AK/SK 时需要）\n  access_key_secret  SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线）\n  access_key_id   SproxySig SK 条目 ID（可选；trust renew 成功后自动回填）\n  timeout         HTTP 超时秒数\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)\n  hub_url         mesh/relay/p2p 共用的 hub 地址 (如 wss://hub.example.com/ws)\n  node_id         本节点默认 ID (mesh/relay/p2p 信令来源；为空回落主机名)\n  peer_fingerprints  对端身份指纹 pinning 列表（逗号分隔，64 hex 或 sha256:<64 hex>；配置后 xfer 隧道握手 fail-closed 校验对端身份）\n\n统一 context 后所有读写都在 config.yaml（environments/users/contexts 三件套）。",
@@ -145,7 +145,7 @@ func applyConfigSetContext(cc *contextcfg.Config, key, value string) error {
 
 // NewCmdConfigRemote 创建独立的 config remote 命令工厂函数。
 func NewCmdConfigRemote(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "remote",
 		Short: "查看或修改远程服务器配置",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -170,7 +170,7 @@ func NewCmdConfigRemote(factory clientfactory.Factory, ios cli.IOStreams) *cobra
 
 // NewCmdConfigRemoteSet 创建独立的 config remote set 命令工厂函数。
 func NewCmdConfigRemoteSet(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "set <key> <value>",
 		Short: "更新远程服务器运行时配置",
 		Args:  cobra.ExactArgs(2),

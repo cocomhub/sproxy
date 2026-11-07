@@ -38,7 +38,7 @@ const (
 )
 
 func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "trace <逻辑路径>",
 		Short: "显示逻辑文件/目录在真实存储上的落点（容器/meta/分块/parity）",
 		Long: `显示逻辑路径在真实存储上的完整落点：容器链、meta blob、每个内容分块
@@ -79,7 +79,7 @@ func newCmdVolumeTrace(factory clientfactory.Factory, ios cli.IOStreams, st *sta
 }
 
 func newCmdVolumeExplain(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "explain <真实路径>",
 		Short: "解释真实存储上的文件/目录用途与逻辑归属",
 		Long: `解释卷根相对真实路径（容器目录或单个 blob）的用途：

@@ -30,7 +30,7 @@ import (
 //
 // RPC 用显式无凭据客户端（M14，同 trust login）：公开端点直达，不带签名头。
 func newCmdTrustRegister(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc ConfigProvider, cfgFile *string) *cobra.Command {
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "register [username]",
 		Short: "注册新 TOTP 账号（打印 AK 与 TOTP 密钥；随后 trust login 完成绑定）",
 		Args:  cobra.MaximumNArgs(1),

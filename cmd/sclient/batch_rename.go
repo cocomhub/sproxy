@@ -34,7 +34,7 @@ type renamePair struct {
 // NewCmdBatchRename 创建独立的 batch-rename 命令工厂函数。
 // 注意：batch-rename 不需要 st *state.State，因为参数是成对的 from/to 路径。
 func NewCmdBatchRename(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
-	return &cobra.Command{
+	return &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "batch-rename <from1> <to1> [from2 to2...]",
 		Short: "批量重命名文件",
 		Long: `批量重命名 sproxy 服务端上的文件。

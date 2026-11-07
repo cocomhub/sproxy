@@ -45,7 +45,7 @@ func newUpgradeCmd(ios cli.IOStreams, deps upgradeDeps) *cobra.Command {
 解包替换当前 sclient 二进制。--check 只查询不安装；--force 跳过版本比较
 （当前版本为快照/脏构建时必用）。`,
 		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		SilenceUsage: true, SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			check, _ := cmd.Flags().GetBool("check")
 			to, _ := cmd.Flags().GetString("to")

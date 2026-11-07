@@ -62,7 +62,7 @@ func newCmdTrustLogin(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc C
 		overwrite bool
 		manualAK  string
 	)
-	cmd := &cobra.Command{
+	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "login [username]",
 		Short: "TOTP 登录（位置参数=用户名，免记 AK；回填 access_key 三件套）",
 		Args:  cobra.MaximumNArgs(1),
