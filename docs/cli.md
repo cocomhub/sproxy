@@ -45,6 +45,23 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--json` | false | 以 JSON 格式输出（机器可读；`-o`/人类可读文案被抑制） |
 | `--verbose`, `-v` | false | 显示详细输出 |
 
+### 错误输出与 `--json` 脚本化
+
+- **稳定 stderr 文案**：命令失败时会用 `WriteErrLine` 向 **stderr** 打印一行可读文案（如
+  `列出文件失败: ...`）。这是脚本可依赖的错误文本；`--json` **不影响**它（`--json` 只抑制
+  **stdout** 上的人类可读输出，即 formatter 的 `Println/Printf`）。
+- **不重复打印**：进程入口（`main`）仅在「命令未打印过错误」时补一行 `sclient: <err>`；
+  命令已打印则不再重复（因此不会出现「同一错误刷两遍」，也不再转储 Usage/help）。
+- **`--json` 结构化错误**：失败时 **stdout** 输出一个 JSON 对象（脚本直接 `jq` 即可，无需解析
+  stderr 文本；命令自身已输出结构化结果的场景，如 `volume inspect --disk` 的审查差异除外）：
+
+  ```json
+  {"success": false, "error": "列出文件失败: ...", "exit_code": 1}
+  ```
+
+- **退出码**：`0` 成功；`1` 执行错误；`3` 审查发现差异（`volume inspect --disk`，便于脚本门禁）。
+  `--json` 与文本模式退出码一致。
+
 ### TLS 与传输回退
 
 | 选项 | 默认值 | 说明 |
