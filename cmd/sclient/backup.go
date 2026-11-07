@@ -160,7 +160,7 @@ func (bs *backupSchedule) runDue(ctx context.Context, now, next time.Time) (time
 		if ctx.Err() != nil {
 			return next, nil
 		}
-		bs.ios.WriteErrLine("backup schedule: 导出失败: %v", err)
+		bs.ios.WriteWarnLine("backup schedule: 导出失败: %v", err)
 	} else {
 		bs.ios.WriteOutLine("备份完成: %s（卷 %s）", bs.dest, bs.volTxt)
 	}

@@ -25,50 +25,64 @@ func NewCmdCd(st *state.State, ios cli.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "cd [path]",
 		Short: "切换当前目录",
+		// 命令自带「错误不转储 Usage/不重复打印」：被独立执行（如单测直接 Execute）时
+		// 行为与经根命令执行一致，使用方无需手动设置。
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		Long: `切换当前操作目录，后续 upload/download/list/delete 等命令将以此目录为基准。
 		cd 带参数时进入指定子目录，无参数时打印当前目录。
 		cd / 回到根目录，cd .. 返回上级目录。`,
 		Args: cobra.MaximumNArgs(1),
-		Run: func(cmd *cobra.Command, args []string) {
-			if len(args) == 0 {
-				printCurrentDirPath(st, ios)
-				return
-			}
-			path := args[0]
-			// 卷 URI（`<卷名>:/<路径>`；`<卷名>:` = 卷根）：切换工作目录**并切到该卷**。
-			// URI 里的路径是**该卷根起算的绝对路径**（不叠加原工作目录）。
-			if vol, inner, ok := splitVolumeURI(path); ok {
-				st.CurrentVolume = vol
-				st.CurrentDir = ""
-				// URI 路径已含前导斜杠（卷根绝对）⇒ 状态内目录不带前导斜杠（既有约定）。
-				inner = strings.TrimPrefix(inner, "/")
-				switch {
-				case inner == "" || inner == ".":
-				case cdApplySpecialPath(st, inner):
-					// `..`/`.` 已按卷内语义处理（卷根下 `..` = 原地）
-				default:
-					cdApplyNormalPath(st, ios, inner)
-				}
-				saveCurrentVolumeValue(st.CurrentVolume)
-				saveCurrentDirValue(st.CurrentDir)
-				return
-			}
-			// 前导 `/` = **本地卷**根（用户口径 2026-10-13）：显式离开当前卷 + 从根起算。
-			if strings.HasPrefix(path, "/") {
-				st.CurrentVolume = ""
-				st.CurrentDir = ""
-				saveCurrentVolumeValue("")
-				// 状态内目录**不带**前导斜杠（与既有约定一致）：去掉后按「从根起算」拼接。
-				path = strings.TrimPrefix(path, "/")
-			}
-			if cdApplySpecialPath(st, path) {
-				saveCurrentVolumeValue(st.CurrentVolume)
-				return
-			}
-			cdApplyNormalPath(st, ios, path)
-			saveCurrentVolumeValue(st.CurrentVolume)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runCd(st, ios, args)
 		},
 	}
+}
+
+// runCd 执行 cd 的目录解析与切换（从 NewCmdCd 抽出，降 gocognit ≤15）。
+func runCd(st *state.State, ios cli.IOStreams, args []string) error {
+	if len(args) == 0 {
+		printCurrentDirPath(st, ios)
+		return nil
+	}
+	path := args[0]
+	// 卷 URI（`<卷名>:/<路径>`；`<卷名>:` = 卷根）：切换工作目录**并切到该卷**。
+	// URI 里的路径是**该卷根起算的绝对路径**（不叠加原工作目录）。
+	if vol, inner, ok := splitVolumeURI(path); ok {
+		st.CurrentVolume = vol
+		st.CurrentDir = ""
+		// URI 路径已含前导斜杠（卷根绝对）⇒ 状态内目录不带前导斜杠（既有约定）。
+		inner = strings.TrimPrefix(inner, "/")
+		switch {
+		case inner == "" || inner == ".":
+		case cdApplySpecialPath(st, inner):
+			// `..`/`.` 已按卷内语义处理（卷根下 `..` = 原地）
+		default:
+			if err := cdApplyNormalPath(st, ios, inner); err != nil {
+				return err
+			}
+		}
+		saveCurrentVolumeValue(st.CurrentVolume)
+		saveCurrentDirValue(st.CurrentDir)
+		return nil
+	}
+	// 前导 `/` = **本地卷**根（用户口径 2026-10-13）：显式离开当前卷 + 从根起算。
+	if strings.HasPrefix(path, "/") {
+		st.CurrentVolume = ""
+		st.CurrentDir = ""
+		saveCurrentVolumeValue("")
+		// 状态内目录**不带**前导斜杠（与既有约定一致）：去掉后按「从根起算」拼接。
+		path = strings.TrimPrefix(path, "/")
+	}
+	if cdApplySpecialPath(st, path) {
+		saveCurrentVolumeValue(st.CurrentVolume)
+		return nil
+	}
+	if err := cdApplyNormalPath(st, ios, path); err != nil {
+		return err
+	}
+	saveCurrentVolumeValue(st.CurrentVolume)
+	return nil
 }
 
 // printCurrentDirPath 打印当前工作目录（`<卷名>:/<目录>`；本地卷省略卷名 ⇒ `/目录`）。
@@ -103,7 +117,8 @@ func cdApplySpecialPath(st *state.State, path string) bool {
 }
 
 // cdApplyNormalPath 处理普通相对路径：拼接当前目录、清理、拒绝越界后写入目标目录。
-func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) {
+// 越界时打印稳定 stderr 文案并返回错误（非零退出码；main 不再重复打印）。
+func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) error {
 	newDir := path
 	if st.CurrentDir != "" {
 		newDir = st.CurrentDir + "/" + path
@@ -114,10 +129,11 @@ func cdApplyNormalPath(st *state.State, ios cli.IOStreams, path string) {
 	}
 	if strings.HasPrefix(cleaned, "..") || strings.Contains(cleaned, "../") {
 		ios.WriteErrLine("无效的路径")
-		return
+		return fmt.Errorf("无效的路径: %s", path)
 	}
 	st.CurrentDir = cleaned
 	saveCurrentDirValue(st.CurrentDir)
+	return nil
 }
 
 // NewCmdPwd 创建独立的 pwd 命令工厂函数。

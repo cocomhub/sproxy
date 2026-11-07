@@ -147,7 +147,7 @@ func newCmdMigrateImport(factory clientfactory.Factory, ios cli.IOStreams) *cobr
 			sum, err := im.Import(cmd.Context())
 			printImportSummary(ios.Out, sum)
 			if err != nil {
-				ios.WriteErrLine("导入未完成: %v", err)
+				ios.WriteWarnLine("导入未完成: %v", err)
 				if errors.Is(err, migrate.ErrConflict) {
 					return fmt.Errorf("%w（同名文件 checksum 不一致；处置冲突后重跑幂等收敛）", err)
 				}

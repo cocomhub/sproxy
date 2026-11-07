@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -34,6 +35,9 @@ func newClusterCredentialCmd(ios cli.IOStreams) *cobra.Command {
 	issue := &cobra.Command{
 		Use:   "issue",
 		Short: "签发集群出口凭证（持有节点本地执行，输出自包含 encoded 串）",
+		// 独立执行（单测）时与经根命令执行一致：不转储 Usage、错误交由入口打印。
+		SilenceUsage:  true,
+		SilenceErrors: true,
 		Long: `在持有节点签发一张集群出口凭证：提供本端签发 SK（cluster.credential_sign_key，
 64-hex）+ 凭证范围（node/volume/owner/recipient 必填；path-prefix 限定路径；ttl 控时效）。
 输出 encoded 串（Credential.Marshal），复制到目标节点配置 cluster.credentials[].encoded。
@@ -43,15 +47,15 @@ func newClusterCredentialCmd(ios cli.IOStreams) *cobra.Command {
     --sign-key "<64-hex 32B>" --node holder-a --volume main \
     --owner alice --recipient "sha256:<出口节点指纹>" --path-prefix docs --ttl 24h`,
 		Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			sk, derr := hex.DecodeString(signKey)
 			if derr != nil || len(sk) != 32 {
 				ios.WriteErrLine("签发密钥需 32B（64 hex，cluster.credential_sign_key）")
-				return
+				return fmt.Errorf("签发密钥需 32B（64 hex，cluster.credential_sign_key）")
 			}
 			if node == "" || volumeName == "" || owner == "" || recipient == "" {
 				ios.WriteErrLine("--node/--volume/--owner/--recipient 必填（fail-closed 不签发半凭证）")
-				return
+				return fmt.Errorf("--node/--volume/--owner/--recipient 必填（fail-closed 不签发半凭证）")
 			}
 			now := time.Now().Unix()
 			cred := clustercred.Credential{
@@ -68,9 +72,10 @@ func newClusterCredentialCmd(ios cli.IOStreams) *cobra.Command {
 			encoded, merr := cred.Marshal()
 			if merr != nil {
 				ios.WriteErrLine("凭证编码失败: %v", merr)
-				return
+				return fmt.Errorf("凭证编码失败: %w", merr)
 			}
 			ios.WriteOutLine(encoded)
+			return nil
 		},
 	}
 	issue.Flags().StringVar(&signKey, "sign-key", "", "签发方 SK（64 hex，cluster.credential_sign_key）")
@@ -84,6 +89,9 @@ func newClusterCredentialCmd(ios cli.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cluster",
 		Short: "集群出口凭证签发工具（持有节点本地执行）",
+		// 独立执行（单测直接 Execute 本子树）时与经根命令执行一致。
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 	cmd.AddCommand(issue)
 	return cmd

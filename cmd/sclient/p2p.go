@@ -461,7 +461,7 @@ func (l *p2pListenLoop) handleListenFailure(err error) (bool, error) {
 		l.delay = reconnectBaseDelay
 		return true, nil
 	}
-	l.ios.WriteErrLine("p2p 监听失败，%v 后重试: %v", l.delay, err)
+	l.ios.WriteWarnLine("p2p 监听失败，%v 后重试: %v", l.delay, err)
 	// B17：节点可能已被 hub 移除（注册 WS 断 / 心跳超时），per-node secret 已轮换——
 	// 信令 400/403 时在重连退避循环内重注册自愈；重注册失败不阻断退避（保持既有
 	// 网络抖动重试行为），下一轮循环继续尝试。
@@ -471,7 +471,7 @@ func (l *p2pListenLoop) handleListenFailure(err error) (bool, error) {
 		// selfVIP 随重注册可能轮换，同步更新出口拨号策略。
 		l.serveOpts = buildP2PServeOpts(l.services, l.dialAllowCIDRs, l.reg.VirtualIP, l.vipSubnet, l.ios)
 	} else {
-		l.ios.WriteErrLine("p2p 重注册失败: %v", rerr2)
+		l.ios.WriteWarnLine("p2p 重注册失败: %v", rerr2)
 	}
 	select {
 	case <-time.After(l.delay):
@@ -498,7 +498,7 @@ func (l *p2pListenLoop) serveConn(conn *webrtc.Conn) bool {
 		// mux 被 Close 属后者，会打印）。故只在真错误时提示会话异常结束——正常关闭
 		// （ctx 取消）不再打印误导性的错误行。
 		if err := relay.Serve(l.ctx, m, "http://127.0.0.1:8080", true, l.httpClient, l.logger, opts...); err != nil {
-			l.ios.WriteErrLine("p2p 会话结束: %v", err)
+			l.ios.WriteWarnLine("p2p 会话结束: %v", err)
 		}
 	}()
 	// manual 模式单次连接：不再进入 accept 循环，但必须阻塞等待连接结束（返回会让
@@ -527,11 +527,11 @@ func buildP2PServeOpts(services, dialAllowCIDRs []string, selfVIP netip.Addr, vi
 	for _, svc := range services {
 		_, addr, ok := strings.Cut(svc, ":")
 		if !ok || addr == "" {
-			ios.WriteErrLine("忽略无效服务（应为 name:addr）: %s", svc)
+			ios.WriteWarnLine("忽略无效服务（应为 name:addr）: %s", svc)
 			continue
 		}
 		if host, _, err := net.SplitHostPort(addr); err != nil || host == "" {
-			ios.WriteErrLine("忽略无效服务 addr（应为 host:port）: %s", svc)
+			ios.WriteWarnLine("忽略无效服务 addr（应为 host:port）: %s", svc)
 			continue
 		}
 		serviceAddrs = append(serviceAddrs, addr)
