@@ -75,6 +75,16 @@ type AdapterConfig struct {
 	Logger *slog.Logger
 	// Fallback 是库兜底实现（nil = 无兜底，二进制失败直接报错）。
 	Fallback libraryFallback
+	// AllowLibraryUpload 允许**上传**回退到库实现（默认 false = 禁止）。
+	//
+	// **为什么上传默认禁止库兜底**（2026-11-08 实测）：fork 库的上传栈
+	// （`uploader.NewMultiUploader`）内部有 200s 级超时与 taskframework 退避（`pcsupload/upload.go:37`、
+	// `upload_task_unit.go:434/460`），对 **1KB 文件实测耗时 ~89.7s 且不响应 ctx**
+	// （P7 阶段打点：`phase=upload elapsed_ms=89710 ctx_err=deadline exceeded`）⇒
+	// 作为**上传主路径**不可接受。生产装配为 binary 优先（实测 3.0–3.6s）。
+	// 默认禁止 ⇒ binary 不可用时**显式报错**（fail-closed），不静默落到慢且不可取消的库路径。
+	// 仅单测/无 CLI 的特殊环境才显式打开。
+	AllowLibraryUpload bool
 }
 
 // defaultBinaryTimeout 是子进程默认超时（10 分钟，覆盖大文件传输）。
@@ -142,7 +152,17 @@ func (a *binaryAdapter) Upload(ctx context.Context, localPath, targetPath string
 	if ok {
 		return nil
 	}
-	// 失败（含超时/二进制缺失）：有兜底则回退，无兜底才返回错误。
+	// 失败（含超时/二进制缺失）：**仅在显式允许时**回退库（库上传实测 ~90s 且不响应 ctx，
+	// 见 AdapterConfig.AllowLibraryUpload 注释）。默认 fail-closed：显式报错并给出可操作提示。
+	if a.cfg.Fallback == nil || !a.cfg.AllowLibraryUpload {
+		a.logger().Error("上传失败且库兜底未启用（默认策略：fail-closed）",
+			"binary_err", err, "allow_library_upload", a.cfg.AllowLibraryUpload,
+			"hint", "安装/修复 BaiduPCS-Go 二进制，或显式开启库上传兜底（慢且不响应取消）")
+		if err != nil {
+			return fmt.Errorf("baidupcs upload: 二进制失败(%w)（库兜底未启用）", err)
+		}
+		return fmt.Errorf("baidupcs upload 失败且库兜底未启用（需 BaiduPCS-Go 二进制）")
+	}
 	if a.cfg.Fallback != nil {
 		fbErr := a.cfg.Fallback.Upload(ctx, localPath, targetPath, overwrite)
 		if fbErr != nil {

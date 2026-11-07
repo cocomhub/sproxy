@@ -91,9 +91,10 @@ func TestBinaryAdapter_Upload_BinaryMissing_Fallback(t *testing.T) {
 	t.Parallel()
 	fb := &fakeLibrary{}
 	a := newBinaryAdapter(AdapterConfig{
-		BinaryPath: filepath.Join(t.TempDir(), "does-not-exist"),
-		Logger:     testLogger(),
-		Fallback:   fb,
+		BinaryPath:         filepath.Join(t.TempDir(), "does-not-exist"),
+		Logger:             testLogger(),
+		AllowLibraryUpload: true, // 显式开启（默认已改 fail-closed）
+		Fallback:           fb,
 	})
 	if err := a.Upload(context.Background(), "/tmp/f.txt", "/baidu/f.txt", true); err != nil {
 		t.Fatalf("二进制缺失应回退库成功: %v", err)
@@ -108,9 +109,10 @@ func TestBinaryAdapter_Upload_Fail_Fallback(t *testing.T) {
 	bin := buildFakeBin(t, "fail")
 	fb := &fakeLibrary{}
 	a := newBinaryAdapter(AdapterConfig{
-		BinaryPath: bin,
-		Logger:     testLogger(),
-		Fallback:   fb,
+		BinaryPath:         bin,
+		Logger:             testLogger(),
+		AllowLibraryUpload: true, // 显式开启（默认已改 fail-closed）
+		Fallback:           fb,
 	})
 	if err := a.Upload(context.Background(), "/tmp/f.txt", "/baidu/f.txt", true); err != nil {
 		t.Fatalf("二进制失败应回退库成功: %v", err)
@@ -125,10 +127,11 @@ func TestBinaryAdapter_Upload_Timeout_Fallback(t *testing.T) {
 	bin := buildFakeBin(t, "sleep")
 	fb := &fakeLibrary{}
 	a := newBinaryAdapter(AdapterConfig{
-		BinaryPath:    bin,
-		BinaryTimeout: 300 * time.Millisecond,
-		Logger:        testLogger(),
-		Fallback:      fb,
+		BinaryPath:         bin,
+		BinaryTimeout:      300 * time.Millisecond,
+		Logger:             testLogger(),
+		AllowLibraryUpload: true, // 显式开启（默认已改 fail-closed）
+		Fallback:           fb,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -156,9 +159,10 @@ func TestBinaryAdapter_Download_Fallback(t *testing.T) {
 	bin := buildFakeBin(t, "fail")
 	fb := &fakeLibrary{}
 	a := newBinaryAdapter(AdapterConfig{
-		BinaryPath: bin,
-		Logger:     testLogger(),
-		Fallback:   fb,
+		BinaryPath:         bin,
+		Logger:             testLogger(),
+		AllowLibraryUpload: true, // 显式开启（默认已改 fail-closed）
+		Fallback:           fb,
 	})
 	if err := a.Download(context.Background(), "/baidu/f.txt", "/tmp/f.txt"); err != nil {
 		t.Fatalf("下载失败应回退库成功: %v", err)
