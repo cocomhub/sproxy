@@ -297,17 +297,25 @@ func (nc *NotifyCenter) attempts(channel string) int {
 
 // httpClientForNotify 构造渠道 HTTP 客户端（IsolatedTransport 基座 + 响应头超时）。
 // R19 门禁：禁止裸构造 http.Transport 字面量。
-func httpClientForNotify() *http.Client {
+func httpClientForNotify() *httpc.Client {
+	// 按用途**共享**：三个渠道 notifier 复用同一 client/连接池（进程级单例场景）；
+	// 通知外发是幂等 POST（同一告警重复投递可接受）⇒ 显式声明 Idempotent 由调用点决定，
+	// 这里只配置传输与超时（避免"每构造一个 notifier 就新建一个池"）。
+	return httpc.Shared(httpc.PurposeNotify, httpc.Options{Transport: notifyTransport()})
+}
+
+// notifyTransport 构造通知渠道的 Transport（IsolatedTransport 基座 + 响应头超时）。
+func notifyTransport() *http.Transport {
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = 10 * time.Second
-	return httpc.NewHTTPClient(httpc.Options{Transport: tr})
+	return tr
 }
 
 // AlertmanagerNotifier Alertmanager 渠道：POST Alertmanager webhook v2 格式
 // （alerts 数组，generatorURL 可跳转）。AM 会把告警落入其路由 → 通知到接收者。
 type AlertmanagerNotifier struct {
 	url    string
-	client *http.Client
+	client *httpc.Client
 }
 
 // NewAlertmanagerNotifier 构造 Alertmanager 渠道。
@@ -351,7 +359,7 @@ func (a *AlertmanagerNotifier) Send(ctx context.Context, m NotifyMessage) error 
 		return &NotifierError{Channel: "alertmanager", Err: err}
 	}
 	req.Header.Set(headerContentType, contentTypeJSON)
-	resp, err := a.client.Do(req) //nolint:gosec // G704
+	resp, err := a.client.DoOpts(ctx, req, httpc.DoOptions{}) //nolint:gosec
 	if err != nil {
 		return &NotifierError{Channel: "alertmanager", Err: err}
 	}
@@ -369,7 +377,7 @@ type GrafanaNotifier struct {
 	token    string
 	user     string
 	password string
-	client   *http.Client
+	client   *httpc.Client
 }
 
 // NewGrafanaNotifier 构造 Grafana 标注渠道。
@@ -400,7 +408,7 @@ func (g *GrafanaNotifier) Send(ctx context.Context, m NotifyMessage) error {
 	} else if g.user != "" {
 		req.SetBasicAuth(g.user, g.password)
 	}
-	resp, err := g.client.Do(req) //nolint:gosec // G704
+	resp, err := g.client.DoOpts(ctx, req, httpc.DoOptions{}) //nolint:gosec
 	if err != nil {
 		return &NotifierError{Channel: "grafana", Err: err}
 	}
@@ -414,7 +422,7 @@ func (g *GrafanaNotifier) Send(ctx context.Context, m NotifyMessage) error {
 // WecomNotifier 企业微信机器人渠道（webhook POST markdown）。
 type WecomNotifier struct {
 	webhook string
-	client  *http.Client
+	client  *httpc.Client
 }
 
 // NewWecomNotifier 构造企微渠道（webhook URL）。
@@ -441,7 +449,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
 	req.Header.Set(headerContentType, contentTypeJSON)
-	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook 是受信配置
+	resp, err := w.client.DoOpts(ctx, req, httpc.DoOptions{}) //nolint:gosec
 	if err != nil {
 		return &NotifierError{Channel: "wecom", Err: err}
 	}
@@ -456,7 +464,7 @@ func (w *WecomNotifier) Send(ctx context.Context, m NotifyMessage) error {
 type ServerChanNotifier struct {
 	baseURL string // 形如 https://sctapi.ftqq.com/{key}（{key} 占位）
 	key     string
-	client  *http.Client
+	client  *httpc.Client
 }
 
 // NewServerChanNotifier 构造 Server 酱渠道（baseURL 含 {key} 占位 + key）。
@@ -480,7 +488,7 @@ func (s *ServerChanNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
 	req.Header.Set(headerContentType, "application/x-www-form-urlencoded")
-	resp, err := s.client.Do(req) //nolint:gosec // G704: baseURL 是受信配置
+	resp, err := s.client.DoOpts(ctx, req, httpc.DoOptions{}) //nolint:gosec
 	if err != nil {
 		return &NotifierError{Channel: "serverchan", Err: err}
 	}
@@ -684,7 +692,7 @@ type WebhookNotifier struct {
 	secret string
 	sigHdr string
 	tsHdr  string
-	client *http.Client
+	client *httpc.Client
 }
 
 // NewWebhookNotifier 构造通用 Webhook 渠道（cfg.URL 空 = 未启用）。
@@ -731,7 +739,7 @@ func (w *WebhookNotifier) Send(ctx context.Context, m NotifyMessage) error {
 		req.Header.Set(w.sigHdr, signWebhook(w.secret, []byte(body), ts))
 		req.Header.Set(w.tsHdr, strconv.FormatInt(ts, 10))
 	}
-	resp, err := w.client.Do(req) //nolint:gosec // G704: webhook URL 是受信配置
+	resp, err := w.client.DoOpts(ctx, req, httpc.DoOptions{}) //nolint:gosec
 	if err != nil {
 		return &NotifierError{Channel: "webhook", Err: err}
 	}

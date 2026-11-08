@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/pipe"
 )
 
 // 幂等请求（GET/HEAD）的退避重试默认值。背景（2026-10-11 实测）：
@@ -39,6 +41,16 @@ func (p retryPolicy) attempts() int {
 		n = defaultRetryCount
 	}
 	return n + 1
+}
+
+// pipePolicy 把 pikpak 的重试策略映射为 `pipe.Policy`：**机制用 pipe、策略留在此处**
+// （退避曲线经 Backoff 注入 ⇒ 保留本包特有的"指数 + **加性**抖动 + 封顶"分布，
+// 与 pipe 内建的乘性抖动不同，不能直接套用）。
+func (p retryPolicy) pipePolicy() pipe.Policy {
+	return pipe.Policy{
+		Attempts: p.attempts(),
+		Backoff:  p.delay,
+	}
 }
 
 // delay 返回第 retry 次重试前的退避时长（retry 从 1 起）：指数增长 + 抖动，封顶。
@@ -86,10 +98,23 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// retryDecision 把 `fn` 的"可重试布尔"编码进错误（`pipe.Retry` 按错误判定是否重试）。
+// 保持 doWithRetry 原有的错误契约：耗尽时对外暴露的仍是**最后一次的业务错误**。
+type retryDecision struct {
+	err       error
+	retryable bool
+}
+
+func (d *retryDecision) Error() string { return d.err.Error() }
+func (d *retryDecision) Unwrap() error { return d.err }
+
 // doWithRetry 执行幂等请求并退避重试。fn 返回 (retryable, err)：
-//   - err == nil → 成功返回；
-//   - retryable=false 或 ctx 结束 → 立即返回该错误（不重试）；
-//   - retryable=true → 退避后重试，直到尝试次数用尽（返回最后一次错误）。
+//   - err == nil ⇒ 成功返回；
+//   - retryable=false 或 ctx 结束 ⇒ 立即返回该错误（不重试）；
+//   - retryable=true ⇒ 退避后重试，直到尝试次数用尽（返回最后一次错误）。
+//
+// 实现说明（2026-11-08）：循环骨架**收敛到 `pkg/pipe.Retry`**（此前本包自写一份同构循环 +
+// sleepCtx；同一语义在仓库内曾有多份实现）。退避曲线经 `pipe.Policy.Backoff` 注入 ⇒ 语义不变。
 //
 // what 仅用于日志（如 "GET /drive/v1/files/x"）；log 可为 nil（不记日志）。
 func doWithRetry(ctx context.Context, p retryPolicy, log *slog.Logger, what string, fn func() (bool, error)) error {
@@ -97,27 +122,32 @@ func doWithRetry(ctx context.Context, p retryPolicy, log *slog.Logger, what stri
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
-	total := p.attempts()
-	var lastErr error
-	for attempt := 1; attempt <= total; attempt++ {
-		if attempt > 1 && !sleepCtx(ctx, p.delay(attempt-1)) {
-			return fmt.Errorf("%s: %w", what, ctx.Err())
-		}
-		retryable, err := fn()
-		if err == nil {
+	pol := p.pipePolicy()
+	pol.Retryable = func(err error) bool {
+		var d *retryDecision
+		return errors.As(err, &d) && d.retryable
+	}
+	err := pipe.Retry(ctx, pipe.Env{}, pol, func(ctx context.Context, attempt int) error {
+		retryable, ferr := fn()
+		if ferr == nil {
 			return nil
 		}
-		lastErr = err
 		// ctx 已结束（用户中断/超时）→ 上报 ctx 语义，不把中断伪装成网络错误。
 		if ctx.Err() != nil {
-			return fmt.Errorf("%s: %w", what, ctx.Err())
+			return &retryDecision{err: fmt.Errorf("%s: %w", what, ctx.Err())}
 		}
-		if !retryable {
-			return err
+		if retryable && log != nil {
+			log.Warn("pikpak request retry", "what", what, "attempt", attempt, "of", pol.Attempts, "err", ferr)
 		}
-		if log != nil {
-			log.Warn("pikpak request retry", "what", what, "attempt", attempt, "of", total, "err", err)
-		}
+		return &retryDecision{err: ferr, retryable: retryable}
+	})
+	if err == nil {
+		return nil
 	}
-	return lastErr
+	// 错误契约：对外只暴露业务错误（不暴露 pipe 的 ErrAttemptsExhausted 包装）。
+	var d *retryDecision
+	if errors.As(err, &d) {
+		return d.err
+	}
+	return err
 }
