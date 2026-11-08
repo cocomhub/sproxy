@@ -88,7 +88,7 @@ func (s *Storage) uploadViaCore(ctx context.Context, pcs *Client,
 	if err != nil {
 		return err
 	}
-	ad := newUCAdapter(s, pcs, key, st.tmpPath, remote, st, true, repair)
+	ad := newUCAdapter(s, newLibPCS(pcs), key, st.tmpPath, remote, st, true, repair)
 	u, err := uploadcore.New(uploadcore.Options{
 		Probe: ad, Rapid: ad, Slicer: ad, Parts: ad, Merge: ad, Verify: ad, Repair: ad,
 		WAL:    wal,
