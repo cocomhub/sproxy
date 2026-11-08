@@ -73,6 +73,11 @@ func (s *Storage) coreAllowed(mode, key string, st *stagedUpload, coreOK bool) (
 	if !useCore || st.size <= limit {
 		return useCore, nil
 	}
+	s.coreStatSkippedOversize.Add(1)
+	if s.coreSkipLogged.CompareAndSwap(false, true) {
+		s.log.Info("上传内核跳过（超过尺寸护栏）——本次起该尺寸走既有路径",
+			"key", key, "size", st.size, "limit", limit)
+	}
 	if mode == "nucleus" {
 		return false, fmt.Errorf("baidupcs: upload_core=nucleus 不支持 %d 字节（超过内核尺寸护栏 %d）",
 			st.size, limit)
@@ -92,6 +97,12 @@ func (s *Storage) uploadStaged(ctx context.Context, key, remote string, st *stag
 	if gerr != nil {
 		return gerr
 	}
+	if mode == "legacy" {
+		s.coreStatLegacyMode.Add(1)
+	}
+	if !useCore && !coreOK {
+		s.coreStatNoDeps.Add(1)
+	}
 	if mode == "legacy" || !useCore {
 		if mode == "nucleus" && !useCore {
 			return fmt.Errorf("baidupcs: upload_core=nucleus 但无库 adapter（无法运行内核）")
@@ -103,11 +114,15 @@ func (s *Storage) uploadStaged(ctx context.Context, key, remote string, st *stag
 		return s.adapter.Upload(ctx, st.tmpPath, remote, true)
 	}
 
+	s.coreStatUsed.Add(1)
 	if err := s.uploadViaCore(ctx, pcs, repair, key, remote, st); err == nil {
 		return nil
 	} else if mode == "nucleus" {
+		s.coreStatFailed.Add(1)
 		return err
 	} else {
+		s.coreStatFailed.Add(1)
+		s.coreStatDegraded.Add(1)
 		s.coreDisabled.Store(true)
 		s.log.Warn("上传内核失败，本进程降级为既有路径（auto）",
 			"key", key, "err", err)
