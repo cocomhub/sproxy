@@ -22,6 +22,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -105,7 +106,7 @@ func New(cfg Config) *Client {
 	}
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = cfg.Timeout
-	return &Client{cfg: cfg, hc: &http.Client{Transport: tr}}
+	return &Client{cfg: cfg, hc: httpc.NewHTTPClient(httpc.Options{Transport: tr})}
 }
 
 // Embed 单条文本 → []float32（归一化，供余弦相似度）。

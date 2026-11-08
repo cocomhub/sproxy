@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -402,4 +403,34 @@ func TestReplayBody_Unit(t *testing.T) {
 	if err := replayBody(&http.Request{}, &http.Request{}); err != nil {
 		t.Fatalf("无 body 时应直接成功，got %v", err)
 	}
+}
+
+// TestNewHTTPClient_DefaultsAndPassthrough 集中构造出口：默认 IsolatedTransport + 字段透传。
+func TestNewHTTPClient_DefaultsAndPassthrough(t *testing.T) {
+	t.Parallel()
+	// 默认：非 DefaultTransport（隔离连接池）。
+	def := NewHTTPClient(Options{})
+	if def.Transport == nil || def.Transport == http.DefaultTransport {
+		t.Fatalf("默认 Transport 必须是独立的 IsolatedTransport，got %v", def.Transport)
+	}
+	// 透传：ClientTimeout / Jar / CheckRedirect 必须落到裸 client（迁移存量时行为等价）。
+	jar, _ := cookiejar.New(nil)
+	redirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	tr := &countingTransport{}
+	hc := NewHTTPClient(Options{Transport: tr, ClientTimeout: 7 * time.Second, Jar: jar, CheckRedirect: redirect})
+	if hc.Timeout != 7*time.Second || hc.Jar == nil || hc.CheckRedirect == nil || hc.Transport != tr {
+		t.Fatalf("字段未透传：timeout=%v jar!=nil=%v redirect!=nil=%v", hc.Timeout, hc.Jar != nil, hc.CheckRedirect != nil)
+	}
+	// New 内部必须复用同一构造出口（避免两份构造逻辑漂移）。
+	c := New(Options{Transport: tr, ClientTimeout: 5 * time.Second})
+	if c.http.Transport != tr || c.http.Timeout != 5*time.Second {
+		t.Fatalf("New 应复用 NewHTTPClient 语义，got %+v", c.http)
+	}
+}
+
+type countingTransport struct{ calls int }
+
+func (t *countingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
 }

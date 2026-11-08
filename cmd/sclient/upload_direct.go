@@ -4,12 +4,13 @@
 package main
 
 import (
+	"net/http"
+
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,7 +20,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/spf13/cobra"
 )
 
@@ -94,7 +95,7 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 	}
 
 	// 隔离 transport（不共享默认客户端——测试铁律；netutil.IsolatedTransport 无全局状态）。
-	putClient := &http.Client{Transport: netutil.IsolatedTransport()}
+	putClient := httpc.NewHTTPClient(httpc.Options{})
 	defer putClient.CloseIdleConnections()
 
 	// PUT 5xx/网络失败自动重试（指数退避 + 每次重试前重新签发——presigned URL 有

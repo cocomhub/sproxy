@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -97,7 +98,7 @@ func New(cfg Config) *Client {
 	}
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = defaultTimeout
-	return &Client{cfg: cfg, hc: &http.Client{Transport: tr}}
+	return &Client{cfg: cfg, hc: httpc.NewHTTPClient(httpc.Options{Transport: tr})}
 }
 
 // Advise 生成建议文本：构建 system+user 消息 → POST {base}/chat/completions

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -230,13 +231,13 @@ func vaultHTTPClientFor(opts VaultOptions, timeout time.Duration) (*http.Client,
 // 跟 10 跳，跨主机跳转只剥离 Authorization/Cookie 等头，X-Vault-Token 是自定义头会被原样
 // 带到重定向目标（token 外泄）——Vault API 客户端应直接收尾跳转响应（I-1）。
 func newVaultHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
-	return &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
+	return httpc.NewHTTPClient(httpc.Options{
+		Transport:     transport,
+		ClientTimeout: timeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
-	}
+	})
 }
 
 // loadVaultCertPool 读取 PEM CA 文件并构造 CertPool（Vault 自签/内网 CA 场景）。

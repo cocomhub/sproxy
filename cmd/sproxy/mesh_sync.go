@@ -18,18 +18,19 @@ package main
 // `transport=webrtc` 在本装配明确报错（留待 CLI 侧注入自己的 Dialer）。
 
 import (
+	"github.com/cocomhub/sproxy/pkg/netutil"
+
 	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"maps"
 	"net"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/remote"
 	"github.com/cocomhub/sproxy/pkg/server"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -446,10 +447,10 @@ func newMeshSignaler(cfg *server.Config, ak, sk, skeyID string) (*hub.HubSignale
 	if needInsecure {
 		tr := netutil.DefaultTransport()
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 显式选择：自签场景
-		sig.SetHTTPClient(&http.Client{
-			Timeout:   60 * time.Second,
-			Transport: tr,
-		})
+		sig.SetHTTPClient(httpc.NewHTTPClient(httpc.Options{
+			Transport:     tr,
+			ClientTimeout: 60 * time.Second,
+		}))
 	}
 	return sig, nil
 }

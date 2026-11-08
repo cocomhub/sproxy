@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -75,10 +76,8 @@ func New(apiBase string) *Client {
 	tr := netutil.IsolatedTransport()
 	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
 	return &Client{
-		HTTP: &http.Client{
-			Transport: tr,
-			Timeout:   0, // 大文件下载不设整体超时（响应头 30s 由 Transport 兜底）
-		},
+		// 大文件下载不设整体超时（ClientTimeout 0；响应头 30s 由 Transport 兜底）。
+		HTTP:        httpc.NewHTTPClient(httpc.Options{Transport: tr}),
 		APIBase:     strings.TrimRight(apiBase, "/"),
 		ReleaseBase: DefaultReleaseURL,
 	}

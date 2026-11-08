@@ -9,16 +9,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
+
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/netutil"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	mesh "github.com/cocomhub/sproxy/pkg/tunnel/mesh"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -213,7 +215,7 @@ func runRelayOnce(ctx context.Context, p *relayStartParams, wsUpgradeHeader, vir
 	if localAddr == "" {
 		localAddr = "http://127.0.0.1:8080"
 	}
-	httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
+	httpClient := httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 30 * time.Second})
 
 	logger.Info("等待中继请求...")
 	// 始终传入包含宣告服务地址的拨号策略（--dial-allow=false 时 Serve 在咨询

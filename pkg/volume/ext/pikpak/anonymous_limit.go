@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -118,5 +119,5 @@ func (p anonLimitProber) rangeProbe(ctx context.Context, link string, offset, to
 // 不能把下载启动拖住）。CLI（pikget）可直接用它做「只探测不下载」。
 func NewAnonymousProbeClient() *http.Client {
 	tr := newProbeTransport()
-	return &http.Client{Timeout: 20 * time.Second, Transport: tr}
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr, ClientTimeout: 20 * time.Second})
 }

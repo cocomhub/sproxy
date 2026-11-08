@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/authn"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"golang.org/x/oauth2"
 )
 
@@ -143,7 +144,7 @@ func (a *OIDCAuthenticator) provider(ctx context.Context) (*oidcProvider, error)
 	if err != nil {
 		return nil, fmt.Errorf("oidcldap: discovery 请求构造失败: %w", err)
 	}
-	client := &http.Client{Transport: newIsolatedTransport()}
+	client := httpc.NewHTTPClient(httpc.Options{})
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -175,7 +176,7 @@ func (a *OIDCAuthenticator) provider(ctx context.Context) (*oidcProvider, error)
 		tokenURL: doc.TokenURL,
 		jwksURL:  doc.JWKSURL,
 		issuer:   a.issuer,
-		client:   &http.Client{Transport: newIsolatedTransport()},
+		client:   httpc.NewHTTPClient(httpc.Options{}),
 		now:      time.Now,
 	}
 	a.prov = p

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -111,7 +112,7 @@ func listHubNodesHTTPClient(insecure bool, httpClient *http.Client) *http.Client
 		return client.InsecureHTTPClient()
 	}
 	tr := netutil.DefaultTransport()
-	return &http.Client{Timeout: 10 * time.Second, Transport: tr}
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr, ClientTimeout: 10 * time.Second})
 }
 
 // decodeHubNodes 解析 /api/hub/nodes 响应为 HubNodeInfo 列表：跳过空 ID，虚拟 IP

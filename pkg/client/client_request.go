@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
@@ -191,10 +192,10 @@ func (c *FileClient) doDirect(ctx context.Context, req *http.Request) (*http.Res
 		// 不落 http.DefaultClient：自建隔离连接池（硬规则——共享连接池被外部
 		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
-		hc = &http.Client{Transport: netutil.IsolatedTransport()}
+		hc = httpc.NewHTTPClient(httpc.Options{})
 	}
 	if noClientTimeoutFrom(ctx) && hc.Timeout != 0 {
-		hc = &http.Client{Transport: hc.Transport}
+		hc = httpc.NewHTTPClient(httpc.Options{Transport: hc.Transport})
 	}
 	resp, err := hc.Do(req)
 	if err != nil && c.downloadProxy != "" && isReplayable(req) {
@@ -234,10 +235,10 @@ func (c *FileClient) doRequestViaProxy(ctx context.Context, req *http.Request, d
 	if c.httpClient != nil {
 		timeout = c.httpClient.Timeout
 	}
-	proxyClient := &http.Client{
-		Timeout:   timeout,
-		Transport: tr,
-	}
+	proxyClient := httpc.NewHTTPClient(httpc.Options{
+		Transport:     tr,
+		ClientTimeout: timeout,
+	})
 	// 克隆请求：Header/URL 深拷贝，保留签名与凭据头；仅替换 Transport 发送。
 	proxyReq := req.Clone(ctx)
 	c.logger.WarnContext(ctx, "直连下载失败，回退代理重发", "direct_error", directErr.Error(), "proxy", c.downloadProxy, "url", req.URL.String())

@@ -16,8 +16,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
 // verifyJWTWithJWKS 校验 JWT（RS256）：从 JWKS 拉公钥 → 验签名 → 校验 iss/aud/exp。
@@ -196,12 +194,6 @@ func buildRSAKey(kty, keyKid, nB64, eB64, kid string) *rsa.PublicKey {
 		return nil
 	}
 	return &rsa.PublicKey{N: new(big.Int).SetBytes(nb), E: int(new(big.Int).SetBytes(eb).Int64())}
-}
-
-// newIsolatedTransport 返回独立连接池的 http.Transport（生产/测试均不共享
-// DefaultTransport——测试隔离硬规则 + 生产防环）。
-func newIsolatedTransport() *http.Transport {
-	return netutil.IsolatedTransport()
 }
 
 // _ 保持 time 引用（将来扩展）。

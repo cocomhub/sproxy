@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/server"
@@ -205,7 +206,7 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 	var httpClient *http.Client
 	if insecureTLS {
 		// 本地自签证书（WSL 联调等）：注入跳过校验的 HTTPClient（生产必须 false）。
-		httpClient = &http.Client{Transport: insecureTransport(), Timeout: 30 * time.Second}
+		httpClient = httpc.NewHTTPClient(httpc.Options{Transport: insecureTransport(), Timeout: 30 * time.Second})
 		cfg.HTTPClient = httpClient
 	}
 	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
