@@ -528,3 +528,139 @@ func TestServiceDefaults(t *testing.T) {
 		t.Fatal("Cfg 未装配时应回落默认上限并读成功")
 	}
 }
+
+// nilTenantResolver 让 files.Service 的租户解析失败（构造写内核拒绝，覆盖错误映射）。
+type nilTenantResolver struct{}
+
+func (nilTenantResolver) TenantFor(string) *storage.Tenant { return nil }
+
+// TestPutObject_KernelRejectAndBadSignature 错签名 403；写内核返回 *files.HTTPError 时
+// 按该状态码映射（不是一律 500）。
+func TestPutObject_KernelRejectAndBadSignature(t *testing.T) {
+	t.Parallel()
+
+	t.Run("错签名 403", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		req := httptest.NewRequest(http.MethodPut, "/s3/EXAMPLE-k.txt", bytes.NewReader([]byte("x")))
+		signRequest(req, []byte("x"), time.Now(), strings.Repeat("00", 32))
+		rec := httptest.NewRecorder()
+		f.svc.Handler(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("错签名 PUT = %d, want 403", rec.Code)
+		}
+	})
+
+	t.Run("写内核拒绝按 HTTPError 映射", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		badFS, err := files.New(nilTenantResolver{})
+		if err != nil {
+			t.Fatalf("files.New(无租户): %v", err)
+		}
+		f.svc.d.FileService = func() *files.Service { return badFS }
+		rec := f.do(http.MethodPut, "/s3/EXAMPLE-k.txt", []byte("x"), true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("内核拒绝 PUT = %d, want 400 body=%q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestEncryptedObject_FailurePaths 加密卷：缺失 404；分块认证失败必须中断响应（不静默截断 200）。
+func TestEncryptedObject_FailurePaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("缺失 404", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		if err := f.root.SetEncryption(bytes.Repeat([]byte{0x5a}, 32)); err != nil {
+			t.Fatalf("SetEncryption: %v", err)
+		}
+		if err := f.root.MkdirAll("user", 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if rec := f.do(http.MethodGet, "/s3/EXAMPLE-none.bin", nil, true); rec.Code != http.StatusNotFound {
+			t.Fatalf("加密卷缺失 GET = %d, want 404", rec.Code)
+		}
+	})
+
+	t.Run("损坏分块中断连接", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		if err := f.root.SetEncryption(bytes.Repeat([]byte{0x5a}, 32)); err != nil {
+			t.Fatalf("SetEncryption: %v", err)
+		}
+		if err := f.root.MkdirAll("user", 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		payload := bytes.Repeat([]byte("A"), 100<<10)
+		w, err := rootfs.WriteUserVisible(f.root, "user/EXAMPLE-damaged.bin", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			t.Fatalf("WriteUserVisible: %v", err)
+		}
+		if _, werr := w.Write(payload); werr != nil {
+			t.Fatalf("写加密对象: %v", werr)
+		}
+		if cerr := w.Close(); cerr != nil {
+			t.Fatalf("关闭写流: %v", cerr)
+		}
+		// 篡改末块密文：GCM 认证失败 ⇒ 读流回错。
+		abs, ok := f.root.Abs("user/EXAMPLE-damaged.bin")
+		if !ok {
+			t.Fatal("Abs 越界")
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			t.Fatalf("Stat 密文: %v", err)
+		}
+		raw, err := os.OpenFile(abs, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("打开密文: %v", err)
+		}
+		if _, err := raw.Seek(info.Size()-1, 0); err != nil {
+			t.Fatalf("Seek 密文: %v", err)
+		}
+		if _, err := raw.Write([]byte{0xff}); err != nil {
+			t.Fatalf("篡改密文: %v", err)
+		}
+		_ = raw.Close()
+
+		rec, recovered := f.doRecovering(http.MethodGet, "/s3/EXAMPLE-damaged.bin", nil, true)
+		if recovered != http.ErrAbortHandler {
+			t.Fatalf("损坏分块应 panic(http.ErrAbortHandler) 中断响应, got %v", recovered)
+		}
+		if rec.Body.Len() >= len(payload) {
+			t.Fatalf("中断前已下发 %d 字节（应少于完整 %d）", rec.Body.Len(), len(payload))
+		}
+	})
+}
+
+// failingSeeker 是读写流在中途失败的桩（模拟校验分块失败/底层读错）。
+type failingSeeker struct{}
+
+func (failingSeeker) Read([]byte) (int, error)       { return 0, errors.New("分块校验失败") }
+func (failingSeeker) Seek(int64, int) (int64, error) { return 0, nil }
+func (failingSeeker) Close() error                   { return nil }
+
+// TestGetObject_VerifyFailureAbortsConnection 校验流读错时不得以合法终止块结束响应
+// （否则客户端看到 200 + 静默截断对象）⇒ 必须 panic(http.ErrAbortHandler)。
+func TestGetObject_VerifyFailureAbortsConnection(t *testing.T) {
+	t.Parallel()
+	f := newTestFixture(t)
+	f.writeUserFile("EXAMPLE-k.txt", []byte("content"))
+	f.meta.wrapper = failingSeeker{}
+
+	rec, recovered := f.doRecovering(http.MethodGet, "/s3/EXAMPLE-k.txt", nil, true)
+	if recovered != http.ErrAbortHandler {
+		t.Fatalf("校验失败应 panic(http.ErrAbortHandler), got %v", recovered)
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("失败前不应下发内容, got %d 字节", rec.Body.Len())
+	}
+}
+
+// brokenReader 模拟读请求体时底层 IO 失败（非超限）。
+type brokenReader struct{}
+
+func (brokenReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
+func (brokenReader) Close() error             { return nil }

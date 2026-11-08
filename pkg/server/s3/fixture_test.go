@@ -283,6 +283,27 @@ func (f *testFixture) do(method, target string, body []byte, sign bool) *httptes
 	return rec
 }
 
+// doRecovering 直调 Handler 并捕获 panic（真实 net/http 会把 http.ErrAbortHandler
+// 转成断连；直调时需自行 recover 才能断言「已中断响应」）。
+func (f *testFixture) doRecovering(method, target string, body []byte, sign bool) (*httptest.ResponseRecorder, any) {
+	f.t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req := httptest.NewRequest(method, target, rdr)
+	if sign {
+		signRequest(req, body, time.Now(), testS3SKHex())
+	}
+	rec := httptest.NewRecorder()
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		f.svc.Handler(rec, req)
+	}()
+	return rec, recovered
+}
+
 // ageFile 把租户根下 rel 的 mtime 回拨 d（模拟过期孤儿会话）。
 func (f *testFixture) ageFile(rel string, d time.Duration) {
 	f.t.Helper()
