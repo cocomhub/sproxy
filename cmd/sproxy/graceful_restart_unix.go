@@ -106,7 +106,7 @@ func waitRestartReady(ctx context.Context, addr string, timeout time.Duration) e
 		return fmt.Errorf("优雅重启：解析就绪探测地址 %q 失败: %w", addr, err)
 	}
 	url := "http://127.0.0.1:" + port + "/readyz"
-	client := httpc.NewHTTPClient(httpc.Options{})
+	client := httpc.NewHTTPClient(httpc.Options{Isolated: true})
 	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(timeout)
 	interval := 200 * time.Millisecond

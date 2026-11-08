@@ -322,7 +322,9 @@ func noTimeoutFrom(ctx context.Context) bool {
 func (c *Client) tunnelHTTPClient(ctx context.Context) *http.Client {
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = httpc.NewHTTPClient(httpc.Options{})
+		// 隔离连接池（#1059 后默认池为进程共享 ⇒ 必须显式 Isolated，避免本实例的
+		// CloseIdleConnections/noTimeout 派生影响其它实例在途请求）。
+		hc = httpc.NewHTTPClient(httpc.Options{Isolated: true})
 	}
 	if noTimeoutFrom(ctx) && hc.Timeout != 0 {
 		return httpc.NewHTTPClient(httpc.Options{Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Jar: hc.Jar})
