@@ -22,12 +22,13 @@
 | 1.8 | **必须等 CI 全绿再合并**（本仓有 ruleset 必检 7 项）；不得提前合并 | 轮询 `gh pr checks` 到 `total≥14 且 pending=0` |
 | 1.9 | **合并后删除分支**（远端 + 本地） | 本仓不会自动删 |
 | 1.10 | **CI 重试只重跑失败的 job** | Benchmark 已改为**手动触发**（`.github/workflows/benchmark-manual.yml`，web 页面 Actions → Benchmark (manual)，不再自动跑在 PR 上）⇒ PR 检查不再含 Benchmark，不再因此阻塞。手动 run 超时（`timeout-minutes: 15`）即结束 ⇒ 对失败/取消的 job 用 `gh run rerun <id> --failed` 或页面 Re-run failed jobs；**不要**用裸 `rerun`（会把已成功的 job 全部重跑）；需主动掐断时先 `gh api -X POST .../runs/<id>/cancel`（GitHub 无 job 级 cancel API），再 rerun failed；rerun 产生新 job id，必须动态取 |
-| 1.11 | **纯文档 PR 无法合并 ⇒ 文档改动必须搭在代码 PR 里** | `paths-ignore` 含 `*.md`/`docs/**` ⇒ 不触发 CI ⇒ ruleset 必检项永不满足；且本仓 `ruleset.bypass_actors=[]` ⇒ **`--admin` 也绕不过**（实测 `GraphQL: Head branch is out of date`）。必要时给同一 PR 加一个**真实门禁/代码改动**（例：`internal/archcheck/docs_rules_test.go` 断言规则文档存在且被 `AGENTS.md` 引用） |
+| 1.11 | **纯文档 PR 走 docs-only 占位通道（可秒合并）**（2026-09-17 起）| 历史：曾因 `paths-ignore` 含 `*.md`/`docs/**` 导致必检项永不满足、`--admin` 也绕不过。现 `ci-docs-only.yml`（`paths` 恰为反向）触发并用**与必检项同名**的秒级占位检查报 success ⇒ 必检被满足、直接 squash 合并。**混有代码（含 workflow 本身）时**仍走完整 `ci.yml`，须全绿 |
 | 1.12 | **CI 等待期并行做下一片**；上一片合并后 `git rebase --onto origin/master <已合并提交>` 再开下一片 PR（PR 里不得夹带已合并提交） | 见 §3.10 |
 | 1.13 | 推送一律走 https：`git push https://github.com/cocomhub/sproxy.git HEAD:refs/heads/<branch>`（本机 SSH 不可用） | — |
 | 1.14 | **自动继续**：方案细节无须逐项确认时，直接按计划推进并在片尾报告；**发现方案缺陷要停下来讨论** | — |
 | 1.15 | **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e** | 用户明示：改 `web/static/**`（含嵌入式 UI）时，① 新增/改动的纯函数要有 `node --test` 单测；② 交互/渲染要有 **Playwright 真实浏览器** e2e（`web/e2e`，CI 必检项 `UI E2E Tests` 会装 chromium 后跑整套）；③ 新 JS 文件必须登记进 Makefile `web-test`（`node --check` 或 `node --test`）。`make web-test` 已挂进 ui-e2e job；门禁 **R10** (`internal/archcheck/web_assets_test.go`) 守 ①③。**e2e 必须走真实服务端数据链路**（不得用 route 拦截/合成对象代替）——见 §3.23 的实测教训 |
 | 1.16 | **CHANGELOG 由 release-please 生成，不再手工维护** | 用户 2026-09-14 决策（修订原「每次 commit 同步 CHANGELOG」规则）。`CHANGELOG.md` 与版本号的单一事实源 = `release-please-config.json` + `.github/workflows/release-please.yml`：release-please 在 push master 时开 **release PR**，合并后打 tag 并由 GoReleaser 出制品。硬要求落在**提交信息**：类型正确（`feat`→Added / `fix`→Fixed / `perf`·`refactor`·`deps`→Changed；破坏性变更 `!`/`BREAKING CHANGE:`）+ subject 是**用户可读的能力描述**（直接成为 changelog 条目）。**不得手写 `[Unreleased]`**——release-please 不消费它 ⇒ 滞留且丢失（实测：写在 `[Unreleased]` 的 4 条 `### Removed` 未进入 0.11.1）。且 **`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**：release-please 用 `DEFAULT_VERSION_HEADER_REGEX = '\n###? v?[0-9[]'` 以「第一个版本标题」为插入锚点，该段因 `[` 命中 ⇒ 新版本段被插到它上面、它从不被消费。删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`，免人工补条目）；其余无法用提交类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` 默认**不进** changelog。发布流程见 `RELEASING.md`。**squash 合并用的是分支 commit 信息（非 PR 标题）**——分支最后一个 commit 的 subject 会成为 master 提交信息并进 changelog，合并前必须确认它是想要的 Conventional Commit subject。门禁 **R12** 守配置与规则一致 |
+| 1.17 | **功能开工前必须把影响面「探索到代码行」**（用户明示 2026-11-08）：凡改动**公共默认值 / 公共 API 语义 / 共享行为 / 公共构造入口**，必须**穷举**受影响调用点（逐行写「文件:行号 + 当前行为 → 改后行为」），并完成「能力不遗失」核对（字段传递 / 语义档位 / 副作用）；**没有行级依据不动手**。能机制化的检查必须加门禁（登记 `docs/gates.md`）。详见 §3.24 的反面样本 |
 
 ---
 
@@ -211,3 +212,43 @@ go test -count=1 ./internal/archcheck/
 | 门禁清单 | `internal/archcheck/`：R1 分层方向 / R2 子包可见性 / R3 新包登记 / R4 领域包不得导入装配层 / R5 全表化 / R6 子 module 边界 / R7 重复实现 / R8 上传副作用单一实现（`upload_side_effect_test.go`）/ R9 规则文档不腐烂 / R10 前端 JS 全覆盖（被 `web-test` 引用 + 测试被 `node --test` 跑 + `web-test` 挂 CI）/ R11 死代码墓碑（已确认删除的遗留符号不得以词边界复活，`dead_symbols_test.go`）/ R12 CHANGELOG 单一事实源（release-please 配置与 AGENTS/CLAUDE 规则一致，`release_policy_test.go`）/ `Managed∖Levels` 断言 / xfer Send 原子性 / R13 门禁自身可用性（`gate_wiring_test.go`）/ R14 测试内固定等待棘轮（`test_sleep_ratchet_test.go`，只减不增）/ R15 sclient 选项文档不漂移（`docs_cli_flags_test.go`）/ R16 开源仓库卫生文档（`repo_hygiene_test.go`）/ R17 `make notest` 门禁自身可用性（`notest_gate_test.go`）/ R18 新增测试并发注册（`test_parallel_gate_test.go`）/ R19 裸 `http.Transport{}` 构造禁止（生产+测试，`http_transport_gate_test.go`；2026-09-20 升级自 #402 零值版）/ R20 生产 `http.Client{}` 构造必须带 `Transport:`（隐式共享 `http.DefaultTransport` 拦截，`http_transport_gate_test.go`）/ Makefile 目标不得重复定义（`makefile_target_dup_test.go`） |
 | 计划与规格 | 已归档至 `docs/archive/`（历史设计文档 2026-09-19 清理；新设计落地后经验写入 archive） |
 | 既有流程文档 | `docs/archive/ci-merge-process.md`（CI/合并细节） |
+
+### 3.24 改公共默认值未穷举影响面 ⇒ 4 处「能力遗失」回归（2026-11-08，实测）
+
+**用户明示纪律**：**"所有功能必须提前探索清楚所有细节具体到代码行，避免后期返工回归"**
+（并强调"确保功能收敛增强并且**无能力遗失**"）。
+
+**反面样本（本仓真实发生）**：把 `pkg/httpc` 默认 Transport 由「独立池」
+（`netutil.IsolatedTransport()`）改为「**进程级共享池**」（`netutil.DefaultTransport()`）时，
+未先穷举"未显式指定 Transport 且依赖旧隔离语义"的调用点 ⇒ **4 处回归**：
+
+| 文件 | 退化后果 |
+|---|---|
+| `pkg/client/client_request.go` | FileClient SDK 缺省 client 变共享池（其 `client.go` 注释本就要求 per-instance 池防跨实例竞态） |
+| `pkg/tunnel/handler_client.go` | 隧道客户端缺省实例变共享池（影响 `noTimeout` 派生路径） |
+| `cmd/sclient/upload_direct.go` | `defer CloseIdleConnections()` ⇒ **关闭进程共享池** |
+| `cmd/sproxy/graceful_restart_unix.go` | 注释写"立即关闭独立连接池"，实现却关共享池 |
+
+后果：这些点会**打断全进程在途请求**（`transport connection broken: http: CloseIdleConnections called`
+—— 硬规则 17 的原始事故形态）；且**注释仍写着"隔离"**（注释与行为矛盾，读代码看不出问题）
+⇒ 事后才由专项审计发现，需专门修复 PR + 新增门禁。**代价：多一轮 PR + 多一次 CI + 一次全量审计。**
+
+**正确前置动作（开工前必做）**：
+1. `grep` 出**所有**受影响调用点（本例：所有未显式指定 `Transport`/`Isolated` 的 httpc 构造点
+   + 所有 `CloseIdleConnections()` 调用点）；
+2. 逐行判定「当前档位 → 改后档位」，标出**依赖旧语义**的点；
+3. 能机制化的直接加门禁（本例新增 **R58** `internal/archcheck/httpc_pool_close_gate_test.go`：
+   含 `CloseIdleConnections(` 且含 httpc 构造 ⇒ 必须 `Isolated: true` 或自备 `Transport:`），
+   并登记 `docs/gates.md`。
+
+**同类流程失误（同一会话 3 次，务必固化）**：`gh pr merge --delete-branch` 合并后 head 回到 `master`，
+下一批工作**未先建分支**就提交 ⇒ 事后需 `git branch <new> <sha>` + `git reset --hard origin/master` 返工。
+**正确做法：每次合并后立刻 `git checkout -b <下一批分支>`**（作为合并流程的下一步，在任何编辑之前）。
+
+**收尾"能力不遗失"验收清单**（抄自全局纪律，逐项打勾）：
+- [ ] 受影响调用点逐行核对（含行号）
+- [ ] 字段传递完整（Transport/超时/重定向/Jar/认证头…）
+- [ ] 语义档位未无声切换（共享/隔离、整体超时/单次尝试、重试次数/退避曲线、幂等性）
+- [ ] 外部契约已登记（`docs/external-dependencies.md`）且有测试锁定
+- [ ] 能机制化的检查已加门禁（登记 `docs/gates.md`）
+- [ ] 分支已就绪（不直接在 `master` 提交）
