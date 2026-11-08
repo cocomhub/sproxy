@@ -31,6 +31,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/pipe"
 )
 
 // Config 是 DNSPod 插件配置。
@@ -47,9 +48,29 @@ type Config struct {
 // Provider 实现 certmgr.DNSProvider 接口。
 type Provider struct {
 	config   Config
-	client   *http.Client
+	client   *httpc.Client
 	endpoint string
 	scheme   string
+}
+
+// dnsPodRetry 是可重试 Action 的策略（外部 API 类：快速退避、有限次数）。
+var dnsPodRetry = httpc.PolicyFor(httpc.PolicyFast)
+
+// dnsPodNoRetry 显式关闭重试（Attempts=1）：给**非幂等** Action 用。
+var dnsPodNoRetry = pipe.Policy{Attempts: 1}
+
+// dnsPodActionIdempotent 报告该 Action 是否可安全重试。
+//
+// 关键：DNSPod 用 **GET 承载写操作**（Action 在 query string 里），而 `httpc` 默认按
+// HTTP 方法判定可重试（GET ⇒ 可重试）⇒ **必须**按 Action 显式区分，否则瞬时 5xx
+// 重试会重复创建 ACME 校验记录。DeleteRecord 幂等（重复删无害）⇒ 可重试。
+func dnsPodActionIdempotent(action string) bool {
+	switch action {
+	case "RecordList", "DeleteRecord":
+		return true
+	default: // CreateRecord 及其它写操作
+		return false
+	}
 }
 
 // dnsPodResponseError 是 DNSPod API 统一错误体（Response.Error 结构）。
@@ -81,9 +102,21 @@ func New(cfg Config) *Provider {
 			endpoint = parts[1]
 		}
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 30 * time.Second})
+	client := httpc.New(httpc.Options{
+		Transport:     netutil.DefaultTransport(),
+		ClientTimeout: 30 * time.Second,
+		Retry:         dnsPodRetry,
+	})
+	if cfg.HTTPClient != nil {
+		// 注入外部 client ⇒ **派生**编排客户端（保留其 Transport/重定向/Jar 语义，
+		// 不改调用方实例）。
+		client = httpc.New(httpc.Options{
+			Transport:     cfg.HTTPClient.Transport,
+			CheckRedirect: cfg.HTTPClient.CheckRedirect,
+			Jar:           cfg.HTTPClient.Jar,
+			ClientTimeout: cfg.HTTPClient.Timeout,
+			Retry:         dnsPodRetry,
+		})
 	}
 	return &Provider{
 		config:   cfg,
@@ -211,8 +244,16 @@ func (p *Provider) callAPIWithResult(ctx context.Context, params map[string]stri
 		return fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	resp, err := p.client.Do(req)
-	if err != nil {
+	// 非幂等 Action（如 CreateRecord）必须显式关重试：DNSPod 是 GET 承载写的 API，
+	// httpc 默认按方法判定会误判为可重试。
+	opt := httpc.DoOptions{}
+	if !dnsPodActionIdempotent(params["Action"]) {
+		opt.Retry = dnsPodNoRetry
+	}
+	resp, err := p.client.DoOpts(ctx, req, opt)
+	// 非 2xx 也返回响应（err = *httpc.HTTPError）：状态码/业务错误由下方分支统一映射
+	// （保持既有错误文案不变），故仅「无响应」视为请求失败。
+	if resp == nil {
 		return fmt.Errorf("API 请求失败: %w", err)
 	}
 	defer resp.Body.Close()

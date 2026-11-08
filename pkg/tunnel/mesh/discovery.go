@@ -89,8 +89,11 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 			Nonce: sproxysig.NewNonce(), BodySHA256: sproxysig.EmptyBodyHash()}
 		req.Header.Set("Authorization", sproxysig.SignAndFormat(accessKeySecret, h, req.Method, req.URL.EscapedPath(), req.URL.RawQuery))
 	}
-	resp, err := listHubNodesHTTPClient(insecure, httpClient).Do(req)
-	if err != nil {
+	resp, err := listHubNodesHTTPClient(insecure, httpClient).Do(ctx, req)
+	// 编排客户端对非 2xx 也返回可读响应体（err 为 *httpc.HTTPError）——本函数需要自行读
+	// body 构造 *hubAPIError（4xx 致命 / 5xx 瞬时由调用方分类），故只把「无响应」视为请求
+	// 失败，状态码分支保持原样（**错误类型与文案不变**）。
+	if resp == nil {
 		return nil, fmt.Errorf("list hub nodes: 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -104,15 +107,41 @@ func ListHubNodes(ctx context.Context, baseURL, accessKey, accessKeySecret, acce
 // listHubNodesHTTPClient 取请求客户端：传入非 nil 时原样复用；nil 时自建隔离副本
 // （硬规则：不落 http.DefaultClient 共享连接池），其中 insecure 用自签兼容的
 // InsecureHTTPClient，否则带默认 Transport 的超时客户端。
-func listHubNodesHTTPClient(insecure bool, httpClient *http.Client) *http.Client {
+// hubNodesRetry 是 hub 发现请求的重试策略（外部 API 类：快速退避、有限次数）。
+// 机制在 pkg/pipe、策略在调用点声明。
+var hubNodesRetry = httpc.PolicyFor(httpc.PolicyFast)
+
+// listHubNodesHTTPClient 取请求客户端（**带重试编排**）：传入非 nil 时**派生**（保留其
+// Transport/重定向/Jar 语义，不改调用方实例）；nil 时自建（硬规则：不落共享池），其中
+// insecure 用自签兼容的 InsecureHTTPClient，否则带默认 Transport 与 10s 超时。
+//
+// 2026-11-08：由裸 `*http.Client` 改为 `httpc.Client` —— discovery 循环每 10s 一轮，
+// 瞬时 5xx/网络抖动此前要等下一轮才恢复；现按 GET 幂等自动重试（4xx 不重试，fail-fast）。
+func listHubNodesHTTPClient(insecure bool, httpClient *http.Client) *httpc.Client {
 	if httpClient != nil {
-		return httpClient
+		return httpc.New(httpc.Options{
+			Transport:     httpClient.Transport,
+			CheckRedirect: httpClient.CheckRedirect,
+			Jar:           httpClient.Jar,
+			ClientTimeout: httpClient.Timeout,
+			Retry:         hubNodesRetry,
+		})
 	}
 	if insecure {
-		return client.InsecureHTTPClient()
+		raw := client.InsecureHTTPClient()
+		return httpc.New(httpc.Options{
+			Transport:     raw.Transport,
+			CheckRedirect: raw.CheckRedirect,
+			Jar:           raw.Jar,
+			ClientTimeout: raw.Timeout,
+			Retry:         hubNodesRetry,
+		})
 	}
-	tr := netutil.DefaultTransport()
-	return httpc.NewHTTPClient(httpc.Options{Transport: tr, ClientTimeout: 10 * time.Second})
+	return httpc.New(httpc.Options{
+		Transport:     netutil.DefaultTransport(),
+		ClientTimeout: 10 * time.Second,
+		Retry:         hubNodesRetry,
+	})
 }
 
 // decodeHubNodes 解析 /api/hub/nodes 响应为 HubNodeInfo 列表：跳过空 ID，虚拟 IP

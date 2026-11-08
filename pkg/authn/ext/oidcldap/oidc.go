@@ -80,7 +80,7 @@ type oidcProvider struct {
 	tokenURL string
 	jwksURL  string
 	issuer   string
-	client   *http.Client
+	client   *httpc.Client
 	now      func() time.Time
 	// verifyToken 校验 id_token（返回 claims map）。nil → 默认实现（JWKS 验签）。
 	verifyToken func(ctx context.Context, token string) (map[string]any, error)
@@ -183,7 +183,7 @@ func (a *OIDCAuthenticator) provider(ctx context.Context) (*oidcProvider, error)
 		tokenURL: doc.TokenURL,
 		jwksURL:  doc.JWKSURL,
 		issuer:   a.issuer,
-		client:   httpc.NewHTTPClient(httpc.Options{Isolated: true}),
+		client:   newOIDCHTTPClient(),
 		now:      time.Now,
 	}
 	a.prov = p
@@ -366,8 +366,11 @@ func (a *OIDCAuthenticator) handleCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	tokenResp, err := prov.client.Do(tokenReq)
-	if err != nil {
+	tokenResp, err := prov.client.Do(r.Context(), tokenReq)
+	// 非 2xx 也返回响应（err = *httpc.HTTPError）：状态码统一由下方分支映射为
+	// 既有文案（msgOIDCLoginFail），故仅「无响应」视为交换失败。
+	// 注：本请求是 POST ⇒ httpc 按方法默认**不重试**（不重复消费 code）。
+	if tokenResp == nil {
 		a.logger.Warn("oidc: token 交换失败", "error", err.Error())
 		http.Error(w, msgOIDCLoginFail, http.StatusUnauthorized)
 		return
