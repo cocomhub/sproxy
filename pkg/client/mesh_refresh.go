@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -40,7 +41,7 @@ func ErrMeshServiceUnavailable(service string) error {
 func InsecureHTTPClient() *http.Client {
 	tr := netutil.IsolatedTransport()
 	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
-	return &http.Client{Timeout: 60 * time.Second, Transport: tr}
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr, ClientTimeout: 60 * time.Second})
 }
 
 // CAHTTPClient 返回以给定 PEM CA 文件为受信根的 http.Client（严格校验，不跳过证书验证）。
@@ -54,7 +55,7 @@ func CAHTTPClient(caFile string) (*http.Client, error) {
 	}
 	tr := netutil.IsolatedTransport()
 	tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	return &http.Client{Timeout: 60 * time.Second, Transport: tr}, nil
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr, ClientTimeout: 60 * time.Second}), nil
 }
 
 // MeshAccessKey 返回 SproxySig 认证 AccessKey：显式 flag 优先，否则配置值。

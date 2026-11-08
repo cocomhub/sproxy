@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/integrity"
 	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -333,10 +334,10 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 		// + 覆写 IdleConnTimeout，不裸构造 &http.Transport。
 		tr := netutil.IsolatedTransport()
 		tr.IdleConnTimeout = 30 * time.Second
-		client = &http.Client{
-			Timeout:   15 * time.Minute,
-			Transport: tr,
-		}
+		client = httpc.NewHTTPClient(httpc.Options{
+			Transport:     tr,
+			ClientTimeout: 15 * time.Minute,
+		})
 	}
 	log := cfg.Logger
 	if log == nil {

@@ -38,6 +38,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/config"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -299,7 +300,7 @@ func (nc *NotifyCenter) attempts(channel string) int {
 func httpClientForNotify() *http.Client {
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = 10 * time.Second
-	return &http.Client{Transport: tr}
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr})
 }
 
 // AlertmanagerNotifier Alertmanager 渠道：POST Alertmanager webhook v2 格式

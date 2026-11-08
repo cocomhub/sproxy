@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/media"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -49,7 +50,7 @@ func NewURLResolverWithClient(api *API, resolver *ShareResolver, client *http.Cl
 		resolver = NewShareResolver(ShareResolverConfig{})
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.IsolatedTransport(), ClientTimeout: 30 * time.Second})
 	}
 	return &URLResolver{api: api, resolver: resolver, client: client}
 }
@@ -127,7 +128,7 @@ func (r *URLResolver) httpClient() *http.Client {
 	if r.client != nil {
 		return r.client
 	}
-	return &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+	return httpc.NewHTTPClient(httpc.Options{Transport: netutil.IsolatedTransport(), ClientTimeout: 30 * time.Second})
 }
 
 // maxKeepshareRedirects 是 keepshare 镜像重定向链的最大跳数。原为 5；2026-11-01 实测上游
@@ -144,7 +145,7 @@ const maxKeepshareRedirects = 10
 // Location 并逐跳重建请求，直到目标主机是 mypikpak 或无可跳转。
 func followKeepshareShareID(ctx context.Context, client *http.Client, raw string) (string, error) {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.IsolatedTransport(), ClientTimeout: 30 * time.Second})
 	}
 	cur := raw
 	seen := map[string]struct{}{}
@@ -180,7 +181,7 @@ func followOneHop(ctx context.Context, client *http.Client, cur string) (next, d
 		return "", "", err
 	}
 	// 干净 client：本函数手动控制重定向（禁用自动跟随避免 CheckRedirect 陷阱）。
-	c := &http.Client{Timeout: client.Timeout, Transport: client.Transport}
+	c := httpc.NewHTTPClient(httpc.Options{Transport: client.Transport, ClientTimeout: client.Timeout})
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := c.Do(req)
 	if err != nil {

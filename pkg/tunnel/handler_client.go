@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -49,7 +50,7 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 		log = slog.Default()
 	}
 	return &Handler{
-		httpClient: &http.Client{
+		httpClient: httpc.NewHTTPClient(httpc.Options{
 			// IsolatedTransport 基座（保留默认调校）+ 显式连接池调优覆写。
 			Transport: func() *http.Transport {
 				tr := netutil.IsolatedTransport()
@@ -58,7 +59,7 @@ func NewLocalHandler(key []byte, local http.Handler, logger *slog.Logger) http.H
 				tr.IdleConnTimeout = 90 * time.Second
 				return tr
 			}(),
-		},
+		}),
 		localHandler:    local,
 		logger:          log,
 		replayProtector: NewReplayProtector(),
@@ -280,8 +281,8 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Log
 	return &Client{
 		Key:       key,
 		TunnelURL: strings.TrimRight(tunnelURL, "/"),
-		HTTPClient: &http.Client{
-			Timeout: timeout,
+		HTTPClient: httpc.NewHTTPClient(httpc.Options{
+			ClientTimeout: timeout,
 			// IsolatedTransport 基座（保留默认调校）+ 显式连接池调优覆写。
 			Transport: func() *http.Transport {
 				tr := netutil.IsolatedTransport()
@@ -290,7 +291,7 @@ func NewClient(hexKey, tunnelURL string, timeout time.Duration, logger *slog.Log
 				tr.IdleConnTimeout = 90 * time.Second
 				return tr
 			}(),
-		},
+		}),
 		logger: log,
 	}, nil
 }
@@ -321,10 +322,10 @@ func noTimeoutFrom(ctx context.Context) bool {
 func (c *Client) tunnelHTTPClient(ctx context.Context) *http.Client {
 	hc := c.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Transport: netutil.IsolatedTransport()}
+		hc = httpc.NewHTTPClient(httpc.Options{})
 	}
 	if noTimeoutFrom(ctx) && hc.Timeout != 0 {
-		return &http.Client{Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Jar: hc.Jar}
+		return httpc.NewHTTPClient(httpc.Options{Transport: hc.Transport, CheckRedirect: hc.CheckRedirect, Jar: hc.Jar})
 	}
 	return hc
 }

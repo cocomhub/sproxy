@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -82,7 +83,7 @@ func New(cfg Config) *Provider {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
+		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 30 * time.Second})
 	}
 	return &Provider{
 		config:   cfg,

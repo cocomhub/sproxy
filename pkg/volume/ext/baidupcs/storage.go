@@ -27,6 +27,7 @@ import (
 	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
 	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -174,7 +175,7 @@ func newRangeHTTPClient() *http.Client {
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = 30 * time.Second
 	tr.IdleConnTimeout = 90 * time.Second
-	return &http.Client{Transport: tr}
+	return httpc.NewHTTPClient(httpc.Options{Transport: tr})
 }
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + **ETag md5 复核有界重试**）。

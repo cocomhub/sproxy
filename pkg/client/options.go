@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -52,10 +53,10 @@ func WithHTTPClient(hc *http.Client) Option {
 		if hc == nil {
 			// 兜底：自建独立连接池（禁共享 http.DefaultClient/DefaultTransport——
 			// 硬规则 17；否则 nil 分支会隐式共享 http.DefaultTransport）。
-			c.httpClient = &http.Client{
-				Timeout:   30 * time.Second,
-				Transport: netutil.IsolatedTransport(),
-			}
+			c.httpClient = httpc.NewHTTPClient(httpc.Options{
+				Transport:     netutil.IsolatedTransport(),
+				ClientTimeout: 30 * time.Second,
+			})
 			return
 		}
 		c.httpClient = hc
@@ -174,10 +175,10 @@ func WithInsecureTLS() Option {
 		} else {
 			transport.TLSClientConfig.InsecureSkipVerify = true
 		}
-		c.httpClient = &http.Client{
-			Timeout:   c.httpClient.Timeout,
-			Transport: transport,
-		}
+		c.httpClient = httpc.NewHTTPClient(httpc.Options{
+			Transport:     transport,
+			ClientTimeout: c.httpClient.Timeout,
+		})
 	}
 }
 
@@ -204,10 +205,10 @@ func WithCAFile(caFile string) Option {
 		}
 		transport.TLSClientConfig.RootCAs = pool
 		transport.TLSClientConfig.InsecureSkipVerify = false
-		c.httpClient = &http.Client{
-			Timeout:   c.httpClient.Timeout,
-			Transport: transport,
-		}
+		c.httpClient = httpc.NewHTTPClient(httpc.Options{
+			Transport:     transport,
+			ClientTimeout: c.httpClient.Timeout,
+		})
 	}
 }
 
@@ -262,10 +263,10 @@ func WithClientCert(certFile, keyFile string, strict bool) Option {
 		transport.TLSClientConfig.Certificates = []tls.Certificate{cert}
 		// 注意：transport 是 Clone() 来的，已经包含了原有的 TLSClientConfig
 		// 包括 InsecureSkipVerify 状态，无需额外处理
-		c.httpClient = &http.Client{
-			Timeout:   c.httpClient.Timeout,
-			Transport: transport,
-		}
+		c.httpClient = httpc.NewHTTPClient(httpc.Options{
+			Transport:     transport,
+			ClientTimeout: c.httpClient.Timeout,
+		})
 	}
 }
 

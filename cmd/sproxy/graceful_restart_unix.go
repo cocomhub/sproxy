@@ -30,7 +30,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/server"
 )
 
@@ -106,7 +106,7 @@ func waitRestartReady(ctx context.Context, addr string, timeout time.Duration) e
 		return fmt.Errorf("优雅重启：解析就绪探测地址 %q 失败: %w", addr, err)
 	}
 	url := "http://127.0.0.1:" + port + "/readyz"
-	client := &http.Client{Transport: netutil.IsolatedTransport()}
+	client := httpc.NewHTTPClient(httpc.Options{})
 	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(timeout)
 	interval := 200 * time.Millisecond

@@ -8,6 +8,35 @@ SPDX-License-Identifier: Apache-2.0
 sproxy v2 引入了全新的分层传输架构，在原有的文件服务与加密隧道之上，增加了可插拔传输层
 抽象、多路复用能力和中继网络支持。
 
+
+## HTTP 交互与编排基座（`pkg/pipe` + `pkg/httpc`，2026-11-08）
+
+**问题**：超时、重试退避、受限并发、取消传播这四件事在本仓曾被重复实现数十次
+（裸 HTTP 客户端构造 53 处、各写一遍超时字段 90 处、指数退避 ≥5 处、裸 worker 池 10 处），
+没有任何一处能统一回答「这个请求会不会卡、能不能取消」。baidupcs 上传「卡 ~90s 且不可取消」
+正是把该问题留给第三方库的结果（见 `docs/external-dependencies.md §7.8.1`）。
+
+**分层**：
+
+| 层 | 包 | 职责 | 用法 |
+|---|---|---|---|
+| L0 | `pkg/pipe` | **纯编排原语**：`Retry`（退避可被 ctx 打断、不可重试错误立即返回）、`RunParts`（受限并发 + 首错取消）、`Env{Sleep}` 注入 | 任何"重试 + 并发 + 取消"场景（HTTP、本地 FS、迁移逐项） |
+| L0 | `pkg/httpc` | **HTTP 交互基座**：`New(Options)` → `*Client`（统一超时/重试分类/取消/打点）；`NewHTTPClient(Options)` → 规范 `*http.Client`（**唯一集中构造出口**，满足 R19） | 新代码用 `httpc.New` + `Do`/`DoOpts`/`DoJSON`；只需 client 时用 `NewHTTPClient` |
+
+**语义要点（易踩坑）**：
+- `httpc.Options.Timeout` 是**单次尝试**超时（经 ctx 施加，可取消）；`ClientTimeout` 是**底层
+  `http.Client.Timeout`**（整体上限，含 body 读取）—— 两者不可混用，迁移存量时用后者保持等价。
+- **仅幂等方法（GET/HEAD/OPTIONS）默认可重试**；PUT/DELETE/POST/PATCH 需 `DoOptions{Idempotent:true}`
+  显式声明；4xx（非 429）致命；**请求体不可重放 ⇒ fail-fast**（绝不静默发空 body）。
+- 单次尝试超时（可重试）与整体取消（不重试）**分开归类**。
+
+**门禁 R57**（`internal/archcheck/http_client_ratchet_test.go`）：裸 `http.Client`/`http.Transport`/
+`DefaultTransport` 构造点**只减不增**（基线文件 `http_client_budgets.tsv`）。存量迁移完成后基线已降至
+1 行（仅一个"取 `http.DefaultTransport` 的 Clone 基座"类型断言的文本误报）。**新代码请用 `pkg/httpc`**。
+
+**已收敛的重复实现**：`pkg/backup` 的退避重试循环（原自写 100ms×2ⁿ）→ `pipe.Retry`；
+`pkg/llmgate`、`pkg/aiembed` 的外部调用 → `httpc.Client`（获 429/5xx 重试 + 取消 + 打点）。
+
 ## 分层架构
 
 ```

@@ -19,6 +19,7 @@ import (
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/credrotate"
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/iostream"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -238,7 +239,7 @@ func newCmdP2PListen(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
-			httpClient := &http.Client{Timeout: 30 * time.Second, Transport: netutil.DefaultTransport()}
+			httpClient := httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 30 * time.Second})
 			manual, _ := cmd.Flags().GetBool("manual")
 			offerFile, _ := cmd.Flags().GetString("offer")
 			answerFile, _ := cmd.Flags().GetString("answer")

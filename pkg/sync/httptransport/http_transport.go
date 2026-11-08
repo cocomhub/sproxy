@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/client"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/sync/internal/fsutil"
@@ -109,7 +110,7 @@ func NewHTTPTransport(cfg HTTPTransportConfig) (*HTTPTransport, error) {
 	}
 	tr.ResponseHeaderTimeout = responseHeaderTimeout
 	tr.IdleConnTimeout = 30 * time.Second
-	hc := &http.Client{Transport: tr}
+	hc := httpc.NewHTTPClient(httpc.Options{Transport: tr})
 	fc := client.NewFileClient(cfg.BaseURL,
 		client.WithHTTPClient(hc),
 		client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret),

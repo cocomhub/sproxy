@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -95,7 +96,7 @@ func NewCli(cfg CliConfig) (*Cli, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.IsolatedTransport(), ClientTimeout: 30 * time.Second})
 	}
 	bin := cfg.BinaryPath
 	if bin == "" {

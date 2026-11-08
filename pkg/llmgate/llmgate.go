@@ -16,11 +16,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/httpc"
+	"github.com/cocomhub/sproxy/pkg/pipe"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -48,7 +52,7 @@ type Config struct {
 // Client 是 LLM 网关客户端。
 type Client struct {
 	cfg Config
-	hc  *http.Client // netutil.IsolatedTransport 基座 + ResponseHeaderTimeout
+	hc  *httpc.Client // netutil.IsolatedTransport 基座 + ResponseHeaderTimeout
 }
 
 // chatMessage 是 chat completions 消息（仅字符串 content，不做多模态/工具）。
@@ -97,7 +101,11 @@ func New(cfg Config) *Client {
 	}
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = defaultTimeout
-	return &Client{cfg: cfg, hc: &http.Client{Transport: tr}}
+	return &Client{cfg: cfg, hc: httpc.New(httpc.Options{
+		Transport: tr,
+		Timeout:   cfg.Timeout,
+		Retry:     llmRetryPolicy(),
+	})}
 }
 
 // Advise 生成建议文本：构建 system+user 消息 → POST {base}/chat/completions
@@ -127,9 +135,13 @@ func (c *Client) Advise(ctx context.Context, system, user string) (string, error
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 
-	resp, err := c.hc.Do(req)
+	resp, err := c.hc.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
 	if err != nil {
-		return "", fmt.Errorf("llmgate: 请求失败: %w", err)
+		// 非 2xx 时 httpc 把响应交回（body 可读）⇒ 沿用下方既有状态码分支，文案不变。
+		var he *httpc.HTTPError
+		if resp == nil || !errors.As(err, &he) {
+			return "", fmt.Errorf("llmgate: 请求失败: %w", err)
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -150,4 +162,10 @@ func (c *Client) Advise(ctx context.Context, system, user string) (string, error
 		return "", fmt.Errorf("llmgate: 响应无 choices")
 	}
 	return strings.TrimSpace(cr.Choices[0].Message.Content), nil
+}
+
+// llmRetryPolicy 是 LLM/embedding 外部调用的重试策略（429/5xx/网络瞬时错误）。
+// 退避 200ms×2ⁿ 封顶 2s、最多 3 次尝试；取消可中断（由 pkg/pipe 保证）。
+func llmRetryPolicy() pipe.Policy {
+	return pipe.Policy{Attempts: 3, Base: 200 * time.Millisecond, Cap: 2 * time.Second, Jitter: true}
 }

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/telemetry"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
@@ -168,14 +169,14 @@ func NewFileClient(serverURL string, opts ...Option) *FileClient {
 		// 使任意调用方关闭 idle 连接（如 httptest.Server.Close、OCI 连接池回收）时的
 		// 竞态表现为本实例请求「transport connection broken」。Clone 保留默认代理/
 		// HTTP2/TLS 配置语义。
-		httpClient: &http.Client{
-			// Timeout 是**通用兜底**（防连接彻底挂死）。慢操作不走它：`/upload/complete`
+		httpClient: httpc.NewHTTPClient(httpc.Options{
+			// ClientTimeout 是**通用兜底**（防连接彻底挂死）。慢操作不走它：`/upload/complete`
 			// 转存大文件经 WithNoClientTimeout(ctx) 临时去掉客户端级超时
 			// （2026-10-23 实测：2.1GB 上传 complete 需 8-10 分钟，旧 300s 会让客户端先
 			// 超时断开而服务端仍在写）。
-			Timeout:   300 * time.Second,
-			Transport: defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
-		},
+			ClientTimeout: 300 * time.Second,
+			Transport:     defaultTransportIsolated(), // per-instance 连接池（防跨实例 CloseIdleConnections 竞态）
+		}),
 		chunkSize:       size.DefaultChunkSize, // 4 MiB
 		logger:          logger,
 		tracer:          telemetry.New(telemetry.WithLogger(logger)),

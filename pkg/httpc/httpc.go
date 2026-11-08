@@ -57,6 +57,15 @@ type Options struct {
 	Timeout time.Duration
 	// OverallTimeout 是**整体**预算（0 ⇒ 不限；由上层 ctx 决定更佳）。
 	OverallTimeout time.Duration
+	// ClientTimeout 是**底层 http.Client.Timeout**（整体上限，**含 body 读取**）。
+	//
+	// 与 `Timeout`（单次尝试、经 ctx 施加）**语义不同**：迁移既有裸构造点时用本字段
+	// 可保持行为等价（例如裸客户端构造带 Timeout: 30s ⇒ ClientTimeout: 30s）。
+	ClientTimeout time.Duration
+	// Jar 是可选 cookie jar（透传底层 client）。
+	Jar http.CookieJar
+	// CheckRedirect 是可选重定向策略（透传底层 client）。
+	CheckRedirect func(req *http.Request, via []*http.Request) error
 	// Retry 是重试策略（Attempts<=0 ⇒ 不重试）。
 	Retry pipe.Policy
 	// Env 提供可注入睡眠（测试零等待）。
@@ -75,6 +84,25 @@ type Client struct {
 	http *http.Client
 }
 
+// NewHTTPClient 按规范构造**裸 `*http.Client`**（唯一集中出口）：
+// 默认 Transport = `netutil.IsolatedTransport()`（满足 R19），并透传 ClientTimeout/Jar/CheckRedirect。
+//
+// 用途：① 既有调用点只需要"一个规范 client"（不需要重试编排）时统一走这里，避免继续散落裸构造；
+// ② 需要把 client 交给第三方（库/签名器）时也走这里。
+// 需要重试/取消/打点编排的场景请用 `New(Options)` + `Do`。
+func NewHTTPClient(o Options) *http.Client {
+	tr := o.Transport
+	if tr == nil {
+		tr = netutil.IsolatedTransport()
+	}
+	return &http.Client{
+		Transport:     tr,
+		Timeout:       o.ClientTimeout,
+		Jar:           o.Jar,
+		CheckRedirect: o.CheckRedirect,
+	}
+}
+
 // New 构造客户端。
 func New(o Options) *Client {
 	if o.Transport == nil {
@@ -89,7 +117,7 @@ func New(o Options) *Client {
 	if o.Metrics == nil {
 		o.Metrics = NullMetrics{}
 	}
-	return &Client{o: o, http: &http.Client{Transport: o.Transport}}
+	return &Client{o: o, http: NewHTTPClient(o)}
 }
 
 // DoOptions 是**单次调用**的语义声明（与 Options 分离：机制在客户端，策略在调用点）。

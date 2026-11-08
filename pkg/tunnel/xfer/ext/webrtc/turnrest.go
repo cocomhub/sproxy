@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -76,9 +77,9 @@ var (
 // 端点 302 到非 loopback http，凭据 query 明文上线）。
 func newTURNRESTClient() *http.Client {
 	tr := netutil.DefaultTransport()
-	return &http.Client{
-		Timeout:   turnRESTFetchTimeout,
-		Transport: tr,
+	return httpc.NewHTTPClient(httpc.Options{
+		Transport:     tr,
+		ClientTimeout: turnRESTFetchTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// 重定向目标必须仍是 https（或 loopback http）——与 SetTURNRESTURL 的
 			// scheme 边界一致，防止凭据 query 被带到明文/跨主机端点。
@@ -92,7 +93,7 @@ func newTURNRESTClient() *http.Client {
 			}
 			return nil
 		},
-	}
+	})
 }
 
 // SetTURNRESTURL 设置 TURN REST API 短期凭证端点（coturn 标准，与静态凭据并存，REST 优先）。

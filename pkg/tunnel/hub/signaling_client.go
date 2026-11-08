@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
@@ -67,7 +68,7 @@ func NewHubSignaler(baseURL, accessKey, nodeID string, secret ...string) *HubSig
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		accessKey:  accessKey,
 		nodeID:     nodeID,
-		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: netutil.DefaultTransport()},
+		httpClient: httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 60 * time.Second}),
 	}
 	if len(secret) > 0 {
 		s.secret = secret[0]

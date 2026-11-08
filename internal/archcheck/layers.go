@@ -12,6 +12,10 @@ package archcheck
 // 「必须登记依赖」的范围，登记一个包就会拖出它整条子图（pkg/tunnel →
 // xfer / mux / hub / …），门禁根本落不了地。
 var Managed = map[string]bool{
+	// 本工作新增（通用 HTTP 编排基座，2026-11-08）：pkg/httpc（HTTP 交互基座）+
+	// pkg/pipe（纯编排原语）。httpc 只依赖 netutil(L0)+pipe(L0) ⇒ L1。
+	"github.com/cocomhub/sproxy/pkg/httpc":     true,
+	"github.com/cocomhub/sproxy/pkg/pipe":      true,
 	"github.com/cocomhub/sproxy/pkg/audit":     true, // 本工作新增（audit 域）：通用审计日志包
 	"github.com/cocomhub/sproxy/pkg/pathguard": true,
 	"github.com/cocomhub/sproxy/pkg/checksum":  true,
@@ -87,6 +91,11 @@ var Managed = map[string]bool{
 var Levels = map[string]int{
 	// ---- G0 基础库（零 pkg/* 内部依赖，实测）----
 	"github.com/cocomhub/sproxy/pkg/accesskey": 0,
+	// 纯编排原语（零 pkg/* 内部依赖）：Retry/RunParts/可注入 Sleep ⇒ G0。
+	"github.com/cocomhub/sproxy/pkg/pipe": 0,
+	// HTTP 交互基座（统一构造出口 + 重试/取消编排）：依赖 netutil(G0) + pipe(G0)
+	// ⇒ **同为 G0**（各层都要用它构造规范客户端，若抬高为 L1 会让所有 L0 包违规）。
+	"github.com/cocomhub/sproxy/pkg/httpc": 0,
 	// 本工作新增（audit 域）：通用审计日志包，零 pkg/* 依赖（仅标准库），故 G0。
 	"github.com/cocomhub/sproxy/pkg/audit":   0,
 	"github.com/cocomhub/sproxy/pkg/certmgr": 0,

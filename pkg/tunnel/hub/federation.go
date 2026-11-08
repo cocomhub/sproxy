@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
 )
@@ -198,7 +199,7 @@ func buildFederationPeers(peers []FederationPeer, timeout time.Duration) ([]Fede
 //   - InsecureSkipVerify → 跳过校验（仅限 loopback peer，Config.Validate 强制）；
 //   - 默认 → 系统根证书池严格校验（fail-closed：证书非法即拒绝，不静默降级）。
 func federationPeerClient(p FederationPeer, timeout time.Duration) (*http.Client, error) {
-	c := &http.Client{Timeout: timeout, Transport: netutil.DefaultTransport()} // 共享连接池（生产默认）
+	c := httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: timeout}) // 共享连接池（生产默认）
 	switch {
 	case p.CAFile != "":
 		pool, cerr := loadCertPool(p.CAFile)

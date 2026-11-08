@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -69,8 +70,8 @@ func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
 	if client != nil {
 		d.httpClient = client
 	} else {
-		d.httpClient = &http.Client{
-			// 使用 Transport 层细粒度超时，不对整体请求设 Timeout，避免大文件过早中断。
+		d.httpClient = httpc.NewHTTPClient(httpc.Options{
+			// 使用 Transport 层细粒度超时，不对整体请求设超时，避免大文件过早中断。
 			Transport: func() *http.Transport {
 				tr := netutil.IsolatedTransport()
 				tr.DialContext = (&net.Dialer{
@@ -82,7 +83,7 @@ func newHTTPDownloaderWithClient(client *http.Client) *HTTPDownloader {
 				return tr
 			}(),
 			CheckRedirect: safeCheckRedirect(),
-		}
+		})
 	}
 	d.ValidateURLAfterDo = validateURLHostAfterDo
 	return d
@@ -797,7 +798,7 @@ func (d *HTTPDownloader) getClient() *http.Client {
 	if d.httpClient != nil {
 		return d.httpClient
 	}
-	return &http.Client{
+	return httpc.NewHTTPClient(httpc.Options{
 		Transport: func() *http.Transport {
 			tr := netutil.IsolatedTransport()
 			tr.DialContext = (&net.Dialer{
@@ -809,7 +810,7 @@ func (d *HTTPDownloader) getClient() *http.Client {
 			return tr
 		}(),
 		CheckRedirect: safeCheckRedirect(),
-	}
+	})
 }
 
 // idleReadCloser 在响应体读取超过 IdleTimeout 无数据时主动关闭底层连接，

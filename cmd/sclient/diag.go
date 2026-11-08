@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cli"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/tunnel/xfer"
 	_ "github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws" // 注册 WebSocket 传输层
@@ -92,7 +93,7 @@ func runPingWithIO(ctx context.Context, hubAddr string, w io.Writer) error {
 // 为基座克隆，保留 ProxyFromEnvironment / 连接池 / HTTP2 / 握手超时等默认配置。
 func defaultIsolatedClient() *http.Client {
 	// 统一 netutil.IsolatedTransport（Clone 基座保留默认调校 + TLSClientConfig nil）。
-	return &http.Client{Transport: netutil.DefaultTransport()}
+	return httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport()})
 }
 
 // runHubStatusWithIO 获取 Hub 节点列表，使用 w 替代 fmt.Printf。

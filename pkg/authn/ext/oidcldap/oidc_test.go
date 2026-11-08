@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/authn"
+	"github.com/cocomhub/sproxy/pkg/httpc"
 )
 
 // mockOIDCServer 是 OIDC mock issuer：/.well-known + token 端点 + JWKS。
@@ -127,7 +128,7 @@ func oidcTestAuthenticator(t *testing.T, m *mockOIDCServer, cfgMod func(*OIDCCon
 		tokenURL: m.issuer + "/oauth/token",
 		jwksURL:  m.issuer + "/jwks",
 		issuer:   m.issuer,
-		client:   &http.Client{Transport: newIsolatedTransport()},
+		client:   httpc.NewHTTPClient(httpc.Options{}),
 		now:      time.Now,
 		// 默认 verify 走 JWKS 验签；这里不注入 verifyToken 以覆盖真实路径。
 	}

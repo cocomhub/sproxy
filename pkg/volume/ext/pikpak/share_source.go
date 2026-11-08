@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -36,7 +37,7 @@ type ShareSourceNormalizer struct {
 // NewShareSourceNormalizer 创建归一器；client 为空时用默认安全传输。
 func NewShareSourceNormalizer(client *http.Client) *ShareSourceNormalizer {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second, Transport: netutil.IsolatedTransport()}
+		client = httpc.NewHTTPClient(httpc.Options{Transport: netutil.IsolatedTransport(), ClientTimeout: 30 * time.Second})
 	}
 	return &ShareSourceNormalizer{client: client}
 }
