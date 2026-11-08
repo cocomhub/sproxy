@@ -145,8 +145,7 @@ func doWithRetry(ctx context.Context, p retryPolicy, log *slog.Logger, what stri
 		return nil
 	}
 	// 错误契约：对外只暴露业务错误（不暴露 pipe 的 ErrAttemptsExhausted 包装）。
-	var d *retryDecision
-	if errors.As(err, &d) {
+	if d, ok := errors.AsType[*retryDecision](err); ok {
 		return d.err
 	}
 	return err
