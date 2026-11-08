@@ -328,3 +328,21 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 # 断言口径：硬断言 = **内容一致**（生产红线）；etagMatch 仅记录（ETag 语义见上表）
 ```
 
+#### 7.8.3.1 可观测：内核"在不在跑、为何没跑"（2026-11-08 落地）
+
+**领域层计数**（`pkg/volume/ext/baidupcs`，原子计数，随时可读）：
+
+| API | 含义 |
+|---|---|
+| `Storage.UploadCoreStats()` | `UploadCoreStats{Used, SkippedOversize, Degraded, Failed, LegacyMode, NoDeps}` |
+| `Storage.CoreDisabled()` | 本进程是否已因内核失败降级（auto） |
+
+**日志**（结构化字段，便于日志检索/告警）：
+- 首次跳过（超尺寸护栏）：`msg="上传内核跳过（超过尺寸护栏）——本次起该尺寸走既有路径" key=… size=… limit=…`（每进程仅一次，避免逐文件刷屏）；
+- 内核失败降级：`msg="上传内核失败，本进程降级为既有路径（auto）" key=… err=…`（WARN）。
+
+**为什么没直接进 `/metrics`**：外部后端（baidupcs/s3/webdav/federated）**当前没有任何指标面**；
+`pkg/volume/registry` 也没有 metrics 依赖钩子。要桥接到 `sproxy_volume_upload_core_total{volume,mode}` 需
+新增一条 registry → 装配层 → `pkg/server/metrics` 的注入链（与 `pkg/files` 的 `RecordVolumeIO` 同模式）。
+**本处以 `UploadCoreStats()` 作为集成点**，接线时读它即可，无需改动领域逻辑。
+

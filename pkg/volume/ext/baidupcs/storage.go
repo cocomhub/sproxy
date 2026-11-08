@@ -112,7 +112,39 @@ type Storage struct {
 	coreDisabled atomic.Bool
 	// coreMaxSizeOverride 仅供测试/真实验收放开内核尺寸护栏（0 = 用默认 coreMaxVerifiedSize）。
 	coreMaxSizeOverride int64
+	// 上传内核路径统计（见 UploadCoreStats；原子计数，无锁）。
+	coreStatUsed, coreStatSkippedOversize, coreStatDegraded, coreStatFailed, coreStatLegacyMode, coreStatNoDeps atomic.Int64
+	// coreSkipLogged 保证"跳过内核"的 Info 日志每进程只打一次（避免逐文件刷屏）。
+	coreSkipLogged atomic.Bool
 }
+
+// UploadCoreStats 是上传内核的**累计路径统计**（生产可观测：内核到底在不在跑、为何没跑）。
+//
+// 口径：Used = 走内核的次数（无论成败）；其余为"没走内核/内核失败"的分因计数。
+// 集成点：装配层可将其桥接到 /metrics（当前外部后端尚无指标面，见 docs/external-dependencies.md §7.8.3）。
+type UploadCoreStats struct {
+	Used            int64 // 走内核（含成功/失败）
+	SkippedOversize int64 // 超过尺寸护栏 ⇒ 改走既有路径
+	Degraded        int64 // auto 模式下内核失败 ⇒ 本进程降级
+	Failed          int64 // 内核失败次数（nucleus 直接报错 / auto 降级）
+	LegacyMode      int64 // upload_core=legacy（显式关闭内核）
+	NoDeps          int64 // 缺少库 client（如 binary-only 卷）⇒ 无法运行内核
+}
+
+// UploadCoreStats 返回累计统计（并发安全；可随时调用，用于诊断与指标桥接）。
+func (s *Storage) UploadCoreStats() UploadCoreStats {
+	return UploadCoreStats{
+		Used:            s.coreStatUsed.Load(),
+		SkippedOversize: s.coreStatSkippedOversize.Load(),
+		Degraded:        s.coreStatDegraded.Load(),
+		Failed:          s.coreStatFailed.Load(),
+		LegacyMode:      s.coreStatLegacyMode.Load(),
+		NoDeps:          s.coreStatNoDeps.Load(),
+	}
+}
+
+// CoreDisabled 报告本进程是否已因内核失败降级（auto）。
+func (s *Storage) CoreDisabled() bool { return s.coreDisabled.Load() }
 
 // NewStorage 创建百度网盘 Storage。
 // Adapter 为空时默认装配 binaryAdapter（二进制优先）+ libraryAdapter（库兜底，

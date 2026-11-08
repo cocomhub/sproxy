@@ -18,6 +18,8 @@ import (
 type wiringFakeAdapter struct {
 	uploads int
 	err     error
+	// badClient 为真时 coreClient() 返回 nil（模拟"无可用库 client"的卷，如 binary-only）。
+	badClient bool
 }
 
 func (c *wiringFakeAdapter) Upload(context.Context, string, string, bool) error {
@@ -30,6 +32,9 @@ func (c *wiringFakeAdapter) Copy(context.Context, string, string) error     { re
 
 // coreClient/coreRepair 实现 coreClientProvider（让内核"可用"，从而能验证降级路径）。
 func (c *wiringFakeAdapter) coreClient() *Client {
+	if c.badClient {
+		return nil
+	}
 	cl, _ := NewClient("fake-bduss-for-wiring-test", "")
 	return cl
 }
@@ -198,5 +203,64 @@ func TestUploadStaged_NucleusMultiSliceFails(t *testing.T) {
 	}
 	if ad.uploads != 0 {
 		t.Fatalf("报错时不得回退 adapter，got %d 次", ad.uploads)
+	}
+}
+
+// TestUploadCoreStats_PathCounting 锁定上传内核的**路径分因计数**（生产可观测：
+// "内核到底在不在跑、为何没跑"）。四类分因各一例，全离线（不发网络请求）。
+func TestUploadCoreStats_PathCounting(t *testing.T) {
+	t.Parallel()
+
+	// ① legacy：显式关闭内核
+	ad1 := &wiringFakeAdapter{}
+	st1 := newWiringStorage(t, "legacy", ad1)
+	if err := st1.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/tmp/x", size: 1}); err != nil {
+		t.Fatalf("legacy: %v", err)
+	}
+	if s := st1.UploadCoreStats(); s.LegacyMode != 1 || s.Used != 0 {
+		t.Fatalf("legacy 计数不符: %+v", s)
+	}
+
+	// ② auto + 超过尺寸护栏：跳过内核（不走内核，且不置位 coreDisabled）
+	ad2 := &wiringFakeAdapter{}
+	st2 := newWiringStorage(t, "auto", ad2)
+	if err := st2.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/nonexistent", size: coreMaxVerifiedSize + 1}); err != nil {
+		t.Fatalf("oversize auto: %v", err)
+	}
+	if s := st2.UploadCoreStats(); s.SkippedOversize != 1 || s.Used != 0 {
+		t.Fatalf("oversize 计数不符: %+v", s)
+	}
+	if ad2.uploads != 1 {
+		t.Fatalf("oversize 应走 adapter，got %d", ad2.uploads)
+	}
+	if st2.CoreDisabled() {
+		t.Fatal("跳过内核不得置位 coreDisabled")
+	}
+
+	// ③ auto + 内核失败（不存在的暂存文件 ⇒ planRapid 阶段失败）：Used+Failed+Degraded 各 1
+	ad3 := &wiringFakeAdapter{}
+	st3 := newWiringStorage(t, "auto", ad3)
+	if err := st3.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/nonexistent", size: 1024}); err != nil {
+		t.Fatalf("auto 失败应降级并成功返回: %v", err)
+	}
+	if s := st3.UploadCoreStats(); s.Used != 1 || s.Failed != 1 || s.Degraded != 1 {
+		t.Fatalf("降级计数不符: %+v", s)
+	}
+	if !st3.CoreDisabled() {
+		t.Fatal("内核失败后应置位 coreDisabled")
+	}
+
+	// ④ 缺库 client（coreOK=false）⇒ NoDeps 计数（wiringFakeAdapter 用非法 BDUSS ⇒ NewClient 失败）
+	ad4 := &wiringFakeAdapter{badClient: true}
+	st4 := newWiringStorage(t, "auto", ad4)
+	if err := st4.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/nonexistent", size: 1024}); err != nil {
+		t.Fatalf("无库依赖应走既有路径: %v", err)
+	}
+	if s := st4.UploadCoreStats(); s.NoDeps != 1 || s.Used != 0 {
+		t.Fatalf("无库依赖计数不符: %+v", s)
 	}
 }
