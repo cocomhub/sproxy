@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -144,10 +145,16 @@ func (a *OIDCAuthenticator) provider(ctx context.Context) (*oidcProvider, error)
 	if err != nil {
 		return nil, fmt.Errorf("oidcldap: discovery 请求构造失败: %w", err)
 	}
-	client := httpc.NewHTTPClient(httpc.Options{Isolated: true})
+	// 短命 discovery 客户端：隔离连接池 + 幂等 GET 重试（httpc 编排），用后即关。
+	// （docs/design-http-client-policy.md §4.4：短命 client 显式 Isolated + CloseIdleConnections。）
+	client := httpc.New(httpc.Options{
+		Isolated: true,
+		// discovery 是幂等 GET ⇒ fast 策略（429/5xx/网络瞬时错误重试，退避可被 ctx 打断）。
+		Retry: httpc.PolicyFor(httpc.PolicyFast),
+	})
 	defer client.CloseIdleConnections()
-	resp, err := client.Do(req)
-	if err != nil {
+	resp, err := client.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return nil, fmt.Errorf("oidcldap: discovery 失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -427,6 +434,14 @@ func randomString(n int) (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// isHTTPStatusError 判断错误是否为「服务端返回了非 2xx」（httpc 在该情形下**仍会把响应
+// 交回**，调用方应沿用既有状态码分支处理——如 discovery 非 200 ⇒ 明确 HTTP 状态错误，
+// 而不是当网络错误上报「discovery 失败」）。
+func isHTTPStatusError(err error) bool {
+	var he *httpc.HTTPError
+	return errors.As(err, &he)
 }
 
 // oauth2TokenSource 保持 x/oauth2 引用（装配扩展点：未来 CLI/refresh token 接入）。

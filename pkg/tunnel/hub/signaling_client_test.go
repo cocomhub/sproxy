@@ -164,6 +164,35 @@ func TestHubSignaler_PollRejectsUnregistered(t *testing.T) {
 	}
 }
 
+// TestHubSignaler_PollRetriesTransient500：poll 是幂等 GET，httpc 按 PolicyFast 重试
+// 瞬时 5xx——hub 首次返回 500、第二次返回 200 空消息 ⇒ poll 成功且 hub 恰好收到 2 次请求。
+func TestHubSignaler_PollRetriesTransient500(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]SignalMsg{})
+	}))
+	t.Cleanup(srv.Close)
+
+	sig := NewHubSignaler(srv.URL, "", "node-A")
+	sig.SetHTTPClient(testutil.IsolatedClient(t))
+	msgs, err := sig.poll(t.Context(), "node-A", SignalOffer)
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("msgs = %+v, want 空", msgs)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("hub 请求次数 = %d, want 2（500 后重试一次成功）", got)
+	}
+}
+
 // recordingRoundTrip 是记录调用次数的 RoundTripper（验证 SetHTTPClient 注入生效）。
 type recordingRoundTrip struct {
 	calls atomic.Int32

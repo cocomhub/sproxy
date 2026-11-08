@@ -37,7 +37,7 @@ type VaultTransitStorer struct {
 	keyName string // Transit 加密 key 名
 	token   string // X-Vault-Token 请求头
 	aadPath string // AAD context 绑定的文件身份（相对路径；空 = 无 AAD 绑定）
-	client  *http.Client
+	client  *httpc.Client
 
 	// decrypt 结果短 TTL 缓存（AD-5）：key = ciphertext 字符串，value = {明文, 过期时间}。
 	// cache 为 nil 时缓存关闭（CacheTTL=0），Decrypt 每次直查 Vault。map 非并发安全，
@@ -136,7 +136,8 @@ type vaultDataEnvelope struct {
 // fail-fast 校验：addr 非空且 scheme 为 http/https + host 非空（url.Parse）、key_name 非空、
 // token 非空（空 → error「vault: token 为空」）。mount 空 → "transit"；timeout ≤0 → 10s；
 // CAFile 非空时读取 PEM 并构造自签 CA 的 TLS 根池（失败返回明确 error）；否则使用默认
-// `http.Client{Timeout}`。两分支 client 均禁止跟随重定向（防 X-Vault-Token 外泄）。CacheTTL
+// httpc 客户端（DefaultTransport + ClientTimeout）。三支 client 均经 httpc 编排（幂等 POST
+// 重试/取消/打点）并禁止跟随重定向（防 X-Vault-Token 外泄）。CacheTTL
 // >0 → 初始化 decrypt 结果缓存 map；=0 → 缓存关闭（Decrypt 直查 Vault）。
 func NewVaultTransitStorer(opts VaultOptions) (*VaultTransitStorer, error) {
 	if err := parseVaultAddr(opts.Addr); err != nil {
@@ -195,20 +196,29 @@ func parseVaultAddr(addr string) error {
 
 // vaultHTTPClientFor 选择 Vault API 客户端：外部注入优先（连接复用/测试隔离）；
 // 否则 CAFile 非空时以隔离 Transport 覆写 TLS 根池；两者皆缺省用 DefaultTransport。
-// 两分支均禁止跟随重定向（防 X-Vault-Token 外泄）。
-func vaultHTTPClientFor(opts VaultOptions, timeout time.Duration) (*http.Client, error) {
-	client := newVaultHTTPClient(timeout, netutil.DefaultTransport())
+// 三支均经 httpc 编排（幂等 POST 重试/取消/打点）并禁止跟随重定向（防 X-Vault-Token 外泄）。
+func vaultHTTPClientFor(opts VaultOptions, timeout time.Duration) (*httpc.Client, error) {
 	if opts.HTTPClient != nil {
-		// 外部注入：连接复用（同一 Vault 多 Storer 共享连接池）或测试隔离 client。
-		client = opts.HTTPClient
-		// 安全语义保持：Vault API 必须禁止跟随重定向（X-Vault-Token 外泄防护）。
-		// 注入的 client 若未定制 CheckRedirect（nil），补 ErrUseLastResponse。
-		if client.CheckRedirect == nil {
-			client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			}
+		// 外部注入：沿用注入 client 的 Transport/Timeout（连接复用或测试隔离），
+		// 再包一层 httpc 统一重试/取消/打点。不改写调用方传入的实例；重定向策略沿用
+		// 调用方已定制者（nil ⇒ 补禁止跟随，X-Vault-Token 外泄防护）。
+		transport := opts.HTTPClient.Transport
+		if transport == nil {
+			transport = netutil.DefaultTransport()
 		}
-	} else if opts.CAFile != "" {
+		redirect := opts.HTTPClient.CheckRedirect
+		if redirect == nil {
+			redirect = vaultNoRedirect
+		}
+		return httpc.New(httpc.Options{
+			Transport:     transport,
+			ClientTimeout: opts.HTTPClient.Timeout,
+			Jar:           opts.HTTPClient.Jar,
+			CheckRedirect: redirect,
+			Retry:         httpc.PolicyFor(httpc.PolicyFast),
+		}), nil
+	}
+	if opts.CAFile != "" {
 		pool, err := loadVaultCertPool(opts.CAFile)
 		if err != nil {
 			return nil, err
@@ -222,21 +232,27 @@ func vaultHTTPClientFor(opts VaultOptions, timeout time.Duration) (*http.Client,
 		// CAFile_RealTLSCert × New_DefaultMount 并发）。隔离副本每实例独立，零竞态。**
 		transport := netutil.IsolatedTransport()
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-		client = newVaultHTTPClient(timeout, transport)
+		return newVaultHTTPClient(timeout, transport), nil
 	}
-	return client, nil
+	return newVaultHTTPClient(timeout, netutil.DefaultTransport()), nil
 }
 
-// newVaultHTTPClient 构造 Vault API 客户端：超时 + 禁止跟随重定向。默认 http.Client 最多
-// 跟 10 跳，跨主机跳转只剥离 Authorization/Cookie 等头，X-Vault-Token 是自定义头会被原样
-// 带到重定向目标（token 外泄）——Vault API 客户端应直接收尾跳转响应（I-1）。
-func newVaultHTTPClient(timeout time.Duration, transport http.RoundTripper) *http.Client {
-	return httpc.NewHTTPClient(httpc.Options{
+// vaultNoRedirect 是 Vault API 客户端的安全重定向策略：直接收尾跳转响应（不跟随）。
+// 默认 http.Client 最多跟 10 跳，跨主机跳转只剥离 Authorization/Cookie 等头，
+// X-Vault-Token 是自定义头会被原样带到重定向目标（token 外泄）——Vault API 客户端应
+// 直接收尾跳转响应（I-1）。
+func vaultNoRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// newVaultHTTPClient 构造 Vault API 客户端：超时 + 禁止跟随重定向，并经 httpc 编排
+// （幂等 POST 重试/取消/打点；fast 策略：429/5xx/网络瞬时错误重试，退避可被 ctx 打断）。
+func newVaultHTTPClient(timeout time.Duration, transport http.RoundTripper) *httpc.Client {
+	return httpc.New(httpc.Options{
 		Transport:     transport,
 		ClientTimeout: timeout,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+		CheckRedirect: vaultNoRedirect,
+		Retry:         httpc.PolicyFor(httpc.PolicyFast),
 	})
 }
 
@@ -392,8 +408,8 @@ func (s *VaultTransitStorer) Probe() error {
 		return fmt.Errorf("vault: 构造探活请求失败: %w", err)
 	}
 	req.Header.Set("X-Vault-Token", s.token)
-	resp, err := s.client.Do(req)
-	if err != nil {
+	resp, err := s.client.DoOpts(context.Background(), req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("vault: 探活失败（Vault 不可达）: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -428,8 +444,8 @@ func (s *VaultTransitStorer) post(op string, reqBody []byte) ([]byte, error) {
 	}
 	req.Header.Set("X-Vault-Token", s.token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
+	resp, err := s.client.DoOpts(context.Background(), req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return nil, fmt.Errorf("vault: %s 请求失败（Vault 不可达）: %w", op, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -445,6 +461,14 @@ func (s *VaultTransitStorer) post(op string, reqBody []byte) ([]byte, error) {
 		return nil, vaultAPIError(op, resp, body)
 	}
 	return body, nil
+}
+
+// isHTTPStatusError 判断错误是否为「服务端返回了非 2xx」（httpc 在该情形下**仍会把响应
+// 交回**，调用方应沿用既有状态码分支处理——如 403/503/5xx ⇒ vaultAPIError，而不是当网络错误
+// 上报「Vault 不可达」）。
+func isHTTPStatusError(err error) bool {
+	var he *httpc.HTTPError
+	return errors.As(err, &he)
 }
 
 // vaultAPIError 把 Vault 非 200 响应包装为带上下文的 error（fail-closed）：

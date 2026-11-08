@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,6 +134,43 @@ func oidcTestAuthenticator(t *testing.T, m *mockOIDCServer, cfgMod func(*OIDCCon
 		// 默认 verify 走 JWKS 验签；这里不注入 verifyToken 以覆盖真实路径。
 	}
 	return a
+}
+
+// TestOIDC_Discovery_RetriesOn5xx 验证 httpc 编排的幂等重试：discovery 首次返回 500、
+// 第二次返回 200 ⇒ provider 初始化成功且共发 2 次请求（fast 策略对 5xx 重试）。
+func TestOIDC_Discovery_RetriesOn5xx(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, "transient", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 "http://issuer.example",
+			"authorization_endpoint": "http://issuer.example/auth",
+			"token_endpoint":         "http://issuer.example/token",
+			"jwks_uri":               "http://issuer.example/jwks",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	sess := authn.NewSessionManager(make([]byte, 32), time.Hour, false)
+	a, err := NewOIDCAuthenticator(OIDCConfig{
+		Enabled: true, Issuer: srv.URL, ClientID: "test-client", RedirectURL: srv.URL + "/callback",
+	}, sess, testLogger())
+	if err != nil {
+		t.Fatalf("NewOIDCAuthenticator: %v", err)
+	}
+	if _, err := a.provider(t.Context()); err != nil {
+		t.Fatalf("discovery 应在重试后成功: %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("应重试 1 次（首次 500 → 二次 200）共 2 次请求, got %d", got)
+	}
 }
 
 // TestOIDC_BearerIDToken_PrincipalOwner 验证 Bearer id_token 认证：Principal 的

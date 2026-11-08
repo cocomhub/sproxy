@@ -99,6 +99,37 @@ func TestFederationClient_StaleWhileError(t *testing.T) {
 	}
 }
 
+// TestFederationClient_RetriesTransient500：节点表拉取是幂等 GET，httpc 按 PolicyFast
+// 重试瞬时 5xx——对端首次返回 500、第二次返回节点表 ⇒ 同步成功且对端恰好收到 2 次请求。
+func TestFederationClient_RetriesTransient500(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"id": "node-b1"}})
+	}))
+	t.Cleanup(srv.Close)
+
+	fc, err := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: srv.URL}}, 30*time.Second, 5*time.Second, testFedLogger())
+	if err != nil {
+		t.Fatalf("NewFederationClient: %v", err)
+	}
+	t.Cleanup(fc.Close)
+	if err := fc.SyncAll(t.Context()); err != nil {
+		t.Fatalf("SyncAll: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("对端请求次数 = %d, want 2（500 后重试一次成功）", got)
+	}
+	if cands := fc.Candidates(); len(cands) != 1 || cands[0].ID != "node-b1" {
+		t.Fatalf("Candidates = %+v, want 1 个 node-b1", cands)
+	}
+}
+
 // TestFederationClient_DefaultLoopbackURL：peer.URL 为空时归一化回落默认 loopback
 // 地址（确定性断言，不发起网络请求——避免依赖本机 18083 端口是否有服务导致的 flaky）。
 func TestFederationClient_DefaultLoopbackURL(t *testing.T) {

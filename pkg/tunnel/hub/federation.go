@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -101,10 +102,10 @@ type FederationClient struct {
 	cands map[string][]FederationNode // peer.ID → 节点列表
 	// svcs 是联邦服务交换表（跨 hub 服务发现，roadmap P2 mesh 集群化 F1）。
 	svcs map[string][]FederationService
-	// clients（peer.ID → 独立 http.Client）在 NewFederationClient 构造后**不可变**：
+	// clients（peer.ID → 独立 httpc.Client）在 NewFederationClient 构造后**不可变**：
 	// syncPeer/Close/Start 均只读访问，无需持锁（加锁反而与 Peers()/Close() 的
 	// 读锁风格不一致）。新增写操作前必须加锁并同步更新注释，防竞态。
-	clients  map[string]*http.Client
+	clients  map[string]*httpc.Client
 	interval time.Duration
 	logger   *slog.Logger
 
@@ -171,9 +172,9 @@ func NewFederationClientWithPersist(peers []FederationPeer, interval, timeout ti
 // buildFederationPeers 归一化对端配置（URL 回落默认、去尾部斜杠、ID 回落 URL），
 // 并为每个 peer 创建独立 http.Client。CA 文件读取失败返回 error（fail-fast，
 // 不静默回退到不校验）。
-func buildFederationPeers(peers []FederationPeer, timeout time.Duration) ([]FederationPeer, map[string]*http.Client, error) {
+func buildFederationPeers(peers []FederationPeer, timeout time.Duration) ([]FederationPeer, map[string]*httpc.Client, error) {
 	normalized := make([]FederationPeer, 0, len(peers))
-	clients := make(map[string]*http.Client, len(peers))
+	clients := make(map[string]*httpc.Client, len(peers))
 	for _, p := range peers {
 		if p.URL == "" {
 			p.URL = DefaultFederationPeerURL
@@ -192,35 +193,37 @@ func buildFederationPeers(peers []FederationPeer, timeout time.Duration) ([]Fede
 	return normalized, clients, nil
 }
 
-// federationPeerClient 按 TLS 策略构造对端专属 http.Client（S-Medium 闭环，策略隔离
+// federationPeerClient 按 TLS 策略构造对端专属 httpc.Client（S-Medium 闭环，策略隔离
 // 不扩散到其他 peer）：
 //   - CAFile 非空 → 用该 CA 构建专属证书池严格校验（InsecureSkipVerify=false，
 //     ServerName 由 URL host 自动校验），供远程自签 hub 使用受信 CA；
 //   - InsecureSkipVerify → 跳过校验（仅限 loopback peer，Config.Validate 强制）；
 //   - 默认 → 系统根证书池严格校验（fail-closed：证书非法即拒绝，不静默降级）。
-func federationPeerClient(p FederationPeer, timeout time.Duration) (*http.Client, error) {
-	c := httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: timeout}) // 共享连接池（生产默认）
+//
+// 每个 peer 使用**独立 Transport**（DefaultTransport().Clone() + 按策略 TLS 定制）⇒
+// 节点表/服务表拉取是幂等 GET，重试统一交 httpc（PolicyFast：429/5xx/网络瞬时错误重试，
+// 退避可被 ctx 打断）；独立池也保证 Close() 的 CloseIdleConnections 只影响本 peer。
+func federationPeerClient(p FederationPeer, timeout time.Duration) (*httpc.Client, error) {
+	tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
 	switch {
 	case p.CAFile != "":
 		pool, cerr := loadCertPool(p.CAFile)
 		if cerr != nil {
 			return nil, fmt.Errorf("peer %s: %w", p.ID, cerr)
 		}
-		tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-		c.Transport = tr
 	case p.InsecureSkipVerify:
 		// 仅 loopback peer（Config.Validate 已拒绝远程 + insecure）。
-		tr := netutil.DefaultTransport().Clone()                   // 共享调校 + 独立实例（TLS 定制不改共享）
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 用户仅对本 loopback peer 显式配置跳过证书校验（本机自签开发/测试）
-		c.Transport = tr
 	default:
 		// 严格校验（系统根证书池），fail-closed。
-		tr := netutil.DefaultTransport().Clone() // 共享调校 + 独立实例（TLS 定制不改共享）
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-		c.Transport = tr
 	}
-	return c, nil
+	return httpc.New(httpc.Options{
+		Transport:     tr,
+		ClientTimeout: timeout, // 整请求上限（含 body 读取），与迁移前等价
+		Retry:         httpc.PolicyFor(httpc.PolicyFast),
+	}), nil
 }
 
 // federationNodeSnap 是联邦候选持久化快照中单个节点的离线表示（仅 id/addr/mesh）。
@@ -315,6 +318,13 @@ func (fc *FederationClient) SyncAll(ctx context.Context) error {
 	return firstErr
 }
 
+// isHTTPStatusError 判断错误是否为「服务端返回了非 2xx」：httpc 在该情形下**仍会把响应
+// 交回**调用方，故调用方应沿用既有状态码分支处理，而不是当网络错误上报（联邦/信令拉取共用）。
+func isHTTPStatusError(err error) bool {
+	var he *httpc.HTTPError
+	return errors.As(err, &he)
+}
+
 // syncPeer 拉取单个 peer 的节点表并更新缓存。
 func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) error {
 	endpoint := p.URL + "/api/hub/federation/nodes"
@@ -337,8 +347,9 @@ func (fc *FederationClient) syncPeer(ctx context.Context, p FederationPeer) erro
 	if client == nil {
 		return fmt.Errorf("peer %s 无对应 http client（内部错误）", p.ID)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
+	// 幂等 GET：httpc 按 PolicyFast 重试 429/5xx/网络瞬时错误（退避可被 ctx 打断）。
+	resp, err := client.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("拉取 %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
@@ -382,8 +393,9 @@ func (fc *FederationClient) SyncServices(ctx context.Context, p FederationPeer) 
 	if client == nil {
 		return fmt.Errorf("peer %s 无对应 http client", p.ID)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
+	// 幂等 GET：httpc 按 PolicyFast 重试 429/5xx/网络瞬时错误（退避可被 ctx 打断）。
+	resp, err := client.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("拉取 %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
@@ -495,6 +507,8 @@ func (fc *FederationClient) PeersForNode(id NodeID, mesh string) []FederationPee
 
 // Close 释放各 peer 客户端空闲连接（后台 goroutine 由 Start 的 ctx 取消控制退出），
 // 并在持久化启用时同步 flush 未落盘的候选变更（进程优雅停服前确保最后一次变更不丢失）。
+// 每个 peer 均为独立 Transport（DefaultTransport().Clone()）⇒ CloseIdleConnections 只
+// 影响本 peer，不会打断共享池上其它在途请求（共享池禁止调用，见 pkg/httpc 文档）。
 func (fc *FederationClient) Close() {
 	fc.mu.RLock()
 	for _, c := range fc.clients {
