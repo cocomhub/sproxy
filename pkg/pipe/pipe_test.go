@@ -295,3 +295,50 @@ func TestRunParts_CancelPropagates(t *testing.T) {
 		t.Fatalf("应返回 context.Canceled，got %v", err)
 	}
 }
+
+// TestPolicy_CustomBackoffOverridesCurve 自定义退避函数应完全接管曲线（机制在 pipe、策略在调用点）。
+func TestPolicy_CustomBackoffOverridesCurve(t *testing.T) {
+	t.Parallel()
+	fe := newFakeEnv()
+	calls := 0
+	pol := Policy{
+		Attempts: 4,
+		Base:     time.Hour, // 应被 Backoff 覆盖（若生效，退避会是小时级）
+		Backoff: func(attempt int) time.Duration {
+			calls++
+			return time.Duration(attempt) * 10 * time.Millisecond // 自定义曲线：10ms,20ms,30ms
+		},
+	}
+	_ = Retry(context.Background(), fe.env(), pol, func(context.Context, int) error {
+		return errors.New("x")
+	})
+	got := fe.got()
+	want := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 30 * time.Millisecond}
+	if len(got) != len(want) {
+		t.Fatalf("退避次数应为 %d，got %v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("第 %d 次退避应为自定义曲线 %v，got %v", i+1, want[i], got[i])
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("自定义 Backoff 应被调用 3 次（attempt 1..3），got %d", calls)
+	}
+}
+
+// TestPolicy_DelayExported 导出 Delay 与内部计算一致（供调用点复用退避曲线）。
+func TestPolicy_DelayExported(t *testing.T) {
+	t.Parallel()
+	pol := Policy{Attempts: 3, Base: time.Second, Cap: 4 * time.Second, Factor: 2}
+	if got := pol.Delay(1); got != time.Second {
+		t.Fatalf("Delay(1)=%v want 1s", got)
+	}
+	if got := pol.Delay(3); got != 4*time.Second {
+		t.Fatalf("Delay(3) 应封顶 4s，got %v", got)
+	}
+	custom := Policy{Backoff: func(int) time.Duration { return 7 * time.Millisecond }}
+	if got := custom.Delay(1); got != 7*time.Millisecond {
+		t.Fatalf("自定义 Backoff 应优先，got %v", got)
+	}
+}

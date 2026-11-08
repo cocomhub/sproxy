@@ -59,7 +59,7 @@ var (
 
 // Client 是 GitHub Releases 查询 + 下载校验的客户端。
 type Client struct {
-	HTTP *http.Client
+	HTTP *httpc.Client // 统一编排（幂等 GET 重试/取消/打点）
 	// APIBase 是 GitHub API 仓库基址（如 https://api.github.com/repos/cocomhub/sproxy）。
 	APIBase string
 	// ReleaseBase 是 Release 页面/CDN 下载基址（如 https://github.com/cocomhub/sproxy/releases）。
@@ -77,7 +77,11 @@ func New(apiBase string) *Client {
 	tr.DialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
 	return &Client{
 		// 大文件下载不设整体超时（ClientTimeout 0；响应头 30s 由 Transport 兜底）。
-		HTTP:        httpc.NewHTTPClient(httpc.Options{Transport: tr}),
+		HTTP: httpc.New(httpc.Options{
+			Transport: tr,
+			// 发布 API 是幂等 GET ⇒ 用 fast 策略（429/5xx/网络瞬时错误重试；退避可被 ctx 打断）。
+			Retry: httpc.PolicyFor(httpc.PolicyFast),
+		}),
 		APIBase:     strings.TrimRight(apiBase, "/"),
 		ReleaseBase: DefaultReleaseURL,
 	}
@@ -111,8 +115,8 @@ func (c *Client) getRelease(ctx context.Context, url string) (*Release, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
+	resp, err := c.HTTP.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return nil, fmt.Errorf("无法获取最新版本: %w", err)
 	}
 	defer resp.Body.Close()
@@ -309,8 +313,8 @@ func (c *Client) Checksums(ctx context.Context, tag string) (map[string]string, 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
+	resp, err := c.HTTP.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return nil, fmt.Errorf("下载 checksums.txt 失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -332,8 +336,8 @@ func (c *Client) DownloadAndVerify(ctx context.Context, url, dest, wantSHA strin
 	if err != nil {
 		return err
 	}
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
+	resp, err := c.HTTP.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("下载失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -610,4 +614,11 @@ func writeFallbackBat(tmp, target string) error {
 		return fmt.Errorf("替换失败: %w", err)
 	}
 	return fmt.Errorf("替换失败：目标文件被占用。请退出当前 sclient 后运行 %s 完成替换", bat)
+}
+
+// isHTTPStatusError 判断错误是否为"服务端返回了非 2xx"（httpc 在该情形下**仍会把响应交回**，
+// 调用方应沿用既有状态码分支处理——如 GitHub 404 ⇒ ErrVersionNotFound，而不是当网络错误上报）。
+func isHTTPStatusError(err error) bool {
+	var he *httpc.HTTPError
+	return errors.As(err, &he)
 }

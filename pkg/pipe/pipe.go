@@ -58,13 +58,26 @@ var ErrAttemptsExhausted = errors.New("pipe: 尝试次数耗尽")
 
 // Policy 是重试策略（**由调用点声明**，本包不预设业务语义）。
 type Policy struct {
-	Attempts  int                                               // 总尝试次数（<=0 视为 1，即不重试）
-	Base      time.Duration                                     // 首次退避（<=0 视为 0 ⇒ 不等待）
-	Cap       time.Duration                                     // 退避上限（<=0 视为不封顶）
-	Factor    float64                                           // 退避倍率（<=0 视为 2）
+	Attempts int           // 总尝试次数（<=0 视为 1，即不重试）
+	Base     time.Duration // 首次退避（<=0 视为 0 ⇒ 不等待）
+	Cap      time.Duration // 退避上限（<=0 视为不封顶）
+	Factor   float64       // 退避倍率（<=0 视为 2）
+	// Backoff 可**自定义退避曲线**（非 nil 时覆盖 Base/Factor/Cap/Jitter 的计算）；
+	// attempt 从 1 起。用于需要特定抖动/曲线（如加性抖动、分段退避）的调用点 ——
+	// 机制在 pipe、策略在调用点。
+	Backoff   func(attempt int) time.Duration
 	Jitter    bool                                              // 是否加抖动（±25%，避免同步重试风暴）
 	Retryable func(err error) bool                              // nil = 全部可重试；返回 false ⇒ 立刻返回该错误
 	OnRetry   func(attempt int, delay time.Duration, err error) // 可选：重试回调（观测用）
+}
+
+// Delay 返回第 attempt 次失败后应等待的时长（attempt 从 1 起）。
+// 若设置了自定义 Backoff，则以它为准（调用点可保留其特有曲线/抖动）。
+func (p Policy) Delay(attempt int) time.Duration {
+	if p.Backoff != nil {
+		return p.Backoff(attempt)
+	}
+	return p.delay(attempt)
 }
 
 // delay 返回第 attempt 次失败后应等待的时长（attempt 从 1 起）。
@@ -141,7 +154,7 @@ func (p Policy) allowRetry(err error) bool {
 
 // waitBefore 执行退避等待（含可选 OnRetry 回调）；等待**可被 ctx 打断**。
 func (p Policy) waitBefore(ctx context.Context, env Env, attempt int, err error) error {
-	d := p.delay(attempt)
+	d := p.Delay(attempt)
 	if p.OnRetry != nil {
 		p.OnRetry(attempt, d, err)
 	}

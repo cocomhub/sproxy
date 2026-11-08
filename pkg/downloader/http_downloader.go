@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -430,32 +429,9 @@ func (d *HTTPDownloader) validateAfterDo(resp *http.Response) error {
 func (d *HTTPDownloader) statusError(resp *http.Response) error {
 	code := resp.StatusCode
 	if code >= 500 || code == http.StatusTooManyRequests || code == http.StatusRequestTimeout {
-		return retryableAfterf(parseRetryAfter(resp.Header), "http status %d", code)
+		return retryableAfterf(httpc.RetryAfter(resp), "http status %d", code)
 	}
 	return fmt.Errorf("http status %d", code)
-}
-
-// parseRetryAfter 解析 `Retry-After`（秒数或 HTTP-date）；无法解析/已过期 ⇒ 0。
-func parseRetryAfter(h http.Header) time.Duration {
-	if h == nil {
-		return 0
-	}
-	v := strings.TrimSpace(h.Get("Retry-After"))
-	if v == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs <= 0 {
-			return 0
-		}
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
-		}
-	}
-	return 0
 }
 
 // writeFullBody 将 200 响应体写入 .partial 文件并在成功后原子重命名。
