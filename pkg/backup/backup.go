@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/pipe"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -324,42 +325,21 @@ func transferFile(ctx context.Context, src, dst syncpkg.FS, rel string, size, mt
 }
 
 // transferWithRetry 带指数退避重试的写入循环：总尝试 = 1+MaxRetries。
+//
+// 退避机制**收敛到 `pkg/pipe`**（此前本包自写一份 100ms×2ⁿ 循环；同一语义在仓库内
+// 曾有 ≥5 份实现）—— pipe 保证退避可被 ctx 打断，且次数/倍率由 Policy 声明。
 func transferWithRetry(ctx context.Context, src, dst syncpkg.FS, rel string, size, mtime int64, maxRetries int) error {
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if werr := writeOnce(ctx, src, dst, rel, size, mtime); werr != nil {
-			lastErr = werr
-			if attempt == maxRetries {
-				break
-			}
-			if werr := retryBackoffWait(ctx, attempt); werr != nil {
-				return werr
-			}
-			continue
-		}
-		lastErr = nil
-		break
+	pol := pipe.Policy{
+		Attempts: maxRetries + 1, // 总尝试 = 1 + MaxRetries（与原实现一致）
+		Base:     100 * time.Millisecond,
+		Factor:   2,
 	}
-	if lastErr != nil {
-		return fmt.Errorf("写入目标失败: %w", lastErr)
+	if err := pipe.Retry(ctx, pipe.Env{}, pol, func(ctx context.Context, _ int) error {
+		return writeOnce(ctx, src, dst, rel, size, mtime)
+	}); err != nil {
+		return fmt.Errorf("写入目标失败: %w", err)
 	}
 	return nil
-}
-
-// retryBackoffWait 指数退避等待（100ms×2ⁿ），ctx 取消时立即返回停止原因。
-func retryBackoffWait(ctx context.Context, attempt int) error {
-	d := time.Duration(100<<uint(attempt)) * time.Millisecond // 100ms×2ⁿ
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 // verifyTransferred Verify 校验：对端 Stat 比对 size（防截断/静默损坏落盘）。

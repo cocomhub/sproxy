@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/httpc"
+	"github.com/cocomhub/sproxy/pkg/pipe"
+
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
 
@@ -55,7 +58,7 @@ type Config struct {
 // Client 是 embedding 客户端。
 type Client struct {
 	cfg Config
-	hc  *http.Client // netutil.IsolatedTransport 基座 + ResponseHeaderTimeout
+	hc  *httpc.Client // netutil.IsolatedTransport 基座 + ResponseHeaderTimeout
 }
 
 // embedRequest 是 OpenAI 兼容请求体（Ollama 同形状，字段名兼容）。
@@ -106,7 +109,11 @@ func New(cfg Config) *Client {
 	}
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = cfg.Timeout
-	return &Client{cfg: cfg, hc: httpc.NewHTTPClient(httpc.Options{Transport: tr})}
+	return &Client{cfg: cfg, hc: httpc.New(httpc.Options{
+		Transport: tr,
+		Timeout:   cfg.Timeout,
+		Retry:     embedRetryPolicy(),
+	})}
 }
 
 // Embed 单条文本 → []float32（归一化，供余弦相似度）。
@@ -148,9 +155,13 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	if c.cfg.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}
-	resp, err := c.hc.Do(req)
+	resp, err := c.hc.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
 	if err != nil {
-		return nil, fmt.Errorf("aiembed: 请求失败: %w", err)
+		// 非 2xx 时 httpc 把响应交回（body 可读）⇒ 沿用下方既有状态码分支，文案不变。
+		var he *httpc.HTTPError
+		if resp == nil || !errors.As(err, &he) {
+			return nil, fmt.Errorf("aiembed: 请求失败: %w", err)
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -225,4 +236,9 @@ func normalize(v []float32) []float32 {
 		out[i] = float32(float64(f) / norm)
 	}
 	return out
+}
+
+// embedRetryPolicy 是 embedding 外部调用的重试策略（与 llmgate 同口径）。
+func embedRetryPolicy() pipe.Policy {
+	return pipe.Policy{Attempts: 3, Base: 200 * time.Millisecond, Cap: 2 * time.Second, Jitter: true}
 }
