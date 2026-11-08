@@ -48,6 +48,35 @@ func (s *Storage) coreDepsOf() (*Client, func(context.Context, string, *stagedUp
 	return nil, nil, false
 }
 
+// coreMaxVerifiedSize 是内核**已验证**的文件大小上限（单片：≤ uploadBlockSize = 4MiB）。
+//
+// 依据（2026-11-08 真实网盘 e2e，**随机内容**以排除秒传；命令见
+// `real_network_compare_e2e_test.go` 的 E2E_* 旋钮）：
+//
+//	1MiB / 3MiB（单片，无 merge）  ⇒ ETag == 本地 md5 ✓
+//	8 / 20 / 48 / 96 / 120MiB（多分片 + merge）⇒ 复验 md5 **不一致**，且秒传自愈（Repair）无法修复 ✗
+//
+// ⇒ 超过该值时**不走内核**（交既有路径），直到多分片缺陷修复；否则仅靠 auto 降级会白试一次
+// （并永久关掉本进程内核），且在无 CLI 兜底时直接失败。缺陷与复现命令登记在
+// `docs/external-dependencies.md`。
+const coreMaxVerifiedSize = uploadBlockSize
+
+// coreAllowed 判定本次上传是否允许走内核：内核依赖齐备 + 暂存文件可用 + 尺寸在已验证范围内。
+// 超限时按模式处理（auto 降级并 WARN；nucleus 显式报错）——抽出以确保 uploadStaged 认知复杂度达标。
+func (s *Storage) coreAllowed(mode, key string, st *stagedUpload, coreOK bool) (bool, error) {
+	useCore := coreOK && st != nil && st.tmpPath != "" && st.size >= 0
+	if !useCore || st.size <= coreMaxVerifiedSize {
+		return useCore, nil
+	}
+	if mode == "nucleus" {
+		return false, fmt.Errorf("baidupcs: upload_core=nucleus 不支持 %d 字节（超过内核已验证的多分片边界 %d）",
+			st.size, int64(coreMaxVerifiedSize))
+	}
+	s.log.Warn("文件超过上传内核已验证范围（多分片），改走既有路径",
+		"key", key, "size", st.size, "limit", int64(coreMaxVerifiedSize))
+	return false, nil
+}
+
 // uploadStaged 执行"把暂存文件上传到远端"这一步（内核优先 + 可降级）。
 func (s *Storage) uploadStaged(ctx context.Context, key, remote string, st *stagedUpload) error {
 	mode := s.coreMode
@@ -55,8 +84,10 @@ func (s *Storage) uploadStaged(ctx context.Context, key, remote string, st *stag
 		mode = "auto"
 	}
 	pcs, repair, coreOK := s.coreDepsOf()
-	// 内核需要库 client + 本地文件；不满足（如 binary-only 无库兜底）⇒ 直接走既有路径。
-	useCore := coreOK && st != nil && st.tmpPath != "" && st.size >= 0
+	useCore, gerr := s.coreAllowed(mode, key, st, coreOK)
+	if gerr != nil {
+		return gerr
+	}
 	if mode == "legacy" || !useCore {
 		if mode == "nucleus" && !useCore {
 			return fmt.Errorf("baidupcs: upload_core=nucleus 但无库 adapter（无法运行内核）")

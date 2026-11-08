@@ -138,6 +138,10 @@ func (b *baidupcsExternalBackend) Close() error { return nil }
 //   - "bduss"：百度网盘登录凭据（库兜底需要）；
 //   - "baidu_root"：网盘根路径（如 /disk1；空 = "/"）；
 //   - "binary_path"：BaiduPCS-Go 可执行路径（空 = PATH 查找）；
+//   - "upload_core"：上传编排内核选择（空/auto = 内核优先、失败降级；legacy = 只用既有路径；
+//     nucleus = 只用内核、失败即报错）。**默认空 = auto**（硬规则 7c：string 配置默认空串）。
+//     注：内核目前只在**单片（≤4MiB）**上验证过 md5 权威（多分片缺陷见 docs/external-dependencies.md），
+//     超过该尺寸会自动改走既有路径。
 //   - "local_root"：本地中间态基目录（staging/resume/cache/tmp 落它之下，用户硬规则；
 //     空时回落 v.RootDir——V3 框架外部卷 RootDir 恒空，故正常走 extra.local_root）。
 //
@@ -150,6 +154,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	bduss, _ := v.Extra["bduss"].(string)
 	baiduRoot, _ := v.Extra["baidu_root"].(string)
 	binaryPath, _ := v.Extra["binary_path"].(string)
+	uploadCore, _ := v.Extra["upload_core"].(string)
 	localRoot, _ := v.Extra["local_root"].(string)
 	if localRoot == "" {
 		localRoot = v.RootDir
@@ -167,6 +172,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 		TempDir:    localRoot,
 		BDUSS:      bduss,
 		BinaryPath: binaryPath,
+		UploadCore: uploadCore,
 		Logger:     slog.Default(),
 	})
 	if err != nil {

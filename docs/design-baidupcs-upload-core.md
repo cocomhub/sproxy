@@ -146,3 +146,13 @@ pending ──probe──▶ (exists&same) ──▶ done
 - 内核必须**自持 HTTP 客户端**（不经库的 client）⇒ 顺带绕开「库在发 HTTP 前做会话/uk 前置检查」这一 L2 障碍（见 §6）；
 - `uploadid` / `RapidUpload` 仍经库调用 ⇒ **L2 里这一段的锁定通过「内核接口注入」完成**（内核不认识库，注入 fake `rapidProvider`）；
 - 降级路径必须可观测：`upload_core_fallback_total{reason}` + WARN 日志，且 `legacy` 分支仅由开关进入。
+
+## 附：多分片护栏（2026-11-08 追加）
+
+真实网盘实测发现：内核在**单片（≤4MiB）**上 md5 权威，但在**多分片（≥8MiB，需 merge）**上
+复验 md5 不一致且秒传自愈修不回（见 `docs/external-dependencies.md` §7.8.3 的实测表与复现命令）。
+
+因此 §5「回退」之外增加一道**尺寸护栏** `coreMaxVerifiedSize = uploadBlockSize (4MiB)`：
+超限时 `auto` 直接走既有路径（不做无谓尝试）、`nucleus` 显式报错。护栏上界只能在
+多分片缺陷修复并有真实网盘证据后才可上调。
+
