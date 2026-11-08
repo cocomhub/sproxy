@@ -132,8 +132,10 @@ func (s *Storage) rangeGetWithDlink(ctx context.Context, key, dlink string, offs
 	req.Header.Set("User-Agent", bdlib.NetdiskUA)
 	// 区间 [offset, offset+size-1]（size>0 恒为闭区间——size≡0 已在上层按空区间返回）。
 	req.Header.Set("Range", "bytes="+strconv.FormatInt(offset, 10)+"-"+strconv.FormatInt(offset+size-1, 10))
-	resp, derr := s.httpc.Do(req)
-	if derr != nil {
+	resp, derr := s.httpc.Do(ctx, req)
+	// 非 2xx 也返回响应（derr = *httpc.HTTPError）：状态码语义由 validateRangeResponse 判定
+	// （403 直链失效 ⇒ 上层 invalidate + 重签），故仅「无响应」视为请求失败。
+	if resp == nil {
 		return nil, fmt.Errorf("baidupcs: Range GET %s 失败: %w", key, derr)
 	}
 	return validateRangeResponse(resp, key, offset, size, s.log)

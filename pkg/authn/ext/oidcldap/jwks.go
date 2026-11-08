@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/httpc"
 )
 
 // verifyJWTWithJWKS 校验 JWT（RS256）：从 JWKS 拉公钥 → 验签名 → 校验 iss/aud/exp。
@@ -28,7 +30,7 @@ type jwtHeader struct {
 	Kid string `json:"kid"`
 }
 
-func verifyJWTWithJWKS(ctx context.Context, client *http.Client, jwksURL, issuer, token, expectedAud string) (map[string]any, error) {
+func verifyJWTWithJWKS(ctx context.Context, client *httpc.Client, jwksURL, issuer, token, expectedAud string) (map[string]any, error) {
 	header, claims, sig, signed, err := parseJWT(token)
 	if err != nil {
 		return nil, err
@@ -84,7 +86,7 @@ type parsedJWT struct {
 }
 
 // verifySignatureAndClaims 拉取公钥验签，并校验 iss/aud/exp。
-func verifySignatureAndClaims(ctx context.Context, client *http.Client, jwksURL string, parsed parsedJWT, issuer, expectedAud string) error {
+func verifySignatureAndClaims(ctx context.Context, client *httpc.Client, jwksURL string, parsed parsedJWT, issuer, expectedAud string) error {
 	key, err := fetchJWKSKey(ctx, client, jwksURL, parsed.header.Kid)
 	if err != nil {
 		return err
@@ -125,8 +127,19 @@ func extractAud(claims map[string]any) string {
 	return aud
 }
 
+// jwksRetry 是 OIDC 外部请求的重试策略（IdP API：快速退避、有限次数）。
+// 只对**幂等方法**生效（httpc 默认）：JWKS 是 GET ⇒ 重试；token 交换是 POST ⇒ 不重试
+// （避免重复消费 authorization code）。
+var jwksRetry = httpc.PolicyFor(httpc.PolicyFast)
+
+// newOIDCHTTPClient 构造 OIDC 出站客户端（独立连接池 + 幂等请求重试编排）。
+// 生产装配与测试共用同一构造点（保证测的就是生产配置）。
+func newOIDCHTTPClient() *httpc.Client {
+	return httpc.New(httpc.Options{Isolated: true, Retry: jwksRetry})
+}
+
 // fetchJWKSKey 从 JWKS 拉取公钥（按 kid 匹配；无 kid 时取首个 RSA key）。
-func fetchJWKSKey(ctx context.Context, client *http.Client, jwksURL, kid string) (*rsa.PublicKey, error) {
+func fetchJWKSKey(ctx context.Context, client *httpc.Client, jwksURL, kid string) (*rsa.PublicKey, error) {
 	body, err := fetchJWKSBody(ctx, client, jwksURL)
 	if err != nil {
 		return nil, err
@@ -135,13 +148,15 @@ func fetchJWKSKey(ctx context.Context, client *http.Client, jwksURL, kid string)
 }
 
 // fetchJWKSBody 拉取并读取 JWKS 资源体（校验 HTTP 状态码，限量 1 MiB）。
-func fetchJWKSBody(ctx context.Context, client *http.Client, jwksURL string) ([]byte, error) {
+func fetchJWKSBody(ctx context.Context, client *httpc.Client, jwksURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("oidcldap: jwks 请求构造失败: %w", err)
 	}
-	resp, err := client.Do(req)
-	if err != nil {
+	resp, err := client.Do(ctx, req)
+	// 非 2xx 也返回响应（err = *httpc.HTTPError）：状态码由下方分支映射为既有文案，
+	// 故仅「无响应」视为拉取失败。
+	if resp == nil {
 		return nil, fmt.Errorf("oidcldap: jwks 拉取失败: %w", err)
 	}
 	defer resp.Body.Close()

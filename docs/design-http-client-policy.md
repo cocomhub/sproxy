@@ -155,3 +155,36 @@ func Shared(p Purpose, opt Options) *Client // 进程级幂等：同 purpose 首
   **不同 host** ⇒ 连接池按 host 隔离（`MaxIdleConnsPerHost`），共享池不产生跨渠道干扰；同时省去 3 个池。
 - **未删任何能力**：无 `CloseIdleConnections`、无每渠道特有 TLS/代理需求（若将来出现 ⇒ 按渠道拆 `Purpose` 即可）。
 - **回归防护**：R58 门禁守"关闭必须自有池"；本文档守"共享池禁止关闭"。
+
+## 6. 幂等性判定：GET 可能承载「写」语义（2026-11-08 实测拦截）
+
+`httpc` 的重试默认按 **HTTP 方法**判定（`defaultIdempotent`：GET/HEAD/OPTIONS/TRACE 可重试）。
+这对 REST 语义成立，但对**把操作写进 query string 的 API 不成立**：
+
+- 实例：DNSPod 用 `GET /?Action=CreateRecord&...` 创建 ACME 校验记录 ⇒ 若按方法视为可重试，
+  瞬时 5xx 会**重复创建记录**（真实缺陷 —— 在把 `pkg/certmgr/ext/dnspod` 接入编排时，由
+  「逐点论证幂等性」这一前置动作拦下，见硬规则 1.17）。
+- 处理：按 **Action** 声明幂等性（`dnsPodActionIdempotent`）——读/幂等写（`RecordList`、
+  `DeleteRecord`）允许重试；写操作（`CreateRecord`）用
+  `DoOpts(..., DoOptions{Retry: pipe.Policy{Attempts: 1}})` **显式关闭**。
+- **判据是「重复执行是否产生额外副作用」，不是「用什么 HTTP 方法」**。
+
+⇒ 新接入编排的调用点必须回答：「重试一次会不会多建/多扣/多发？」答案是否才允许默认重试。
+反例（无需处理）：OIDC token 交换是 POST（`authorization_code` 只能消费一次）——httpc 按方法
+默认不重试 ✓。
+
+### 6.1 本批接入的 4 处 与 不纳入的 6 处
+
+| 调用点 | 方法 | 幂等 | 处理 |
+|---|---|---|---|
+| `pkg/tunnel/mesh/discovery.go`（hub 节点发现） | GET | ✓ | `PolicyFast` 重试（discovery 循环不再等到下一轮） |
+| `pkg/volume/ext/baidupcs`（dlink Range GET） | GET | ✓ | `PolicyFast` 重试（下行抖动自愈；4xx 直链失效 fail-fast ⇒ 上层重签） |
+| `pkg/certmgr/ext/dnspod` | GET | **按 Action** | 读/删重试；`CreateRecord` **关闭重试** |
+| `pkg/authn/ext/oidcldap`（JWKS） | GET | ✓ | `PolicyFast` 重试；token 交换（POST）不重试 |
+
+**不纳入**（各有明确原因，非遗漏）：
+- `pkg/volume/ext/pikpak/urlresolver.go`：`followKeepshareShareID` 需要**裸 client**（重定向跟随）
+  ⇒ 需先给 `httpc.Client` 暴露底层 client 或重构跟随逻辑（后续片）。
+- `pkg/volume/ext/baidupcs/download.go`：走**百度库**的 `requester.HTTPClient`，不是本仓 client。
+- `pkg/volume/webdav/webdav_fs.go`：GET/PUT/DELETE 混合且带自身错误映射（PUT/DELETE 非幂等）。
+- `pkg/volume/ext/pikpak/api.go`、`pkg/downloader/http_downloader.go`、`.../turnrest.go`：**已有**自己的重试。

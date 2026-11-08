@@ -12,7 +12,6 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -87,7 +86,9 @@ type Storage struct {
 	// httpc 是 Range GET 专用客户端（评审 I4 修复：禁 http.DefaultClient/共享
 	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
-	httpc *http.Client
+	// 2026-11-08：由裸 `*http.Client` 改为 `httpc.Client`（Bundle 重试编排）——
+	// dlink 来自 CDN，瞬时 5xx/抖动此前直接让分块读失败，现按 GET 幂等自动重试。
+	httpc *httpc.Client
 
 	// dlinkMu 串行化签发（同 key 并发段读只签一次）。
 	dlinkMu sync.Mutex
@@ -171,12 +172,16 @@ func normalizeUploadCoreMode(v string) string {
 // newRangeHTTPClient 构造 Range GET 专用客户端（评审 I4 + R19 门禁：per-instance 独立
 // 连接池 + ResponseHeaderTimeout 兜底；禁共享 DefaultClient/DefaultTransport，也用
 // netutil.IsolatedTransport() 基座 + 覆写定制字段而非裸 Transport 构造）。
-func newRangeHTTPClient() *http.Client {
+func newRangeHTTPClient() *httpc.Client {
 	tr := netutil.IsolatedTransport()
 	tr.ResponseHeaderTimeout = 30 * time.Second
 	tr.IdleConnTimeout = 90 * time.Second
-	return httpc.NewHTTPClient(httpc.Options{Transport: tr})
+	return httpc.New(httpc.Options{Transport: tr, Retry: rangeGetRetry})
 }
+
+// rangeGetRetry 是 dlink Range GET 的重试策略（外部 CDN 下行：快速退避、有限次数）。
+// 4xx（签名错/直链失效）不被 httpc 视为可重试 ⇒ fail-fast，交由上层 invalidate + 重签。
+var rangeGetRetry = httpc.PolicyFor(httpc.PolicyFast)
 
 // Put 上传内容到网盘（本地临时文件 + adapter.Upload + **ETag md5 复核有界重试**）。
 //
