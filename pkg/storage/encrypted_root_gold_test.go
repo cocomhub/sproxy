@@ -105,10 +105,7 @@ func TestEncRootGoldFixture_FormatFrozen(t *testing.T) {
 		if _, err := sk.Seek(off, io.SeekStart); err != nil {
 			t.Fatalf("Seek(%d, Start): %v", off, err)
 		}
-		end := off + 64
-		if end > goldPlainLen {
-			end = goldPlainLen
-		}
+		end := min(off+64, goldPlainLen)
 		buf := make([]byte, end-off)
 		if _, err := io.ReadFull(rc, buf); err != nil {
 			t.Fatalf("Seek(%d) 后读取: %v", off, err)
