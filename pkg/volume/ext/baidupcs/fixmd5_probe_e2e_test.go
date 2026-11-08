@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"time"
 )
 
@@ -93,17 +95,15 @@ func TestE2E_FixMD5Probe(t *testing.T) {
 	t.Logf("③ FixMD5 调用：err=%v", fixErr)
 
 	// ④ 再看 ETag（修复后需短暂等待服务器刷新——库自身错误文案即「可能服务器未刷新」）。
+	// 用 testutil.WaitForBool（项目条件轮询 helper，非固定等待；R14 棘轮只数 *_test.go 的 time.Sleep）。
 	etagAfter := ""
-	for attempt := 1; attempt <= 6; attempt++ {
-		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	okAfter := testutil.WaitForBool(45*time.Second, func() bool {
 		if meta, okM := st.metaByExactList(ctx, key); okM && meta != nil {
 			etagAfter = meta.ETag
 		}
-		t.Logf("④ 第 %d 次复核：ETag=%s（== 本地 md5：%v）", attempt, etagAfter, etagAfter == localMD5)
-		if etagAfter == localMD5 {
-			break
-		}
-	}
+		return etagAfter == localMD5
+	})
+	t.Logf("④ FixMD5 后条件轮询（≤45s）：ETag=%s（== 本地 md5：%v）", etagAfter, okAfter)
 
 	// ⑤ 内容回读（确认无论 ETag 语义如何，内容都是对的）
 	rc, _, gerr := st.Get(ctx, key)
