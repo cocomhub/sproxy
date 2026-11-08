@@ -51,6 +51,9 @@ type StorageConfig struct {
 	// AllowLibraryUpload 允许**上传**在二进制失败时回退到库实现（默认 false = 禁止）。
 	// 见 `AdapterConfig.AllowLibraryUpload`：库上传实测小文件 ~90s 且不响应 ctx ⇒ 默认 fail-closed。
 	AllowLibraryUpload bool
+	// coreMaxVerifiedSizeOverride 仅供测试/真实验收放开内核尺寸护栏（0 = 用默认 coreMaxVerifiedSize）。
+	// 生产恒为 0 ⇒ 走已验证范围；验收用例需要在大文件上直接压内核时才注入。
+	coreMaxVerifiedSizeOverride int64
 	// UploadCore 选择上传编排内核（见 uploadcore_wiring.go）：
 	// 空/"" = auto（内核优先，失败一次降级既有路径 + WARN）；"nucleus" 只用内核；
 	// "legacy" 只用既有路径。**默认空字符串**（硬规则 7c：string 配置默认空值）。
@@ -107,6 +110,8 @@ type Storage struct {
 	coreMode string
 	// coreDisabled 是本进程的降级标记（auto 模式内核失败一次即置位，避免每个文件都踩同一坑）。
 	coreDisabled atomic.Bool
+	// coreMaxSizeOverride 仅供测试/真实验收放开内核尺寸护栏（0 = 用默认 coreMaxVerifiedSize）。
+	coreMaxSizeOverride int64
 }
 
 // NewStorage 创建百度网盘 Storage。
@@ -152,7 +157,7 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 	st := &Storage{
 		root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger,
 		httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
-		auditSvc: cfg.Audit, coreMode: normalizeUploadCoreMode(cfg.UploadCore),
+		auditSvc: cfg.Audit, coreMode: normalizeUploadCoreMode(cfg.UploadCore), coreMaxSizeOverride: cfg.coreMaxVerifiedSizeOverride,
 	}
 	return st, nil
 }

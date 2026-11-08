@@ -48,32 +48,36 @@ func (s *Storage) coreDepsOf() (*Client, func(context.Context, string, *stagedUp
 	return nil, nil, false
 }
 
-// coreMaxVerifiedSize 是内核**已验证**的文件大小上限（单片：≤ uploadBlockSize = 4MiB）。
+// coreMaxVerifiedSize 是内核**能用 ETag 校验**的文件大小上限（单片：≤ uploadBlockSize = 4MiB）。
 //
-// 依据（2026-11-08 真实网盘 e2e，**随机内容**以排除秒传；命令见
-// `real_network_compare_e2e_test.go` 的 E2E_* 旋钮）：
+// 依据（2026-11-08 真实网盘 e2e，**随机内容**以排除秒传；命令见 `real_network_compare_e2e_test.go` 的 E2E_* 旋钮）：
 //
-//	1MiB / 3MiB（单片，无 merge）  ⇒ ETag == 本地 md5 ✓
-//	8 / 20 / 48 / 96 / 120MiB（多分片 + merge）⇒ 复验 md5 **不一致**，且秒传自愈（Repair）无法修复 ✗
+//	1MiB / 3MiB（单片，无 merge）   ⇒ ETag == 本地 md5 ✓
+//	8 / 20 / 48 / 96 / 120MiB（多分片）⇒ **回读内容逐字节一致 ✓**（内核对，无损坏），
+//	                                  但百度给的 ETag **既非整文件 md5、也非块列表 md5** ⇒ 无法用 ETag 判权威
 //
-// ⇒ 超过该值时**不走内核**（交既有路径），直到多分片缺陷修复；否则仅靠 auto 降级会白试一次
-// （并永久关掉本进程内核），且在无 CLI 兜底时直接失败。缺陷与复现命令登记在
-// `docs/external-dependencies.md`。
+// ⇒ 超过该值时**不走内核**（交既有路径），原因是**校验语义**而非内容缺陷：内核的 `Verify`
+// 以「ETag == 整文件 md5」判据，对多块文件会误报不一致（fail-closed 白报错，且秒传自愈也改不了
+// ETag 语义）。要让内核覆盖多分片，需把校验改为**回读内容比对**（带宽成本需评估）。
+// 详见 `docs/external-dependencies.md` §7.8.3（含实测三值与复现命令）。
 const coreMaxVerifiedSize = uploadBlockSize
 
 // coreAllowed 判定本次上传是否允许走内核：内核依赖齐备 + 暂存文件可用 + 尺寸在已验证范围内。
 // 超限时按模式处理（auto 降级并 WARN；nucleus 显式报错）——抽出以确保 uploadStaged 认知复杂度达标。
 func (s *Storage) coreAllowed(mode, key string, st *stagedUpload, coreOK bool) (bool, error) {
 	useCore := coreOK && st != nil && st.tmpPath != "" && st.size >= 0
-	if !useCore || st.size <= coreMaxVerifiedSize {
+	var limit int64 = coreMaxVerifiedSize
+	if s.coreMaxSizeOverride > 0 { // 仅测试/真实验收放开（见 StorageConfig.coreMaxVerifiedSizeOverride）
+		limit = s.coreMaxSizeOverride
+	}
+	if !useCore || st.size <= limit {
 		return useCore, nil
 	}
 	if mode == "nucleus" {
-		return false, fmt.Errorf("baidupcs: upload_core=nucleus 不支持 %d 字节（超过内核已验证的多分片边界 %d）",
-			st.size, int64(coreMaxVerifiedSize))
+		return false, fmt.Errorf("baidupcs: upload_core=nucleus 不支持 %d 字节（超过内核尺寸护栏 %d）",
+			st.size, limit)
 	}
-	s.log.Warn("文件超过上传内核已验证范围（多分片），改走既有路径",
-		"key", key, "size", st.size, "limit", int64(coreMaxVerifiedSize))
+	s.log.Warn("文件超过上传内核尺寸护栏，改走既有路径", "key", key, "size", st.size, "limit", limit)
 	return false, nil
 }
 

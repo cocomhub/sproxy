@@ -147,12 +147,12 @@ pending ──probe──▶ (exists&same) ──▶ done
 - `uploadid` / `RapidUpload` 仍经库调用 ⇒ **L2 里这一段的锁定通过「内核接口注入」完成**（内核不认识库，注入 fake `rapidProvider`）；
 - 降级路径必须可观测：`upload_core_fallback_total{reason}` + WARN 日志，且 `legacy` 分支仅由开关进入。
 
-## 附：多分片护栏（2026-11-08 追加）
+## 附：多分片护栏与 ETag 语义（2026-11-08 追加）
 
-真实网盘实测发现：内核在**单片（≤4MiB）**上 md5 权威，但在**多分片（≥8MiB，需 merge）**上
-复验 md5 不一致且秒传自愈修不回（见 `docs/external-dependencies.md` §7.8.3 的实测表与复现命令）。
+真实验收发现：内核在**多分片**（≥2 块，需 merge）上**内容正确**（回读逐字节一致），但百度给的
+**ETag 既非整文件 md5 也非块列表 md5** ⇒ 内核 `Verify` 的「ETag == 整文件 md5」判据对多块文件误报，
+秒传自愈也改不了 ETag 语义。
 
-因此 §5「回退」之外增加一道**尺寸护栏** `coreMaxVerifiedSize = uploadBlockSize (4MiB)`：
-超限时 `auto` 直接走既有路径（不做无谓尝试）、`nucleus` 显式报错。护栏上界只能在
-多分片缺陷修复并有真实网盘证据后才可上调。
-
+因此保留一道尺寸护栏 `coreMaxVerifiedSize = uploadBlockSize (4MiB)`：超限时 `auto` 走既有路径、
+`nucleus` 显式报错。**护栏原因是校验语义，不是内容缺陷**；要让内核覆盖多分片，需先把校验改为
+回读内容比对（或对齐 ETag 语义）——详见 `docs/external-dependencies.md` §7.8.3（含实测三值）。

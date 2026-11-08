@@ -252,10 +252,19 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 	}
 	defer func() { _ = f.Close() }()
 	a.logDebug("上传分片参数", "upload_id", uploadID, "seq", p.Seq, "offset", p.Offset, "size", p.Size)
-	if _, err := a.pcs.UploadTmpFile(uploadID, a.remote, p.Seq, p.Offset,
-		io.NewSectionReader(f, p.Offset, p.Size), p.Size); err != nil {
-		return fmt.Errorf("baidupcs: 上传分片 %d: %w", p.Seq, err)
+	// 记录**服务端返回的切片 checksum** 与本地按 4MiB 计算的分块 md5，便于核对二者是否一致
+	// （合并时的 block_list 用后者；若二者不等价，Baidu 会按不一致的块链算文件 md5）。
+	gotCS, uerr := a.pcs.UploadTmpFile(uploadID, a.remote, p.Seq, p.Offset,
+		io.NewSectionReader(f, p.Offset, p.Size), p.Size)
+	if uerr != nil {
+		return fmt.Errorf("baidupcs: 上传分片 %d: %w", p.Seq, uerr)
 	}
+	var localMD5 string
+	if a.stg != nil && p.Seq < len(a.stg.blockMD5s) {
+		localMD5 = a.stg.blockMD5s[p.Seq]
+	}
+	a.logDebug("分片上传返回", "seq", p.Seq, "server_checksum", gotCS, "local_block_md5", localMD5,
+		"match", gotCS != "" && localMD5 != "" && gotCS == localMD5)
 	return nil
 }
 
@@ -309,6 +318,9 @@ func (a *ucAdapter) Verify(ctx context.Context, req uploadcore.Request) error {
 		want = a.stg.md5
 	}
 	if want != "" && meta.ETag != "" && meta.ETag != want {
+		// ⚠️ 多块文件的 ETag **不是**整文件 md5（实测三值互不相同，但回读内容一致）⇒ 该判据对
+		// 多分片会误报。因此尺寸护栏只放行单片（见 uploadcore_wiring.go）；语义详见
+		// docs/external-dependencies.md §7.8.3。
 		return fmt.Errorf("baidupcs: md5 不一致（远端 %s != 本地 %s）", meta.ETag, want)
 	}
 	return nil
