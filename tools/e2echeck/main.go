@@ -29,10 +29,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -40,13 +42,47 @@ import (
 
 // 目标地址与 SproxySig 凭据（**全部由命令行传入**；默认值为占位符，非真实数据）。
 var (
-	base    string
-	ak      string
-	sk      string
-	entryID string
+	base     string
+	ak       string
+	sk       string
+	entryID  string
+	seedRoot string
 )
 
+// seedCredentials 写入与默认 -ak/-sk/-skid 匹配的凭据存储（<dir>/anonymous/meta/credentials.json），
+// 供本地冒烟：起一个 storage_root=<dir> 的 sproxy 即可被本工具认证。
+// 占位值，**不是真实凭据**。
+func seedCredentials(root string) error {
+	sk, _ := hex.DecodeString(sk)
+	f := struct {
+		Version int             `json:"version"`
+		Keys    []accesskey.Key `json:"keys"`
+	}{Version: 1, Keys: []accesskey.Key{{
+		AK: ak, Owner: "test",
+		Entries: []accesskey.SKEntry{{
+			ID: entryID, SK: sk, Kind: accesskey.KindPlain,
+			CreatedAt: time.Now().UTC().Truncate(time.Second), Status: accesskey.StatusActive,
+			Meta: accesskey.Meta{Type: "initial"},
+		}},
+	}}}
+	dir := filepath.Join(root, "anonymous", "meta")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(dir, "credentials.json")
+	if werr := os.WriteFile(dst, data, 0o644); werr != nil {
+		return werr
+	}
+	fmt.Println("seeded", dst)
+	return nil
+}
+
 func parseFlags() {
+	flag.StringVar(&seedRoot, "seed", "", "只做夹具：把占位凭据写入 <dir>/anonymous/meta/credentials.json 后退出")
 	flag.StringVar(&base, "addr", "http://127.0.0.1:18999", "sproxy base URL（如 https://127.0.0.1:18084）")
 	flag.StringVar(&ak, "ak", "ak-00000000000000000000000000000000", "SproxySig AccessKey")
 	flag.StringVar(&sk, "sk", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "SproxySig AccessKeySecret")
@@ -204,6 +240,13 @@ func sumOf(b []byte) []byte {
 
 func main() {
 	parseFlags()
+	if seedRoot != "" {
+		if err := seedCredentials(seedRoot); err != nil {
+			fmt.Fprintf(os.Stderr, "seed 失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	fmt.Println("=== 1. 公开面 / 未认证面")
 	for _, p := range []string{"/healthz", "/version", "/metrics", "/ui/"} {
 		call("public "+p, http.MethodGet, p, nil, nil)

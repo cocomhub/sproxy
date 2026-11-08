@@ -7,7 +7,7 @@
 
 | 工具 | 用途 | 运行方式 |
 | --- | --- | --- |
-| `tools/e2echeck` | 对**运行中**的 sproxy 实例逐条打真实 HTTP 做**全能力面冒烟**（公开面/未认证面/上传→下载→校验/分享/批量/分块上传/凭据…）。断言原则：任何路由不得 5xx（除登记例外）、关键能力必须真工作、有业务错误的端点允许 4xx 但不允许「接线错误 500」 | `go run ./tools/e2echeck -addr=https://127.0.0.1:18084 -ak=<AK> -sk=<SK> -skid=<SK条目ID>`；或 `make build-dev-tools` 后跑 `build/bin/e2echeck` |
+| `tools/e2echeck` | 对**运行中**的 sproxy 实例逐条打真实 HTTP 做**全能力面冒烟**（公开面/未认证面/上传→下载→校验/分享/批量/分块上传/凭据…）。断言原则：任何路由不得 5xx（除登记例外）、关键能力必须真工作、有业务错误的端点允许 4xx 但不允许「接线错误 500」。内置 **`-seed` 夹具**：把与默认 `-ak/-sk/-skid` 匹配的占位凭据写入 `<dir>/anonymous/meta/credentials.json`，便于本地起一个 `storage_root=<dir>` 的实例后直接冒烟（原 `build/e2e/seed`） | `go run ./tools/e2echeck -seed <storage_root>` 后 `go run ./tools/e2echeck -addr=https://127.0.0.1:18084 -ak=<AK> -sk=<SK> -skid=<SK条目ID>`；或 `make build-dev-tools` 后跑 `build/bin/e2echeck` |
 | `tools/uploadperf` | 上传吞吐压测（`plain` 单请求 / `chunked` 分块 + 并发），并支持清理测试目录（`ls`/`rm`/`rmdir`）；绕开业务层只压 sproxy 上传路径 | `go run ./tools/uploadperf -mode=chunked -server=https://127.0.0.1:18084 -chunk=4194304 -conc=4 -ak=.. -sk=.. -skid=..` |
 | `scripts/mutcheck.sh` | **变异验证骨架**（硬规则 5）：施加一处真实变异 ⇒ 断言指定测试**变红** ⇒ **无论成败自动复原**源文件。退出码：0=变异被捕获 / 1=**未被捕获（测试缺口）** / 2=参数错 / 3=锚点未命中或不唯一 / 4=缺依赖 | `make mutcheck ARGS="-file <f> -old '<a>' -new '<b>' -pkg <pkg> -run <regex>"` |
 | `scripts/regression-audit.sh` | **回归审计**（硬规则 1.17）：用 `git show <commit> -U0` 抽出**被删除的导出符号**与**能力相关字段/档位**，并实测「裸默认池构造点 / `CloseIdleConnections` 调用点」当前状态，要求逐条给出行级判定 | `make regression-audit`（默认 origin/master 最近 12 个提交）或 `ARGS="--current"` / `ARGS="<sha>…"` |
