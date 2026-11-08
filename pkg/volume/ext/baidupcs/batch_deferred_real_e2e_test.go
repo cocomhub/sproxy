@@ -36,6 +36,7 @@ import (
 )
 
 func TestE2E_BatchDeferredUploadAndVerify(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e（跨进程外部资源：远端目录/上传会话；与其它 e2e 共用同一远端根）
 	bduss := e2eBDUSSFromConfig(t)
 	if bduss == "" {
 		t.Skip("BDUSS 为空（~/.config/BaiduPCS-Go/pcs_config.json 未登录）")
