@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
+
 	"github.com/cocomhub/sproxy/pkg/server/metrics"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
 	"github.com/cocomhub/sproxy/pkg/tunnel/mux"
@@ -90,15 +92,43 @@ func (h *Handlers) aggregateMuxMetrics() *mux.Metrics {
 	return &total
 }
 
+// uploadCoreCountsProvider 是**可选能力**：外部后端上报「上传内核路径计数」（原始整数，
+// 避免 pkg/server 依赖具体后端类型）。实现方：pkg/volume/ext/baidupcs 的 Storage 经
+// cmd/sproxy 的 backend 包装器**转发**（透明装饰器必须转发能力，否则此处恒探测不到）。
+type uploadCoreCountsProvider interface {
+	UploadCoreStatsCounts() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64)
+}
+
+// uploadCoreCountsOf 探测外部后端是否提供上传内核路径计数。
+func uploadCoreCountsOf(ext registry.ExternalBackend) (used, skippedOversize, degraded, failed, legacyMode, noDeps int64, ok bool) {
+	if ext == nil {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	p, okp := ext.(uploadCoreCountsProvider)
+	if !okp {
+		return 0, 0, 0, 0, 0, 0, false
+	}
+	used, skippedOversize, degraded, failed, legacyMode, noDeps = p.UploadCoreStatsCounts()
+	return used, skippedOversize, degraded, failed, legacyMode, noDeps, true
+}
+
 // renderVolumeWatermarks 把每卷已用/容量水位注入指标并输出（装配层版：卷集合来自 Handlers）。
 func (h *Handlers) renderVolumeWatermarks(b *strings.Builder, m *metrics.Metrics) {
 	if h != nil && h.volSet != nil {
 		for _, v := range h.volSet.All() {
 			m.SetVolumeUsage(v.Name, h.volumeUsage(v), v.Capacity)
+			// 上传内核路径计数（仅当后端提供该能力时输出；本地卷/未实现后端不产生噪声）。
+			if used, skip, deg, fail, legacy, nodeps, ok := uploadCoreCountsOf(h.volSet.External(v.Name)); ok {
+				m.SetVolumeUploadCore(v.Name, used, skip, deg, fail, legacy, nodeps)
+			}
 		}
 	}
 	metrics.WriteGaugeSamples(b, "sproxy_storage_usage_bytes", "Per-volume used bytes (disk watermark)", m.VolumeUsageSamples())
 	metrics.WriteGaugeSamples(b, "sproxy_storage_capacity_bytes", "Per-volume capacity bytes (0/absent = unlimited)", m.VolumeCapSamples())
+	// 上传内核路径计数（按卷+mode）：生产可直接看出"内核在不在跑、为何没跑"。
+	metrics.WriteLabeledCounter(b, "sproxy_volume_upload_core_total",
+		"Per-volume upload-core path counts by mode (used/skipped_oversize/degraded/failed/legacy_mode/no_deps)",
+		m.VolumeUploadCoreSamples())
 }
 
 // MetricsHandler 返回 GET /metrics 的 HTTP handler。

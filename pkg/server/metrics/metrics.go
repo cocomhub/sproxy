@@ -93,8 +93,9 @@ type Metrics struct {
 	// ---- 卷磁盘水位（roadmap 11.5-⑪）：每卷 usage/capacity gauge ----
 	// 供 Prometheus 告警规则 sproxy_storage_usage_bytes / sproxy_storage_capacity_bytes。
 	// 快照型：读面渲染时经 SetVolumeUsage 注入最新水位（不随 IO 事件自增）。
-	volumeUsage *labeledGauges[VolumeKey]
-	volumeCap   *labeledGauges[VolumeKey]
+	volumeUsage      *labeledGauges[VolumeKey]
+	volumeCap        *labeledGauges[VolumeKey]
+	volumeUploadCore *labeledGauges[UploadCoreKey]
 
 	// ---- 备份/同步任务计数（roadmap 11.5-⑪）：failed / total ----
 	backupTasks       atomic.Int64
@@ -204,6 +205,10 @@ type (
 	volumeIOKey struct{ volume, op string }
 	// VolumeKey 是卷磁盘水位指标的键：仅卷名。
 	VolumeKey struct{ volume string }
+	// UploadCoreKey 是「上传内核路径计数」指标的键：卷名 + mode（used/skipped_oversize/degraded/
+	// failed/legacy_mode/no_deps）。快照型：抓取时由装配层从后端注入最新累计值（不随事件自增，
+	// 否则每次抓取会重复累加）。
+	UploadCoreKey struct{ volume, mode string }
 	// rateLimitRejectedKey 是限流拒绝计数的键：scope（ip/endpoint/global/concurrent）+ 被拒路径。
 	rateLimitRejectedKey struct{ scope, endpoint string }
 	// ownerKey 是计量报告 per-owner 指标的键：仅 owner 名。
@@ -342,6 +347,9 @@ func NewMetrics() *Metrics {
 		}),
 		volumeIOLatency: newLabeledCounters(func(k volumeIOKey) string {
 			return fmt.Sprintf(`volume="%s",op="%s"`, escapeLabel(k.volume), escapeLabel(k.op))
+		}),
+		volumeUploadCore: newLabeledGauges(func(k UploadCoreKey) string {
+			return fmt.Sprintf(`volume="%s",mode="%s"`, escapeLabel(k.volume), k.mode)
 		}),
 		volumeUsage: newLabeledGauges(func(k VolumeKey) string {
 			return fmt.Sprintf(`volume="%s"`, escapeLabel(k.volume))
@@ -534,6 +542,26 @@ func (m *Metrics) SetVolumeUsage(volume string, used, capVal int64) {
 		m.volumeCap.deleteKey(VolumeKey{volume: volume})
 	}
 }
+
+// SetVolumeUploadCore 注入某卷的「上传内核路径计数」（快照型：抓取时覆盖，**不累加**——来源是
+// 后端进程内累计计数，见 pkg/volume/ext/baidupcs.UploadCoreStats）。
+//
+// 只接收原始整数：指标层/装配层不依赖具体后端类型（能力探测见 metrics_handlers.go 的
+// uploadCoreCountsProvider）。
+func (m *Metrics) SetVolumeUploadCore(volume string, used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+	if m == nil {
+		return
+	}
+	for mode, v := range map[string]int64{
+		"used": used, "skipped_oversize": skippedOversize, "degraded": degraded,
+		"failed": failed, "legacy_mode": legacyMode, "no_deps": noDeps,
+	} {
+		m.volumeUploadCore.set(UploadCoreKey{volume: volume, mode: mode}, v)
+	}
+}
+
+// VolumeUploadCoreSamples 返回上传内核路径计数样本（按卷+mode）。
+func (m *Metrics) VolumeUploadCoreSamples() []LabeledSample { return m.volumeUploadCore.samples() }
 
 // RecordBackupTask 记一次备份/同步任务启动（roadmap 11.5-⑪）。
 func (m *Metrics) RecordBackupTask() {

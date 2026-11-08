@@ -730,3 +730,21 @@ func (f *fakeBaidupcsStorage) Move(ctx context.Context, srcKey, dstKey string) (
 	f.files[dstKey] = data
 	return &baidupcs.ObjectMeta{Key: dstKey, Size: int64(len(data))}, nil
 }
+
+// TestBaidupcsExternalBackend_UploadCoreStatsForwarding 锁定**能力转发**（R21 同族纪律）：
+// /metrics 抓取时经 registry.External(name) 探测该能力（pkg/server 的 uploadCoreCountsProvider），
+// 包装器不转发 ⇒ 恒探测不到 ⇒ 生产看不到"内核在不在跑"。nil 来源必须零值且不 panic。
+func TestBaidupcsExternalBackend_UploadCoreStatsForwarding(t *testing.T) {
+	t.Parallel()
+	// ① 满足探测侧接口形状（编译期契约）
+	var _ interface {
+		UploadCoreStatsCounts() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64)
+	} = &baidupcsExternalBackend{}
+
+	// ② 未装配来源（如测试注入的 fake 工厂）⇒ 全 0，不 panic
+	be := &baidupcsExternalBackend{}
+	used, skip, deg, fail, legacy, nodeps := be.UploadCoreStatsCounts()
+	if used != 0 || skip != 0 || deg != 0 || fail != 0 || legacy != 0 || nodeps != 0 {
+		t.Fatalf("未装配来源应返回全 0，got %d/%d/%d/%d/%d/%d", used, skip, deg, fail, legacy, nodeps)
+	}
+}
