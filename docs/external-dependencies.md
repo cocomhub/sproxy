@@ -341,8 +341,17 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 - 首次跳过（超尺寸护栏）：`msg="上传内核跳过（超过尺寸护栏）——本次起该尺寸走既有路径" key=… size=… limit=…`（每进程仅一次，避免逐文件刷屏）；
 - 内核失败降级：`msg="上传内核失败，本进程降级为既有路径（auto）" key=… err=…`（WARN）。
 
-**为什么没直接进 `/metrics`**：外部后端（baidupcs/s3/webdav/federated）**当前没有任何指标面**；
-`pkg/volume/registry` 也没有 metrics 依赖钩子。要桥接到 `sproxy_volume_upload_core_total{volume,mode}` 需
-新增一条 registry → 装配层 → `pkg/server/metrics` 的注入链（与 `pkg/files` 的 `RecordVolumeIO` 同模式）。
-**本处以 `UploadCoreStats()` 作为集成点**，接线时读它即可，无需改动领域逻辑。
+**已接入 `/metrics`（抓取时探测，快照语义）**：
+
+```
+sproxy_volume_upload_core_total{volume="<卷>",mode="used|skipped_oversize|degraded|failed|legacy_mode|no_deps"} N
+```
+
+链路：`/metrics` 渲染时的卷遍历（`renderVolumeWatermarks`）→ `volSet.External(name)` **能力探测**
+（`pkg/server` 的 `uploadCoreCountsProvider`，只收原始整数 ⇒ 指标层不依赖具体后端类型）→
+`cmd/sproxy` 的 backend 包装器**转发**（`UploadCoreStatsCounts()`，把 `baidupcs.Storage.UploadCoreStats()`
+的结构体适配成 6 元组；nil 来源返回全 0）→ `metrics.SetVolumeUploadCore`（**覆盖式**写入，避免每次抓取重复累加）。
+
+注意：**透明装饰器必须转发能力**（R21 同族）——包装器漏转发 ⇒ 探测恒 false ⇒ 生产看不到"内核在不在跑"，
+故 `cmd/sproxy` 侧有专门用例锁定该转发与新式接口形状。
 

@@ -107,6 +107,38 @@ func setupBaidupcsFSFactory(exec *syncexec.Executor, set *registry.Set, log *slo
 // Close 无连接资源（幂等安全）。
 type baidupcsExternalBackend struct {
 	fs syncpkg.FS
+	// core 是上传内核路径计数来源（可选；nil = 不支持该能力）。
+	// 转发是必须的：/metrics 抓取时经 registry.External(name) 探测该能力（见
+	// pkg/server/metrics_handlers.go 的 uploadCoreCountsProvider），不转发则恒探测不到。
+	core uploadCoreStatsSource
+}
+
+// coreStatsAdapter 把 baidupcs.StorageAPI（接口）适配成 6 元组窄接口。
+// 用运行时能力探测：fake 工厂注入的替身不实现 UploadCoreStats ⇒ 返回全 0（零回归）。
+type coreStatsAdapter struct{ storage baidupcs.StorageAPI }
+
+func (a coreStatsAdapter) UploadCoreStats() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+	s, ok := a.storage.(interface {
+		UploadCoreStats() baidupcs.UploadCoreStats
+	})
+	if !ok {
+		return 0, 0, 0, 0, 0, 0
+	}
+	v := s.UploadCoreStats()
+	return v.Used, v.SkippedOversize, v.Degraded, v.Failed, v.LegacyMode, v.NoDeps
+}
+
+// uploadCoreStatsSource 是「能报告上传内核路径计数」的窄接口（由 baidupcs.Storage 满足）。
+type uploadCoreStatsSource interface {
+	UploadCoreStats() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64)
+}
+
+// UploadCoreStatsCounts 暴露上传内核路径计数（原始整数；供 /metrics 抓取时探测）。
+func (b *baidupcsExternalBackend) UploadCoreStatsCounts() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+	if b.core == nil {
+		return 0, 0, 0, 0, 0, 0
+	}
+	return b.core.UploadCoreStats()
 }
 
 func (b *baidupcsExternalBackend) FS() syncpkg.FS { return b.fs }
@@ -188,7 +220,7 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	}
 	// P5：quota 装配上移到工厂闭包（per-owner，见 setupBaidupcsFSFactory）——backend 构造
 	// 不再挂卷级 quota（避免双重记账/跨 owner 串桶）。
-	return &baidupcsExternalBackend{fs: vb.FS}, nil
+	return &baidupcsExternalBackend{fs: vb.FS, core: coreStatsAdapter{storage: storage}}, nil
 }
 
 // registerBaidupcsBackendWithFactory 注册 baidupcs 后端类型构造器（测试可注入 fake 工厂，
