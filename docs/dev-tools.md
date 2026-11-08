@@ -31,3 +31,35 @@
 2. **工具也要走既有基座**：HTTP 一律用 `pkg/httpc`（`NewHTTPClient` 取裸 client、`New`+`Do` 要编排），
    不要新造裸 `&http.Client{}`（`tools/` 虽在 R57 豁免内，但漂移会随复制扩散）。
 3. **新增 tools 包必须登记 `.notestignore`**（并写明理由），否则 `make notest` 报红。
+
+## 四、分支 / 工作区清理流程（2026-11-08 实测）
+
+**判据必须用 GitHub PR 记录，不要用 commit subject。** squash 合并时常改写 subject ⇒ subject 匹配会产生
+**≈98% 假阴性**（实测 50 个分支只匹配 1 个）；内容级指标也不可靠（master 后来演进会让老分支的「新增行」自然消失）。
+
+1. 拉全部 PR 的 head/state：`gh pr list --state all --limit 1200 --json number,headRefName,state,mergedAt > build/prs.json`
+   ——**limit 必须 ≥ 仓库 PR 总数**，否则老分支会被误判成「从未提 PR」。
+2. 与 `git branch` 求**交集**（只处理本地真实存在的分支）后分类：
+   | 分类 | 判据 | 处置 |
+   |---|---|---|
+   | 已交付 | 该 head 有 `mergedAt` | 可删 |
+   | 进行中 | `state=OPEN` | **保留** |
+   | 被取代 | `state=CLOSED` 且未合并（核对后继 PR） | 可删 |
+   | 本地探索 | 无任何 PR | **需人工判定** |
+3. 删除前确认未被 worktree 占用：`git worktree list --porcelain`。占用时先 `git worktree remove <dir>`
+   ——**移除前必须确认工作区干净**。
+4. **遇到遗留未提交改动：不要 `rm -rf`，也不要 `--no-verify` 强行提交。** 按硬规则先让 pre-commit 通过
+   （通常只是 lint/格式），再用**合法 Conventional 类型**提交到该分支保全，例如
+   `test(<scope>): 保全 <来源> 的遗留改动（未验证 WIP）`——注意 `wip: …` **不是**合法类型，commit-msg 钩子会拒绝。
+   提交后移除 worktree，工作仍在分支里（可复查、可丢弃）。
+5. 收尾：`git worktree prune` 清掉失效登记。
+
+### 实测踩到的 3 个陷阱
+
+- **CRLF 静默跳过**：python 在 Windows 写出的清单是 CRLF ⇒ `while read -r b` 得到的分支名尾部会带 `\r`（回车符）⇒ `git rev-parse` 全部失配、循环体形同空转（表现为「已删除 0 个」，且不报错）。用 `tr -d '\r'` 过滤，或在写出时用 `open(..., newline='')`。
+
+- **遍历对象搞错**：要遍历**本地分支**并查 PR，而不是遍历 PR 记录去查分支（后者里绝大多数 ref 本地并不存在，
+  只会静默跳过，白跑一轮）。
+- **MSYS 路径转换**：Git-Bash 下 `git show origin/master:<path>` 会被改写成 Windows 路径（`/`→`\`、`:`→`;`）
+  而报 `ambiguous argument` ⇒ 加 `MSYS_NO_PATHCONV=1`，或用 `git cat-file`。
+
