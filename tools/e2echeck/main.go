@@ -49,38 +49,35 @@ var (
 	seedRoot string
 )
 
-// seedCredentials 写入与默认 -ak/-sk/-skid 匹配的凭据存储（<dir>/anonymous/meta/credentials.json），
-// 供本地冒烟：起一个 storage_root=<dir> 的 sproxy 即可被本工具认证。
-// 占位值，**不是真实凭据**。
+// seedCredentials 写入与默认 -ak/-sk/-skid 匹配的凭据存储，供本地冒烟：起一个
+// storage_root=<dir> 的 sproxy 即可被本工具认证。占位值，**不是真实凭据**。
+//
+// 落盘走生产抽象 accesskey.CredentialStore（与服务器加载的是同一份格式）——不自己拼 JSON。
 func seedCredentials(root string) error {
-	sk, _ := hex.DecodeString(sk)
-	f := struct {
-		Version int             `json:"version"`
-		Keys    []accesskey.Key `json:"keys"`
-	}{Version: 1, Keys: []accesskey.Key{{
+	skBytes, err := hex.DecodeString(sk)
+	if err != nil {
+		return fmt.Errorf("默认 -sk 不是合法 hex: %w", err)
+	}
+	keys := []accesskey.Key{{
 		AK: ak, Owner: "test",
 		Entries: []accesskey.SKEntry{{
-			ID: entryID, SK: sk, Kind: accesskey.KindPlain,
+			ID: entryID, SK: skBytes, Kind: accesskey.KindPlain,
 			CreatedAt: time.Now().UTC().Truncate(time.Second), Status: accesskey.StatusActive,
 			Meta: accesskey.Meta{Type: "initial"},
 		}},
-	}}}
-	dir := filepath.Join(root, "anonymous", "meta")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	}}
+	metaDir := filepath.Join(root, "anonymous", "meta")
+	if merr := os.MkdirAll(metaDir, 0o755); merr != nil {
+		return merr
 	}
-	data, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
+	if serr := accesskey.NewCredentialStore(metaDir).Save(keys); serr != nil {
+		return serr
 	}
-	dst := filepath.Join(dir, "credentials.json")
-	if werr := os.WriteFile(dst, data, 0o644); werr != nil {
-		return werr
-	}
-	fmt.Println("seeded", dst)
+	fmt.Println("seeded", filepath.Join(metaDir, "credentials.json"))
 	return nil
 }
 
+// parseFlags 解析命令行（地址与凭据全部运行期传入）。
 func parseFlags() {
 	flag.StringVar(&seedRoot, "seed", "", "只做夹具：把占位凭据写入 <dir>/anonymous/meta/credentials.json 后退出")
 	flag.StringVar(&base, "addr", "http://127.0.0.1:18999", "sproxy base URL（如 https://127.0.0.1:18084）")
