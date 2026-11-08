@@ -4,7 +4,6 @@
 package storage
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/cipherstream"
 )
 
 // LayoutVersion 是当前存储布局版本。OpenRoot 时校验/写入 <root>/LAYOUT_VERSION。
@@ -41,7 +42,7 @@ type Root struct {
 	// 解密 reader / 加密 writer（透明）。OpenRoot 后经 SetEncryption 注入。
 	enc *rootEnc
 	// plainSize 缓存「密文尺寸/修改时间 → 明文长度」（评审 R14 NEW-5）：此前每次
-	// `OpenDecrypted` 都重跑 `encPlaintextSize`（逐块读 4B 头，O(#blocks) syscall），
+	// `OpenDecrypted` 都重跑 `cipherstream.PlaintextSize`（逐块读 4B 头，O(#blocks) syscall），
 	// 而分块下载/Range 每个请求都会开一次 ⇒ 大文件重复扫描。
 	plainSizeMu sync.Mutex
 	plainSize   map[string]plainSizeEntry
@@ -121,7 +122,7 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 	if rt.enc == nil {
 		return f, nil
 	}
-	dr, derr := newEncRootReader(rt.enc.key, f)
+	dr, derr := cipherstream.NewReader(rt.enc.key, f, encRootCfg(rt.enc.chunk))
 	if derr != nil {
 		f.Close()
 		return nil, derr
@@ -144,7 +145,7 @@ func (rt *Root) OpenDecrypted(rel string) (io.ReadCloser, error) {
 		if oerr != nil {
 			return nil, oerr
 		}
-		ndr, nderr := newEncRootReader(rt.enc.key, nf)
+		ndr, nderr := cipherstream.NewReader(rt.enc.key, nf, encRootCfg(rt.enc.chunk))
 		if nderr != nil {
 			nf.Close()
 			return nil, nderr
@@ -165,7 +166,7 @@ func (rt *Root) OpenFileEncrypted(rel string, flag int, perm os.FileMode) (io.Wr
 	if rt.enc == nil {
 		return f, nil
 	}
-	ew, werr := newEncRootWriter(rt.enc.key, f, rt.enc.chunk)
+	ew, werr := cipherstream.NewWriter(rt.enc.key, f, encRootCfg(rt.enc.chunk))
 	if werr != nil {
 		f.Close()
 		return nil, werr
@@ -196,11 +197,14 @@ func (rt *Root) IsEncrypted() bool {
 // volumes[].extra.cipher 选型——未来 RegisterCipher 扩展算法时块大小取自注册表；
 // 当前仅 aes-256-gcm 64KiB 一种，非法块大小 fail-closed）。
 // 必须在 SetEncryption 之后调用；未加密卷（enc==nil）时忽略（零回归）。
+//
+// 上界 = `cipherstream.MaxHeaderChunk`：读侧按头部声明的块大小做畸形头防护，
+// 写入超过该值的块会让**自己写出的文件读不回**（fail-closed 在写入前拦截）。
 func (rt *Root) SetCipher(chunk int) error {
 	if rt.enc == nil {
 		return nil
 	}
-	if chunk <= 0 {
+	if chunk <= 0 || chunk > cipherstream.MaxHeaderChunk {
 		return fmt.Errorf("storage: 加密卷块大小非法 %d", chunk)
 	}
 	rt.enc.chunk = chunk
@@ -241,7 +245,7 @@ func (rt *Root) LogicalSize(rel string) (int64, error) {
 		return 0, oerr
 	}
 	defer f.Close()
-	return encPlaintextSize(f)
+	return cipherstream.PlaintextSize(f, encRootMagic)
 }
 
 // Lstat 返回相对路径的文件信息（不跟随符号链接）。供 rmdir 等检查符号链接，
@@ -403,7 +407,7 @@ func (rt *Root) Close() error {
 // encReadCloser 解密流 + 底层文件关闭。
 // 实现 io.ReadSeeker 的最小集：Seek 仅支持 0 起（重开解密流）——加密流不可任意 seek
 // （块随机存取需重读密文块），Range 语义降级为整读重开（ServeContent 兼容）。
-// size 为**明文**总长（由 encPlaintextSize 探测）——供 ServeContent 设正确的
+// size 为**明文**总长（由 cipherstream.PlaintextSize 探测）——供 ServeContent 设正确的
 // Content-Length（若误用密文长度会导致客户端 unexpected EOF）。
 type encReadCloser struct {
 	r    io.Reader
@@ -432,13 +436,13 @@ func (rt *Root) cachedPlaintextSize(rel string, csize, mtime int64) (int64, bool
 	}
 	rt.plainSizeMu.Unlock()
 
-	// 用**独立句柄**探测：encPlaintextSize 会 seek 到文件尾，复用调用方的句柄会打乱其读位置
-	// （回归用例 TestEncryptedPhysicalSize_MatchesDiskTruth 抓到过）。
+	// 用**独立句柄**探测：cipherstream.PlaintextSize 会 seek 到文件尾，复用调用方的句柄会
+	// 打乱其读位置（回归用例 TestEncryptedPhysicalSize_MatchesDiskTruth 抓到过）。
 	pf, oerr := rt.r.Open(rel)
 	if oerr != nil {
 		return 0, false
 	}
-	psize, perr := encPlaintextSize(pf)
+	psize, perr := cipherstream.PlaintextSize(pf, encRootMagic)
 	_ = pf.Close()
 	if perr != nil {
 		return 0, false
@@ -450,35 +454,6 @@ func (rt *Root) cachedPlaintextSize(rel string, csize, mtime int64) (int64, bool
 	rt.plainSize[rel] = plainSizeEntry{csize: csize, mtime: mtime, psize: psize}
 	rt.plainSizeMu.Unlock()
 	return psize, true
-}
-
-// encRootOverhead 是加密块头外的固定开销：nonce(12B) + GCM tag(16B)。
-const encRootOverhead = 12 + 16
-
-// encPlaintextSize 探测加密文件的明文总长（**不解密**，仅顺序走每块长度头后跳过密文）。
-// 加密格式：[magic(15B)][4B chunk] 重复 [4B l][nonce|ct|tag]，l = encRootOverhead + 明文长。
-func encPlaintextSize(f *os.File) (int64, error) {
-	if _, err := f.Seek(int64(len(encRootMagic))+4, io.SeekStart); err != nil {
-		return 0, err
-	}
-	var total int64
-	var lenBuf [4]byte
-	for {
-		if _, err := io.ReadFull(f, lenBuf[:]); err != nil {
-			if err == io.EOF {
-				return total, nil
-			}
-			return 0, err
-		}
-		l := int64(binary.BigEndian.Uint32(lenBuf[:]))
-		if l < encRootOverhead {
-			return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
-		}
-		total += l - encRootOverhead
-		if _, err := f.Seek(l, io.SeekCurrent); err != nil {
-			return 0, err
-		}
-	}
 }
 
 // Stat 返回明文视图的 FileInfo：Size = 明文长度（与 SeekEnd/LogicalSize 同源），
@@ -542,7 +517,7 @@ func (e *encReadCloser) Seek(offset int64, whence int) (int64, error) {
 
 // seekStart 重开解密流并定位到明文 offset（评审 R14 C10）。
 //
-// 优先走**块头跳过**（`encRootReader.SeekPlain`）：只读每块 4 字节长度头并 Seek，不解密前面的
+// 优先走**块头跳过**（`cipherstream.Reader.SeekPlain`）：只读每块 4 字节长度头并 Seek，不解密前面的
 // 块。旧实现 `io.CopyN(io.Discard, r, offset)` 会把前面所有块解密 ⇒ 1 GiB 文件末尾 Range 请求
 // 需解密 1 GiB、8 MiB 分块的 1 GiB 下载累计约 64 GiB 解密。底层不可 Seek 时回落复制丢弃。
 func (e *encReadCloser) seekStart(offset int64) (int64, error) {
@@ -559,11 +534,11 @@ func (e *encReadCloser) seekStart(offset int64) (int64, error) {
 	if offset == 0 {
 		return 0, nil
 	}
-	if er, ok := r.(*encRootReader); ok {
+	if er, ok := r.(cipherstream.PlainSeeker); ok {
 		if serr := er.SeekPlain(offset); serr == nil {
 			e.pos = offset
 			return offset, nil
-		} else if !errors.Is(serr, errEncSeekUnsupported) {
+		} else if !errors.Is(serr, cipherstream.ErrSeekUnsupported) {
 			return 0, fmt.Errorf("storage: 解密流 seek 失败 %d: %w", offset, serr)
 		}
 	}

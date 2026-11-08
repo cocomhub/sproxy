@@ -519,6 +519,12 @@ StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者�
 - **加密卷（at-rest）**：默认下发**明文**（加密只在存储层，与 DAV/S3/分享/预览语义一致），
   `?ciphertext=1` 显式导出存储原样密文；尺寸/`Content-Range`/Range 一律按**明文坐标**
   （`storage.Root.LogicalSize`），密文坐标仅在 `ciphertext=1` 分支。
+- **分块加密帧格式的唯一实现 = `pkg/cipherstream`**（`[magic][4B chunk]` + 逐块
+  `[4B len][nonce|ct|tag]`）：服务端 at-rest 加密卷（`pkg/sync.EncryptedFS`、
+  `pkg/storage.EncryptedRoot`）、归档 cipher、客户端 E2EE 共用**一份**实现，**仅魔数不同**
+  （域分隔：不同密钥域互不可解）。随机访问（`SeekPlain` 明文偏移定位，跳块只读长度头
+  + Seek、不解密）与尺寸探测（`PlaintextSize`）同属该包（`random_access.go`）。
+  跨实现密文互通由 **R59** 行为锁守住（旧「源码逐字一致」门禁已废弃：那是重复的症状）。
 - **降级可观测**：sidecar 缺失（升级后存量文件）记 Debug、读失败/畸形记 Warn；`skip_verify`
   只关读侧校验、不关 meta 生成与桶隔离。
 

@@ -14,8 +14,10 @@
 //
 // 为什么放在 pkg/：`cmd/sclient` 是独立 module，其 `internal/` 不能被根模块 import，
 // 但**它可以 import 根模块的 pkg/**。此前客户端因此复制了一份实现，靠一个「两份代码必须
-// 逐字一致」的源码门禁防分叉（R57）——那是重复的症状，不是解法。
-
+// 逐字一致」的源码门禁防分叉——那是重复的症状，不是解法；已收敛为共享实现。
+//
+// 本包同时提供**格式的随机访问/尺寸探测**能力（`SeekPlain` / `PlaintextSize`）：它们要
+// 逐块读长度头并跳过密文（不解密），属于同一份格式知识，故与读写实现同处一包。
 package cipherstream
 
 import (
@@ -30,6 +32,12 @@ import (
 
 // MaxHeaderChunk 是头部声明的块大小上界（防畸形头导致超大分配）。
 const MaxHeaderChunk = 64 << 20
+
+// DefaultChunkSize 是写侧默认块大小（各使用方的历史默认一致：64 KiB）。
+const DefaultChunkSize = 64 << 10
+
+// HeaderLen 返回给定魔数下的密文头长度（魔数 + 4B 块大小）。
+func HeaderLen(magic []byte) int { return len(magic) + 4 }
 
 // gcmOverhead 是非前缀开销上界（nonce 12B + tag 16B = 28B；留 4B 余量）。
 const gcmOverhead = 32
@@ -49,7 +57,7 @@ type Config struct {
 
 func (c Config) chunkSize() int {
 	if c.ChunkSize <= 0 {
-		return 64 << 10
+		return DefaultChunkSize
 	}
 	return c.ChunkSize
 }
@@ -140,7 +148,7 @@ func (w *writer) Close() error {
 }
 
 // NewReader 返回流式解密 reader（读 NewWriter 的产物）。
-func NewReader(key []byte, r io.Reader, cfg Config) (io.Reader, error) {
+func NewReader(key []byte, r io.Reader, cfg Config) (*Reader, error) {
 	head := make([]byte, len(cfg.Magic)+4)
 	if _, err := io.ReadFull(r, head); err != nil {
 		return nil, fmt.Errorf("%s: 加密头读取失败: %w", cfg.label(), err)
@@ -159,18 +167,25 @@ func NewReader(key []byte, r io.Reader, cfg Config) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &reader{gcm: gcm, r: r, chunk: chunk, label: cfg.label()}, nil
+	return &Reader{gcm: gcm, r: r, chunk: chunk, label: cfg.label(), magic: cfg.Magic}, nil
 }
 
-type reader struct {
+// Reader 是分块解密流（读 NewWriter 的产物）。
+//
+// 当底层 reader 实现 io.Seeker 时，它还额外提供 `SeekPlain`（明文偏移定位，见 random_access.go）——
+// 调用方可用 PlainSeeker 接口断言取得该能力。
+//
+// magic 是域分隔魔数（SeekPlain 需要按其长度定位到第一块）。
+type Reader struct {
 	gcm     cipher.AEAD
 	r       io.Reader
 	chunk   int
 	label   string
 	pending []byte
+	magic   []byte
 }
 
-func (r *reader) Read(p []byte) (int, error) {
+func (r *Reader) Read(p []byte) (int, error) {
 	if len(r.pending) == 0 {
 		plain, err := r.readFrame()
 		if err != nil {
@@ -183,7 +198,7 @@ func (r *reader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (r *reader) readFrame() ([]byte, error) {
+func (r *Reader) readFrame() ([]byte, error) {
 	var ln [4]byte
 	if _, err := io.ReadFull(r.r, ln[:]); err != nil {
 		if err == io.EOF {
