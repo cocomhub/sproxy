@@ -47,33 +47,93 @@ func (a *ucAdapter) logDebug(msg string, kv ...any) {
 	a.st.log.Debug("uploadcore adapter: "+msg, kv...)
 }
 
-// ucSectionReader 把文件区间包装成 fork 库要求的 `rio.ReaderLen64`。
+// ucLen64Reader 把任意 io.Reader 包装成 fork 库要求的 `rio.ReaderLen64`。
 // `Len()` 语义与库 `fileReadedlen64.Len()` 一致：**剩余未读长度**（rio/file.go:65-72）。
-type ucSectionReader struct {
-	f   *os.File
-	sr  *io.SectionReader
+type ucLen64Reader struct {
+	r   io.Reader
 	rem int64
 }
 
-func newUCSectionReader(f *os.File, offset, size int64) *ucSectionReader {
-	return &ucSectionReader{f: f, sr: io.NewSectionReader(f, offset, size), rem: size}
+func newUCLen64Reader(r io.Reader, size int64) *ucLen64Reader {
+	return &ucLen64Reader{r: r, rem: size}
 }
 
-func (r *ucSectionReader) Read(b []byte) (int, error) {
-	n, err := r.sr.Read(b)
+func (r *ucLen64Reader) Read(b []byte) (int, error) {
+	n, err := r.r.Read(b)
 	r.rem -= int64(n)
 	return n, err
 }
 
 // Len 返回剩余未读字节数（库用它设置分片请求的 Content-Length）。
-func (r *ucSectionReader) Len() int64 { return r.rem }
+func (r *ucLen64Reader) Len() int64 { return r.rem }
 
-func (r *ucSectionReader) Close() error { return r.f.Close() }
+// ucPCS 是 adapter 依赖的**窄接口**（依赖倒置）：
+//   - 生产实现 libPCS 直接转发 fork 库调用；
+//   - 测试可注入 fake ⇒ **L2 契约（建会话先于上传 / 必须合并 / 不可见容忍）可锁进 CI**，
+//     不依赖库内部 HTTP 细节（实测：库的 requester 层会绕过直接替换的 Transport）。
+type ucPCS interface {
+	// CacheUK 取用户 uk（rapidupload 偏移计算需要；缺 STOKEN 会失败）。
+	CacheUK() (int64, error)
+	// RapidUpload 真秒传：返回 (returnType, uploadID)。returnType==2 表示秒传命中。
+	RapidUpload(remote, policy, uploadID, contentMD5, sliceMD5, dataContent, crc32 string,
+		offset, length, totalSize, dataTime int64, blockListMD5 []string) (int, string, error)
+	// FakeRapidUpload 建立上传会话（rapidupload 未命中时 **uploadid 的来源**）。
+	FakeRapidUpload(remote, policy string, length int64) (string, error)
+	// UploadTmpFile 上传一个分片（只写会话临时区，**必须**再 CreateSuperFile 才成正式文件）。
+	UploadTmpFile(uploadID, remote string, partSeq int, partOffset int64, r io.Reader, size int64) (string, error)
+	// CreateSuperFile 合并分片（不调用则远端永远不会出现文件）。
+	CreateSuperFile(uploadID, policy string, size int64, remote string, checksumMap map[int]string) error
+}
+
+// libPCS 是 ucPCS 的**生产实现**（转发 fork 库；每方法数行、不含业务逻辑）。
+type libPCS struct{ c *Client }
+
+// newLibPCS 构造生产实现（c 为我们的库客户端封装）。
+func newLibPCS(c *Client) ucPCS { return &libPCS{c: c} }
+
+func (l *libPCS) CacheUK() (int64, error) {
+	uk, pcsErr := l.c.PCS().CacheUK()
+	if pcsErr != nil {
+		return 0, pcsErr
+	}
+	return uk, nil
+}
+
+func (l *libPCS) RapidUpload(remote, policy, uploadID, contentMD5, sliceMD5, dataContent, crc32 string,
+	offset, length, totalSize, dataTime int64, blockListMD5 []string) (int, string, error) {
+	pcsError, jsonData := l.c.PCS().RapidUpload(remote, policy, uploadID, contentMD5, sliceMD5,
+		dataContent, crc32, offset, length, totalSize, dataTime, blockListMD5)
+	if pcsError != nil {
+		return 0, "", pcsError
+	}
+	return jsonData.ReturnType, jsonData.UploadID, nil
+}
+
+func (l *libPCS) FakeRapidUpload(remote, policy string, length int64) (string, error) {
+	pcsError, jsonData := l.c.PCS().FakeRapidUpload(remote, policy, length)
+	if pcsError != nil {
+		return "", pcsError
+	}
+	return jsonData.UploadID, nil
+}
+
+func (l *libPCS) UploadTmpFile(uploadID, remote string, partSeq int, partOffset int64,
+	r io.Reader, size int64) (string, error) {
+	mu := newBaiduMultiUpload(l.c, remote)
+	return mu.TmpFile(context.Background(), uploadID, remote, partSeq, partOffset,
+		newUCLen64Reader(r, size))
+}
+
+func (l *libPCS) CreateSuperFile(uploadID, policy string, size int64, remote string,
+	checksumMap map[int]string) error {
+	mu := newBaiduMultiUpload(l.c, remote)
+	return mu.CreateSuperFile("", policy, uploadID, size, checksumMap)
+}
 
 // ucAdapter 实现内核所需的全部依赖接口（一次上传会话一个实例）。
 type ucAdapter struct {
 	st  *Storage
-	pcs *Client
+	pcs ucPCS
 	// key 是**相对 root 的 key**（列举类操作必须用它：metaByExactList 内部会拼 s.root）；
 	// remote 是**完整远端路径**（库 API 需要完整路径）。混用会导致路径双重拼接（实测踩坑）。
 	key       string
@@ -87,7 +147,7 @@ type ucAdapter struct {
 
 // newUCAdapter 构造适配器（staged 参数复用既有 stagedUpload，不重复算 checksum）。
 // pcs 为库客户端（发 rapidupload/分片/合并请求）；repair 为可选自愈（秒传刷新）。
-func newUCAdapter(st *Storage, pcs *Client, key, localPath, remote string,
+func newUCAdapter(st *Storage, pcs ucPCS, key, localPath, remote string,
 	stg *stagedUpload, overwrite bool,
 	repair func(ctx context.Context, remote string, st *stagedUpload) (bool, error)) *ucAdapter {
 	return &ucAdapter{st: st, pcs: pcs, key: key, stg: stg, localPath: localPath,
@@ -106,9 +166,9 @@ func (a *ucAdapter) ExistingMD5(ctx context.Context, targetPath string) (string,
 // Rapid 尝试秒传：返回 (upload_id, 是否已命中)。参数取自 stagedUpload（md5/sliceMD5/crc32/
 // blockMD5s/size）+ 随机片段（planRapid，含与库逐位一致的偏移算法）。
 func (a *ucAdapter) Rapid(ctx context.Context, req uploadcore.Request) (string, bool, error) {
-	uk, pcsErr := a.pcs.PCS().CacheUK()
-	if pcsErr != nil {
-		return "", false, fmt.Errorf("baidupcs: 获取 uk 失败（需 STOKEN）: %w", pcsErr)
+	uk, ukErr := a.pcs.CacheUK()
+	if ukErr != nil {
+		return "", false, fmt.Errorf("baidupcs: 获取 uk 失败（需 STOKEN）: %w", ukErr)
 	}
 	now := time.Now().Unix()
 	plan, err := planRapid(a.localPath, uk, now)
@@ -120,34 +180,35 @@ func (a *ucAdapter) Rapid(ctx context.Context, req uploadcore.Request) (string, 
 		return "", false, fmt.Errorf("baidupcs: 暂存文件 md5 漂移（staged=%s 实测=%s）", a.stg.md5, plan.ContentMD5)
 	}
 	policy := bcPolicy(a.overwrite)
-	pcsError, jsonData := a.pcs.PCS().RapidUpload(a.remote, policy, "",
+	returnType, rapidID, rErr := a.pcs.RapidUpload(a.remote, policy, "",
 		plan.ContentMD5, plan.SliceMD5, plan.DataContent, plan.CRC32,
 		plan.Offset, plan.DataLength, plan.Size, plan.DataTime, a.blockList(plan))
-	if pcsError != nil {
-		return "", false, fmt.Errorf("baidupcs: rapidupload 失败: %w", pcsError)
+	if rErr != nil {
+		return "", false, fmt.Errorf("baidupcs: rapidupload 失败: %w", rErr)
 	}
-	a.logDebug("rapidupload 响应", "return_type", jsonData.ReturnType,
-		"upload_id", jsonData.UploadID, "size", plan.Size, "block_size", plan.BlockSize,
-		"blocks", len(a.blockList(plan)), "offset", plan.Offset, "data_len", plan.DataLength)
-	if jsonData.ReturnType == 2 {
-		return jsonData.UploadID, true, nil // 秒传命中（零传输完成）
+	a.logDebug("rapidupload 响应", "return_type", returnType, "upload_id", rapidID,
+		"size", plan.Size, "block_size", plan.BlockSize, "blocks", len(a.blockList(plan)),
+		"offset", plan.Offset, "data_len", plan.DataLength)
+	if returnType == 2 {
+		return rapidID, true, nil // 秒传命中（零传输完成）
 	}
 	// **uploadid 的真正来源**（2026-11-08 实测修正）：rapidupload 未命中时**不返回 uploadid**
 	// （实测响应无 uploadid 字段 ⇒ 直接拿它做分片上传会 `uploadid=` 为空 ⇒ 百度 400）。
 	// 与库 CLI 的 `NoRapidUpload` 分支一致：先调 `FakeRapidUpload`（xpan create，rtype=1）
 	// 建立上传会话并取回 uploadid（库 upload_task_unit.go 的 prepare 分支同构）。
-	if jsonData.UploadID != "" {
-		return jsonData.UploadID, false, nil
+	if rapidID != "" {
+		return rapidID, false, nil
 	}
-	fakeErr, fakeJSON := a.pcs.PCS().FakeRapidUpload(a.remote, policy, plan.Size)
-	if fakeErr != nil {
-		return "", false, fmt.Errorf("baidupcs: 建立上传会话失败（fake rapid）: %w", fakeErr)
+	// **uploadid 的来源**：rapidupload 未命中时不返回 uploadid ⇒ 必须用 fake rapid 建会话。
+	fakeID, fErr := a.pcs.FakeRapidUpload(a.remote, policy, plan.Size)
+	if fErr != nil {
+		return "", false, fmt.Errorf("baidupcs: 建立上传会话失败（fake rapid）: %w", fErr)
 	}
-	a.logDebug("fake rapidupload 响应", "return_type", fakeJSON.ReturnType, "upload_id", fakeJSON.UploadID)
-	if fakeJSON.UploadID == "" {
+	a.logDebug("fake rapidupload 响应", "upload_id", fakeID)
+	if fakeID == "" {
 		return "", false, fmt.Errorf("baidupcs: 上传会话未返回 uploadid（size=%d）", plan.Size)
 	}
-	return fakeJSON.UploadID, false, nil
+	return fakeID, false, nil
 }
 
 // blockList 返回 rapidupload 的 block_list 参数：**必须与上传分块一致**
@@ -189,11 +250,10 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 	if err != nil {
 		return fmt.Errorf("baidupcs: 打开待上传文件: %w", err)
 	}
-	rd := newUCSectionReader(f, p.Offset, p.Size)
-	defer func() { _ = rd.Close() }()
+	defer func() { _ = f.Close() }()
 	a.logDebug("上传分片参数", "upload_id", uploadID, "seq", p.Seq, "offset", p.Offset, "size", p.Size)
-	mu := newBaiduMultiUpload(a.pcs, a.remote)
-	if _, err := mu.TmpFile(ctx, uploadID, a.remote, p.Seq, p.Offset, rd); err != nil {
+	if _, err := a.pcs.UploadTmpFile(uploadID, a.remote, p.Seq, p.Offset,
+		io.NewSectionReader(f, p.Offset, p.Size), p.Size); err != nil {
 		return fmt.Errorf("baidupcs: 上传分片 %d: %w", p.Seq, err)
 	}
 	return nil
@@ -212,8 +272,7 @@ func (a *ucAdapter) Merge(_ context.Context, uploadID string, req uploadcore.Req
 		}
 	}
 	policy := bcPolicy(a.overwrite)
-	mu := newBaiduMultiUpload(a.pcs, a.remote)
-	if err := mu.CreateSuperFile("", policy, uploadID, size, checksumMap); err != nil {
+	if err := a.pcs.CreateSuperFile(uploadID, policy, size, a.remote, checksumMap); err != nil {
 		return fmt.Errorf("baidupcs: 合并分片: %w", err)
 	}
 	return nil

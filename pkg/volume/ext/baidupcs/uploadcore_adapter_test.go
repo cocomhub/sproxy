@@ -17,9 +17,9 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs/uploadcore"
 )
 
-// TestUCSectionReader_RemainingLenAndContent 区间 reader 的 Len 必须是**剩余**长度
+// TestUCLen64Reader_RemainingLenAndContent 区间 reader 的 Len 必须是**剩余**长度
 // （与库 rio/file.go:65-72 语义一致），且内容为文件真实区间。
-func TestUCSectionReader_RemainingLenAndContent(t *testing.T) {
+func TestUCLen64Reader_RemainingLenAndContent(t *testing.T) {
 	t.Parallel()
 	data := make([]byte, 100)
 	for i := range data {
@@ -33,8 +33,8 @@ func TestUCSectionReader_RemainingLenAndContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	rd := newUCSectionReader(f, 10, 20)
-	defer func() { _ = rd.Close() }()
+	defer func() { _ = f.Close() }()
+	rd := newUCLen64Reader(io.NewSectionReader(f, 10, 20), 20)
 	if got := rd.Len(); got != 20 {
 		t.Fatalf("初始 Len 应为分片长度 20，got %d", got)
 	}
