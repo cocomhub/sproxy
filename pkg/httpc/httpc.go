@@ -282,6 +282,18 @@ func classifyNetErr(actx, parent context.Context, err error, m Metrics) error {
 	return err
 }
 
+// CloseIdleConnections 关闭该客户端底层连接池的空闲连接（**仅对独立池安全**）。
+//
+// 语义（重要）：`Options.Isolated=true`（独立池）或调用方自备 Transport 时，用它释放空闲连接；
+// **共享池（默认）禁止调用** —— 池的生命周期属于进程，任一处关闭都会打断全进程在途请求
+// （见 docs/design-http-client-policy.md §4）。
+func (c *Client) CloseIdleConnections() {
+	if c == nil || c.http == nil {
+		return
+	}
+	c.http.CloseIdleConnections()
+}
+
 // Get 便捷方法。
 func (c *Client) Get(ctx context.Context, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

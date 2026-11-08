@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1044,6 +1045,40 @@ func TestVaultTransitStorer_Encrypt_EmptyCiphertextRejected(t *testing.T) {
 
 	if _, err := s.Encrypt([]byte("x")); err == nil || !strings.Contains(err.Error(), "vault:v") {
 		t.Fatalf("空/非 vault:v<N>: 前缀 ciphertext 应拒绝且错误含前缀线索, got %v", err)
+	}
+}
+
+// TestVaultTransitStorer_RetriesOn5xx 验证 httpc 编排的幂等重试：Vault 首次返回 500、
+// 第二次返回 200 ⇒ Encrypt 成功且共发 2 次请求（fast 策略对 429/5xx 重试）。
+func TestVaultTransitStorer_RetriesOn5xx(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			mockVaultError(w, http.StatusInternalServerError, `{"errors":["transient"]}`)
+			return
+		}
+		mockVaultData(w, map[string]string{"ciphertext": "vault:v1:" + base64.StdEncoding.EncodeToString([]byte("pt"))})
+	}))
+	t.Cleanup(srv.Close)
+
+	s, err := NewVaultTransitStorer(VaultOptions{
+		Addr: srv.URL, KeyName: vaultTestKey, Token: vaultTestToken,
+		HTTPClient: testutil.IsolatedClient(t),
+	})
+	if err != nil {
+		t.Fatalf("NewVaultTransitStorer: %v", err)
+	}
+	ct, err := s.Encrypt([]byte("payload"))
+	if err != nil {
+		t.Fatalf("Encrypt 应在重试后成功: %v", err)
+	}
+	if !bytes.HasPrefix(ct, []byte("vault:v1:")) {
+		t.Fatalf("重试成功后应返回密文, got %q", ct)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("应重试 1 次（首次 500 → 二次 200）共 2 次请求, got %d", got)
 	}
 }
 

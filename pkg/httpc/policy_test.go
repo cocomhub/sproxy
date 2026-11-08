@@ -126,3 +126,12 @@ func TestDefaultTransport_SharedVsIsolated(t *testing.T) {
 		t.Fatal("Isolated 不得复用共享池")
 	}
 }
+
+// TestClient_CloseIdleConnections 独立池可安全关闭；nil 安全（共享池场景禁止调用，由文档约束）。
+func TestClient_CloseIdleConnections(t *testing.T) {
+	t.Parallel()
+	c := New(Options{Isolated: true})
+	c.CloseIdleConnections() // 必须不 panic
+	var nilClient *Client
+	nilClient.CloseIdleConnections() // nil 安全
+}

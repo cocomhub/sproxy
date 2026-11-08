@@ -104,3 +104,21 @@ func Shared(p Purpose, opt Options) *Client // 进程级幂等：同 purpose 首
 3. 门禁：新增"**禁止对共享池（DefaultTransport）调 CloseIdleConnections**"的棘轮/白名单检查
    （比文本匹配更稳的做法：检查 `CloseIdleConnections` 调用点是否都持有 `Isolated: true` 或自有 Transport）。
 4. Purpose 适配：`llmgate`/`aiembed`/`selfupdate`/`notify` 改 `Shared(...)`；S3/S4 保持既有形态。
+
+### 4.4 连接池关闭契约（`Client.CloseIdleConnections`）
+
+`pkg/httpc` 提供 `func (c *Client) CloseIdleConnections()`（纯转发底层 `http.Client`，nil 安全）。
+**使用契约**：
+
+| 场景 | 是否可调用 | 说明 |
+|---|---|---|
+| `Options.Isolated=true`（独立池） | ✅ | 池归该 client 所有，用完即关正确 |
+| 调用方自备 `Transport`（如每-peer 独立克隆） | ✅ | 同上；典型如 mesh/hub 的 per-peer client |
+| **默认共享池**（`Isolated=false`） | ❌ | 池生命周期属于**进程**；任一处关闭都会打断全进程在途请求（硬规则 17 的原始事故） |
+
+**为什么把它做成方法而不是让调用方自留 transport 引用**：避免"为关连接而重复保存一份 transport 状态"
+（两处状态必然漂移）；关闭动作与 client 自身池一一对应，语义唯一。
+
+**配套的调用点纪律**（本仓现状）：
+- 需要 `defer CloseIdleConnections()` 的短命 client ⇒ 显式 `Options{Isolated: true}`（oidcldap/turnrest）；
+- 共享池调用点（notify/selfupdate 等）**不得**调用该方法（代码评审 + 本文档约束）。

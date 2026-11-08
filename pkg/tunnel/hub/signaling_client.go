@@ -46,9 +46,9 @@ type HubSignaler struct {
 	// context.Background()，注入后受调用方取消控制。
 	//nolint:containedctx // S8242 已评估：base-context 注入设计（SetContext，仿 http.Server.BaseContext），非请求作用域——与下行 NOSONAR 双抑制
 	ctx context.Context // NOSONAR: S8242 — base-context 注入设计（SetContext，仿 http.Server.BaseContext）——非请求作用域
-	// httpClient 用于调用 hub API。单次 poll 超时 60s（I11）> 服务端
+	// httpClient 用于调用 hub API（httpc 统一编排：超时/取消/重试/打点）。单次 poll 超时 60s（I11）> 服务端
 	// PollTimeout(25s) + 网络余量，避免客户端先于服务端超时。
-	httpClient *http.Client
+	httpClient *httpc.Client
 
 	// seenMu 保护 seen/seenList（I10 去重，简单 FIFO 近似 LRU，上限 1024）。
 	seenMu   sync.Mutex
@@ -65,10 +65,14 @@ const maxSeenSignalIDs = 1024
 // secret 为可选变参：传入 per-node secret 后 post/poll 携带 X-Node-Secret 头。
 func NewHubSignaler(baseURL, accessKey, nodeID string, secret ...string) *HubSignaler {
 	s := &HubSignaler{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		accessKey:  accessKey,
-		nodeID:     nodeID,
-		httpClient: httpc.NewHTTPClient(httpc.Options{Transport: netutil.DefaultTransport(), ClientTimeout: 60 * time.Second}),
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		accessKey: accessKey,
+		nodeID:    nodeID,
+		httpClient: httpc.New(httpc.Options{
+			Transport:     netutil.DefaultTransport(),
+			ClientTimeout: 60 * time.Second,
+			Retry:         httpc.PolicyFor(httpc.PolicyFast),
+		}),
 	}
 	if len(secret) > 0 {
 		s.secret = secret[0]
@@ -116,9 +120,18 @@ func (s *HubSignaler) SetContext(ctx context.Context) {
 // 对齐 SetContext 模式（I7）：不调用则保持默认（Timeout 60s + 独立连接池，向后兼容）。
 // 供 sclient --insecure 场景注入跳过证书校验的 client（自签 wss hub 信令链路）。
 func (s *HubSignaler) SetHTTPClient(hc *http.Client) {
-	if hc != nil {
-		s.httpClient = hc
+	if hc == nil {
+		return
 	}
+	// 保持导出签名（*http.Client 是跨 module 契约）：从注入 client 派生 httpc 编排客户端，
+	// 沿用其 Transport/TLS 定制/Jar/重定向策略与超时，再叠加统一重试（PolicyFast）。
+	s.httpClient = httpc.New(httpc.Options{
+		Transport:     hc.Transport,
+		ClientTimeout: hc.Timeout,
+		Jar:           hc.Jar,
+		CheckRedirect: hc.CheckRedirect,
+		Retry:         httpc.PolicyFor(httpc.PolicyFast),
+	})
 }
 
 // baseCtx 返回注入的 base context；未注入时回退 context.Background()。
@@ -174,8 +187,11 @@ func (s *HubSignaler) post(ctx context.Context, kind SignalKind, to, sdp, cand s
 		req.Header.Set("X-Node-Secret", s.secret)
 	}
 	s.sign(req, sproxysig.BodyHash(body))
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
+	// post 是**非幂等写**（服务端为每条 SDP 分配新消息 ID，重试会产生重复 Offer/Answer，
+	// 客户端 seen-set 无法去重）⇒ **不得**声明 Idempotent，httpc 不重试（POST 默认不可重放）；
+	// 仍经 httpc 获得统一超时/取消/打点。
+	resp, err := s.httpClient.DoOpts(ctx, req, httpc.DoOptions{})
+	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("信令 post %s 失败: %w", kind, err)
 	}
 	defer resp.Body.Close()
@@ -202,8 +218,9 @@ func (s *HubSignaler) poll(ctx context.Context, peer string, kind SignalKind) ([
 		req.Header.Set("X-Node-Secret", s.secret)
 	}
 	s.sign(req, sproxysig.EmptyBodyHash())
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
+	// 幂等 GET：httpc 按 PolicyFast 重试 429/5xx/网络瞬时错误（退避可被 ctx 打断）。
+	resp, err := s.httpClient.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	if err != nil && !isHTTPStatusError(err) {
 		return nil, fmt.Errorf("信令 poll 失败: %w", err)
 	}
 	defer resp.Body.Close()
