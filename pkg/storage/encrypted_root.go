@@ -8,26 +8,36 @@ package storage
 //
 //   - EncryptedRoot 透明包装 storage.Root：Open 返回解密 reader、OpenFile 写入
 //     加密 writer；目录/元数据操作转发。
-//   - 密文格式与 pkg/sync.EncryptedFS 同构（[magic][chunkSize] + 逐块
-//     [4B len][nonce|ct|tag]）但自含——storage 不 import sync 防环（同 #518
-//     sync/files 双实现先例）。
+//   - 密文格式（`[magic][4B chunk]` + 逐块 `[4B len][nonce|ct|tag]`）的**唯一实现**在
+//     pkg/cipherstream（与 pkg/sync.EncryptedFS、归档 cipher、客户端 E2EE 共用）。本文件只
+//     固定**加密卷的魔数**（域分隔：同一份密文不会被其它密钥域误读）+ 透明包装语义。
 //
-// 纯标准库（crypto/aes + cipher + rand），不引第三方。
+// 历史（2026-11-08 收敛）：本文件曾自带 writer/reader/SeekPlain 各一份（与 cipherstream 同族
+// 实现），靠「源码必须逐字一致」的源码级门禁防分叉——那是重复的症状。现已改为共享实现，
+// 随机访问（明文偏移定位）与尺寸探测能力上移到 pkg/cipherstream/random_access.go。
 
 import (
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/cocomhub/sproxy/pkg/cipherstream"
 )
 
-// encRootMagic 是加密卷根魔数头（与 sync.EncryptedFS 同值，格式互通）。
+// encRootMagic 是加密卷根魔数头（与 pkg/sync.EncryptedFS 同值 ⇒ **同一密钥域**，两侧密文互通；
+// 由 pkg/sync 的跨包互解用例行为锁定）。
 var encRootMagic = []byte("SPROXY-FS-ENC-v1")
+
+// encRootCfg 返回加密卷根使用的 cipherstream 配置。
+//
+// 读侧**不**校验块大小（`VerifyChunkSize=false`：以密文头部声明为准）——与历史行为一致，
+// 兼容早期不同块大小写出的既有密文。
+func encRootCfg(chunk int) cipherstream.Config {
+	if chunk <= 0 {
+		chunk = cipherstream.DefaultChunkSize
+	}
+	return cipherstream.Config{Magic: encRootMagic, ChunkSize: chunk, Label: "storage"}
+}
 
 // EncryptedRoot 是透明加密 storage.Root 包装。
 type EncryptedRoot struct {
@@ -59,7 +69,7 @@ func (er *EncryptedRoot) ReadFile(rel string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	dr, err := newEncRootReader(er.key, f)
+	dr, err := cipherstream.NewReader(er.key, f, encRootCfg(0))
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +81,7 @@ func (er *EncryptedRoot) WriteFile(rel string, data []byte, perm os.FileMode) er
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		ew, werr := newEncRootWriter(er.key, pw, 64<<10)
+		ew, werr := cipherstream.NewWriter(er.key, pw, encRootCfg(0))
 		if werr != nil {
 			_ = pw.CloseWithError(werr)
 			errCh <- werr
@@ -122,232 +132,4 @@ func dirOf(rel string) string {
 		}
 	}
 	return ""
-}
-
-// encRootWriter 流式分块加密 writer（格式与 sync.EncryptedFS 同构）。
-type encRootWriter struct {
-	gcm   cipher.AEAD
-	w     io.Writer
-	buf   bytes.Buffer
-	chunk int
-}
-
-func newEncRootWriter(key []byte, w io.Writer, chunk int) (*encRootWriter, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("storage: 加密卷 key 必须 32B")
-	}
-	if chunk <= 0 {
-		chunk = 64 << 10
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(encRootMagic); err != nil {
-		return nil, err
-	}
-	var sz [4]byte
-	binary.BigEndian.PutUint32(sz[:], uint32(chunk))
-	if _, err := w.Write(sz[:]); err != nil {
-		return nil, err
-	}
-	return &encRootWriter{gcm: gcm, w: w, chunk: chunk}, nil
-}
-
-func (w *encRootWriter) Write(p []byte) (int, error) {
-	w.buf.Write(p)
-	for w.buf.Len() >= w.chunk {
-		chunk := make([]byte, w.chunk)
-		if _, err := io.ReadFull(&w.buf, chunk); err != nil {
-			return 0, err
-		}
-		if err := w.encryptChunk(chunk); err != nil {
-			return 0, err
-		}
-	}
-	return len(p), nil
-}
-
-func (w *encRootWriter) encryptChunk(plain []byte) error {
-	nonce := make([]byte, w.gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
-	ct := w.gcm.Seal(nil, nonce, plain, nil)
-	out := make([]byte, 4+len(nonce)+len(ct))
-	binary.BigEndian.PutUint32(out[:4], uint32(len(nonce)+len(ct)))
-	copy(out[4:], nonce)
-	copy(out[4+len(nonce):], ct)
-	_, err := w.w.Write(out)
-	return err
-}
-
-func (w *encRootWriter) Close() error {
-	// 尾部残块（< chunk）加密写出。
-	if w.buf.Len() > 0 {
-		if err := w.encryptChunk(w.buf.Bytes()); err != nil {
-			return err
-		}
-		w.buf.Reset()
-	}
-	return nil
-}
-
-// encRootReader 流式解密 reader。
-type encRootReader struct {
-	gcm    cipher.AEAD
-	r      io.Reader
-	chunk  int
-	remain []byte
-	done   bool
-}
-
-func newEncRootReader(key []byte, r io.Reader) (*encRootReader, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("storage: 加密卷 key 必须 32B")
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	// 校验魔数头。
-	magic := make([]byte, len(encRootMagic))
-	if _, err := io.ReadFull(r, magic); err != nil {
-		return nil, fmt.Errorf("storage: 读加密头: %w", err)
-	}
-	if !bytes.Equal(magic, encRootMagic) {
-		return nil, fmt.Errorf("storage: 非加密卷格式（魔数不匹配）")
-	}
-	var sz [4]byte
-	if _, err := io.ReadFull(r, sz[:]); err != nil {
-		return nil, fmt.Errorf("storage: 读块大小: %w", err)
-	}
-	chunk := int(binary.BigEndian.Uint32(sz[:]))
-	if chunk <= 0 {
-		return nil, fmt.Errorf("storage: 非法块大小 %d", chunk)
-	}
-	return &encRootReader{gcm: gcm, r: r, chunk: chunk}, nil
-}
-
-// errEncSeekUnsupported 表示底层流不支持 Seek（调用方回落「复制丢弃」路径）。
-var errEncSeekUnsupported = errors.New("storage: 解密流底层不支持 Seek")
-
-// SeekPlain 把解密流定位到**明文偏移** off（评审 R14 C10）。
-//
-// 关键：跳过前面的块时**只读 4 字节块头并 Seek**，不解密（旧实现 `io.CopyN(io.Discard)`
-// 会把前面每一块都解密 ⇒ 1 GiB 文件的末尾 Range 需要解密 1 GiB；8 MiB 分块的 1 GiB 下载
-// 累计约 64 GiB 解密量）。定位到目标块后只解密**该块**，并丢弃块内前 skip 字节。
-func (r *encRootReader) SeekPlain(off int64) error {
-	if off < 0 {
-		return fmt.Errorf("storage: 非法明文偏移 %d", off)
-	}
-	sk, ok := r.r.(io.Seeker)
-	if !ok {
-		return errEncSeekUnsupported
-	}
-	r.remain = r.remain[:0]
-	r.done = false
-	if _, err := sk.Seek(int64(len(encRootMagic))+4, io.SeekStart); err != nil {
-		return err
-	}
-	var plainSoFar int64
-	for off > 0 {
-		l, lerr := r.readBlockLen()
-		if lerr != nil {
-			return lerr
-		}
-		plainLen := l - encRootOverhead
-		if off < plainSoFar+plainLen {
-			return r.readBlockSkip(l, off-plainSoFar)
-		}
-		plainSoFar += plainLen
-		if _, err := sk.Seek(l, io.SeekCurrent); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// readBlockLen 读当前块的密文长度（4B 大端）。
-func (r *encRootReader) readBlockLen() (int64, error) {
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r.r, lenBuf[:]); err != nil {
-		if err == io.EOF {
-			return 0, io.ErrUnexpectedEOF
-		}
-		return 0, err
-	}
-	l := int64(binary.BigEndian.Uint32(lenBuf[:]))
-	if l <= 0 || l > int64(r.chunk)+32 {
-		return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
-	}
-	return l, nil
-}
-
-// readBlockSkip 读取并解密**当前块**（密文长度 l），把明文自 skip 起挂到 remain。
-func (r *encRootReader) readBlockSkip(l, skip int64) error {
-	blob := make([]byte, l)
-	if _, err := io.ReadFull(r.r, blob); err != nil {
-		return err
-	}
-	nonceSize := r.gcm.NonceSize()
-	plain, derr := r.gcm.Open(nil, blob[:nonceSize], blob[nonceSize:], nil)
-	if derr != nil {
-		return fmt.Errorf("storage: 解密失败: %w", derr)
-	}
-	if skip > int64(len(plain)) {
-		return io.ErrUnexpectedEOF
-	}
-	r.remain = append(r.remain, plain[skip:]...)
-	return nil
-}
-
-func (r *encRootReader) Read(p []byte) (int, error) {
-	if len(r.remain) > 0 {
-		n := copy(p, r.remain)
-		r.remain = r.remain[n:]
-		return n, nil
-	}
-	if r.done {
-		return 0, io.EOF
-	}
-	var lenBuf [4]byte
-	if _, err := io.ReadFull(r.r, lenBuf[:]); err != nil {
-		if err == io.EOF {
-			r.done = true
-			return 0, io.EOF
-		}
-		return 0, err
-	}
-	l := int(binary.BigEndian.Uint32(lenBuf[:]))
-	if l <= 0 || l > r.chunk+32 {
-		return 0, fmt.Errorf("storage: 非法密文块长 %d", l)
-	}
-	blob := make([]byte, l)
-	if _, err := io.ReadFull(r.r, blob); err != nil {
-		return 0, err
-	}
-	nonceSize := r.gcm.NonceSize()
-	if l < nonceSize {
-		return 0, fmt.Errorf("storage: 密文块过短")
-	}
-	nonce := blob[:nonceSize]
-	ct := blob[nonceSize:]
-	plain, err := r.gcm.Open(nil, nonce, ct, nil)
-	if err != nil {
-		return 0, fmt.Errorf("storage: 解密失败: %w", err)
-	}
-	n := copy(p, plain)
-	if n < len(plain) {
-		r.remain = plain[n:]
-	}
-	return n, nil
 }

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cipherstream"
 )
 
 // encrypted_size_test.go 钉住「加密卷物理占用公式 == 磁盘真值」（2026-10-14 容量口径收口）。
@@ -18,9 +20,9 @@ import (
 // TestEncryptedPhysicalSize_Formula：公式边界（块边界、空文件、负值钳 0）。
 func TestEncryptedPhysicalSize_Formula(t *testing.T) {
 	t.Parallel()
-	overhead := int64(encRootChunkOverhead())
-	header := int64(encRootHeaderLen)
-	chunk := int64(encRootDefaultChunk)
+	overhead := int64(cipherstream.ChunkOverhead())
+	header := int64(cipherstream.HeaderLen(encRootMagic))
+	chunk := int64(cipherstream.DefaultChunkSize)
 	if overhead <= 0 || header <= 0 || chunk <= 0 {
 		t.Fatalf("常量异常: header=%d chunk=%d overhead=%d", header, chunk, overhead)
 	}
@@ -58,8 +60,8 @@ func TestEncryptedPhysicalSize_MatchesDiskTruth(t *testing.T) {
 	if !root.IsEncrypted() {
 		t.Fatal("应报告为加密卷")
 	}
-	sizes := []int64{0, 1, 4096, encRootDefaultChunk - 1, encRootDefaultChunk, encRootDefaultChunk + 1, 3*encRootDefaultChunk + 7}
-	payload := make([]byte, 4*encRootDefaultChunk+16)
+	sizes := []int64{0, 1, 4096, cipherstream.DefaultChunkSize - 1, cipherstream.DefaultChunkSize, cipherstream.DefaultChunkSize + 1, 3*cipherstream.DefaultChunkSize + 7}
+	payload := make([]byte, 4*cipherstream.DefaultChunkSize+16)
 	for i := range payload {
 		payload[i] = byte(i % 251)
 	}

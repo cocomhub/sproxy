@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/cocomhub/sproxy/pkg/cipherstream"
 )
 
 func writeEncFile(t *testing.T, root *Root, rel string, plain []byte) {
@@ -78,9 +80,9 @@ func TestEncSeekPlain_SkipsCiphertextBlocks(t *testing.T) {
 	// 定位到「最后 1KiB」的起点。
 	target := int64(len(plain)) - 1024
 	cr := &countingReadSeeker{r: bytes.NewReader(cipherBytes)}
-	er, nerr := newEncRootReader(key, cr)
+	er, nerr := cipherstream.NewReader(key, cr, encRootCfg(0))
 	if nerr != nil {
-		t.Fatalf("newEncRootReader: %v", nerr)
+		t.Fatalf("cipherstream.NewReader: %v", nerr)
 	}
 	if serr := er.SeekPlain(target); serr != nil {
 		t.Fatalf("SeekPlain: %v", serr)
@@ -93,7 +95,7 @@ func TestEncSeekPlain_SkipsCiphertextBlocks(t *testing.T) {
 		t.Fatal("定位后内容与明文不符")
 	}
 	// 只允许读：头(15+4) + 最后一块的头(4)+密文体(chunk+28)。允许 2 块的余量。
-	limit := int64(len(encRootMagic)) + 4 + 2*(4+64<<10+encRootOverhead)
+	limit := int64(len(encRootMagic)) + 4 + 2*(4+64<<10+int64(cipherstream.SealOverhead()))
 	if cr.read > limit {
 		t.Fatalf("SeekPlain 读入 %d 字节（应 ≈ 一个块 ≤ %d）—— 仍在逐块解密跳读", cr.read, limit)
 	}
@@ -177,7 +179,7 @@ func TestEncReadCloserSeek_UsesBlockSkip(t *testing.T) {
 	var total int64
 	newReader := func() (io.Reader, error) {
 		// 底层仍是 io.ReadSeeker（*countingReadSeeker）⇒ 类型断言在 seekStart 内成立。
-		return newEncRootReader(key, &countingReadSeeker{r: bytes.NewReader(cipherBytes), total: &total})
+		return cipherstream.NewReader(key, &countingReadSeeker{r: bytes.NewReader(cipherBytes), total: &total}, encRootCfg(0))
 	}
 	ec := &encReadCloser{c: nopCloser{}, open: newReader, size: int64(len(plain))}
 	target := int64(len(plain)) - 1024
@@ -190,7 +192,7 @@ func TestEncReadCloserSeek_UsesBlockSkip(t *testing.T) {
 		t.Fatalf("Seek 后内容不符（len=%d）", len(rest))
 	}
 	// 允许：头(15+4) + 最后两块（头+密文体），远小于整段密文。
-	limit := int64(len(encRootMagic)) + 4 + 2*(4+64<<10+encRootOverhead)
+	limit := int64(len(encRootMagic)) + 4 + 2*(4+64<<10+int64(cipherstream.SealOverhead()))
 	if total > limit {
 		t.Fatalf("Seek 读入 %d 字节（应只读块头 + 目标块 ≤ %d）——接线仍走复制丢弃", total, limit)
 	}
