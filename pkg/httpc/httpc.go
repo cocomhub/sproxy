@@ -50,9 +50,18 @@ func (NullMetrics) ObserveAttempt(string, time.Duration) {}
 
 // Options 是客户端配置（零值可用：全部有安全默认）。
 type Options struct {
-	// Transport 是底层传输（nil ⇒ netutil.IsolatedTransport() —— 唯一构造点，满足 R19 门禁）。
+	// Transport 是底层传输（nil ⇒ 见 Isolated）。
 	// 注入自定义 Transport（如把 host 重写到 httptest.Server）即可在 CI 锁定协议行为。
 	Transport http.RoundTripper
+	// Isolated 选择**独立连接池**（`netutil.IsolatedTransport()`）。
+	//
+	// 默认 false ⇒ 使用**进程级共享池** `netutil.DefaultTransport()`：同用途/多实例复用
+	// 连接与 TLS 会话（对齐 netutil 既定设计 + Go 官方 DefaultTransport 语义）。
+	//
+	// **共享池禁止调用 `CloseIdleConnections()`**（会打断全进程在途请求——历史事故）。
+	// 需要"用完即关"或与其它实例隔离（短命 client、测试替身、库持有、不可信端点）时显式
+	// 置 true（见 docs/design-http-client-policy.md §4）。
+	Isolated bool
 	// Timeout 是**单次尝试**超时（0 ⇒ 30s；经 ctx 施加 ⇒ 始终可取消）。
 	Timeout time.Duration
 	// OverallTimeout 是**整体**预算（0 ⇒ 不限；由上层 ctx 决定更佳）。
@@ -85,7 +94,8 @@ type Client struct {
 }
 
 // NewHTTPClient 按规范构造**裸 `*http.Client`**（唯一集中出口）：
-// 默认 Transport = `netutil.IsolatedTransport()`（满足 R19），并透传 ClientTimeout/Jar/CheckRedirect。
+// 默认 Transport = `netutil.DefaultTransport()`（**进程级共享池**；`Isolated: true` 时用隔离池），
+// 并透传 ClientTimeout/Jar/CheckRedirect。
 //
 // 用途：① 既有调用点只需要"一个规范 client"（不需要重试编排）时统一走这里，避免继续散落裸构造；
 // ② 需要把 client 交给第三方（库/签名器）时也走这里。
@@ -93,7 +103,7 @@ type Client struct {
 func NewHTTPClient(o Options) *http.Client {
 	tr := o.Transport
 	if tr == nil {
-		tr = netutil.IsolatedTransport()
+		tr = defaultTransport(o.Isolated)
 	}
 	return &http.Client{
 		Transport:     tr,
@@ -101,6 +111,14 @@ func NewHTTPClient(o Options) *http.Client {
 		Jar:           o.Jar,
 		CheckRedirect: o.CheckRedirect,
 	}
+}
+
+// defaultTransport 返回默认 Transport：默认**共享池**（进程级），Isolated 时用独立池。
+func defaultTransport(isolated bool) *http.Transport {
+	if isolated {
+		return netutil.IsolatedTransport()
+	}
+	return netutil.DefaultTransport()
 }
 
 // New 构造客户端。

@@ -78,6 +78,7 @@ var (
 func newTURNRESTClient() *http.Client {
 	tr := netutil.DefaultTransport()
 	return httpc.NewHTTPClient(httpc.Options{
+		Isolated:      true, // 该 client 会 CloseIdleConnections ⇒ 必须独立池
 		Transport:     tr,
 		ClientTimeout: turnRESTFetchTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
