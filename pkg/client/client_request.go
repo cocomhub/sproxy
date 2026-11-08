@@ -192,7 +192,9 @@ func (c *FileClient) doDirect(ctx context.Context, req *http.Request) (*http.Res
 		// 不落 http.DefaultClient：自建隔离连接池（硬规则——共享连接池被外部
 		// CloseIdleConnections 会打断在途请求）。统一 netutil.IsolatedTransport
 		// （Clone 基座保留默认调校 + TLSClientConfig nil）。
-		hc = httpc.NewHTTPClient(httpc.Options{})
+		// 恢复隔离语义（#1059 把 httpc 默认池改为进程共享后此处曾退化为共享池 ⇒
+		// 与下方注释及硬规则 17 相悖；显式 Isolated 保证 per-instance 独立连接池）。
+		hc = httpc.NewHTTPClient(httpc.Options{Isolated: true})
 	}
 	if noClientTimeoutFrom(ctx) && hc.Timeout != 0 {
 		hc = httpc.NewHTTPClient(httpc.Options{Transport: hc.Transport})
