@@ -27,9 +27,9 @@ func hubNodesJSON(w http.ResponseWriter) {
 
 func TestListHubNodes_RetriesTransient5xx(t *testing.T) {
 	t.Parallel()
-	var calls int32
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
+		if calls.Add(1) == 1 {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			return
 		}
@@ -39,21 +39,21 @@ func TestListHubNodes_RetriesTransient5xx(t *testing.T) {
 
 	nodes, err := ListHubNodes(t.Context(), srv.URL, "", "", "", false, testutil.IsolatedClient(t))
 	if err != nil {
-		t.Fatalf("瞬时 5xx 后应重试成功，实际报错: %v（请求次数=%d）", err, atomic.LoadInt32(&calls))
+		t.Fatalf("瞬时 5xx 后应重试成功，实际报错: %v（请求次数=%d）", err, calls.Load())
 	}
 	if len(nodes) != 1 || nodes[0].ID != "hub-1" {
 		t.Fatalf("解析结果不符: %+v", nodes)
 	}
-	if got := atomic.LoadInt32(&calls); got < 2 {
+	if got := calls.Load(); got < 2 {
 		t.Fatalf("期望至少 2 次请求（首次 502 后重试），实际 %d 次 —— 未接入重试编排", got)
 	}
 }
 
 func TestListHubNodes_NonRetryable4xxFailsFast(t *testing.T) {
 	t.Parallel()
-	var calls int32
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer srv.Close()
@@ -66,7 +66,7 @@ func TestListHubNodes_NonRetryable4xxFailsFast(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.code != http.StatusUnauthorized {
 		t.Fatalf("错误类型/状态码不符: %v", err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("4xx 不应重试，实际请求 %d 次", got)
 	}
 }
