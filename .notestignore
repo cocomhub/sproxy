@@ -8,8 +8,10 @@
 build/*
 
 # 以下为无测试文件的 tools 包，暂不要求测试：
+tools/e2echeck
 tools/genbenchview
 tools/gencoverview
 tools/genreport
 tools/gentimingview
 tools/randread
+tools/uploadperf

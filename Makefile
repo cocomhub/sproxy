@@ -202,6 +202,28 @@ test-backup-restore:
 	@bash scripts/sproxy-backup_test.sh
 	@bash scripts/sproxy-restore_test.sh
 
+# 开发工具：对**运行中**实例做全能力面冒烟（e2echeck）/ 上传吞吐压测（uploadperf）。
+# 与 `make test-e2e` 互补：后者自建进程与临时存储，这两个工具面向你手动起好的真实实例。
+.PHONY: build-dev-tools
+build-dev-tools: prepare
+	@mkdir -p $(BUILD_DIR)/bin
+	@$(GO) build -o $(BUILD_DIR)/bin/e2echeck ./tools/e2echeck
+	@$(GO) build -o $(BUILD_DIR)/bin/uploadperf ./tools/uploadperf
+
+# 变异验证（硬规则 5）：施加一处真实变异 ⇒ 断言测试变红 ⇒ 无论成败自动复原源文件。
+# 用法：make mutcheck ARGS="-file <file> -old '<a>' -new '<b>' -pkg <pkg> -run <regex>"
+.PHONY: mutcheck
+mutcheck:
+	@bash scripts/mutcheck.sh $(ARGS)
+
+# 回归审计（硬规则 1.17）：收敛/改公共默认值后，扫描「被删除的导出符号与能力字段/档位」，
+# 要求逐条给出行级判定（能力遗失 vs 测试重命名/薄封装/等价替换）。
+# 用法：make regression-audit            # origin/master 最近 12 个提交
+#       make regression-audit ARGS="--current"
+.PHONY: regression-audit
+regression-audit:
+	@bash scripts/regression-audit.sh $(ARGS)
+
 .PHONY: web-test
 web-test:
 	@node --check web/static/app.js
@@ -653,6 +675,9 @@ help:
 	@echo "  web-test        Run Web UI JS unit tests (node --test)"
 	@echo "  test-tag-release Run scripts/tag-release.sh fixture tests"
 	@echo "  test-backup-restore Run backup/restore scripts fixture tests"
+	@echo "  build-dev-tools Build dev tools (e2echeck/uploadperf) into build/bin"
+	@echo "  mutcheck        Verify a mutation is caught by tests (ARGS=-file/-old/-new/-pkg/-run)"
+	@echo "  regression-audit Scan deleted exports/capability fields after a convergence PR"
 	@echo "  backup           Backup storage_root to build/backups/"
 	@echo "  restore          Restore storage_root from BACKUP=<tar.gz>"
 	@echo "  notest          Verify all packages have test files"
