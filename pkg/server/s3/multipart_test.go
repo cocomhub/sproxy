@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/internal/size"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/cocomhub/sproxy/pkg/storage"
@@ -516,11 +517,6 @@ func TestMultipartAbort_ClearsSessionAndLedger(t *testing.T) {
 	})
 }
 
-// brokenReader 模拟读请求体时底层 IO 失败（非超限）。
-type brokenReader struct{}
-
-func (brokenReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
-
 // TestS3CompleteReadBody_ReadError complete 请求体读失败按 400（不是 413）。
 func TestS3CompleteReadBody_ReadError(t *testing.T) {
 	t.Parallel()
@@ -821,5 +817,248 @@ func TestCompleteSettlement_CommitTarget(t *testing.T) {
 	neg.CommitTarget(f.root, "user/EXAMPLE-missing.bin", -1)
 	if got := scope.Usage(); got != 6 {
 		t.Fatalf("负 total 应为 no-op, scope=%d", got)
+	}
+}
+
+// TestMultipartInitiate_MetaWriteFailure 会话 meta 落盘失败 → 500（不返回 UploadId）。
+func TestMultipartInitiate_MetaWriteFailure(t *testing.T) {
+	t.Parallel()
+	f := newTestFixture(t)
+	// chunk 桶位置被普通文件占据 ⇒ meta 无法落盘。
+	f.writeRaw("chunk", []byte("occupied"))
+	rec := f.do(http.MethodPost, "/s3/EXAMPLE-mp.bin?uploads", nil, true)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("meta 落盘失败 init = %d, want 500 body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMultipartUploadPart_TenantAndBodyFailures 卷不可用 400 / 请求体读失败 400。
+func TestMultipartUploadPart_TenantAndBodyFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("卷不可用", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		bare := New(Deps{Logger: f.svc.d.Logger, Credentials: f.ring, TenantFor: func(string) *storage.Tenant { return nil }})
+		req := httptest.NewRequest(http.MethodPut, "/s3/EXAMPLE-mp.bin?partNumber=1&uploadId=abc", bytes.NewReader([]byte("x")))
+		signRequest(req, []byte("x"), time.Now(), testS3SKHex())
+		rec := httptest.NewRecorder()
+		bare.s3UploadPart(rec, req, "EXAMPLE-mp.bin")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("卷不可用 part = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("请求体读失败", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		req := httptest.NewRequest(http.MethodPut, "/s3/EXAMPLE-mp.bin?partNumber=1&uploadId=abc", nil)
+		req.Body = io.NopCloser(brokenReader{})
+		rec := httptest.NewRecorder()
+		f.svc.s3UploadPart(rec, req, "EXAMPLE-mp.bin")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("读体失败 part = %d, want 400 body=%q", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestMultipartComplete_FailurePaths 完成阶段的失败分支：验签、非法 key、目标创建失败、
+// part 拼接失败、写后 meta 失败（不阻断）、body 读失败。
+func TestMultipartComplete_FailurePaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("无签名 401", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		body := completePartsXML([]CompletePart{{PartNumber: 1}})
+		req := httptest.NewRequest(http.MethodPost, "/s3/EXAMPLE-mp.bin?uploadId=abc", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		f.svc.s3CompleteMultipart(rec, req, "EXAMPLE-mp.bin")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("无签名 complete = %d, want 401", rec.Code)
+		}
+	})
+
+	t.Run("错签名 403", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		body := completePartsXML([]CompletePart{{PartNumber: 1}})
+		req := httptest.NewRequest(http.MethodPost, "/s3/EXAMPLE-mp.bin?uploadId=abc", bytes.NewReader(body))
+		signRequest(req, body, time.Now(), strings.Repeat("00", 32))
+		rec := httptest.NewRecorder()
+		f.svc.s3CompleteMultipart(rec, req, "EXAMPLE-mp.bin")
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("错签名 complete = %d, want 403", rec.Code)
+		}
+	})
+
+	t.Run("请求体读失败 400", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		req := httptest.NewRequest(http.MethodPost, "/s3/EXAMPLE-mp.bin?uploadId=abc", nil)
+		req.Body = io.NopCloser(brokenReader{})
+		rec := httptest.NewRecorder()
+		f.svc.s3CompleteMultipart(rec, req, "EXAMPLE-mp.bin")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("读体失败 complete = %d, want 400", rec.Code)
+		}
+	})
+
+	t.Run("目标 key 非法 400", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		// 会话 meta 的 key 就是非法路径（会话归属校验先过，再由 UserRel 拒绝）。
+		id := "11111111111111111111111111111111"
+		f.writeRaw(f.metaRel(id), []byte(testS3Owner+"\n"+"../EXAMPLE-x.bin"))
+		f.writeRaw(f.partRel(id, 1), []byte("abc"))
+		body := completePartsXML([]CompletePart{{PartNumber: 1, ETag: md5Hex([]byte("abc"))}})
+		rec := f.do(http.MethodPost, "/s3/../EXAMPLE-x.bin?uploadId="+id, body, true)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("非法 key complete = %d, want 400 body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("目标创建失败 500", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		key := "blocked/EXAMPLE-mp.bin"
+		uploadID := f.initiate(key)
+		f.writeRaw("user/blocked", []byte("occupied")) // 目标父路径被文件占据 ⇒ 无法建目标
+		if rec := f.putPart(key, uploadID, 1, []byte("abc")); rec.Code != http.StatusOK {
+			t.Fatalf("part = %d", rec.Code)
+		}
+		rec := f.complete(key, uploadID, []CompletePart{{PartNumber: 1, ETag: md5Hex([]byte("abc"))}})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("目标创建失败 complete = %d, want 500 body=%q", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("part 拼接失败 500 且清理半截目标", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		key := "EXAMPLE-mp.bin"
+		uploadID := f.initiate(key)
+		// part 路径占成目录：measure 的 Open+Stat 通过，拷贝时底层读错。
+		if err := f.root.MkdirAll(f.partRel(uploadID, 1), 0o755); err != nil {
+			t.Fatalf("MkdirAll(part 占位): %v", err)
+		}
+		rec := f.complete(key, uploadID, []CompletePart{{PartNumber: 1, ETag: md5Hex([]byte("abc"))}})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("拼接失败 complete = %d, want 500 body=%q", rec.Code, rec.Body.String())
+		}
+		if f.exists("user/" + key) {
+			t.Fatal("失败后不应留下半截目标文件")
+		}
+	})
+
+	t.Run("写后 meta 失败不阻断成功", func(t *testing.T) {
+		t.Parallel()
+		f := newTestFixture(t)
+		f.meta.writeErr = errors.New("sidecar 落盘失败")
+		key := "EXAMPLE-mp.bin"
+		uploadID := f.initiate(key)
+		if rec := f.putPart(key, uploadID, 1, []byte("abc")); rec.Code != http.StatusOK {
+			t.Fatalf("part = %d", rec.Code)
+		}
+		rec := f.complete(key, uploadID, []CompletePart{{PartNumber: 1, ETag: md5Hex([]byte("abc"))}})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("meta 失败不应阻断成功, got %d body=%q", rec.Code, rec.Body.String())
+		}
+		if !f.exists("user/" + key) {
+			t.Fatal("目标应已落盘")
+		}
+	})
+}
+
+// TestSweepStaleMultipart_MetaRemoveFailure meta 删除失败只记 Warn（best-effort），
+// 不影响本次清扫计数与其它会话。
+func TestSweepStaleMultipart_MetaRemoveFailure(t *testing.T) {
+	t.Parallel()
+	f := newTestFixture(t)
+	id := "22222222222222222222222222222222"
+	// meta 位置是非空目录 ⇒ root.Remove 失败（ENOTEMPTY）。
+	if err := f.root.MkdirAll(f.metaRel(id), 0o755); err != nil {
+		t.Fatalf("MkdirAll(meta 目录): %v", err)
+	}
+	f.writeRaw(f.metaRel(id)+"/child", []byte("x"))
+	f.ageFile(f.metaRel(id), 25*time.Hour)
+
+	if swept := f.svc.SweepStaleMultipart(f.root); swept != 1 {
+		t.Fatalf("清扫会话数=%d, want 1", swept)
+	}
+	if !f.exists(f.metaRel(id)) {
+		t.Fatal("删除失败的 meta 应保留（best-effort，不掩盖）")
+	}
+}
+
+// TestReadMultipartMeta_ReadError meta 不可读（目录）时返回错误。
+func TestReadMultipartMeta_ReadError(t *testing.T) {
+	t.Parallel()
+	f := newTestFixture(t)
+	id := "33333333333333333333333333333333"
+	if err := f.root.MkdirAll(f.metaRel(id), 0o755); err != nil {
+		t.Fatalf("MkdirAll(meta 目录): %v", err)
+	}
+	if _, _, err := ReadMultipartMeta(f.root, id); err == nil {
+		t.Fatal("meta 不可读时应报错")
+	}
+}
+
+// TestPartLedger_RemoveFailureKeepsAccounting 删除失败（非空目录）不得释放记账
+// ——「删成功才释放」不变量在 abort/清扫同源实现上的一致性。
+func TestPartLedger_RemoveFailureKeepsAccounting(t *testing.T) {
+	t.Parallel()
+	f := newTestFixture(t)
+	led := f.svc.newS3PartLedger(testS3Owner, f.tenant)
+	resv := led.Reserve(4)
+	if resv == nil {
+		t.Fatal("预留应成功")
+	}
+	resv.Commit(led, 4)
+
+	id := "44444444444444444444444444444444"
+	// part 位置是非空目录 ⇒ root.Remove 失败。
+	if err := f.root.MkdirAll(f.partRel(id, 1), 0o755); err != nil {
+		t.Fatalf("MkdirAll(part 目录): %v", err)
+	}
+	f.writeRaw(f.partRel(id, 1)+"/child", []byte("x"))
+
+	if led.removePartReleasing(f.root, f.partRel(id, 1)) {
+		t.Fatal("删除非空目录应失败")
+	}
+	entries, err := f.root.ReadDir("chunk")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if n, bytes := led.removeSessionParts(f.root, entries, id); n != 0 || bytes != 0 {
+		t.Fatalf("removeSessionParts=(%d,%d), want (0,0)", n, bytes)
+	}
+	if got := f.chunks().Usage(); got != 4 {
+		t.Fatalf("删除失败后记账=%d, want 4（不释放）", got)
+	}
+}
+
+// TestMultipartBodyLimit_413 part 与 complete 的请求体上限（size.DefaultChunkBodyLimit）
+// 必须 fail-closed：超限 413 且不落盘（OOM DoS 防护）。
+//
+// 单条 64MiB 请求体（上限 +1 字节）；两个子步骤串行复用同一缓冲区，避免并行放大内存峰值。
+func TestMultipartBodyLimit_413(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("64MiB 请求体在 -short 下跳过")
+	}
+	f := newTestFixture(t)
+	body := make([]byte, size.DefaultChunkBodyLimit+1)
+
+	recPart := f.do(http.MethodPut, "/s3/EXAMPLE-mp.bin?partNumber=1&uploadId=abc", body, true)
+	if recPart.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限 part = %d, want 413 body=%q", recPart.Code, recPart.Body.String())
+	}
+	recComplete := f.do(http.MethodPost, "/s3/EXAMPLE-mp.bin?uploadId=abc", body, true)
+	if recComplete.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限 complete = %d, want 413 body=%q", recComplete.Code, recComplete.Body.String())
+	}
+	if got := f.chunks().Usage(); got != 0 {
+		t.Fatalf("超限请求不得入账, usage=%d", got)
 	}
 }
