@@ -122,3 +122,36 @@ func Shared(p Purpose, opt Options) *Client // 进程级幂等：同 purpose 首
 **配套的调用点纪律**（本仓现状）：
 - 需要 `defer CloseIdleConnections()` 的短命 client ⇒ 显式 `Options{Isolated: true}`（oidcldap/turnrest）；
 - 共享池调用点（notify/selfupdate 等）**不得**调用该方法（代码评审 + 本文档约束）。
+
+## 5. 全量回归审计（2026-11-08，用户要求"确认每个 PR 是否功能退化/遗失/回归"）
+
+对本次 HTTP/编排相关**全部已合并 PR** 做了逐项审计（方法：`git show <squash> -U0` 检测**被删除的导出符号**
+与**能力相关字段** + 当前状态实测 + 逐点行级核查）：
+
+| PR | 结论 | 依据 |
+|---|---|---|
+| #1056 baidupcs 移动/上传守卫 | ✅ 无退化 | 删除项仅为**测试结构调整**（`BinaryTimeout: 300ms` 出现在测试夹具中，因该 PR 让测试显式开启 `AllowLibraryUpload`）；`AllowLibraryUpload` 默认 false 是**有意变更**且已文档化 |
+| #1057 上传内核 + 基座 + R57 | ✅ 无退化 | 纯新增（内核/基座/门禁），无导出符号删除 |
+| #1058 存量构造点收敛（46 处） | ✅ 无退化 | 逐个迁移保留原字段（`Transport`/`ClientTimeout`/`CheckRedirect`/`Jar` 6 处已逐一核对）；删除的 `newIsolatedTransport` 是薄封装（硬规则 11 要求删除） |
+| #1059 策略化 + 默认共享池 | ⚠️ **曾引入 4 处隔离能力遗失** | 已由 **#1063** 修复（显式 `Isolated: true`）+ **R58 门禁**锁定 |
+| #1060 L2 契约 + 窄接口 | ✅ 无退化 | 删除的是**测试重命名**（`TestUCSectionReader_*` → `TestUCLen64Reader_*`）与 reader 泛化（`rio.ReaderLen64` 语义保留：`Len()` = 剩余长度） |
+| #1061 pipe.Backoff + 4 处收敛 | ✅ 无退化 | `parseRetryAfter` → `httpc.RetryAfter` 行为等价（`secs<=0 ⇒ 0` 一致）；pikpak **8 个既有 retry 用例全绿**；selfupdate 保留状态码分支（新增重试是增强） |
+| #1062 幂等调用编排 | ✅ 无退化 | `accesskey` 由"mutate 注入 client"改为"派生"（**注入方仅测试**，生产不注入 ⇒ 无依赖）；`c.Transport = tr` → 传参等价（每-peer 独立池保留）；`oidcldap`/`hub` 均为增强 |
+| #1063 修复回归 + R58 | ✅ | 修复 + 机制化 |
+| #1064 纪律 | ✅ | 文档 |
+
+**当前实测**（`grep` 全仓）：
+- **裸默认池构造点：0**（`httpc.NewHTTPClient(httpc.Options{})` / `httpc.New(httpc.Options{})` 全无）；
+- `CloseIdleConnections()` 调用点 8 处，**全部**为"独立池/自备 transport"（oidcldap、turnrest、upload_direct、
+  graceful_restart 显式 `Isolated`；federation 每-peer 独立 Transport；`sync/httptransport`、`webdav` 直接操作自有 transport）；
+- `CheckRedirect`/`Jar` 传递完整（6 个曾带这些字段的点逐一核对通过）。
+
+### 5.1 唯一"隔离性变化"（有意取舍，非能力遗失）
+
+`pkg/server/notify` 的 4 个渠道 notifier（Alertmanager / Grafana / Wecom / ServerChan）此前各自
+`httpClientForNotify()` 新建**独立池**，现改为 `Shared(PurposeNotify, …)` **共享一个 client**：
+
+- **取舍理由**：四者配置完全相同（`IsolatedTransport` 基座 + `ResponseHeaderTimeout=10s`），且通知渠道是
+  **不同 host** ⇒ 连接池按 host 隔离（`MaxIdleConnsPerHost`），共享池不产生跨渠道干扰；同时省去 3 个池。
+- **未删任何能力**：无 `CloseIdleConnections`、无每渠道特有 TLS/代理需求（若将来出现 ⇒ 按渠道拆 `Purpose` 即可）。
+- **回归防护**：R58 门禁守"关闭必须自有池"；本文档守"共享池禁止关闭"。
