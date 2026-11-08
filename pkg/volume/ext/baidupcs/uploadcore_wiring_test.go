@@ -165,3 +165,38 @@ func TestUploadCoreWAL_NoAuditUsesNop(t *testing.T) {
 		t.Fatal("WAL 不得为 nil（内核要求非 nil）")
 	}
 }
+
+// TestUploadStaged_MultiSliceSkipsCore 锁定**多分片护栏**（2026-11-08 真实网盘缺陷）：
+// 内核只在单片（≤4MiB）上验证过 md5 权威；>4MiB 真实多分片复验 md5 不一致（且自愈修不回），
+// 因此超限时必须**不走内核**、直接交既有路径（auto）。
+func TestUploadStaged_MultiSliceSkipsCore(t *testing.T) {
+	t.Parallel()
+	ad := &wiringFakeAdapter{}
+	st := newWiringStorage(t, "auto", ad)
+	// 超过 coreMaxVerifiedSize（4MiB）⇒ 不走内核，即使暂存文件不存在也应成功（走 fake adapter）。
+	if err := st.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/nonexistent", size: coreMaxVerifiedSize + 1}); err != nil {
+		t.Fatalf("多分片应跳过内核直接走 adapter: %v", err)
+	}
+	if ad.uploads != 1 {
+		t.Fatalf("adapter.Upload 应被调用 1 次，got %d", ad.uploads)
+	}
+	if st.coreDisabled.Load() {
+		t.Fatal("跳过内核不得置位 coreDisabled（内核并未失败）")
+	}
+}
+
+// TestUploadStaged_NucleusMultiSliceFails nucleus 语义「最可预测」⇒ 超限必须**显式报错**，不静默降级。
+func TestUploadStaged_NucleusMultiSliceFails(t *testing.T) {
+	t.Parallel()
+	ad := &wiringFakeAdapter{}
+	st := newWiringStorage(t, "nucleus", ad)
+	err := st.uploadStaged(context.Background(), "k", "/r/k",
+		&stagedUpload{tmpPath: "/nonexistent", size: coreMaxVerifiedSize + 1})
+	if err == nil {
+		t.Fatal("nucleus + 多分片应显式报错")
+	}
+	if ad.uploads != 0 {
+		t.Fatalf("报错时不得回退 adapter，got %d 次", ad.uploads)
+	}
+}

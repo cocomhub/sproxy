@@ -41,6 +41,18 @@ func TestValidate_Volumes_BaidupcsType(t *testing.T) {
 				Extra: map[string]any{"bduss": 12345},
 			})
 		}, "bduss"},
+		{"volumes[] type=baidupcs + extra.upload_core=legacy → 通过", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss", "upload_core": "legacy"},
+			})
+		}, ""},
+		{"volumes[] type=baidupcs + extra.upload_core 非法值 → 拒绝（不得静默归一为 auto）", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss", "upload_core": "nucleous"},
+			})
+		}, "upload_core"},
 		{"本地卷（Type 缺省）零回归 → 通过", func(c *Config) {
 			// 不追加任何卷，Default() 的默认本地卷不受影响。
 		}, ""},

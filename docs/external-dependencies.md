@@ -289,3 +289,36 @@ phase=postcheck elapsed_ms=0      err="context deadline exceeded"
 > 锁定方式：`TestE2E_UploadCoreNucleus`（真实网盘，nucleus 不降级 ⇒ 成功即证明内核可用；
 > `BAIDUPCS_E2E_ROOT` 环境变量门控、自行清理产物）+ L1 用例
 > （`TestUpload_SmallFile_OnePartPlusMerge` 断言"必须合并"；会话前置断言 `rapid==1` 且复用 `UploadID`）。
+
+### 7.8.3 自研上传内核的**多分片边界**（2026-11-08 真实网盘实测，带护栏）
+
+**实测事实**（真实百度网盘，`E2E_RANDOM=1` **随机内容以排除秒传**，5 组大小各跑一次）：
+
+| 文件大小 | 分片数 | 内核结果（`upload_core=nucleus`） |
+|---|---|---|
+| 1 MiB / 3 MiB | 1（≤ `uploadBlockSize` 4MiB） | ✅ ETag == 本地整文件 md5（约 2.9–3.4s） |
+| 8 / 20 / 48 / 96 / 120 MiB | ≥2（需 merge） | ❌ `uploadcore verify(slices) 自愈后复验仍失败: md5 不一致（远端 … != 本地 …）` |
+
+- **内核的秒传自愈（`Repair` → 库侧 `RapidUpload`，已带 `blockListMD5`）无法修复该不一致**；
+  失败是 **fail-closed**（报错，不会静默接受错 md5 的文件）。
+- **同内容走既有路径（CLI 二进制 BaiduPCS-Go）ETag 权威 ✓**：120 MiB 随机内容 26–45s、2–3 轮收敛。
+- 结论：**内核的多分片（>4MiB）流程产出的远端 md5 与本地不一致** ⇒ 该能力**未验证通过**。
+
+**护栏（已落地）**：`coreMaxVerifiedSize = uploadBlockSize (4MiB)`
+（`pkg/volume/ext/baidupcs/uploadcore_wiring.go`）——超过该尺寸**不走内核**：
+
+- `upload_core=auto`（默认）⇒ 直接走既有路径（不再白试一次内核、不再因此永久关掉本进程内核）；
+- `upload_core=nucleus` ⇒ **显式报错**（nucleus 语义是"行为最可预测"，不静默降级）。
+
+**复现命令**（WSL，真实凭据：`~/.config/BaiduPCS-Go/pcs_config.json` + 二进制在 PATH）：
+
+```bash
+cd pkg/volume/ext/baidupcs
+GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeout 30m .
+# 旋钮：E2E_UPLOAD_MB=120 E2E_UPLOAD_TIMEOUT=10m E2E_ARMS=core|auto|cli|lib E2E_RANDOM=1
+#   E2E_ARMS=core ⇒ 只跑内核（失败即暴露）；=auto ⇒ 生产默认（含降级）
+```
+
+**待修（后续片）**：定位 merge 后 md5 与整文件 md5 不一致的根因（候选：`createsuperfile` 的
+`block_list` 传递 / slice md5 计算 / merge 后 md5 语义），修好之前**不要把护栏上界调大**。
+

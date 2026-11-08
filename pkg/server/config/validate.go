@@ -301,13 +301,24 @@ func (c *Config) validateExternalVolumeExtras() error {
 }
 
 // validateBaidupcsVolumeExtras 校验 baidupcs 外部卷：extra.bduss 或 extra.binary_path 至少一个
-// 非空（fail-closed：无可用执行路径拒绝）。键名 bduss/baidu_root/binary_path/local_root 与
-// baidupcs backend 构造器读取一致（单一事实源）；首卷必本地（V3 装配层 fail-closed）。
+// 非空（fail-closed：无可用执行路径拒绝）。
+// 键名 bduss/baidu_root/binary_path/local_root/upload_core 与 baidupcs backend 构造器读取一致
+// （单一事实源）；首卷必本地（V3 装配层 fail-closed）。
+//
+// upload_core 留空 = auto（默认）；非空时只接受 auto/legacy/nucleus——拼写错误应 fail-closed，
+// 而不是被领域层静默归一成 auto（否则“想关内核但写错”会静默失效）。
 func validateBaidupcsVolumeExtras(v *VolumeConfig) error {
 	bduss, _ := v.Extra["bduss"].(string)
 	binaryPath, _ := v.Extra["binary_path"].(string)
 	if bduss == "" && binaryPath == "" {
 		return fmt.Errorf("卷 %q（type=baidupcs）需配置 extra.bduss 或 extra.binary_path 至少一个（fail-closed：否则二进制优先与库兜底都无可用执行路径）", v.Name)
+	}
+	if core, ok := v.Extra["upload_core"].(string); ok && core != "" {
+		switch core {
+		case "auto", "legacy", "nucleus":
+		default:
+			return fmt.Errorf("卷 %q（type=baidupcs）的 extra.upload_core=%q 非法（只接受 auto/legacy/nucleus 或留空=auto）", v.Name, core)
+		}
 	}
 	return nil
 }
