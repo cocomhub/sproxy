@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/httpc"
-	"github.com/cocomhub/sproxy/pkg/pipe"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -104,7 +103,7 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg, hc: httpc.New(httpc.Options{
 		Transport: tr,
 		Timeout:   cfg.Timeout,
-		Retry:     llmRetryPolicy(),
+		Retry:     httpc.PolicyFor(httpc.PolicyFast),
 	})}
 }
 
@@ -162,10 +161,4 @@ func (c *Client) Advise(ctx context.Context, system, user string) (string, error
 		return "", fmt.Errorf("llmgate: 响应无 choices")
 	}
 	return strings.TrimSpace(cr.Choices[0].Message.Content), nil
-}
-
-// llmRetryPolicy 是 LLM/embedding 外部调用的重试策略（429/5xx/网络瞬时错误）。
-// 退避 200ms×2ⁿ 封顶 2s、最多 3 次尝试；取消可中断（由 pkg/pipe 保证）。
-func llmRetryPolicy() pipe.Policy {
-	return pipe.Policy{Attempts: 3, Base: 200 * time.Millisecond, Cap: 2 * time.Second, Jitter: true}
 }

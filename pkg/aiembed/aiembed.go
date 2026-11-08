@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/httpc"
-	"github.com/cocomhub/sproxy/pkg/pipe"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
 )
@@ -112,7 +111,7 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg, hc: httpc.New(httpc.Options{
 		Transport: tr,
 		Timeout:   cfg.Timeout,
-		Retry:     embedRetryPolicy(),
+		Retry:     httpc.PolicyFor(httpc.PolicyFast),
 	})}
 }
 
@@ -236,9 +235,4 @@ func normalize(v []float32) []float32 {
 		out[i] = float32(float64(f) / norm)
 	}
 	return out
-}
-
-// embedRetryPolicy 是 embedding 外部调用的重试策略（与 llmgate 同口径）。
-func embedRetryPolicy() pipe.Policy {
-	return pipe.Policy{Attempts: 3, Base: 200 * time.Millisecond, Cap: 2 * time.Second, Jitter: true}
 }
