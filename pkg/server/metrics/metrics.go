@@ -205,8 +205,8 @@ type (
 	volumeIOKey struct{ volume, op string }
 	// VolumeKey 是卷磁盘水位指标的键：仅卷名。
 	VolumeKey struct{ volume string }
-	// UploadCoreKey 是「上传内核路径计数」指标的键：卷名 + mode（used/skipped_oversize/degraded/
-	// failed/legacy_mode/no_deps）。快照型：抓取时由装配层从后端注入最新累计值（不随事件自增，
+	// UploadCoreKey 是「上传内核路径计数」指标的键：卷名 + mode（used/degraded/failed/
+	// legacy_mode/no_deps）。快照型：抓取时由装配层从后端注入最新累计值（不随事件自增，
 	// 否则每次抓取会重复累加）。
 	UploadCoreKey struct{ volume, mode string }
 	// rateLimitRejectedKey 是限流拒绝计数的键：scope（ip/endpoint/global/concurrent）+ 被拒路径。
@@ -548,12 +548,12 @@ func (m *Metrics) SetVolumeUsage(volume string, used, capVal int64) {
 //
 // 只接收原始整数：指标层/装配层不依赖具体后端类型（能力探测见 metrics_handlers.go 的
 // uploadCoreCountsProvider）。
-func (m *Metrics) SetVolumeUploadCore(volume string, used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+func (m *Metrics) SetVolumeUploadCore(volume string, used, degraded, failed, legacyMode, noDeps int64) {
 	if m == nil {
 		return
 	}
 	for mode, v := range map[string]int64{
-		"used": used, "skipped_oversize": skippedOversize, "degraded": degraded,
+		"used": used, "degraded": degraded,
 		"failed": failed, "legacy_mode": legacyMode, "no_deps": noDeps,
 	} {
 		m.volumeUploadCore.set(UploadCoreKey{volume: volume, mode: mode}, v)

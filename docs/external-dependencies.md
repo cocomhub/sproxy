@@ -424,15 +424,15 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 
 #### 7.8.3.1 可观测：内核"在不在跑、为何没跑"（2026-11-08 落地）
 
-> 注：`skipped_oversize` 是**废弃口径**（原尺寸护栏已随 §7.8.3.2 的修复移除，当前**恒 0**）。
-> 该字段暂保留以兼容 `/metrics` 的既有序列契约（删除会改 `UploadCoreStatsCounts` 签名与
-> `sproxy_volume_upload_core_total` 的 `mode` 枚举 ⇒ 单独小 PR 处理，勿在无关改动里顺手删）。
+> 注：`skipped_oversize`（废弃口径，原尺寸护栏已随 §7.8.3.2 的修复移除、恒 0）**已于 2026-11-09 删除**
+> （含 `UploadCoreStats` 字段、`UploadCoreStatsCounts` 签名与 `/metrics` 的 `mode` 枚举，1 处一起改完，
+> 避免误导运维。
 
 **领域层计数**（`pkg/volume/ext/baidupcs`，原子计数，随时可读）：
 
 | API | 含义 |
 |---|---|
-| `Storage.UploadCoreStats()` | `UploadCoreStats{Used, SkippedOversize, Degraded, Failed, LegacyMode, NoDeps}` |
+| `Storage.UploadCoreStats()` | `UploadCoreStats{Used, Degraded, Failed, LegacyMode, NoDeps}` |
 | `Storage.CoreDisabled()` | 本进程是否已因内核失败降级（auto） |
 
 **日志**（结构化字段，便于日志检索/告警）：
@@ -442,7 +442,7 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 **已接入 `/metrics`（抓取时探测，快照语义）**：
 
 ```
-sproxy_volume_upload_core_total{volume="<卷>",mode="used|skipped_oversize|degraded|failed|legacy_mode|no_deps"} N
+sproxy_volume_upload_core_total{volume="<卷>",mode="used|degraded|failed|legacy_mode|no_deps"} N
 ```
 
 链路：`/metrics` 渲染时的卷遍历（`renderVolumeWatermarks`）→ `volSet.External(name)` **能力探测**

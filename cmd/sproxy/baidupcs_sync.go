@@ -113,30 +113,30 @@ type baidupcsExternalBackend struct {
 	core uploadCoreStatsSource
 }
 
-// coreStatsAdapter 把 baidupcs.StorageAPI（接口）适配成 6 元组窄接口。
+// coreStatsAdapter 把 baidupcs.StorageAPI（接口）适配成 5 元组窄接口。
 // 用运行时能力探测：fake 工厂注入的替身不实现 UploadCoreStats ⇒ 返回全 0（零回归）。
 type coreStatsAdapter struct{ storage baidupcs.StorageAPI }
 
-func (a coreStatsAdapter) UploadCoreStats() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+func (a coreStatsAdapter) UploadCoreStats() (used, degraded, failed, legacyMode, noDeps int64) {
 	s, ok := a.storage.(interface {
 		UploadCoreStats() baidupcs.UploadCoreStats
 	})
 	if !ok {
-		return 0, 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 	v := s.UploadCoreStats()
-	return v.Used, v.SkippedOversize, v.Degraded, v.Failed, v.LegacyMode, v.NoDeps
+	return v.Used, v.Degraded, v.Failed, v.LegacyMode, v.NoDeps
 }
 
 // uploadCoreStatsSource 是「能报告上传内核路径计数」的窄接口（由 baidupcs.Storage 满足）。
 type uploadCoreStatsSource interface {
-	UploadCoreStats() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64)
+	UploadCoreStats() (used, degraded, failed, legacyMode, noDeps int64)
 }
 
 // UploadCoreStatsCounts 暴露上传内核路径计数（原始整数；供 /metrics 抓取时探测）。
-func (b *baidupcsExternalBackend) UploadCoreStatsCounts() (used, skippedOversize, degraded, failed, legacyMode, noDeps int64) {
+func (b *baidupcsExternalBackend) UploadCoreStatsCounts() (used, degraded, failed, legacyMode, noDeps int64) {
 	if b.core == nil {
-		return 0, 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 	return b.core.UploadCoreStats()
 }
