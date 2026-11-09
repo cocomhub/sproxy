@@ -188,3 +188,26 @@ func Shared(p Purpose, opt Options) *Client // 进程级幂等：同 purpose 首
 - `pkg/volume/ext/baidupcs/download.go`：走**百度库**的 `requester.HTTPClient`，不是本仓 client。
 - `pkg/volume/webdav/webdav_fs.go`：GET/PUT/DELETE 混合且带自身错误映射（PUT/DELETE 非幂等）。
 - `pkg/volume/ext/pikpak/api.go`、`pkg/downloader/http_downloader.go`、`.../turnrest.go`：**已有**自己的重试。
+
+## 7. 响应体生命周期契约（2026-11-09 实测缺陷 + 修复）
+
+**契约**：`httpc.Client.DoOpts` 返回的 `resp.Body` 在**调用方读取期间必须可用**——单次尝试的
+ctx **不得在返回前被取消**。
+
+**缺陷（真实，已修复）**：`attempt()` 内 `actx, cancel := context.WithTimeout(...)` + `defer cancel()`
+⇒ 返回响应时立刻取消该 ctx，而 `resp.Body` 绑定它 ⇒ 任何「`DoOpts` 返回后再读 body」的调用点都会
+得到 `context canceled`。小响应因已被 transport 缓冲而侥幸通过，**`sclient upgrade --check` 读
+GitHub release JSON 时暴露**（自更新下载大 body 同样会中招）。
+
+**修复**：把该次尝试的释放权**移交响应体**（`bodyReleasingOnDone`）——读完（EOF）或 `Close()` 时
+释放（`sync.Once` 幂等）；失败路径仍立即释放；非 2xx 终态同样移交（HTTPError 路径调用方要读 body）。
+语义与 net/http 自身 `Client.Timeout` 一致。
+
+**残留语义（调用点须知）**：`Options.Timeout`（默认 30s）经 ctx 施加，因而**同时覆盖调用方的 body
+读取**⇒ 大 body 流式下载必须在 `DoOptions.Timeout` 给足预算（`selfupdate.DownloadAndVerify` 已设
+15 分钟）。否则读取中途报 `context deadline exceeded`。
+
+**回归锁定**：`pkg/httpc/httpc_body_lifetime_test.go`
+（`TestDoOpts_ReturnedBodyStaysReadableAfterAttemptTimeout` / `TestDoOpts_Non2xxBodyStaysReadable`，
+无 sleep 的确定性断言：捕获请求 ctx，断言返回时未取消 + 读尽/Close 后已释放；变异去掉移交 ⇒ 红）。
+沿用 R14（禁新增固定等待）与 R18（`t.Parallel()`）门禁。

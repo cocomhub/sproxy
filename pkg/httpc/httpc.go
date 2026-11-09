@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/netutil"
@@ -63,6 +64,10 @@ type Options struct {
 	// 置 true（见 docs/design-http-client-policy.md §4）。
 	Isolated bool
 	// Timeout 是**单次尝试**超时（0 ⇒ 30s；经 ctx 施加 ⇒ 始终可取消）。
+	//
+	// 注意：该窗口经 ctx 施加到请求上，因而**同时覆盖调用方的响应体读取**——大 body
+	// 流式读取（如自更新下载二进制）必须在 `DoOptions.Timeout` 给足预算，否则读取中途
+	// 报 `context deadline exceeded`。
 	Timeout time.Duration
 	// OverallTimeout 是**整体**预算（0 ⇒ 不限；由上层 ctx 决定更佳）。
 	OverallTimeout time.Duration
@@ -234,7 +239,19 @@ func (c *Client) attemptTimeout(opt DoOptions) time.Duration {
 // attempt 执行单次尝试：per-attempt 超时（**可取消**）、重试时重建 body、打点与错误分类。
 func (c *Client) attempt(actx, parent context.Context, req *http.Request, attempt int, timeout time.Duration) (*http.Response, error) {
 	actx, cancel := context.WithTimeout(actx, timeout)
-	defer cancel()
+	// 该次尝试的 ctx **必须**在「返回的响应体被读完/关闭」前保持有效：调用方是拿到 resp
+	// **之后**才读 body 的，若在此处（返回前）cancel，读会立即得到 `context canceled`
+	// —— 真实缺陷（2026-11-09 实测：`sclient upgrade --check` 读 GitHub release JSON；
+	// 自更新下载大 body 同样会中招）。小响应因已被 transport 缓冲而侥幸通过。
+	//
+	// 语义（与 net/http 自身 `Client.Timeout` 一致）：失败路径立即释放；返回给调用方的
+	// 响应把释放权**移交响应体**——读完（EOF）或 `Close()` 时释放，并且幂等。
+	released := false
+	defer func() {
+		if !released {
+			cancel()
+		}
+	}()
 
 	r := req.Clone(actx)
 	if attempt > 1 {
@@ -251,6 +268,8 @@ func (c *Client) attempt(actx, parent context.Context, req *http.Request, attemp
 	}
 	c.o.Metrics.IncRequest(req.Method, statusClass(resp.StatusCode))
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		resp.Body = bodyReleasingOnDone(resp.Body, cancel)
+		released = true
 		return resp, nil
 	}
 	last := &HTTPError{
@@ -261,7 +280,42 @@ func (c *Client) attempt(actx, parent context.Context, req *http.Request, attemp
 	if retryableStatus(resp.StatusCode) {
 		c.o.Metrics.IncRetry(statusClass(resp.StatusCode))
 	}
+	// 非 2xx 同样交回响应（HTTPError 路径调用方要读 body 定位）⇒ 同样移交释放权。
+	resp.Body = bodyReleasingOnDone(resp.Body, cancel)
+	released = true
 	return resp, last
+}
+
+// bodyReleasingOnDone 包裹响应体：读完（EOF）或 `Close()` 时释放该次尝试的 ctx（幂等）。
+//
+// 为什么需要它：`httpc` 单次尝试经 `context.WithTimeout` 施加（见 Options.Timeout），
+// 而调用方在 `DoOpts` 返回**之后**才读 body ⇒ 释放时机必须由 body 生命周期决定，
+// 否则返回即取消（真实缺陷，2026-11-09）。
+func bodyReleasingOnDone(rc io.ReadCloser, release context.CancelFunc) io.ReadCloser {
+	if rc == nil { // 无 body（如 HEAD）：立刻释放，不泄漏定时器
+		release()
+		return nil
+	}
+	return &releaseOnDoneBody{rc: rc, release: release}
+}
+
+type releaseOnDoneBody struct {
+	rc      io.ReadCloser
+	release context.CancelFunc
+	once    sync.Once
+}
+
+func (b *releaseOnDoneBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if err == io.EOF {
+		b.once.Do(b.release)
+	}
+	return n, err
+}
+
+func (b *releaseOnDoneBody) Close() error {
+	b.once.Do(b.release)
+	return b.rc.Close()
 }
 
 // attemptTimeoutError 标记"**单次尝试**超时"（与整体 ctx 取消不同：前者可重试）。
