@@ -11,6 +11,7 @@ package uploadcore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -35,6 +36,7 @@ func (f *fakeProbe) ExistingMD5(context.Context, string) (string, error) {
 
 type fakeRapid struct {
 	uploadID string
+	ids      []string // 按调用序号返回（用于"重建后拿到新会话"）；空 ⇒ 恒 uploadID
 	done     bool
 	err      error
 	n        int
@@ -42,6 +44,9 @@ type fakeRapid struct {
 
 func (f *fakeRapid) Rapid(context.Context, Request) (string, bool, error) {
 	f.n++
+	if n := f.n; n <= len(f.ids) {
+		return f.ids[n-1], f.done, f.err
+	}
 	return f.uploadID, f.done, f.err
 }
 
@@ -49,24 +54,32 @@ type fakeParts struct {
 	mu      sync.Mutex
 	plan    []Part
 	attempt map[int]int
-	fail    map[int]int // seq -> 前 N 次失败
-	calls   []Part
-	err     error
+	fail    map[int]int // seq -> 前 N 次失败（transient）
+	// expiredSessions：**该 uploadID 恒定**返回 ErrSessionExpired（真实语义：会话失效后该会话内
+	// 所有请求都失败 ⇒ 与"前 N 次失败"不同）。
+	expiredSessions map[string]bool
+	calls           []Part
+	ids             []string // 每次调用的 uploadID（断言"重建后用新会话"）
+	err             error
 }
 
 func (f *fakeParts) Plan(context.Context, Request) ([]Part, error) { return f.plan, f.err }
 
-func (f *fakeParts) UploadPart(ctx context.Context, _ string, p Part) error {
+func (f *fakeParts) UploadPart(ctx context.Context, uploadID string, p Part) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	f.calls = append(f.calls, p)
+	f.ids = append(f.ids, uploadID)
 	if f.attempt == nil {
 		f.attempt = map[int]int{}
 	}
 	f.attempt[p.Seq]++
+	if f.expiredSessions[uploadID] {
+		return fmt.Errorf("%w: part %d (upload_id=%s)", ErrSessionExpired, p.Seq, uploadID)
+	}
 	if f.fail != nil && f.attempt[p.Seq] <= f.fail[p.Seq] {
 		return errors.New("transient")
 	}
@@ -343,5 +356,62 @@ func TestUpload_ResumeSkipsCompletedParts(t *testing.T) {
 	}
 	if res.PartsDone != 3 {
 		t.Fatalf("完成后 PartsDone 应为 3，got %d", res.PartsDone)
+	}
+}
+
+// TestUpload_SessionExpiredRebuildsSession 锁定 **L2 契约：31066（会话失效）⇒ 内核重建会话**。
+//
+// 依据（设计 §5）：百度 v2 分片上传在会话临时区不存在时返回 **31066**（file does not exist）⇒
+// 必须**重走 rapid 拿新 `uploadid`**，并且**全量重传**（新会话临时区为空 ⇒ 已完成分片作废）；
+// 重建次数**有界**（`maxSessionRebuilds`），防"重建-失效"死循环。
+//
+// 变异：去掉 `runPartsWithRebuild` 的重建分支 ⇒ 本用例红（错误直接冒泡）。
+func TestUpload_SessionExpiredRebuildsSession(t *testing.T) {
+	t.Parallel()
+	p := &fakeParts{
+		plan:            plan3(),
+		expiredSessions: map[string]bool{"up-old": true}, // 旧会话恒定失效（会话级）
+	}
+	rapid := &fakeRapid{ids: []string{"up-old", "up-new"}} // 重建前后拿到不同会话 id
+	o := baseOpts(p)
+	o.Rapid = rapid
+	u, err := New(o)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	res, err := u.Upload(context.Background(), bigReq())
+	if err != nil {
+		t.Fatalf("会话失效后应重建并成功: %v", err)
+	}
+	if rapid.n != 2 {
+		t.Fatalf("应重走 rapid 拿新会话（rapid 调用 2 次），got %d", rapid.n)
+	}
+	if res.UploadID != "up-new" {
+		t.Fatalf("结果应携带**新**会话 id，got %q", res.UploadID)
+	}
+	// 全量重传：seq0/seq1 在旧会话各调 1 次（失败）+ 新会话各 1 次（成功），seq2 仅新会话 1 次。
+	sawOld, sawNew, newSessions := 0, 0, map[int]int{}
+	p.mu.Lock()
+	for i, id := range p.ids {
+		switch id {
+		case "up-old":
+			sawOld++
+		case "up-new":
+			sawNew++
+			newSessions[p.calls[i].Seq]++
+		}
+	}
+	p.mu.Unlock()
+	// 旧会话下的尝试次数取决于并发取消时序（首片失败即 cancel ⇒ 其余分片可能未启动）⇒ 只断言 ≥1。
+	if sawOld < 1 {
+		t.Fatalf("旧会话下应至少有 1 次分片尝试，got %d", sawOld)
+	}
+	if sawNew != 3 {
+		t.Fatalf("新会话下应**全量重传** 3 片，got %d", sawNew)
+	}
+	for seq := range 3 {
+		if newSessions[seq] != 1 {
+			t.Fatalf("新会话下 seq=%d 应被重传 1 次（全量重传），got %d", seq, newSessions[seq])
+		}
 	}
 }

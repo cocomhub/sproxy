@@ -18,6 +18,7 @@ package baidupcs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -241,5 +242,40 @@ func TestUCAdapter_Repair_PassesSessionUploadID(t *testing.T) {
 	}
 	if got := ids[len(ids)-1]; got != "UP-42" {
 		t.Fatalf("Repair 必须以**会话 uploadid** 调 rapidupload，实际 %q（空 = 刷新不生效）", got)
+	}
+}
+
+// TestL2_UploadPart_SessionExpiredMapsToSentinel 锁定 **31066 ⇒ 会话失效哨兵**（L2 契约）：
+// 百度在会话临时区不存在时返回 31066（file does not exist，库文案「文件或目录不存在」）⇒
+// adapter 必须把它映射为 `uploadcore.ErrSessionExpired`，内核才能据此**重建会话**
+// （设计 §5；内核侧用例见 uploadcore/uploader_test.go 的 TestUpload_SessionExpiredRebuildsSession）。
+//
+// 变异：把映射去掉（回到裸 `fmt.Errorf("baidupcs: 上传分片 …")`）⇒ 本用例红。
+func TestL2_UploadPart_SessionExpiredMapsToSentinel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		verr error
+		want bool
+	}{
+		{"百度 31066（中文文案）", errors.New("文件或目录不存在"), true},
+		{"错误码字面量 31066", errors.New("远端服务器返回错误, 代码: 31066"), true},
+		{"英文 file does not exist（os.ErrNotExist 包装）", errors.New("baidupcs: not found: file does not exist"), true},
+		{"普通传输错误 ⇒ 不得误判", errors.New("connection reset by peer"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fp := &fakePCS{uploadErr: tc.verr}
+			st := testStaged(t)
+			ad := newAdapterWithFake(t, fp, st.tmpPath, "/r/d/a.bin", st)
+			err := ad.UploadPart(context.Background(), "up-1",
+				uploadcore.Part{Seq: 0, Offset: 0, Size: 1024})
+			if err == nil {
+				t.Fatal("分片失败必须返回错误")
+			}
+			if got := errors.Is(err, uploadcore.ErrSessionExpired); got != tc.want {
+				t.Fatalf("errors.Is(ErrSessionExpired)=%v，want %v（err=%v）", got, tc.want, err)
+			}
+		})
 	}
 }

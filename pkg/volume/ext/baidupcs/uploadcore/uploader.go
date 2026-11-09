@@ -289,10 +289,16 @@ func (u *Uploader) uploadSlices(ctx context.Context, req Request, res Result, up
 		return res, fmt.Errorf("uploadcore plan: %w", err)
 	}
 	res.Via, res.PartsTotal = ViaSlices, len(plan)
-	if err := u.runParts(ctx, uploadID, plan, completed); err != nil {
+	if err := u.runPartsWithRebuild(ctx, req, &uploadID, plan, completed); err != nil {
+		if errors.Is(err, errRapidHitDuringRebuild) {
+			res.UploadID, res.Via = "", ViaRapid
+			u.o.Logger.Info("重建会话时秒传命中（目标已在盘）", "target", req.TargetPath)
+			return res, nil
+		}
 		res.PartsDone = len(completed)
 		return res, err
 	}
+	res.UploadID = uploadID // 可能因重建而更新（供 Merge/Repair 使用会话 id）
 	res.PartsDone = len(plan)
 	if err := u.o.Merge.Merge(ctx, uploadID, req, plan); err != nil {
 		return res, fmt.Errorf("uploadcore merge: %w", err)
@@ -332,8 +338,48 @@ func (u *Uploader) runParts(ctx context.Context, uploadID string, plan []Part, c
 	return ctx.Err()
 }
 
+// runPartsWithRebuild 上传全部分片；遇 `ErrSessionExpired` ⇒ 重建会话后**全量重传**。
+//
+// 为什么必须全量重传：新 `uploadid` 的临时区是**空的**（分片属于会话），已完成分片作废。
+// 有界：最多重建 `maxSessionRebuilds` 次（防死循环）；超出 ⇒ 返回原错误（fail-closed）。
+func (u *Uploader) runPartsWithRebuild(ctx context.Context, req Request, uploadID *string,
+	plan []Part, completed map[int]bool) error {
+	for rebuild := 0; ; rebuild++ {
+		err := u.runParts(ctx, *uploadID, plan, completed)
+		if err == nil || !errors.Is(err, ErrSessionExpired) || rebuild >= maxSessionRebuilds {
+			return err
+		}
+		newID, hit, rErr := u.o.Rapid.Rapid(ctx, req)
+		if rErr != nil {
+			return fmt.Errorf("uploadcore 重建会话: %w", rErr)
+		}
+		if hit {
+			return errRapidHitDuringRebuild
+		}
+		if newID == "" {
+			return errors.New("uploadcore: 重建会话未返回 upload_id")
+		}
+		u.o.Logger.Warn("上传会话失效，已重建会话并全量重传分片",
+			"old_upload_id", *uploadID, "new_upload_id", newID, "rebuild", rebuild+1)
+		*uploadID = newID
+		clear(completed) // 新会话临时区为空 ⇒ 已完成分片作废
+	}
+}
+
 // errWALPart 标记 WAL 写失败（**不可重试**：重试只会重复写同一条记录）。
 var errWALPart = errors.New("uploadcore: WAL 分片记录失败")
+
+// ErrSessionExpired 表示上传会话（`uploadid`）已失效：百度在分片上传时返回 **31066
+// （file does not exist）** ⇒ 会话临时区已不存在 ⇒ 必须**重建会话**（重走 rapid 拿新 uploadid）
+// 并**全量重传**（新会话的临时区为空，已完成分片作废）。
+// `PartUploader` 实现负责把底层错误映射到本哨兵（见 baidupcs 的 ucAdapter.UploadPart）。
+var ErrSessionExpired = errors.New("uploadcore: 上传会话已失效（需重建）")
+
+// errRapidHitDuringRebuild 表示"因会话失效而重走 rapid 时秒传命中"（目标已在盘）⇒ 视为已完成。
+var errRapidHitDuringRebuild = errors.New("uploadcore: 重建会话时秒传命中")
+
+// maxSessionRebuilds 是会话失效后**重建会话**的次数上限（防"重建-失效"死循环）。
+const maxSessionRebuilds = 2
 
 // partWithRetry 上传单片（**复用 pkg/pipe.Retry**：次数上限 + 可中断指数退避 + 成功后写 WAL）。
 func (u *Uploader) partWithRetry(ctx context.Context, uploadID string, p Part) error {
@@ -342,8 +388,13 @@ func (u *Uploader) partWithRetry(ctx context.Context, uploadID string, p Part) e
 		Base:     partBackoffBase,
 		Cap:      partBackoffCap,
 		Factor:   2,
-		// 仅"分片上传失败"可重试；WAL 写失败属本地状态错误，重试无意义。
-		Retryable: func(err error) bool { return !errors.Is(err, errWALPart) },
+		// 仅"分片上传失败"可重试：
+		//   - WAL 写失败属本地状态错误（重试只会重复写同一条记录）；
+		//   - **会话失效（31066）重试无意义**（同一 uploadid 内所有请求都会失败）⇒ 交给
+		//     `runPartsWithRebuild` 重建会话后全量重传（避免白等 3 次退避）。
+		Retryable: func(err error) bool {
+			return !errors.Is(err, errWALPart) && !errors.Is(err, ErrSessionExpired)
+		},
 	}
 	return pipe.Retry(ctx, u.o.Env, pol, func(attemptCtx context.Context, _ int) error {
 		if err := u.attemptPart(attemptCtx, uploadID, p); err != nil {
