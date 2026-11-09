@@ -53,6 +53,24 @@ func TestValidate_Volumes_BaidupcsType(t *testing.T) {
 				Extra: map[string]any{"bduss": "test-bduss", "upload_core": "nucleous"},
 			})
 		}, "upload_core"},
+		{"volumes[] type=baidupcs + extra.upload_concurrency=2 → 通过", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss", "upload_concurrency": 2},
+			})
+		}, ""},
+		{"volumes[] type=baidupcs + extra.upload_concurrency=0 → 通过（缺省语义）", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss", "upload_concurrency": 0},
+			})
+		}, ""},
+		{"volumes[] type=baidupcs + extra.upload_concurrency 越界 → 拒绝（不得静默归一）", func(c *Config) {
+			c.Volumes = append(c.Volumes, VolumeConfig{
+				Name: "mydisk", Type: "baidupcs",
+				Extra: map[string]any{"bduss": "test-bduss", "upload_concurrency": 99},
+			})
+		}, "upload_concurrency"},
 		{"本地卷（Type 缺省）零回归 → 通过", func(c *Config) {
 			// 不追加任何卷，Default() 的默认本地卷不受影响。
 		}, ""},

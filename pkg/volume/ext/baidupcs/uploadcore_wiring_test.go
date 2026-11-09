@@ -108,8 +108,8 @@ func TestUploadStaged_AutoFallsBackAndDisables(t *testing.T) {
 	if ad.uploads == 0 {
 		t.Fatal("降级后必须调用既有 adapter")
 	}
-	if !st.coreDisabled.Load() {
-		t.Fatal("auto 模式内核失败一次后必须置位降级标记（避免每个文件都重踩）")
+	if !st.CoreDisabled() {
+		t.Fatal("auto 模式内核失败一次后必须进入降级冷却窗口（避免每个文件都重踩）")
 	}
 	// 已降级 ⇒ 后续上传不再尝试内核（adapter 再被调用一次）。
 	if err := st.uploadStaged(context.Background(), "k2", "/r/k2",
@@ -198,7 +198,7 @@ func TestUploadCoreStats_PathCounting(t *testing.T) {
 		t.Fatalf("降级计数不符: %+v", s)
 	}
 	if !st3.CoreDisabled() {
-		t.Fatal("内核失败后应置位 coreDisabled")
+		t.Fatal("内核失败后应进入降级冷却窗口（CoreDisabled=true）")
 	}
 
 	// ③ 缺库 client（coreOK=false）⇒ NoDeps 计数（wiringFakeAdapter 用非法 BDUSS ⇒ NewClient 失败）

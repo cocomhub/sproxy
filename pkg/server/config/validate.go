@@ -320,7 +320,32 @@ func validateBaidupcsVolumeExtras(v *VolumeConfig) error {
 			return fmt.Errorf("卷 %q（type=baidupcs）的 extra.upload_core=%q 非法（只接受 auto/legacy/nucleus 或留空=auto）", v.Name, core)
 		}
 	}
+	// upload_concurrency：每卷同时进行的上传动作数上限（并发闸）。缺省/0 ⇒ 领域层默认 4；
+	// 非空时必须落在 [1,32]（与领域层 MaxUploadConcurrency 一致）—— 越界 fail-closed，
+	// 避免"想限流但写错"被静默归一（与 upload_core 同一纪律）。
+	if n := extraIntValue(v.Extra["upload_concurrency"]); n != 0 && (n < 1 || n > baidupcsMaxUploadConcurrency) {
+		return fmt.Errorf("卷 %q（type=baidupcs）的 extra.upload_concurrency=%d 非法（须在 1..%d，或留空/0 用默认 4）",
+			v.Name, n, baidupcsMaxUploadConcurrency)
+	}
 	return nil
+}
+
+// baidupcsMaxUploadConcurrency 与领域层 `baidupcs.MaxUploadConcurrency` 一致（此处硬编码以
+// 避免 config 包依赖具体后端包；变更时两处同步 —— 由 `validate_upload_concurrency_test.go` 守）。
+const baidupcsMaxUploadConcurrency = 32
+
+// extraIntValue 读取 extra 里的整数（YAML 可能给出 int/int64/float64）；缺失/类型不符 ⇒ 0。
+func extraIntValue(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 // validateWebDAVVolumeExtras 校验 webdav 外部卷：extra.url（http(s)）必填 + username/password

@@ -179,6 +179,21 @@ func (b *baidupcsExternalBackend) Close() error { return nil }
 //
 // 凭据（fail-closed）：bduss 与 binary_path 至少一个非空——否则二进制优先（PATH 查找）
 // 与库兜底（bduss）都没有可用执行路径，明确报错而非静默跳过。
+// extraInt 读取外部卷 extra 中的整数配置（YAML 可能给出 int/int64/float64）；
+// 缺失或类型不符 ⇒ 0（含义由领域层定义：多数配置 0 = 用默认值）。
+func extraInt(extra map[string]any, key string) int {
+	switch v := extra[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory baidupcsStorageFactory) (registry.ExternalBackend, error) {
 	if v.Type == "" || v.Type == volume.TypeLocal {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q 类型 %q 不是外部 baidupcs 卷", v.Name, v.Type)
@@ -187,6 +202,8 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 	baiduRoot, _ := v.Extra["baidu_root"].(string)
 	binaryPath, _ := v.Extra["binary_path"].(string)
 	uploadCore, _ := v.Extra["upload_core"].(string)
+	// upload_concurrency：每卷「同时进行的上传动作」数上限（G2 并发闸；0/缺省 ⇒ 领域层默认 4）。
+	uploadConcurrency := extraInt(v.Extra, "upload_concurrency")
 	localRoot, _ := v.Extra["local_root"].(string)
 	if localRoot == "" {
 		localRoot = v.RootDir
@@ -200,12 +217,13 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 		}
 	}
 	storage, err := factory(baidupcs.StorageConfig{
-		Root:       baiduRoot,
-		TempDir:    localRoot,
-		BDUSS:      bduss,
-		BinaryPath: binaryPath,
-		UploadCore: uploadCore,
-		Logger:     slog.Default(),
+		Root:              baiduRoot,
+		TempDir:           localRoot,
+		BDUSS:             bduss,
+		BinaryPath:        binaryPath,
+		UploadCore:        uploadCore,
+		UploadConcurrency: uploadConcurrency,
+		Logger:            slog.Default(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q Storage 构造失败: %w", v.Name, err)

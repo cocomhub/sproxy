@@ -41,4 +41,5 @@ replace (
 	github.com/cocomhub/sproxy => ../../..
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/webrtc => ../../../pkg/tunnel/xfer/ext/webrtc
 	github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../../pkg/tunnel/xfer/ext/ws
+	github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ../../../pkg/volume/ext/baidupcs
 )
