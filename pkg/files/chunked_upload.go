@@ -1060,7 +1060,7 @@ func (s *Service) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, f
 	session := store.GetSession(uploadID)
 	if session != nil {
 		missing := MissingChunks(session)
-		s.sendJSON(w, ChunkStatusResponse{
+		resp := ChunkStatusResponse{
 			Success:       true,
 			UploadID:      session.UploadID,
 			ReceivedCount: len(session.ReceivedChunks) - len(missing),
@@ -1070,7 +1070,12 @@ func (s *Service) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, f
 			FileChecksum:  session.FileChecksum,
 			Filename:      session.Filename,
 			Message:       fmt.Sprintf("会话%d/%d分块已接收", len(session.ReceivedChunks)-len(missing), session.TotalChunks),
-		}, http.StatusOK)
+		}
+		// 服务端写入阶段进度（二期 T4，2026-11-10）：会话分块只反映「客户端→sproxy」段；
+		// 写入阶段（加密 / 远端卷上传）由进度注册表提供（卷层经 pkg/sync 回调上报）。
+		// 注册表以**逻辑路径**为键；会话 Filename 与 URL filename 都可能是它，**两个都试**（不猜）。
+		s.fillStageProgress(&resp, session.Filename, filename)
+		s.sendJSON(w, resp, http.StatusOK)
 		return true
 	}
 	// upload_id 存在但 session 不存在

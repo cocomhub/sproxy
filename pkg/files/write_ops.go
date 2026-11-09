@@ -2225,6 +2225,9 @@ func (s *Service) WriteTarget(ctx context.Context, input WriteTargetInput, src i
 	if err != nil {
 		return WriteTargetResult{}, err
 	}
+	// 服务端写入阶段进度（二期 T4）：若调用方未装配进度回调，则注入注册表回调（key=rel）。
+	// 已装配（如上层已有更细的装配）⇒ 不覆盖。未注入时一切上报是 no-op（零回归）。
+	ctx = s.withUploadProgress(ctx, rel)
 	if !input.NoLock {
 		release, acquired := s.rt.fileLocks().TryMark(owner, rel, uploadingLockUpload)
 		if !acquired {
