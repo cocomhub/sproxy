@@ -3,7 +3,7 @@ module github.com/cocomhub/sproxy/web/e2e
 go 1.27
 
 require (
-	github.com/cocomhub/sproxy v0.0.0-20260728025421-d6b205ef75ab
+	github.com/cocomhub/sproxy v0.0.0
 	github.com/mxschmitt/playwright-go v0.6201.1
 )
 
@@ -11,6 +11,7 @@ replace github.com/cocomhub/sproxy => ../../
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs v0.22.0 // indirect
 	github.com/deckarep/golang-set/v2 v2.8.0 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
@@ -23,3 +24,7 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs => ../../pkg/volume/ext/baidupcs
+
+replace github.com/cocomhub/sproxy/pkg/tunnel/xfer/ext/ws => ../../pkg/tunnel/xfer/ext/ws
