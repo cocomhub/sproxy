@@ -49,7 +49,7 @@ func TestE2E_FixMD5Probe(t *testing.T) {
 	}
 	st, err := NewStorage(StorageConfig{
 		Root: "/来自：本地电脑", TempDir: tmpRoot, BDUSS: bduss, BinaryPath: binPath,
-		Logger: testLogger(), UploadCore: "nucleus", coreMaxVerifiedSizeOverride: 1 << 30,
+		Logger: testLogger(), UploadCore: "nucleus",
 	})
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
@@ -170,7 +170,7 @@ func TestE2E_FileMetaCompare_CLIvsCore(t *testing.T) {
 				Fallback: newLibraryAdapter(pcs, testLogger())})
 		}()
 		st, serr := NewStorage(StorageConfig{Root: "/来自：本地电脑", TempDir: tmpRoot, Adapter: ad,
-			Logger: testLogger(), UploadCore: coreMode, coreMaxVerifiedSizeOverride: 1 << 30})
+			Logger: testLogger(), UploadCore: coreMode})
 		if serr != nil {
 			t.Fatalf("%s NewStorage: %v", name, serr)
 		}
@@ -204,6 +204,8 @@ func TestE2E_FileMetaCompare_CLIvsCore(t *testing.T) {
 	probe("内核-8MiB", fmt.Sprintf("e2ecmp/%d/core8.bin", uniq), true, "nucleus", coreMD5, coreStage)
 	_, core20MD5, core20Stage := newContent(20 << 20)
 	probe("内核-20MiB(多块)", fmt.Sprintf("e2ecmp/%d/core20.bin", uniq), true, "nucleus", core20MD5, core20Stage)
+	_, core120MD5, core120Stage := newContent(120 << 20)
+	probe("内核-120MiB(多块)", fmt.Sprintf("e2ecmp/%d/core120.bin", uniq), true, "nucleus", core120MD5, core120Stage)
 	// 关键对照：CLI 上传 20MiB —— **实测仍是单块 + 权威 md5**（⇒ CLI 上传后存在"折叠成单块"的步骤，
 	// 与块大小无关；见 docs/external-dependencies.md §7.8.3 的实验表）。
 	_, cli20MD5, cli20Stage := newContent(20 << 20)

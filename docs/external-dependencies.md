@@ -290,7 +290,11 @@ phase=postcheck elapsed_ms=0      err="context deadline exceeded"
 > `BAIDUPCS_E2E_ROOT` 环境变量门控、自行清理产物）+ L1 用例
 > （`TestUpload_SmallFile_OnePartPlusMerge` 断言"必须合并"；会话前置断言 `rapid==1` 且复用 `UploadID`）。
 
-### 7.8.3 百度多分片文件的 ETag 语义（2026-11-08 真实验收；**内容正确、ETag 不可用于判权威**）
+### 7.8.3 百度多分片文件的 ETag 语义（2026-11-08 真实验收；**根因已定位并修复**）
+
+> **已修复（2026-11-08 晚）**：根因是**秒传刷新没带会话 `uploadid`**（+ 需要退避重试）——
+> 修复后 8/20/120MiB 多块上传**全部收敛为权威整文件 md5**。细节与证据见下方 §7.8.3.2。
+> 本节的实验数据保留为"修复前的现象"记录。
 
 **实测（真实百度网盘，`E2E_RANDOM=1` 随机内容排除秒传）**：
 
@@ -328,39 +332,55 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 # 断言口径：硬断言 = **内容一致**（生产红线）；etagMatch 仅记录（ETag 语义见上表）
 ```
 
-#### 7.8.3.2 「方案 B（对齐 ETag 语义）」的逆向结论（2026-11-08，3 组真实网盘隔离实验）
+#### 7.8.3.2 根因定位与修复：**秒传刷新必须带会话 uploadid + 退避重试**（2026-11-08 已修复）
 
-目标：找出 CLI 二进制路径让 `ETag == 整文件 md5` 的那一步，在内核复刻（无带宽成本）。
-**结论：机制未定位到可复刻的调用**，但已排除两个假设、锁定判别式。
+**根因（真实网盘隔离实验定位）**：多块文件的 `md5` 是服务端派生值，**只有经「秒传（rapidupload）刷新」**
+才会变成权威整文件 md5（刷新后 `BlockList` 折叠为 `[整文件md5]`，与库 `FixMD5ByFileInfo` 的判据一致）。
+而**我方两处 rapid 调用都把 `uploadid` 传成了空串** —— 库的实现传的是**当前上传会话 id**
+（`internal/pcsfunctions/pcsupload/upload_task_unit.go:236` 的 `utu.state.Uploadid`）；
+百度 v2 的 create/precreate 需要会话 id（早前实测缺 uploadid 直接 400）⇒ **刷新不生效** ⇒ 校验恒失败。
 
-| 实验（各臂**独立随机内容**，排除秒传） | 远端 MD5 == 本地 | **BlockList 数** |
-|---|---|---|
-| CLI-8MiB | ✓ | **1** |
-| 内核-8MiB（4MiB 分块） | ✗ | 3 |
-| **CLI-20MiB（必然 >16MiB，需分块）** | **✓** | **1** |
-| 内核-20MiB / 内核-40MiB | ✗ | 2 / 3 |
-| 内核-8MiB（临时把分块改成 16MiB） | ✓ | 1 |
-| 内核-20MiB（16MiB 分块，多块） | ✗ | 2 |
+**修复**：
+1. `ucAdapter` 在 `Merge` 时记录**会话 uploadid**，`Repair` 用它做 rapidupload 刷新
+   （参数与首传同一份 `planRapid`：整文件 md5 / sliceMD5 / 随机片段 dataContent / crc32 /
+   offset / dataLength / size / dataTime / block_list），并保留既有库路径作回退；
+2. `uploadcore.verifyWithRepair` 改为**有界重试 + 退避**（4 次，2s/4s/8s）：远端「块 md5 索引」可见性有延迟
+   ⇒ 单位 1 次刷新命中率不足（实测同一实现/同一文件有时命中有时 miss）；退避复用 `Options.Env.Sleep`
+   （测试零等待）；
+3. **移除尺寸护栏**（原 `coreMaxVerifiedSize=4MiB`，其前提已被证伪）：多块现在能收敛，
+   安全网由 `auto` 降级（内核失败 ⇒ 本进程降级既有 CLI 路径 + WARN）承担；
+4. **回归锁定**：单测 `TestUCAdapter_Repair_PassesSessionUploadID` 断言刷新**必须带会话 id**
+   （变异验证：改回空串 ⇒ 用例红）——e2e 不进 CI，这条约束由单测守。
 
-**已排除的假设**：
-1. **「调用 `FixMD5` 可修复」** ✗ —— 直接调库的 `BaiduPCS.FixMD5`（= `BaiduPCS-Go fixmd5` 的同一实现）
-   返回 `err=nil`，但 ETag 在 6 次复核（~42s）内**完全不变**；内容回读始终一致。
-2. **「块大小不匹配（4MiB vs 库默认 16MiB）导致秒传 miss」** ✗ —— 把分块临时改为 16MiB 后，
-   **多块（20/40MiB）仍然失败**，只有单块成功。
+**重试预算**：`verifyWithRepair` = **6 次尝试**（退避 2/4/8/16/32s，上限 ~62s）。实测 120MiB/30 块
+**4 次不够、6 次内收敛**（块数越多，远端块 md5 索引就绪越慢）；退避经 `Options.Env.Sleep` 注入（测试零等待）。
 
-**已锁定的判别式**（与库实现一致）：`FixMD5ByFileInfo` 的跳过条件是
-`len(BlockList)==1 && BlockList[0]==MD5` ⇒ **Baidu 只对「单块」文件给出权威 md5**；多块文件的
-`MD5` 字段是服务端派生值（既非整文件 md5，也非块列表 md5）。
+**修复后实测（真实网盘，各臂独立随机内容排除秒传）**：
 
-**CLI 为何权威**：其上产物 `BlockList 数 == 1`（即使 20MiB 也如此）⇒ CLI 上传流程中存在一步把文件
-**折叠成单块**（`BlockList=[wholeMD5]`，正是**秒传注册**的产物形状），而我们的 `Repair`
-（`libraryAdapter.RapidUpload`，带 `blockMD5s`）**未产生该效果**。
+| 臂 | Put | BlockList 数 | MD5 == 本地 |
+|---|---|---|---|
+| 内核-8MiB | ✅ | 1 | ✅ |
+| 内核-20MiB（5 块） | ✅ | 1 | ✅ |
+| **内核-120MiB（30 块，6 次预算内）** | ✅（`Put err=nil`） | 1 | ✅（`ETag权威=true`） |
+| CLI-8/20MiB（对照） | ✅ | 1 | ✅ |
 
-**下一步（若要继续 B）**：抓 BaiduPCS-Go ↔ 百度的**实际请求序列**（在 WSL 里对 CLI 抓包/加日志），
-定位那一步折叠调用及其参数；或在库内找 `RunUpload` 结束时是否有未被我们复用的调用。
-**在此之前不要调大内核尺寸护栏**；若要现在启用多分片内核，走**方案 A（回读校验）**（实测 48MiB 回读 ~1–2s）。
+**修复前**（同一内容）：内核 8MiB `BlockList=3` / 20MiB `=5` / 120MiB `=30`，md5 全部非权威、校验 fail-closed。
+
+**读侧残留（与上传无关，另记待办）**：刚上传的**大文件**（实测 120MiB）经 `Storage.Get` 下载返回
+**403 Forbidden**（疑似 dlink/元信息就绪延迟；小文件 8/20/48MiB 正常）。e2e 已把它与「内容不符」明确区分
+（读侧不可用 ⇒ 不对内容下结论）。**待办**：`Get` 对「刚上传的大文件」加重试/退避，或先确认 meta 就绪再下发直链。
+
+**已排除的旁路假设**（保留以免重复探索）：
+- 调库的 `BaiduPCS.FixMD5`（`BaiduPCS-Go fixmd5` 同实现）**修不了**——返回 `err=nil` 但 ETag 在 ~42s 内完全不变；
+- **不是块大小问题**：把分块临时改 16MiB（库默认）后多块仍失败，只有单块成功。
+
+> 复现/回归：`pkg/volume/ext/baidupcs/fixmd5_probe_e2e_test.go`（`-tags=e2e`，CI 不跑）与
+> `TestE2E_CompareUploadPaths`（`E2E_UPLOAD_MB`/`E2E_ARMS`/`E2E_RANDOM` 旋钮）；
+> 单测锁定见 `l2_contract_test.go` 的 `TestUCAdapter_Repair_PassesSessionUploadID`。
 
 #### 7.8.3.1 可观测：内核"在不在跑、为何没跑"（2026-11-08 落地）
+
+> 注：`skipped_oversize` 为**预留口径**（原尺寸护栏已随 §7.8.3.2 的修复移除，当前恒 0）。
 
 **领域层计数**（`pkg/volume/ext/baidupcs`，原子计数，随时可读）：
 

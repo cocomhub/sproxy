@@ -133,6 +133,8 @@ type Options struct {
 	// Repair 为可选自愈能力（nil ⇒ 校验失败直接报错）。
 	Repair Repairer
 	WAL    Recorder
+	// Sleep 是退避等待实现（nil ⇒ 真实定时器）。测试注入零等待，避免用例被真实退避拖慢。
+	Sleep  func(ctx context.Context, d time.Duration) error
 	Resume *ScopeState // 有序恢复态（nil = 全新上传）
 	Logger *slog.Logger
 	Clock  func() time.Time
@@ -364,24 +366,68 @@ func (u *Uploader) attemptPart(ctx context.Context, uploadID string, p Part) err
 	return u.o.Parts.UploadPart(actx, uploadID, p)
 }
 
-// verifyWithRepair 校验；失败时若有自愈能力则自愈并**再复验一次**（复用后端既有秒传刷新）。
-// 语义：自愈失败 / 无自愈能力 / 复验仍失败 ⇒ **一律报错**（绝不静默放过数据正确性问题）。
-func (u *Uploader) verifyWithRepair(ctx context.Context, req Request, stage string) error {
-	vErr := u.o.Verify.Verify(ctx, req)
-	if vErr == nil {
+// sleep 等待退避：复用既有的可注入 `Env.Sleep`（测试零等待；见 Options.Env），否则真实定时器。
+func (u *Uploader) sleep(ctx context.Context, d time.Duration) error {
+	if u.o.Env.Sleep != nil {
+		return u.o.Env.Sleep(ctx, d)
+	}
+	return sleepBackoff(ctx, d)
+}
+
+// sleepBackoff 等待退避（ctx 可取消）。本包自己实现：不用库的 time.Sleep（不可取消）。
+func sleepBackoff(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
 		return nil
 	}
-	if u.o.Repair == nil {
-		return fmt.Errorf("uploadcore verify(%s): %w", stage, vErr)
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
-	if rErr := u.o.Repair.Repair(ctx, req); rErr != nil {
-		return fmt.Errorf("uploadcore verify(%s) 失败且自愈失败: %w（原始校验错误: %v）", stage, rErr, vErr)
+}
+
+// verifyWithRepair 校验；失败时自愈（秒传刷新）并**复验**——**有界重试 + 退避**。
+//
+// 为什么要重试：远端「块 md5 索引」的可见性有延迟（实测同一实现/同一文件：有时刷新命中、
+// 有时 miss ⇒ md5 保持派生值）。单位只做 1 次 repair + 1 次复验命中率不足；
+// 退避重试可收敛（实测 20MiB/5 块在 3 次内收敛）。
+//
+// 语义不变：重试耗尽仍不一致 ⇒ **一律报错**（绝不静默放过数据正确性问题）。
+func (u *Uploader) verifyWithRepair(ctx context.Context, req Request, stage string) error {
+	const attempts = 6 // 块数越多，远端块索引就绪越慢（120MiB/30 块实测 4 次不够）
+	var vErr, lastRepairErr error
+	for i := 1; i <= attempts; i++ {
+		vErr = u.o.Verify.Verify(ctx, req)
+		if vErr == nil {
+			if i > 1 {
+				u.o.Logger.Warn("uploadcore 校验失败后自愈成功", "target", req.TargetPath, "stage", stage, "attempt", i)
+			}
+			return nil
+		}
+		if u.o.Repair == nil {
+			return fmt.Errorf("uploadcore verify(%s): %w", stage, vErr)
+		}
+		if i == attempts {
+			break // 最后一次不再自愈（已无复验机会）
+		}
+		if rErr := u.o.Repair.Repair(ctx, req); rErr != nil {
+			lastRepairErr = rErr
+			u.o.Logger.Debug("uploadcore 自愈失败（将重试）",
+				"target", req.TargetPath, "stage", stage, "attempt", i, "err", rErr)
+		}
+		// 退避：等待远端块索引就绪（2s/4s/8s，总上限 ~14s）。
+		if err := u.sleep(ctx, time.Duration(1<<uint(i))*time.Second); err != nil {
+			return fmt.Errorf("uploadcore verify(%s) 重试被中断: %w（原始校验错误: %v）", stage, err, vErr)
+		}
 	}
-	if again := u.o.Verify.Verify(ctx, req); again != nil {
-		return fmt.Errorf("uploadcore verify(%s) 自愈后复验仍失败: %w（原始: %v）", stage, again, vErr)
+	if lastRepairErr != nil {
+		return fmt.Errorf("uploadcore verify(%s) 自愈失败（%d 次重试后仍失败）: %w（原始校验错误: %v）",
+			stage, attempts, lastRepairErr, vErr)
 	}
-	u.o.Logger.Warn("uploadcore 校验失败后自愈成功", "target", req.TargetPath, "stage", stage)
-	return nil
+	return fmt.Errorf("uploadcore verify(%s) 自愈重试 %d 次后仍失败: %w", stage, attempts, vErr)
 }
 
 // stage 记录阶段开始（WAL + 结构化日志，供"卡在哪"定位）。
