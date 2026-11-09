@@ -366,9 +366,33 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 
 **修复前**（同一内容）：内核 8MiB `BlockList=3` / 20MiB `=5` / 120MiB `=30`，md5 全部非权威、校验 fail-closed。
 
-**读侧残留（与上传无关，另记待办）**：刚上传的**大文件**（实测 120MiB）经 `Storage.Get` 下载返回
-**403 Forbidden**（疑似 dlink/元信息就绪延迟；小文件 8/20/48MiB 正常）。e2e 已把它与「内容不符」明确区分
-（读侧不可用 ⇒ 不对内容下结论）。**待办**：`Get` 对「刚上传的大文件」加重试/退避，或先确认 meta 就绪再下发直链。
+**读侧 403 —— 根因已定位并修复（2026-11-08）**：刚上传的**大文件**（120MiB）经 `Storage.Get` 曾返回
+**403 Forbidden**，真实网盘实验逐层收窄后确认为 **Range 块过大**：
+
+| 实验（真实网盘） | 结果 |
+|---|---|
+| 手工 Range **32KiB / 1MiB / 2MiB / 4MiB** + 网盘 UA（无 cookie） | **206** ✅ |
+| 手工 Range **8MiB / 15MiB**（无 cookie / 带 BDUSS cookie 皆试） | **403** `31326 user is not authorized, hitcode:104` ✗ |
+| 库自己的 client（`requester.NewHTTPClient()` + 网盘 UA）发 32KiB | **206** ✅ ⇒ **客户端无责** |
+| `Storage.Get`（下载器未知模式、并发 8） | 403 ✗（请求块 8–15MiB） |
+| `MaxParallel=1`（仍用默认自适应模式） | 仍 403 ✗ ⇒ **与并发无关，只与块大小有关** |
+
+**根因**：库 `downloader.Config.Mode` 默认 `RangeGenMode_Default`，其自适应生成器按「总大小 ÷ 并发」切块
+（120MiB + 并发 8 ⇒ **~15MiB** 块）；百度 CDN 对非会员账号**拒绝过大的 Range**（上限即库自身
+`downloader.BlockSizeList` 最大 **4MiB** ✓ 与上表实测边界吻合）。此时 `cfg.BlockSize` **无效**
+（它只在 `RangeGenMode_BlockSize` 下生效）。
+
+**修复**：`newDownloadConfig()` 显式 `Mode = transfer.RangeGenMode_BlockSize` + `BlockSize = 4MiB`
+（常量 `maxDownloadBlockSize`，红线由单测守：不得超 `downloader.BlockSizeList[3]`）。
+**真实场景验证**：120MiB ⇒ `内容一致=true`（修复前 false）；20MiB 亦 `true`（无回归）。
+
+**顺带修正的另一处真实缺陷（不是本 403 的成因）**：下载器 worker 的 client 此前继承
+`requester.NewHTTPClient()` 的**浏览器 UA**，而百度 CDN 对 Range 请求要求网盘 UA（缺/错 ⇒
+403 `31362 sign error`，2026-10-22 已在 `syncfs_range.go` 记录同因）⇒ 现 `newDownloadHTTPClient()`
+统一 `SetUserAgent(bdlib.NetdiskUA)`，且 Range **探测**（裸 `Do` 不继承 UA）显式设请求头。
+
+**外部契约测试**（硬规则 20，`-tags=e2e`）：`TestE2E_DlinkRangeSizeBoundary` 锁定「32KiB/1MiB/4MiB ⇒ 206、
+8MiB ⇒ 403」；阈值移动即红 ⇒ 先对照本节判定是依赖变化还是回归。
 
 **已排除的旁路假设**（保留以免重复探索）：
 - 调库的 `BaiduPCS.FixMD5`（`BaiduPCS-Go fixmd5` 同实现）**修不了**——返回 `err=nil` 但 ETag 在 ~42s 内完全不变；

@@ -21,12 +21,15 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 
 	"github.com/cocomhub/sproxy/pkg/testutil"
-	"time"
 )
 
 func TestE2E_FixMD5Probe(t *testing.T) {
@@ -210,4 +213,96 @@ func TestE2E_FileMetaCompare_CLIvsCore(t *testing.T) {
 	// 与块大小无关；见 docs/external-dependencies.md §7.8.3 的实验表）。
 	_, cli20MD5, cli20Stage := newContent(20 << 20)
 	probe("CLI-20MiB(2块@16MiB)", fmt.Sprintf("e2ecmp/%d/cli20.bin", uniq), false, "legacy", cli20MD5, cli20Stage)
+}
+
+// TestE2E_DlinkRangeSizeBoundary **锁定外部契约**（硬规则 20）：百度 CDN 对**大 Range** 请求返回
+// 403 `31326 user is not authorized, hitcode:104`（非会员账号），上限即库自身 `BlockSizeList` 最大 4MiB。
+//
+// 这是「大文件读回 403」的根因来源 ⇒ 我们的下载器必须使用 ≤4MiB 的块（见 newDownloadConfig）。
+// 契约变化（阈值移动）时本用例会红 ⇒ 对照 docs/external-dependencies.md §7.8.3.2 判定是依赖变化还是回归。
+func TestE2E_DlinkRangeSizeBoundary(t *testing.T) {
+	// sproxy:serial: 真实网盘 e2e（外部资源）
+	bduss := e2eBDUSSFromConfig(t)
+	if bduss == "" {
+		t.Skip("BDUSS 为空")
+	}
+	binPath, ok := e2eBinaryAvailable()
+	if !ok {
+		t.Skip("BaiduPCS-Go 二进制不在 PATH")
+	}
+	pcs, cerr := NewClient(bduss, "")
+	if cerr != nil {
+		t.Fatalf("NewClient: %v", cerr)
+	}
+	content := make([]byte, 120<<20)
+	if _, rerr := rand.Read(content); rerr != nil {
+		t.Fatal(rerr)
+	}
+	key := fmt.Sprintf("e2edlink/%d/big.bin", time.Now().UnixNano())
+	tmpRoot := filepath.Join(t.TempDir(), "tmp")
+	_ = os.MkdirAll(tmpRoot, 0o755)
+	st, err := NewStorage(StorageConfig{Root: "/来自：本地电脑", TempDir: tmpRoot, BDUSS: bduss,
+		BinaryPath: binPath, Logger: testLogger(), UploadCore: "nucleus"})
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cc := context.WithTimeout(context.Background(), time.Minute)
+		defer cc()
+		_ = st.Delete(c, key)
+	})
+	stage := filepath.Join(t.TempDir(), "big.bin")
+	if werr := os.WriteFile(stage, content, 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	f, _ := os.Open(stage)
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	if _, putErr := st.Put(ctx, key, f); putErr != nil {
+		t.Fatalf("上传失败：%v", putErr)
+	}
+
+	urlInfo, pcsErr := pcs.PCS().LocateDownload("/来自：本地电脑/" + key)
+	if pcsErr != nil {
+		t.Fatalf("LocateDownload: %v", pcsErr)
+	}
+	if len(urlInfo.URLs) == 0 {
+		t.Fatalf("无 dlink")
+	}
+	dlink := urlInfo.URLs[0].URL
+
+	cli := &http.Client{Timeout: 60 * time.Second}
+	fetch := func(rng string) int {
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodGet, dlink, nil)
+		if rerr != nil {
+			t.Fatalf("构造请求：%v", rerr)
+		}
+		req.Header.Set("User-Agent", bdlib.NetdiskUA)
+		req.Header.Set("Range", rng)
+		resp, derr := cli.Do(req)
+		if derr != nil {
+			t.Fatalf("请求 %s：%v", rng, derr)
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		return resp.StatusCode
+	}
+
+	for _, tc := range []struct {
+		name string
+		size int64
+		want int
+	}{
+		{"32KiB", 32 << 10, http.StatusPartialContent},
+		{"1MiB", 1 << 20, http.StatusPartialContent},
+		{"4MiB", 4 << 20, http.StatusPartialContent},
+		{"8MiB", 8 << 20, http.StatusForbidden}, // 超上限 ⇒ 403 31326
+	} {
+		got := fetch(fmt.Sprintf("bytes=0-%d", tc.size-1))
+		if got != tc.want {
+			t.Errorf("Range %s：status=%d, want %d（外部契约变化？见 docs/external-dependencies.md §7.8.3.2）",
+				tc.name, got, tc.want)
+		}
+	}
 }

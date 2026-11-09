@@ -6,14 +6,17 @@ package baidupcs
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	bdlib "github.com/qjfoidnh/BaiduPCS-Go/baidupcs"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester"
 	"github.com/qjfoidnh/BaiduPCS-Go/requester/downloader"
+	"github.com/qjfoidnh/BaiduPCS-Go/requester/transfer"
 )
 
 // downloadViaDownloader 用上游 Downloader（Range 并行 + 断点续传）下载网盘文件到本地。
@@ -65,14 +68,14 @@ func downloadViaDownloader(ctx context.Context, pcs *Client, remotePath, localPa
 	}()
 
 	// 4. 构造 Downloader：Range 并行 + 断点文件。
-	cfg := downloader.NewConfig()
-	cfg.MaxParallel = 8
-	cfg.BlockSize = 8 * 1024 * 1024
-	cfg.InstanceStateStorageFormat = downloader.InstanceStateStorageFormatJSON
-	cfg.InstanceStatePath = resumePath
+	cfg := newDownloadConfig(resumePath)
 
 	der := downloader.NewDownloader(dlink, writer, cfg)
-	der.SetClient(requester.NewHTTPClient()) // 每实例独立连接池（禁共享 DefaultTransport）
+	// 每实例独立连接池（禁共享 DefaultTransport）+ **网盘客户端 UA**：下载器 worker 走
+	// `client.Req(...)`（库的 `Req` 会把 `HTTPClient.UserAgent` 写进请求头）⇒ 设它即可让
+	// 并行 Range 请求带上 `netdisk;P2SP;...`（否则 CDN 403 sign error；小文件单请求不触发 Range
+	// 所以此前"只有大文件读失败"）。库自身 pan 下载流程的等效配置是 PanUA（默认 = NetdiskUA）。
+	der.SetClient(newDownloadHTTPClient())
 	der.SetDURLCheckFunc(func(cli *requester.HTTPClient, durl string) (int64, *http.Response, error) {
 		// 用 Range 探测文件大小（与上游 BaiduPCSURLCheckFunc 同构）。
 		return baiduDURLCheck(ctx, cli, durl)
@@ -111,6 +114,40 @@ func downloadViaDownloader(ctx context.Context, pcs *Client, remotePath, localPa
 	return nil
 }
 
+// maxDownloadBlockSize 单次 Range 请求的**上限**。百度 CDN 对非会员账号拒绝过大的 Range
+// （实测：1/2/4MiB ⇒ 206；8/15MiB ⇒ 403 `31326 user is not authorized, hitcode:104`），
+// 且库自己的 BlockSizeList 上限也是 4MiB（`requester/downloader.BlockSizeList`，见
+// `downloader.SelectBlockSizeAndInitRangeGen`）。
+//
+// **必须显式切到块模式**：库默认 `RangeGenMode_Default` 的自适应生成器会按 `总大小/并发` 切块
+// （120MiB + 并发 8 ⇒ ~15MiB 块）⇒ 触发 CDN 403；此时 `cfg.BlockSize` 是**无效**的
+// （它只在 `RangeGenMode_BlockSize` 下生效）——这正是「大文件读回 403、小文件正常」的根因。
+const maxDownloadBlockSize = 4 << 20 // 4MiB
+
+// newDownloadConfig 构造下载器配置：块模式 + 4MiB 块（≤ CDN/库上限）+ 断点文件。
+func newDownloadConfig(resumePath string) *downloader.Config {
+	cfg := downloader.NewConfig()
+	cfg.MaxParallel = 8
+	cfg.Mode = transfer.RangeGenMode_BlockSize
+	cfg.BlockSize = maxDownloadBlockSize
+	cfg.InstanceStateStorageFormat = downloader.InstanceStateStorageFormatJSON
+	cfg.InstanceStatePath = resumePath
+	return cfg
+}
+
+// newDownloadHTTPClient 构造下载器用的 HTTP 客户端：**每实例独立连接池**（禁共享
+// DefaultTransport）+ **网盘客户端 UA**。
+//
+// 为什么必须设 UA：下载器 worker 走 `client.Req(...)`，库的 `Req` 会把 `HTTPClient.UserAgent`
+// 写入请求头；而百度 CDN 对 **Range** 请求要求 `netdisk;P2SP;...`（缺/错 ⇒ 403 sign error 31362，
+// 2026-10-22 实测）。不设 ⇒ 继承 `NewHTTPClient()` 的**浏览器 UA** ⇒ 大文件（并行 Range）读取 403、
+// 小文件（单请求）正常。库自身 pan 下载流程的等效配置是 `PanUA`（默认 = `baidupcs.NetdiskUA`）。
+func newDownloadHTTPClient() *requester.HTTPClient {
+	cli := requester.NewHTTPClient()
+	cli.SetUserAgent(bdlib.NetdiskUA)
+	return cli
+}
+
 // baiduDURLCheck 用 Range 请求探测下载直链的**文件总大小**。
 //
 // P1 修复（2026-10-21）：此前直接取 `resp.ContentLength` / `Content-Length` 作为总大小，
@@ -128,6 +165,10 @@ func baiduDURLCheck(ctx context.Context, cli *requester.HTTPClient, durl string)
 	if err != nil {
 		return 0, nil, err
 	}
+	// **必须携带网盘客户端 UA**（与 syncfs_range.go 同因，2026-10-22 实测）：百度 CDN 对 Range
+	// 请求要求 `netdisk;P2SP;...`，缺/错 ⇒ 403 `sign error (31362)`。注意 `cli.Do(req)` 是**裸**
+	// http.Client.Do ⇒ 不应用 `HTTPClient.UserAgent`（那只在 `Req()` 里生效）⇒ 此处必须显式设。
+	req.Header.Set("User-Agent", bdlib.NetdiskUA)
 	// 探测区间与上游对齐（32KiB）：返回的 body 与首个 Range 块一致，避免探测浪费带宽。
 	req.Header.Set("Range", "bytes=0-32767")
 	resp, err := cli.Do(req)
@@ -136,6 +177,14 @@ func baiduDURLCheck(ctx context.Context, cli *requester.HTTPClient, durl string)
 			_ = resp.Body.Close()
 		}
 		return 0, nil, err
+	}
+	// 非 2xx（既不 200 也不 206）⇒ 把**响应体**带进错误：百度侧的 error_code/error_msg
+	// （如 31362 sign error / 31066 file does not exist / 风控）是定性的唯一依据，
+	// 此前只报 "403 Forbidden" 无法区分「UA/dlink 问题」与「可见性/权限问题」（实测踩过）。
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		_ = resp.Body.Close()
+		return 0, nil, fmt.Errorf("baidupcs: dlink 探测 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return probeTotalSize(resp), resp, nil
 }
