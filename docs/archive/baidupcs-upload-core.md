@@ -1,7 +1,9 @@
 # 设计：BaiduPCS 自研分片上传内核（复用 audit WAL + recovery）
 
-> 状态：**待评审**（2026-11-08）。目标文件：`pkg/volume/ext/baidupcs/uploadcore/`
-> 关联：`docs/external-dependencies.md` §7.8.1（90s 实测）、PR #1056（库上传 fail-closed）
+> **状态：已收敛并归档（2026-11-09）**。实现已全部落地（PR #1057/#1065/#1072–#1080/#1081/#1082），
+> 权威说明见 `docs/architecture.md` §「上传内核（`pkg/volume/ext/baidupcs/uploadcore`）」与
+> `docs/external-dependencies.md §7.8.x`。本文件保留**设计过程与决策背景**（为什么这么设计、
+> 踩过什么坑），不再作为实现事实源；其中的"待评审"状态已作废、阶段计划（S1–S5）均已完成。
 
 ## 1. 问题与目标
 

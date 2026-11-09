@@ -60,7 +60,8 @@ type StorageConfig struct {
 	// nil ⇒ 内核用空 WAL（流程一致，但无跨进程续传）。
 	Audit *audit.Service
 	// UploadConcurrency 是**每卷同时进行的上传动作数上限**（见 upload_gate.go）：
-	// 0 或负数 ⇒ DefaultUploadConcurrency(4)；> MaxUploadConcurrency(32) ⇒ 钳到上限。
+	// **0 或负数 ⇒ 不启用闸门**（缺省，保持既有并发行为）；显式 1..32 才启用
+	// （> MaxUploadConcurrency(32) ⇒ 钳到上限；建议值见 RecommendedUploadConcurrency）。
 	// 用途：防「块级并发 × 分片并发 × 卷数」叠乘触发百度风控（31034）。
 	UploadConcurrency int
 }

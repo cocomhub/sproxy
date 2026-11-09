@@ -5,7 +5,7 @@ package baidupcs
 
 // uploadcore_wiring.go —— 把自研上传内核接到 `Storage.putAttempt` 的**上传一步**（S5 接线）。
 //
-// 设计：docs/design-baidupcs-upload-core.md §5「回退」。
+// 设计：docs/archive/baidupcs-upload-core.md §5「回退」。
 // 开关语义（`StorageConfig.UploadCore`，**空 = auto** —— 硬规则 7c：string 配置默认空字符串）：
 //
 //	legacy  : 只用既有路径（binaryAdapter 二进制优先 / libraryAdapter 库 MultiUploader）

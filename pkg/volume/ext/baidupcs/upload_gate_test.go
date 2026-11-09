@@ -91,8 +91,8 @@ func TestStorage_UploadGate_Normalization(t *testing.T) {
 	for _, tc := range []struct {
 		in, want int
 	}{
-		{0, DefaultUploadConcurrency},
-		{-3, DefaultUploadConcurrency},
+		{0, 0}, // 缺省 = 不启用（用户裁定：显式配置才限流）
+		{-3, 0},
 		{1, 1},
 		{4, 4},
 		{100, MaxUploadConcurrency},
@@ -215,5 +215,43 @@ func TestStorage_PutDeferred_GoesThroughUploadGate(t *testing.T) {
 	}
 	if got := ad.peakN(); got > 1 {
 		t.Fatalf("闸门=1 时并发峰值应 ≤1，got %d", got)
+	}
+}
+
+// TestStorage_UploadGate_DisabledByDefault **缺省不启用**（用户裁定 2026-11-09）：
+// 未配置 `UploadConcurrency` 时并发上传**不受限**（保持既有行为、零副作用）。
+// 变异：把缺省改回"默认 4" ⇒ 本用例红（峰值会被压到 ≤4）。
+func TestStorage_UploadGate_DisabledByDefault(t *testing.T) {
+	t.Parallel()
+	ad := newGatedAdapter()
+	ad.gate = make(chan struct{})
+	ad.entered = make(chan struct{}, 16)
+	st := newGateStorage(t, ad, 0) // 0 = 缺省
+	if st.uploadGate != nil || st.uploadLimit != 0 {
+		t.Fatalf("缺省不得装配闸门：limit=%d gate=%v", st.uploadLimit, st.uploadGate)
+	}
+	const n = 8
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("dir/d%d.bin", i)
+			if _, err := st.Put(context.Background(), key, strings.NewReader("x")); err != nil {
+				t.Errorf("Put %s: %v", key, err)
+			}
+		}(i)
+	}
+	for range n { // 8 个必须全部进入（闸门未启用 ⇒ 不被限量）
+		select {
+		case <-ad.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("缺省不应限流：等待全部并发上传进入超时")
+		}
+	}
+	close(ad.gate)
+	wg.Wait()
+	if got := ad.peakN(); got != n {
+		t.Fatalf("缺省应达 %d 并发，got %d", n, got)
 	}
 }

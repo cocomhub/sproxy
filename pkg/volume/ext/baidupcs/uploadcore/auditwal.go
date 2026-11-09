@@ -4,7 +4,7 @@
 package uploadcore
 
 // auditwal.go —— 把内核 WAL 语义接到 **pkg/audit 作用域**（复用既有审计与恢复能力，
-// 不新造持久化/恢复框架；设计 docs/design-baidupcs-upload-core.md §4）。
+// 不新造持久化/恢复框架；设计 docs/archive/baidupcs-upload-core.md §4）。
 //
 // 映射规则（每个上传会话一个作用域）：
 //   - ScopeID = upload.<volume>.<sha256(targetPath)[:16]>（**确定性** ⇒ 崩溃后可定位同一会话）；

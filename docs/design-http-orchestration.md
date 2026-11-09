@@ -1,6 +1,6 @@
 # 设计：通用 HTTP 编排基座（`pkg/pipe` + `pkg/httpc`）
 
-> 状态：**待评审**（2026-11-08）。动机来自 `docs/design-baidupcs-upload-core.md`：
+> 状态：**待评审**（2026-11-08）。动机来自 `docs/archive/baidupcs-upload-core.md`：
 > 百度上传「不可取消 + ~90s」的根因是**把超时/重试策略藏在第三方库里**；同样的病在
 > 本仓库**自己**的 89 处 HTTP 调用点上以「各写一遍」的形式存在。
 

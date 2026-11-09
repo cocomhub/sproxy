@@ -176,7 +176,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `volumes[].extra.max_bytes` | size | `0` | 封装卷自身上限（`0` = 不设自身上限，**继承源卷池约束**）。封装卷容量池挂在有效源卷池之下（父链聚合、同一字节不双计） |
 | `volumes[].extra.encrypt_key_file` | string | (空) | at-rest 加密密钥文件路径（raw 32B 或 base64 32B）。`encrypt=true` 时必填（缺失启动失败）；与 `credential_store.master_key_file` 同语义，`openssl rand -base64 32` 生成 |
 | `volumes[].extra.cipher` | size | `64KiB` | at-rest 加密的分块大小（仅 `encrypt=true` 时生效；非法值 fail-closed）。预留给未来多算法选型——当前仅 `aes-256-gcm` 一种 |
-| `volumes[].extra.*` | object | (空) | 后端类型特有配置（外部后端构造器读取，如 baidupcs 的 `bduss`/`baidu_root`/`binary_path`/`upload_core`（后者：空=auto 内核优先；legacy=只用既有路径；nucleus=只用内核；`upload_concurrency`：每卷同时进行的上传动作数上限，缺省/0=默认 4，范围 1..32，越界 fail-closed——防"块级并发 × 分片并发 × 卷数"叠乘触发网盘风控）、s3 的 `endpoint`/`bucket`/`access_key`/`secret_key`）。**含凭据的键在 `GET /api/volumes` / `GET /api/volumes/user` 回显时被打码** |
+| `volumes[].extra.*` | object | (空) | 后端类型特有配置（外部后端构造器读取，如 baidupcs 的 `bduss`/`baidu_root`/`binary_path`/`upload_core`（后者：空=auto 内核优先；legacy=只用既有路径；nucleus=只用内核；`upload_concurrency`：每卷同时进行的上传动作数上限，**缺省/0=不启用（不额外限流）**，显式 1..32 才启用，越界 fail-closed——防"块级并发 × 分片并发 × 卷数"叠乘触发网盘风控（建议值 4））、s3 的 `endpoint`/`bucket`/`access_key`/`secret_key`）。**含凭据的键在 `GET /api/volumes` / `GET /api/volumes/user` 回显时被打码** |
 
 配置示例见 `config.example.yaml`。
 

@@ -37,6 +37,51 @@ sproxy v2 引入了全新的分层传输架构，在原有的文件服务与加�
 **已收敛的重复实现**：`pkg/backup` 的退避重试循环（原自写 100ms×2ⁿ）→ `pipe.Retry`；
 `pkg/llmgate`、`pkg/aiembed` 的外部调用 → `httpc.Client`（获 429/5xx 重试 + 取消 + 打点）。
 
+## 上传内核（`pkg/volume/ext/baidupcs/uploadcore`，2026-11-09）
+
+**问题**：嵌入式调用 fork 库的 `uploader.MultiUploader` 时上传**不可取消、耗时可到 ~90s**
+（库自建 client 超时不可注入、退避用 `time.Sleep` 不听 ctx；实测见
+`docs/external-dependencies.md §7.8.1`）。⇒ 自研上传编排（**不是**重造 PCS 协议）。
+
+**形态**：5 阶段状态机 + **依赖倒置接口**（内核不认识库，全部经窄接口注入）：
+
+```
+uploadcore.Uploader（唯一编排者，全程 ctx 可控）
+  probe  精确列举父目录 ⇒ 目标已存在且同 md5 ⇒ 幂等完成（短路）
+  rapid  pcs.RapidUpload ⇒ {uploadid | 秒传命中即完成}
+  slices 受限并发（pipe.RunParts）逐片 UploadTmpFile，**每片成功即写 WAL**
+  merge  pcs.UploadCreateSuperFile(uploadid, policy, size, checksumMap)
+  verify meta md5 比对 + **秒传刷新自愈**（有界重试退避）
+```
+
+接口（`Prober`/`RapidProvider`/`Slicer`/`PartUploader`/`Merger`/`Verifier`/`Repairer`/`Recorder`）
+由 `uploadcore_adapter.go` 的 `ucAdapter` 实现；生产经窄接口 `ucPCS` 转发 fork 库。
+**为什么窄接口而非直接依赖库**：既便于测试注入（无网络锁定协议形状），也避免内核被库的
+超时/退避语义绑架。
+
+**关键语义（都有测试锁定）**：
+
+| 语义 | 说明 | 锁定 |
+|---|---|---|
+| **缺什么补什么** | 上传是「暂存 → 逐片 → 合并 → 校验」四步一体；**漏 merge ⇒ 远端永远不出现该文件** | `TestUpload_SmallFile_OnePartPlusMerge` |
+| **会话失效重建** | 分片接口返回 **31066** ⇒ 会话临时区失效 ⇒ 重走 rapid 拿新 `uploadid` 并 **全量重传**（旧分片属旧会话），重建**有界**（2 次） | `TestUpload_SessionExpiredRebuildsSession` + L2 `TestL2_UploadPart_SessionExpiredMapsToSentinel` |
+| **可取消** | 每阶段/每分片带 ctx；退避经 `pipe.Env` 注入（可中断）；最坏退出 = 单请求超时 | `TestUpload_CancelStopsPromptly` |
+| **可恢复** | 每文件一个 `pkg/audit` 作用域 + 逐片 state record；`pkg/recovery` 扫描未完成作用域交给 sink（**只登记、不发请求**），真正续传在下次上传同文件时由 `ResumeScope` 完成 | `TestUpload_ResumeSkipsCompletedParts`、`TestUploadLegacies_EndToEndRegistersUnfinishedUpload` |
+| **降级可恢复** | `auto`：内核失败 ⇒ 本进程降级既有路径 + **冷却窗口**（5min，过后自动重试内核并计数），**不再永久降级** | `TestStorage_CoreDegrade_CooldownAllowsRetry` |
+| **统一入口** | `Put` 与 `PutDeferred` 走同一 `uploadStaged`（否则绕过内核、绕过闸门） | `TestStorage_PutDeferred_GoesThroughUploadGate` |
+| **并发闸（缺省不启用）** | `extra.upload_concurrency` 显式配置才限制「每卷同时进行的上传动作数」；缺省保持既有并发（零副作用） | `TestStorage_UploadGate_{DisabledByDefault,LimitsConcurrency,WaitCancellation}` |
+
+**配置**（`volumes[].extra`）：`upload_core` = 空/auto（内核优先 + 失败降级）/ `legacy`（只用既有路径）/
+`nucleus`（只用内核，失败即报错）；`upload_concurrency` = 缺省/0 不启用，显式 1..32 启用。
+
+**可观测**：阶段打点 `logPhase`（`stage|precheck|list|upload|postcheck` + `elapsed_ms`/`ctx_err`）；
+内核路径分因计数 → `/metrics` 的 `sproxy_volume_upload_core_total{volume,mode}`。
+
+**测试三层**：L1 内核单测（fake 注入：状态机/取消/重试/续传）+ **L2 契约**（fake `ucPCS` 锁
+「adapter ↔ 百度协议」形状，无网络）+ L3 真实网盘 e2e（`-tags e2e`，`BAIDUPCS_E2E_ROOT` 门控）。
+
+> 设计过程与决策记录见 `docs/archive/baidupcs-upload-core.md`（已收敛，保留背景）。
+
 ## 分层架构
 
 ```
