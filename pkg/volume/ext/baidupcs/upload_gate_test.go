@@ -56,6 +56,9 @@ func (g *gatedAdapter) Upload(ctx context.Context, localPath, targetPath string,
 			return ctx.Err()
 		}
 	}
+	// 对嵌入 fake adapter 的调用**串行化**：`fakeStorageAdapter.files` 是无锁 map，
+	// 并发 Put（本文件用例刻意制造并发）会触发 `-race`（CI 实测）。闸门的并发语义由
+	// 上方的 gate/计数器观测，不依赖真并发写内存 map。
 	err := g.fakeStorageAdapter.Upload(ctx, localPath, targetPath, overwrite)
 	g.mu.Lock()
 	g.cur--

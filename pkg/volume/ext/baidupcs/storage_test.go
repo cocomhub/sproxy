@@ -22,6 +22,10 @@ import (
 
 // fakeStorageAdapter 是 Storage 测试用的内存 adapter（实现 Adapter 接口）。
 type fakeStorageAdapter struct {
+	// mu 保护下面的可变状态：并发用例（如 upload_gate_test.go 的闸门用例）会有多个 goroutine
+	// 同时经 Put 调用本 adapter（含「上传写」与「上传后复核读」重叠）⇒ 无锁 map 会触发 `-race`。
+	// 加锁对既有单线程用例透明（零行为变化）。
+	mu    sync.Mutex
 	files map[string]string   // remote path → content
 	dirs  map[string]struct{} // 目录标记（remote path → exists）
 	dlink string              // canned 直链（DirectLink 返回）；空 = 不支持直链
@@ -35,6 +39,9 @@ func newFakeStorageAdapter() *fakeStorageAdapter {
 }
 
 func (f *fakeStorageAdapter) Upload(ctx context.Context, localPath, targetPath string, overwrite bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return err
@@ -49,6 +56,9 @@ func (f *fakeStorageAdapter) Upload(ctx context.Context, localPath, targetPath s
 }
 
 func (f *fakeStorageAdapter) Download(ctx context.Context, remotePath, localPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	data, ok := f.files[remotePath]
 	if !ok {
 		return errNotFound
@@ -58,6 +68,9 @@ func (f *fakeStorageAdapter) Download(ctx context.Context, remotePath, localPath
 
 // Move 服务端移动（源移除、目标覆盖）。
 func (f *fakeStorageAdapter) Move(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	data, ok := f.files[from]
 	if !ok {
 		return errNotFound
@@ -70,6 +83,9 @@ func (f *fakeStorageAdapter) Move(ctx context.Context, from, to string) error {
 
 // Copy 服务端复制（源保留）。
 func (f *fakeStorageAdapter) Copy(ctx context.Context, from, to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	data, ok := f.files[from]
 	if !ok {
 		return errNotFound
@@ -81,6 +97,9 @@ func (f *fakeStorageAdapter) Copy(ctx context.Context, from, to string) error {
 
 // Delete 服务端删除（幂等：不存在不报错）。
 func (f *fakeStorageAdapter) Delete(ctx context.Context, remotePath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if _, ok := f.files[remotePath]; !ok {
 		return nil // 幂等：缺失不报错
 	}
@@ -101,6 +120,9 @@ func (f *fakeStorageAdapter) markDirs(remotePath string) {
 // List 返回 remotePath 下单层条目（目录+文件混合，不递归）。实现 metadataProvider。
 // 条目 Key 为**完整 remote 路径**（调用方 Storage.List 剥 root 得相对路径）。
 func (f *fakeStorageAdapter) List(ctx context.Context, remotePath string) ([]ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -168,6 +190,9 @@ func (f *fakeStorageAdapter) listDirsLocked(prefix, remotePath string, seen map[
 // Meta 返回单个路径元信息（目录/文件）。实现 metadataProvider。
 // ETag = 内容 md5（对齐百度 ETag 语义；供 Put 的 md5 刷新复核通过）。
 func (f *fakeStorageAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMeta, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -191,6 +216,9 @@ var _ metadataProvider = (*fakeStorageAdapter)(nil)
 
 // DirectLink 实现 directLinkProvider（fake 版）：返回 canned dlink（空 = 不支持）。
 func (f *fakeStorageAdapter) DirectLink(ctx context.Context, remotePath string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	if err := ctx.Err(); err != nil {
 		return "", true, err
 	}
