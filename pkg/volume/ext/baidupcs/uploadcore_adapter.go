@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs/uploadcore"
@@ -259,7 +260,7 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 	gotCS, uerr := a.pcs.UploadTmpFile(uploadID, a.remote, p.Seq, p.Offset,
 		io.NewSectionReader(f, p.Offset, p.Size), p.Size)
 	if uerr != nil {
-		return fmt.Errorf("baidupcs: 上传分片 %d: %w", p.Seq, uerr)
+		return mapPartErr(p.Seq, uerr)
 	}
 	var localMD5 string
 	if a.stg != nil && p.Seq < len(a.stg.blockMD5s) {
@@ -271,6 +272,33 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 }
 
 // Merge 合并分片（复用既有 CreateSuperFile = pcs.UploadCreateSuperFile）。
+// mapPartErr 把分片上传错误映射为**内核可识别的形态**：
+// 百度在会话临时区不存在时返回 **31066（file does not exist）** ⇒ 映射为
+// `uploadcore.ErrSessionExpired`，由内核 `runPartsWithRebuild` 重建会话后全量重传
+// （设计 §5）。分片接口报"文件不存在"**只可能**是会话失效 —— 目标正式文件此时尚未创建，
+// 不存在"目标真的不存在"的歧义。
+func mapPartErr(seq int, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isSessionExpiredErr(err) {
+		return fmt.Errorf("%w: 上传分片 %d: %w", uploadcore.ErrSessionExpired, seq, err)
+	}
+	return fmt.Errorf("baidupcs: 上传分片 %d: %w", seq, err)
+}
+
+// isSessionExpiredErr 判定"上传会话失效"：库把 31066 渲染为「文件或目录不存在」
+// （fork `pcserror/pcserrorinfo.go:112`），或经我们的 `os.ErrNotExist` 包装成英文文案。
+func isSessionExpiredErr(err error) bool {
+	s := err.Error()
+	for _, tok := range []string{"31066", "文件或目录不存在", "文件不存在", "file does not exist"} {
+		if strings.Contains(s, tok) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *ucAdapter) Merge(_ context.Context, uploadID string, req uploadcore.Request, parts []uploadcore.Part) error {
 	// 记录会话 id：校验失败后的**秒传刷新**必须带上它（库 upload_task_unit.go:236 同构；
 	// 百度 v2 create/precreate 需会话 id，实测缺 uploadid 直接 400）。
