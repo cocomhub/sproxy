@@ -5,7 +5,7 @@ package baidupcs
 
 // rapidcalc.go —— rapidupload（秒传）参数计算：**全部离线可算、可单测**。
 //
-// 设计依据 docs/design-baidupcs-upload-core.md（S5）：内核的 Rapid 阶段需要 upload_id，
+// 设计依据 docs/archive/baidupcs-upload-core.md（S5）：内核的 Rapid 阶段需要 upload_id，
 // 而 upload_id 只能由 rapidupload 响应给出（库 internal/pcsfunctions/pcsupload/upload_task_unit.go:281-283），
 // 因此必须先算出 rapidupload 的**完整参数**再发请求。
 //

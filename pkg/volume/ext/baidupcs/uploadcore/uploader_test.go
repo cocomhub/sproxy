@@ -5,7 +5,7 @@ package uploadcore
 
 // uploadcore 测试（L1）：状态机 + 取消 + 重试上限 + 大小分流 + WAL 逐片记录。
 //
-// 设计依据：docs/design-baidupcs-upload-core.md
+// 设计依据：docs/archive/baidupcs-upload-core.md
 // 全部依赖经 Options 注入（fake），**不触网、不用 time.Sleep**（退避用注入的 Sleep）。
 
 import (

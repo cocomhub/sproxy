@@ -284,6 +284,7 @@ phase=postcheck elapsed_ms=0      err="context deadline exceeded"
 | **`superfile2/upload`（`UploadTmpFile`）只写"会话临时区"，必须再 `createsuperfile` 才成为正式文件** | 实测：只上传一片不合并 ⇒ 内核报成功但远端**从未出现该文件**，既有复核 3 轮均空 ETag（284s ⇒ ErrTransient）；补 merge 后 2.87s 成功且 md5 一致 |
 | **新对象列举/元信息可见性有延迟**（§7.8 同族）⇒ 上传后**立即**严格校验会假失败；权威校验应在带等待窗口的链路（`putCheckAfterUpload`，`statVisibleWait`） | 实测：上传成功后立即列举未见 ⇒ 内核 verify 假失败；改为"能看到时要求一致"后通过 |
 | **小文件不省 merge**：任意大小都是「1 片 + 合并」（与库 `MultiUploader` 一致） | 同上第 2 条 |
+| **会话失效（31066）⇒ 必须重建会话**：分片接口报「文件或目录不存在」= 会话临时区失效（目标正式文件尚未创建）⇒ 重走 rapid 拿**新 `uploadid`** 并**全量重传**（旧分片属旧会话）；重建**有界**（2 次） | 设计 §5；实现与锁定：`uploadcore.ErrSessionExpired` + `runPartsWithRebuild`；L1 `TestUpload_SessionExpiredRebuildsSession`、L2 `TestL2_UploadPart_SessionExpiredMapsToSentinel`（31066 三形态 + 反向对照） |
 | **内核路径耗时 2.87s（1MiB）**，同环境库 `MultiUploader` 路径实测 ~90s | `TestE2E_UploadCoreNucleus` vs 早前 P7 打点 |
 
 > 锁定方式：`TestE2E_UploadCoreNucleus`（真实网盘，nucleus 不降级 ⇒ 成功即证明内核可用；
@@ -402,9 +403,30 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 > `TestE2E_CompareUploadPaths`（`E2E_UPLOAD_MB`/`E2E_ARMS`/`E2E_RANDOM` 旋钮）；
 > 单测锁定见 `l2_contract_test.go` 的 `TestUCAdapter_Repair_PassesSessionUploadID`。
 
+#### 7.8.4 负面结论：`httptest` 直驱 fork 库**不可行**（2026-11-09 两次实测，避免重复探索）
+
+**目标**：用 `httptest` 假百度 + 自定义 `RoundTripper` 重写 host，在 CI 里锁定「库的 HTTP 行为 +
+我们的应对」（错误码、请求形状）。
+
+**实测（两种注入方式都失败）**：
+1. `NewPCSWithClient(266719, hc)` + `hc.Client.Transport = rewriteTransport`，并注入 cookie jar 的
+   `BDUSS`/`STOKEN` ⇒ **一个请求都没发出**，库本地报 `31045 user not exists`；
+2. 改用**库实际持有的** client（`pcs.GetClient()`）替换其 `Transport` ⇒ `CacheUK()` 仍报错，
+   `rewriteTransport` **记录为空**（请求未经过我们注入的 Transport）。
+
+**结论**：障碍在**库的内部 client 管理**（`GetClient()` 返回的实例未必是请求实际使用的那个），
+**不值得为测试反向适配生产代码**。⇒ 本仓的「库 + HTTP 协议」层锁定改走 **窄接口注入**
+（`ucPCS`：`CacheUK`/`RapidUpload`/`FakeRapidUpload`/`UploadTmpFile`/`CreateSuperFile`），
+见 `pkg/volume/ext/baidupcs/l2_contract_test.go` —— 无网络、更稳。
+
+> 订正记录：早前曾把现象记为「库在发 HTTP 前做会话/uk 前置检查」；实测表明请求**确实发生**，
+> 但**未走我们注入的 Transport**。勿再据旧结论设计 httptest 方案。
+
 #### 7.8.3.1 可观测：内核"在不在跑、为何没跑"（2026-11-08 落地）
 
-> 注：`skipped_oversize` 为**预留口径**（原尺寸护栏已随 §7.8.3.2 的修复移除，当前恒 0）。
+> 注：`skipped_oversize` 是**废弃口径**（原尺寸护栏已随 §7.8.3.2 的修复移除，当前**恒 0**）。
+> 该字段暂保留以兼容 `/metrics` 的既有序列契约（删除会改 `UploadCoreStatsCounts` 签名与
+> `sproxy_volume_upload_core_total` 的 `mode` 枚举 ⇒ 单独小 PR 处理，勿在无关改动里顺手删）。
 
 **领域层计数**（`pkg/volume/ext/baidupcs`，原子计数，随时可读）：
 

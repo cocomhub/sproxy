@@ -13,7 +13,7 @@
 //   - 库退避是 `time.Sleep`（`taskframework/executor.go:135` + `pcsfunctions/common.go:8-13`），
 //     **不听 ctx** ⇒ 表现为「卡 ~90s 且不可取消」。
 //
-// 本内核的设计目标与约束见 `docs/design-baidupcs-upload-core.md`：
+// 本内核的设计目标与约束见 `docs/archive/baidupcs-upload-core.md`：
 // 可取消（分片级 ctx）、可观测（WAL 逐片记录 + 阶段）、可恢复（audit scope 回放）、
 // 幂等（probe 短路 + 续传只补缺失片）、可验证（依赖全部注入 ⇒ httptest 可锁定）。
 //

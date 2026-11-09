@@ -5,7 +5,7 @@ package baidupcs
 
 // uploadcore_adapter.go —— 把**本包既有能力**适配到自研上传内核（S5 装配）。
 //
-// 设计：docs/design-baidupcs-upload-core.md。内核只做"编排"（状态机/并发/重试/取消/WAL/续传），
+// 设计：docs/archive/baidupcs-upload-core.md。内核只做"编排"（状态机/并发/重试/取消/WAL/续传），
 // 协议细节与 checksum 全部复用既有实现，**避免第二份实现**：
 //
 //	Prober    ← Storage.metaByExactList（列举取 md5；绕开会挂起的 Meta）
