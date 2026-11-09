@@ -28,6 +28,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/httpc"
 	"github.com/cocomhub/sproxy/pkg/netutil"
+	"github.com/cocomhub/sproxy/pkg/waitq"
 )
 
 // maxPutAttempts 限制上传后 ETag 复核不匹配时的重试次数，避免 Baidu PCS
@@ -58,6 +59,10 @@ type StorageConfig struct {
 	// Audit 是可选审计服务：装配后内核用 `pkg/audit` 作用域 WAL（崩溃续传）；
 	// nil ⇒ 内核用空 WAL（流程一致，但无跨进程续传）。
 	Audit *audit.Service
+	// UploadConcurrency 是**每卷同时进行的上传动作数上限**（见 upload_gate.go）：
+	// 0 或负数 ⇒ DefaultUploadConcurrency(4)；> MaxUploadConcurrency(32) ⇒ 钳到上限。
+	// 用途：防「块级并发 × 分片并发 × 卷数」叠乘触发百度风控（31034）。
+	UploadConcurrency int
 }
 
 // _ 编译期断言：Storage 满足 StorageAPI（sync.FS 适配层消费的最小接口）。
@@ -105,10 +110,24 @@ type Storage struct {
 	auditSvc *audit.Service
 	// coreMode 是归一化后的上传内核开关（"auto"/"nucleus"/"legacy"）。
 	coreMode string
-	// coreDisabled 是本进程的降级标记（auto 模式内核失败一次即置位，避免每个文件都踩同一坑）。
-	coreDisabled atomic.Bool
+	// coreDisabledAt 是本进程的降级时刻（UnixNano；0 = 未降级）。**G3**：降级带**冷却窗口**，
+	// 窗口过后允许再试内核——此前"一次失败即本进程永久降级"会让偶发抖动造成能力长期丢失。
+	coreDisabledAt atomic.Int64
+	// coreDegradeRetry 是"降级冷却结束后重新尝试内核"的次数（可观测：降级是否真有恢复机会）。
+	coreDegradeRetry atomic.Int64
+	// coreCooldown 是降级冷却窗口（结构体私有字段；NewStorage 注入默认值，测试可缩短）。
+	coreCooldown time.Duration
+	// coreNow 是时钟（默认 time.Now；测试注入假时钟，避免 sleep）。
+	coreNow func() time.Time
+	// coreUpload 是内核上传动作（默认 s.uploadViaCore；测试注入以确定性驱动成功/失败）。
+	coreUpload coreUploadFunc
 	// 上传内核路径统计（见 UploadCoreStats；原子计数，无锁）。
 	coreStatUsed, coreStatSkippedOversize, coreStatDegraded, coreStatFailed, coreStatLegacyMode, coreStatNoDeps atomic.Int64
+	// uploadGate 是每卷上传并发闸（G2，见 upload_gate.go）；uploadSlots 是其槽位资源适配器。
+	uploadGate  *waitq.Queue
+	uploadSlots *uploadSlotResource
+	// uploadLimit 是归一化后的并发上限（测试/日志/指标可读）。
+	uploadLimit int
 }
 
 // UploadCoreStats 是上传内核的**累计路径统计**（生产可观测：内核到底在不在跑、为何没跑）。
@@ -136,8 +155,12 @@ func (s *Storage) UploadCoreStats() UploadCoreStats {
 	}
 }
 
-// CoreDisabled 报告本进程是否已因内核失败降级（auto）。
-func (s *Storage) CoreDisabled() bool { return s.coreDisabled.Load() }
+// CoreDisabled 报告内核是否处于**降级冷却窗口内**（auto）。
+// G3：窗口过后会自动重新尝试内核 ⇒ false（不再永久降级）。
+func (s *Storage) CoreDisabled() bool { return s.coreDegraded(s.now()) }
+
+// CoreDegradeRetry 返回"降级冷却结束后重新尝试内核"的累计次数（可观测降级是否真会恢复）。
+func (s *Storage) CoreDegradeRetry() int64 { return s.coreDegradeRetry.Load() }
 
 // NewStorage 创建百度网盘 Storage。
 // Adapter 为空时默认装配 binaryAdapter（二进制优先）+ libraryAdapter（库兜底，
@@ -179,10 +202,14 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 		})
 	}
 
+	limit := normalizeUploadConcurrency(cfg.UploadConcurrency)
+	gate, slots := newUploadGate(limit)
 	st := &Storage{
 		root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger,
 		httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
 		auditSvc: cfg.Audit, coreMode: normalizeUploadCoreMode(cfg.UploadCore),
+		coreCooldown: defaultCoreDegradeCooldown, coreNow: time.Now,
+		uploadGate: gate, uploadSlots: slots, uploadLimit: limit,
 	}
 	return st, nil
 }
@@ -1378,7 +1405,9 @@ func (s *Storage) PutDeferred(ctx context.Context, key, stagedPath string, size 
 	if err != nil {
 		return err
 	}
-	if upErr := s.adapter.Upload(ctx, st.tmpPath, remote, true); upErr != nil {
+	// G8：与 `Put` 走**同一上传入口**（`uploadStaged`）——否则既绕过并发闸门（G2），
+	// 也绕过上传内核（无续传/无分片并发/无内核收益）✗。
+	if upErr := s.uploadStaged(ctx, key, remote, st); upErr != nil {
 		return mapPCSError(upErr)
 	}
 	s.invalidateDlink(key) // 覆盖写同名旧对象 ⇒ 失效旧直链
