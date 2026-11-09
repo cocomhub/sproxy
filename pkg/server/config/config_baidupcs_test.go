@@ -59,7 +59,7 @@ func TestValidate_Volumes_BaidupcsType(t *testing.T) {
 				Extra: map[string]any{"bduss": "test-bduss", "upload_concurrency": 2},
 			})
 		}, ""},
-		{"volumes[] type=baidupcs + extra.upload_concurrency=0 → 通过（缺省语义）", func(c *Config) {
+		{"volumes[] type=baidupcs + extra.upload_concurrency=0 → 通过（缺省=不启用闸门）", func(c *Config) {
 			c.Volumes = append(c.Volumes, VolumeConfig{
 				Name: "mydisk", Type: "baidupcs",
 				Extra: map[string]any{"bduss": "test-bduss", "upload_concurrency": 0},

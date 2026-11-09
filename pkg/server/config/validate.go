@@ -320,7 +320,7 @@ func validateBaidupcsVolumeExtras(v *VolumeConfig) error {
 			return fmt.Errorf("卷 %q（type=baidupcs）的 extra.upload_core=%q 非法（只接受 auto/legacy/nucleus 或留空=auto）", v.Name, core)
 		}
 	}
-	// upload_concurrency：每卷同时进行的上传动作数上限（并发闸）。缺省/0 ⇒ 领域层默认 4；
+	// upload_concurrency：每卷同时进行的上传动作数上限（并发闸）。**缺省/0 ⇒ 不启用**（不额外限流）；
 	// 非空时必须落在 [1,32]（与领域层 MaxUploadConcurrency 一致）—— 越界 fail-closed，
 	// 避免"想限流但写错"被静默归一（与 upload_core 同一纪律）。
 	if n := extraIntValue(v.Extra["upload_concurrency"]); n != 0 && (n < 1 || n > baidupcsMaxUploadConcurrency) {
