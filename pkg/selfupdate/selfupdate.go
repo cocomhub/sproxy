@@ -336,7 +336,7 @@ func (c *Client) DownloadAndVerify(ctx context.Context, url, dest, wantSHA strin
 	if err != nil {
 		return err
 	}
-	resp, err := c.HTTP.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true})
+	resp, err := c.HTTP.DoOpts(ctx, req, httpc.DoOptions{Idempotent: true, Timeout: 15 * time.Minute})
 	if err != nil && !isHTTPStatusError(err) {
 		return fmt.Errorf("下载失败: %w", err)
 	}
