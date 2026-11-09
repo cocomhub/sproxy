@@ -147,12 +147,12 @@ pending ──probe──▶ (exists&same) ──▶ done
 - `uploadid` / `RapidUpload` 仍经库调用 ⇒ **L2 里这一段的锁定通过「内核接口注入」完成**（内核不认识库，注入 fake `rapidProvider`）；
 - 降级路径必须可观测：`upload_core_fallback_total{reason}` + WARN 日志，且 `legacy` 分支仅由开关进入。
 
-## 附：多分片护栏与 ETag 语义（2026-11-08 追加）
+## 附：多分片校验（2026-11-08 已修复）
 
-真实验收发现：内核在**多分片**（≥2 块，需 merge）上**内容正确**（回读逐字节一致），但百度给的
-**ETag 既非整文件 md5 也非块列表 md5** ⇒ 内核 `Verify` 的「ETag == 整文件 md5」判据对多块文件误报，
-秒传自愈也改不了 ETag 语义。
+多块文件的远端 `md5` 是服务端派生值；要变权威必须做**秒传（rapidupload）刷新**，而且**必须带当前上传
+会话的 `uploadid`**（库实现见 `upload_pcsfunctions/pcsupload/upload_task_unit.go:236`）——我们此前传空
+⇒ 刷新不生效 ⇒ 多块校验恒失败。
 
-因此保留一道尺寸护栏 `coreMaxVerifiedSize = uploadBlockSize (4MiB)`：超限时 `auto` 走既有路径、
-`nucleus` 显式报错。**护栏原因是校验语义，不是内容缺陷**；要让内核覆盖多分片，需先把校验改为
-回读内容比对（或对齐 ETag 语义）——详见 `docs/external-dependencies.md` §7.8.3（含实测三值）。
+修复后（`Merge` 记录会话 id + `Repair` 带 id 刷新 + `verifyWithRepair` 有界退避重试）8/20/120MiB
+多块上传全部收敛为权威 md5；原 `coreMaxVerifiedSize` 尺寸护栏的前提被证伪，**已移除**（安全网改为
+`auto` 降级）。详见 `docs/external-dependencies.md` §7.8.3 / §7.8.3.2。

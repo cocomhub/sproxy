@@ -32,6 +32,7 @@ type fakePCS struct {
 
 	calls     []string // rapid / fake-rapid / part / merge
 	partIDs   []string // 每次分片上传收到的 uploadid
+	rapidIDs  []string // 每次 rapidupload 收到的 uploadid（秒传刷新必须带会话 id）
 	mergeID   string
 	mergeSum  map[int]string
 	rapidType int    // rapidupload 的 return_type（2 = 秒传命中）
@@ -54,10 +55,20 @@ func (f *fakePCS) seq() []string {
 
 func (f *fakePCS) CacheUK() (int64, error) { return 123456789, nil }
 
-func (f *fakePCS) RapidUpload(string, string, string, string, string, string, string,
-	int64, int64, int64, int64, []string) (int, string, error) {
+func (f *fakePCS) RapidUpload(_, _, uploadID, _, _, _, _ string,
+	_, _, _, _ int64, _ []string) (int, string, error) {
 	f.record("rapid")
+	f.mu.Lock()
+	f.rapidIDs = append(f.rapidIDs, uploadID)
+	f.mu.Unlock()
 	return f.rapidType, f.rapidID, nil
+}
+
+// rapidUploadIDs 返回历次 rapidupload 收到的 uploadid（副本）。
+func (f *fakePCS) rapidUploadIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rapidIDs...)
 }
 
 func (f *fakePCS) FakeRapidUpload(string, string, int64) (string, error) {
@@ -203,4 +214,32 @@ func TestL2_AdaptersSatisfyCoreInterfaces(t *testing.T) {
 	var _ uploadcore.PartUploader = (*ucAdapter)(nil)
 	var _ uploadcore.Merger = (*ucAdapter)(nil)
 	var _ = bytes.MinRead // 保持 bytes 引用（供将来加入 body 断言）
+}
+
+// TestUCAdapter_Repair_PassesSessionUploadID 锁定**秒传刷新必须带会话 uploadid**（2026-11-08 根因）。
+//
+// 真实网盘实测：两处 rapid 调用都传空 uploadid ⇒ 刷新不生效 ⇒ 多块文件的远端 md5 保持服务端派生值
+// ⇒ 校验恒失败（甚至 120MiB/30 块）。库实现传的是 `utu.state.Uploadid`（upload_task_unit.go:236）。
+// e2e 不进 CI ⇒ 本单测是这条约束在 CI 中的唯一保障（回退即失去多块收敛能力）。
+func TestUCAdapter_Repair_PassesSessionUploadID(t *testing.T) {
+	t.Parallel()
+	fp := &fakePCS{rapidType: 2} // return_type=2 = 秒传刷新命中
+	st := testStaged(t)
+	ad := newAdapterWithFake(t, fp, st.tmpPath, "/r/remote/x.bin", st)
+	ctx := context.Background()
+
+	if err := ad.Merge(ctx, "UP-42", uploadcore.Request{Size: st.size},
+		[]uploadcore.Part{{Seq: 0, Offset: 0, Size: st.size}}); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if err := ad.Repair(ctx, uploadcore.Request{Size: st.size}); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	ids := fp.rapidUploadIDs()
+	if len(ids) == 0 {
+		t.Fatal("Repair 应调用 rapidupload 刷新")
+	}
+	if got := ids[len(ids)-1]; got != "UP-42" {
+		t.Fatalf("Repair 必须以**会话 uploadid** 调 rapidupload，实际 %q（空 = 刷新不生效）", got)
+	}
 }

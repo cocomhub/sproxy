@@ -143,6 +143,8 @@ type ucAdapter struct {
 	overwrite bool
 	// repair 是自愈回调（秒传刷新）；nil ⇒ 内核视为"无自愈能力"（校验失败即报错）。
 	repair func(ctx context.Context, remote string, st *stagedUpload) (bool, error)
+	// uploadID 是本次上传会话 id（Merge 时记录；**秒传刷新必须带上它**，否则刷新不生效）。
+	uploadID string
 }
 
 // newUCAdapter 构造适配器（staged 参数复用既有 stagedUpload，不重复算 checksum）。
@@ -270,6 +272,9 @@ func (a *ucAdapter) UploadPart(ctx context.Context, uploadID string, p uploadcor
 
 // Merge 合并分片（复用既有 CreateSuperFile = pcs.UploadCreateSuperFile）。
 func (a *ucAdapter) Merge(_ context.Context, uploadID string, req uploadcore.Request, parts []uploadcore.Part) error {
+	// 记录会话 id：校验失败后的**秒传刷新**必须带上它（库 upload_task_unit.go:236 同构；
+	// 百度 v2 create/precreate 需会话 id，实测缺 uploadid 直接 400）。
+	a.uploadID = uploadID
 	size := req.Size
 	if size <= 0 && a.stg != nil {
 		size = a.stg.size
@@ -326,19 +331,43 @@ func (a *ucAdapter) Verify(ctx context.Context, req uploadcore.Request) error {
 	return nil
 }
 
-// Repair 自愈：复用既有秒传刷新（零传输重算远端元信息）。
+// Repair 自愈：用**带 uploadid 的 rapidupload 刷新**把远端 MD5 刷新为权威整文件 md5（零传输）。
+//
+// 参数与首传**同一份 planRapid**（整文件 md5 / sliceMD5 / 随机片段 dataContent / crc32 /
+// offset / dataLength / size / dataTime / block_list），唯一区别是带上会话 uploadID。
+//
+// 为什么必须带 uploadid：库的上传单元刷新时传 `utu.state.Uploadid`（upload_task_unit.go:236）；
+// 百度 v2 的 create/precreate 需要会话 id（早前实测：缺 uploadid ⇒ 400）。此前我们两处 rapid 调用
+// 都传空 ⇒ 刷新不生效，表现为「多块文件校验恒失败」（见 docs/external-dependencies.md §7.8.3.2）。
+//
+// 回退：新路径未成功时仍走既有库路径刷新（`a.repair`，零回归）。
 func (a *ucAdapter) Repair(ctx context.Context, req uploadcore.Request) error {
-	if a.repair == nil {
-		return fmt.Errorf("baidupcs: 未装配自愈能力（秒传刷新）")
+	uk, ukErr := a.pcs.CacheUK()
+	if ukErr != nil {
+		return fmt.Errorf("baidupcs: 获取 uk 失败（需 STOKEN）: %w", ukErr)
 	}
-	hit, err := a.repair(ctx, a.remote, a.stg)
-	if err != nil {
-		return fmt.Errorf("baidupcs: 秒传刷新失败: %w", err)
+	plan, perr := planRapid(a.localPath, uk, time.Now().Unix())
+	if perr != nil {
+		return perr
 	}
-	if !hit {
-		return fmt.Errorf("baidupcs: 秒传刷新未命中（无法自愈，需重传）")
+	returnType, _, rErr := a.pcs.RapidUpload(a.remote, bcPolicy(a.overwrite), a.uploadID,
+		plan.ContentMD5, plan.SliceMD5, plan.DataContent, plan.CRC32,
+		plan.Offset, plan.DataLength, plan.Size, plan.DataTime, a.blockList(plan))
+	if rErr == nil && returnType == 2 {
+		a.logDebug("秒传刷新成功（远端 md5 应刷新为权威整文件 md5）",
+			"upload_id", a.uploadID, "size", plan.Size, "blocks", len(a.blockList(plan)))
+		return nil
 	}
-	return nil
+	if rErr == nil {
+		rErr = fmt.Errorf("秒传刷新未命中（return_type=%d）", returnType)
+	}
+	// 回退：既有库路径刷新（保留原能力）。
+	if a.repair != nil {
+		if hit, fErr := a.repair(ctx, a.remote, a.stg); fErr == nil && hit {
+			return nil
+		}
+	}
+	return fmt.Errorf("baidupcs: 秒传刷新失败: %w", rErr)
 }
 
 // 保证编译期契约（内核依赖全部被满足）。
