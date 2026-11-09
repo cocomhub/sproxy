@@ -123,7 +123,7 @@ type Storage struct {
 	// coreUpload 是内核上传动作（默认 s.uploadViaCore；测试注入以确定性驱动成功/失败）。
 	coreUpload coreUploadFunc
 	// 上传内核路径统计（见 UploadCoreStats；原子计数，无锁）。
-	coreStatUsed, coreStatSkippedOversize, coreStatDegraded, coreStatFailed, coreStatLegacyMode, coreStatNoDeps atomic.Int64
+	coreStatUsed, coreStatDegraded, coreStatFailed, coreStatLegacyMode, coreStatNoDeps atomic.Int64
 	// uploadGate 是每卷上传并发闸（G2，见 upload_gate.go）；uploadSlots 是其槽位资源适配器。
 	uploadGate  *waitq.Queue
 	uploadSlots *uploadSlotResource
@@ -136,23 +136,21 @@ type Storage struct {
 // 口径：Used = 走内核的次数（无论成败）；其余为"没走内核/内核失败"的分因计数。
 // 集成点：装配层可将其桥接到 /metrics（当前外部后端尚无指标面，见 docs/external-dependencies.md §7.8.3）。
 type UploadCoreStats struct {
-	Used            int64 // 走内核（含成功/失败）
-	SkippedOversize int64 // **预留**（原尺寸护栏已随 2026-11-08 秒传刷新修复移除；当前恒 0）
-	Degraded        int64 // auto 模式下内核失败 ⇒ 本进程降级
-	Failed          int64 // 内核失败次数（nucleus 直接报错 / auto 降级）
-	LegacyMode      int64 // upload_core=legacy（显式关闭内核）
-	NoDeps          int64 // 缺少库 client（如 binary-only 卷）⇒ 无法运行内核
+	Used       int64 // 走内核（含成功/失败）
+	Degraded   int64 // auto 模式下内核失败 ⇒ 本进程降级
+	Failed     int64 // 内核失败次数（nucleus 直接报错 / auto 降级）
+	LegacyMode int64 // upload_core=legacy（显式关闭内核）
+	NoDeps     int64 // 缺少库 client（如 binary-only 卷）⇒ 无法运行内核
 }
 
 // UploadCoreStats 返回累计统计（并发安全；可随时调用，用于诊断与指标桥接）。
 func (s *Storage) UploadCoreStats() UploadCoreStats {
 	return UploadCoreStats{
-		Used:            s.coreStatUsed.Load(),
-		SkippedOversize: s.coreStatSkippedOversize.Load(),
-		Degraded:        s.coreStatDegraded.Load(),
-		Failed:          s.coreStatFailed.Load(),
-		LegacyMode:      s.coreStatLegacyMode.Load(),
-		NoDeps:          s.coreStatNoDeps.Load(),
+		Used:       s.coreStatUsed.Load(),
+		Degraded:   s.coreStatDegraded.Load(),
+		Failed:     s.coreStatFailed.Load(),
+		LegacyMode: s.coreStatLegacyMode.Load(),
+		NoDeps:     s.coreStatNoDeps.Load(),
 	}
 }
 
