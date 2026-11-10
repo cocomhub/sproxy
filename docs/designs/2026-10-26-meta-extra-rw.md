@@ -159,7 +159,7 @@ sink.WriteFile(ctx, rel, f, size, mtime)
 ## 5. 边界与明示
 
 - **裸外部卷（无 trusted）**：不支持 extra（无 sidecar 载体），读返回空 / 补录 fail-closed；文档登记。
-- `maxExtraBytes` 16KiB 总量上限保持；`x_` 前缀自定义扩展继续自由。
+- `maxExtraBytes` 改为默认 10MiB 可配置（`max_file_meta_bytes`）；`x_` 前缀自定义扩展支持嵌套 map/array，只限制完整 JSON 序列化后的大小（2026-11-10 用户裁定）。
 - 读侧不做 Trim/Validate（写侧已把关）；Extra 深拷贝防污染卷内存态。
 - 兼容旧 meta（无 Extra 字段）：读返回空 map；合并从空起步。
 

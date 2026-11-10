@@ -189,6 +189,45 @@ func TestConfig_UpdateMaxUploadBytes(t *testing.T) {
 	}
 }
 
+// TestConfig_UpdateMaxFileMetaBytes 覆盖 max_file_meta_bytes 热更新：
+// PUT /api/config 更新后 cfgPtr 可见；GET /api/config 回显。
+func TestConfig_UpdateMaxFileMetaBytes(t *testing.T) {
+	t.Parallel()
+	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
+
+	req, err := http.NewRequest("PUT", url+"/api/config", strings.NewReader(`{"max_file_meta_bytes":20971520}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(headerContentType, contentTypeJSON)
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if cfg := cfgPtr.Load(); int64(cfg.MaxFileMetaBytes) != 20971520 {
+		t.Errorf("expected max_file_meta_bytes=20971520, got %d", cfg.MaxFileMetaBytes)
+	}
+
+	gr, gerr := http.Get(url + "/api/config")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	defer gr.Body.Close()
+	var cfg struct {
+		MaxFileMetaBytes int64 `json:"max_file_meta_bytes"`
+	}
+	if err := json.NewDecoder(gr.Body).Decode(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxFileMetaBytes != 20971520 {
+		t.Errorf("GET /api/config max_file_meta_bytes=%d want 20971520", cfg.MaxFileMetaBytes)
+	}
+}
+
 func TestConfig_UpdateRateLimit(t *testing.T) {
 	t.Parallel()
 	url, cfgPtr := newTestServerWithAllRoutes(t, nil)
@@ -231,6 +270,7 @@ func TestConfig_UpdateInvalidInput(t *testing.T) {
 		{"invalid rate_window", `{"rate_limit_window":"-1s"}`, http.StatusBadRequest},
 		{"negative max_storage", `{"max_storage_bytes":-1}`, http.StatusBadRequest},
 		{"negative max_upload", `{"max_upload_bytes":-1}`, http.StatusBadRequest},
+		{"negative max_file_meta", `{"max_file_meta_bytes":-1}`, http.StatusBadRequest},
 		{"malformed json", `{bad json}`, http.StatusBadRequest},
 	}
 

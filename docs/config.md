@@ -24,6 +24,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `storage_root` | string | `./storage` | 多租户存储根目录，自动创建 |
 | `owner_quotas` | map[string]ByteSize | (空) | 按 owner 配额上限：显式 owner > `"*"` 默认 > 0（不限制）。值支持人类可读大小（`"5GiB"`/`"2GB"`）或纯数字字节 |
 | `max_upload_bytes` | ByteSize | `1 GiB` | 普通（非分块）上传请求体上限（roadmap P0 恢复可配；`0`/缺省 = 1 GiB 默认，超过 413） |
+| `max_file_meta_bytes` | ByteSize | `10 MiB` | 文件自定义 meta（`FileMeta.Extra`）完整 JSON 序列化后的上限；`x_` 自定义字段支持嵌套 map/array，只受此大小限制；`0`/缺省 = 10 MiB |
 | `registration` | {disable: bool} | `disable: false` | 注册开关：`false`=允许注册（默认）；`true`=禁止注册（仅存量用户，无法新增） |
 | `registration.force_totp` | bool | `false` | `true` 时 register 走 TOTP 分支——注册不生成 SK 条目，用户须经 `sclient trust login` 录入 GA 密钥后登录拿短命 session SK（DEC-B） |
 | `registration.session_ttl` | duration | `7d` | TOTP 登录（`login_type=web`，缺省）签发的 session SK 有效期（D3 服务端控） |
@@ -724,6 +725,8 @@ owner_quotas:
 owner 配额不足则该文件失败（任务不中止，记 ActionError），上传完成立即释放。未配置
 owner 的配额（scopeFor 返回 nil）→ 不装配 staging 配额（兼容旧装配）。
 # max_upload_bytes：普通上传请求体上限（可配置；0 = 默认 1 GiB）
+# max_file_meta_bytes：文件自定义 meta（FileMeta.Extra）完整 JSON 上限（默认 10 MiB；
+#   x_ 自定义字段支持嵌套 map/array，只限制序列化后大小）
 # 凭据不再写在配置文件：首次启动自动生成 anonymous 凭据（SK 落盘，见启动日志 AK），
 # 后续经 sclient trust renew 轮换、/api/credentials 管理。mesh 身份从 AK 派生、隧道密钥
 # 由 SK HKDF 派生——mesh/tunnel 密钥均由凭据自动派生，无需手动配置。

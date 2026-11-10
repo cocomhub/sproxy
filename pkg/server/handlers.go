@@ -249,6 +249,7 @@ func (h *Handlers) fileServiceLocked() *files.Service {
 			files.WithAudit(rt),
 			files.WithEventSink(rt),
 			files.WithUploadBodyLimit(func() int64 { return int64(h.cfgPtr.Load().MaxUploadBytes) }),
+			files.WithMetaLimit(func() int64 { return int64(h.cfgPtr.Load().MaxFileMetaBytes) }),
 			files.WithBandwidthLimiter(rt),
 		}
 		// meta 恒生成（用户裁定：只关校验不关 meta）——fileMetaPolicy 恒装配。

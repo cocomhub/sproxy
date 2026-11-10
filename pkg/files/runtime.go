@@ -29,6 +29,7 @@ import (
 	"github.com/cocomhub/sproxy/internal/size"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
 )
@@ -48,6 +49,7 @@ type runtime struct {
 	ledger        ChecksumLedgerProvider
 	chunkSizeFn   func() int64
 	uploadLimit   func() int64
+	metaLimit     func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
 	downloadPaths DownloadPathResolver
@@ -338,6 +340,17 @@ func (r *runtime) uploadBodyLimit() int64 {
 		return l
 	}
 	return size.UploadBodyLimit
+}
+
+// metaExtraLimit 返回 FileMeta.Extra 最大字节数（配置 <=0 回落 10 MiB 默认）。
+func (r *runtime) metaExtraLimit() int64 {
+	if r.metaLimit == nil {
+		return meta.DefaultMaxExtraBytes
+	}
+	if l := r.metaLimit(); l > 0 {
+		return l
+	}
+	return meta.DefaultMaxExtraBytes
 }
 
 func (r *runtime) versioningEnabled() bool { return r.versioning.Enabled() }

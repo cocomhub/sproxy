@@ -926,6 +926,10 @@ type Config struct {
 	// 旧实现把上限硬编码在 internal/size.UploadBodyLimit 并删除配置键；roadmap P0 恢复
 	// 可配：<=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认零回归）。
 	MaxUploadBytes ByteSize `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
+	// MaxFileMetaBytes 是文件自定义元数据（FileMeta.Extra）完整 JSON 序列化后的上限。
+	// 用户裁定（2026-11-10）：自定义扩展支持嵌套结构，只限制大小；默认 10 MiB。
+	// <=0 时由 SetDefaults 回落默认值。
+	MaxFileMetaBytes ByteSize `yaml:"max_file_meta_bytes" mapstructure:"max_file_meta_bytes"`
 	// MaxChunkUploadBytes 已移至 internal/size.DefaultChunkBodyLimit（64 MiB 硬限制），不可配置。
 	ServerTimeouts ServerTimeouts  `yaml:"server_timeouts" mapstructure:"server_timeouts"`
 	LogLevel       string          `yaml:"log_level" mapstructure:"log_level"`

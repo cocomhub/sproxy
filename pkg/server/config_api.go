@@ -62,6 +62,7 @@ type configResponse struct {
 	BandwidthOwnerBPS  int64  `json:"bandwidth_per_owner_bps"`
 	MaxStorageBytes    int64  `json:"max_storage_bytes"`
 	MaxUploadBytes     int64  `json:"max_upload_bytes"`
+	MaxFileMetaBytes   int64  `json:"max_file_meta_bytes"`
 	ChunkSize          int64  `json:"chunk_size"`
 	UploadSessionTTL   string `json:"upload_session_ttl"`
 	VersioningEnabled  bool   `json:"versioning_enabled"`
@@ -92,6 +93,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		BandwidthOwnerBPS:  cfg.RateLimit.Bandwidth.PerOwnerBPS,
 		MaxStorageBytes:    cfg.MaxStorageBytes,
 		MaxUploadBytes:     int64(cfg.MaxUploadBytes),
+		MaxFileMetaBytes:   int64(cfg.MaxFileMetaBytes),
 		ChunkSize:          cfg.ChunkSize,
 		UploadSessionTTL:   cfg.UploadSessionTTL.String(),
 		VersioningEnabled:  cfg.Versioning.Enabled,
@@ -113,13 +115,14 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 
 // updateConfigRequest 是 PUT /api/config 的请求体。
 type updateConfigRequest struct {
-	LogLevel        *string `json:"log_level,omitempty"`
-	LogFormat       *string `json:"log_format,omitempty"`
-	RateLimitReq    *int    `json:"rate_limit_requests,omitempty"`
-	RateLimitWin    *string `json:"rate_limit_window,omitempty"`
-	MaxStorageBytes *int64  `json:"max_storage_bytes,omitempty"`
-	MaxUploadBytes  *int64  `json:"max_upload_bytes,omitempty"`
-	WebTunnel       *bool   `json:"web_tunnel,omitempty"`
+	LogLevel         *string `json:"log_level,omitempty"`
+	LogFormat        *string `json:"log_format,omitempty"`
+	RateLimitReq     *int    `json:"rate_limit_requests,omitempty"`
+	RateLimitWin     *string `json:"rate_limit_window,omitempty"`
+	MaxStorageBytes  *int64  `json:"max_storage_bytes,omitempty"`
+	MaxUploadBytes   *int64  `json:"max_upload_bytes,omitempty"`
+	MaxFileMetaBytes *int64  `json:"max_file_meta_bytes,omitempty"`
+	WebTunnel        *bool   `json:"web_tunnel,omitempty"`
 }
 
 // updateConfigHandler 处理 PUT /api/config，更新运行时配置项。
@@ -146,7 +149,7 @@ func (h *Handlers) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	// 检查是否所有字段均为 nil，拒绝空请求体（{}）
 	if req.LogLevel == nil && req.LogFormat == nil &&
 		req.RateLimitReq == nil && req.RateLimitWin == nil && req.MaxStorageBytes == nil &&
-		req.MaxUploadBytes == nil && req.WebTunnel == nil {
+		req.MaxUploadBytes == nil && req.MaxFileMetaBytes == nil && req.WebTunnel == nil {
 		h.auditConfigDenied(r, "empty request body: no fields to update")
 		sendJSONResponse(w, map[string]any{"success": false, "message": "empty request body: no fields to update"}, http.StatusBadRequest)
 		return
@@ -260,6 +263,14 @@ func (h *Handlers) applyQuotaUpdates(r *http.Request, req *updateConfigRequest, 
 			return false, fmt.Errorf("max_upload_bytes must be non-negative")
 		}
 		cfg.MaxUploadBytes = ByteSize(*req.MaxUploadBytes)
+		changed = true
+	}
+	if req.MaxFileMetaBytes != nil {
+		if *req.MaxFileMetaBytes < 0 {
+			h.auditConfigDenied(r, "invalid max_file_meta_bytes")
+			return false, fmt.Errorf("max_file_meta_bytes must be non-negative")
+		}
+		cfg.MaxFileMetaBytes = ByteSize(*req.MaxFileMetaBytes)
 		changed = true
 	}
 	return changed, nil

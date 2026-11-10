@@ -310,13 +310,15 @@ secretdata 等）经**卷状态缓存**（`volumestate`，TTL=0 + 写穿 + `volu
 
 - 认证：主 mux `user`（写子组）/ 隧道内层 `tunnel`
 - query 参数：`filename`（必填，经 `ValidateFilePath`）
-- 请求体（≤ 64 KiB）：
+- 请求体（≤ `max_file_meta_bytes`，默认 10 MiB；`extra` 完整 JSON 序列化后的上限同此）：
   ```json
   {"extra": {"code": "EXAMPLE-001", "maker": "STUDIO X"}, "mode": "merge"}
   ```
   - `mode`：`merge`（缺省，新增/覆盖同名键，不删旧键）/ `replace`（整表替换）/ `delete`（删指定键）
-  - `extra` 的键值经 `meta.TrimExtra` 清洗 + `meta.ValidateExtra` 校验；`merge`/`replace` 时不得为空，
+  - `extra` 的键值经 `meta.TrimExtra` 清洗 + `meta.ValidateExtraLimit` 校验；`merge`/`replace` 时不得为空，
     `delete` 至少一个键
+  - `x_` 自定义扩展允许任意可 JSON 序列化的**嵌套 map/array**（不再限制深度/键数），只受完整序列化
+    大小上限约束；白名单字段类型/长度不变
 - 响应：`{"success": true, "message": "meta extra 已更新"}`
 - 错误：`400` filename 为空 / 请求体非法 / `mode` 非法 / `extra` 为空或校验失败；
   `503` 元数据能力不可用（`ErrMetaUnavailable`）；`409` 其余域层失败（无 sidecar / 并发覆盖 / 卷不支持 /
@@ -1784,7 +1786,7 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
   "log_level": "info", "log_format": "text", "access_keys_set": true,
   "rate_limit_requests": 100, "rate_limit_window": "1m0s",
   "bandwidth_enabled": false, "bandwidth_per_owner_bps": 0,
-  "max_storage_bytes": 0, "max_upload_bytes": 1073741824,
+  "max_storage_bytes": 0, "max_upload_bytes": 1073741824, "max_file_meta_bytes": 10485760,
   "chunk_size": 4194304, "upload_session_ttl": "24h0m0s",
   "versioning_enabled": false, "versioning_max_versions": 0,
   "cloud_max_concurrent": 3, "cloud_transfer_concurrency": 3,
@@ -1805,11 +1807,11 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 ```json
 {"log_level": "debug", "log_format": "json", "rate_limit_requests": 200,
  "rate_limit_window": "30s", "max_storage_bytes": 10737418240,
- "max_upload_bytes": 209715200, "web_tunnel": true}
+ "max_upload_bytes": 209715200, "max_file_meta_bytes": 10485760, "web_tunnel": true}
 ```
 
 - 校验：`log_level` ∈ debug/info/warn/error；`log_format` ∈ text/json；`rate_limit_requests`
-  > 0；`rate_limit_window` 为合法 duration 且 > 0；`max_storage_bytes`/`max_upload_bytes` ≥ 0
+  > 0；`rate_limit_window` 为合法 duration 且 > 0；`max_storage_bytes`/`max_upload_bytes`/`max_file_meta_bytes` ≥ 0
 - 空请求体 `{}`（无任何字段）→ `400`；任一字段非法 → `400`（`{"success": false, "message": "..."}`）
 - 响应：`{"success": true, "changed": true}`
 - 生效范围：日志级别/格式立即重建 logger；限流参数与 `max_storage_bytes` 热更新到现有实例；
