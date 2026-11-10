@@ -1487,6 +1487,10 @@ func (p filesMetaPolicy) computeMeta(ctx context.Context, root *storage.Root, re
 	}
 	fm := c.Finish()
 	fm.Name = path.Base(strings.ReplaceAll(rel, "\\", "/"))
+	// 原始文件时间由 sproxy 统一保存（download-manager 等客户端读取的“真实数据”）。
+	// 本地卷从已落盘文件取；外部卷由 trusted.Wrap 写面在 FileMeta 中记录。
+	fm.MTime = fi.ModTime().UTC().Format(time.RFC3339)
+	fm.CTime = time.Now().UTC().Format(time.RFC3339)
 	return fm, nil
 }
 

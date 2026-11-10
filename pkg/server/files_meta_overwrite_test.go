@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -165,4 +166,39 @@ func readMetaProbe(t *testing.T, p filesMetaPolicy, ctx context.Context, root *s
 		t.Fatalf("Unmarshal: %v", uerr)
 	}
 	return fm
+}
+
+// TestWriteMeta_PreservesOriginalMTime 钉住：本地卷 sidecar 必须保存原始文件 mtime。
+// 背景：download-manager 远程保存读取 sproxy meta 的 mtime 作为真实时间，不得回退到
+// 存储后端时间。变异：computeMeta 不写 fm.MTime → 红。
+func TestWriteMeta_PreservesOriginalMTime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := storage.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	const rel = "user/mtime.txt"
+	writeMetaProbeFile(t, root, rel, "mtime")
+	abs, _ := root.Abs(rel)
+	want := time.Unix(1_700_000_000, 0).UTC()
+	if err := os.Chtimes(abs, want, want); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	p := filesMetaPolicy{h: &Handlers{}}
+	if err := p.WriteMeta(context.Background(), "alice", root, rel, nil); err != nil {
+		t.Fatalf("WriteMeta: %v", err)
+	}
+	raw, rerr := p.ReadMetaRaw(context.Background(), root, meta.MetaPath(rel))
+	if rerr != nil {
+		t.Fatalf("ReadMetaRaw: %v", rerr)
+	}
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatalf("Unmarshal: %v", uerr)
+	}
+	if got := fm.MTime; got != want.Format(time.RFC3339) {
+		t.Fatalf("sidecar mtime=%q want %q", got, want.Format(time.RFC3339))
+	}
 }
