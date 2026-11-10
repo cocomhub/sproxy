@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/internal/size"
+	"github.com/cocomhub/sproxy/pkg/files/meta"
 	"github.com/cocomhub/sproxy/pkg/syncmgr"
 	"github.com/cocomhub/sproxy/pkg/tunnel"
 	"github.com/cocomhub/sproxy/pkg/tunnel/hub"
@@ -197,6 +198,9 @@ func (c *Config) applyDefaultBasics() {
 	// （超大配置由运行时行为兜底：请求体超 MaxBytesReader 直接 413）。
 	if c.MaxUploadBytes <= 0 {
 		c.MaxUploadBytes = ByteSize(size.UploadBodyLimit)
+	}
+	if c.MaxFileMetaBytes <= 0 {
+		c.MaxFileMetaBytes = ByteSize(meta.DefaultMaxExtraBytes)
 	}
 	// 卷配置归一（多卷）：placement 缺省 prefer-default；volumes 未配（nil/空）合成
 	// 单默认卷（name=default, root=StorageRoot）。已配卷时逐卷补**空** root（仅首卷，

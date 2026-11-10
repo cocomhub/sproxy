@@ -160,6 +160,7 @@ storage_root: "./storage"
 
 # 单次普通上传（非分块）最大字节数，超过返回 413。0 或不填使用默认 1 GiB。
 # max_upload_bytes: 1073741824
+# max_file_meta_bytes: 10485760  # 文件自定义 meta 完整 JSON 上限（默认 10 MiB）
 
 server_timeouts:
   read_header: "5s"

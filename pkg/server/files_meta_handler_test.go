@@ -78,6 +78,32 @@ func TestUpdateFileMeta_OK(t *testing.T) {
 	}
 }
 
+// TestUpdateFileMeta_NestedLargeMap 验证嵌套 map + 超过旧 64 KiB 上限的 body 可写入
+// （用户裁定 2026-11-10：只限制完整 JSON 序列化大小，默认 10 MiB）。
+func TestUpdateFileMeta_NestedLargeMap(t *testing.T) {
+	t.Parallel()
+	svc := &fakeMetaService{}
+	h := &Handlers{metaSvcForTest: svc}
+	nested := map[string]any{
+		"metadata": map[string]any{"title": "t", "tags": []any{"a", "b"}},
+		"extra": map[string]any{
+			"files": []any{map[string]any{"path": "a.mp4", "size": 1}},
+			"blob":  strings.Repeat("x", 200<<10), // 200 KiB > 旧 64 KiB body 上限
+		},
+	}
+	body, _ := json.Marshal(map[string]any{"extra": map[string]any{"x_dm_object": nested}})
+	req := httptest.NewRequest(http.MethodPut, "/api/files/meta?filename=n/v.mp4", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	h.updateFileMeta(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	got, ok := svc.got.Extra["x_dm_object"].(map[string]any)
+	if !ok || got["metadata"] == nil {
+		t.Fatalf("嵌套 map 未透传: %#v", svc.got.Extra)
+	}
+}
+
 // TestUpdateFileMeta_InvalidExtra 验证未知字段被拒（fail-closed，400）。
 func TestUpdateFileMeta_InvalidExtra(t *testing.T) {
 	t.Parallel()

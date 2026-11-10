@@ -175,8 +175,8 @@ func validateChunkPlan(totalSize, chunkSize int64, totalChunks int) error {
 
 // UploadInit 初始化一个分块上传会话。
 func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
-	// 限制请求体大小
-	r.Body = http.MaxBytesReader(w, r.Body, size.MultipartBufSize) // 1MB 足够
+	// 限制请求体大小（基础字段 1MB；meta_extra 可配置到 10MB，需为其预留余量）。
+	r.Body = http.MaxBytesReader(w, r.Body, s.initBodyLimit())
 	var req ChunkedInitRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "请求体解析失败"}, http.StatusBadRequest)
@@ -267,6 +267,12 @@ func (s *Service) UploadInit(w http.ResponseWriter, r *http.Request) {
 		ChunkSize: session.ChunkSize,
 		Message:   msg,
 	}, http.StatusOK)
+}
+
+// initBodyLimit 返回 /upload/init 请求体上限：基础字段 1MB；meta_extra 上限可配置到
+// 10MB（默认），为其预留 1MB JSON 外壳/转义余量。
+func (s *Service) initBodyLimit() int64 {
+	return max(int64(size.MultipartBufSize), s.rt.metaExtraLimit()+(1<<20))
 }
 
 // initSuccessMessage 组装 init 成功文案（续传恢复 vs 新会话），并输出对应日志。
@@ -1802,7 +1808,7 @@ func (s *Service) validateInitMetaExtra(w http.ResponseWriter, req *ChunkedInitR
 		return true
 	}
 	req.MetaExtra = meta.TrimExtra(req.MetaExtra)
-	if verr := meta.ValidateExtra(req.MetaExtra); verr != nil {
+	if verr := meta.ValidateExtraLimit(req.MetaExtra, s.rt.metaExtraLimit()); verr != nil {
 		s.sendJSON(w, ChunkedInitResponse{Success: false, Message: "meta_extra 无效: " + verr.Error()}, http.StatusBadRequest)
 		return false
 	}

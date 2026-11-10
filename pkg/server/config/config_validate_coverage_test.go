@@ -68,6 +68,7 @@ func TestValidate_RejectBranches(t *testing.T) {
 		{"allow_ips 非法拒绝", func(c *Config) { c.Auth.AllowIPs = []string{"bad"} }, "auth.allow_ips"},
 		{"trusted_proxies 非法拒绝", func(c *Config) { c.Auth.TrustedProxies = []string{"bad"} }, "auth.trusted_proxies"},
 		{"max_upload_bytes 负值拒绝", func(c *Config) { c.MaxUploadBytes = -1 }, "max_upload_bytes"},
+		{"max_file_meta_bytes 负值拒绝", func(c *Config) { c.MaxFileMetaBytes = -1 }, "max_file_meta_bytes"},
 		{"tier_policy.interval 负值拒绝", func(c *Config) { c.TierPolicy.Interval = -time.Second }, "tier_policy.interval"},
 		{"tier_policy.max_age_hot 负值拒绝", func(c *Config) { c.TierPolicy.MaxAgeHot = -time.Second }, "max_age_hot"},
 		{"tier_policy.min_size_hot 负值拒绝", func(c *Config) { c.TierPolicy.MinSizeHot = -1 }, "min_size_hot"},

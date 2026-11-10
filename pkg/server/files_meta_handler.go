@@ -63,7 +63,15 @@ func (h *Handlers) updateFileMeta(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": "filename 不能为空"}, http.StatusBadRequest)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	maxExtra := int64(meta.DefaultMaxExtraBytes)
+	if h.cfgPtr != nil {
+		if v := int64(h.cfgPtr.Load().MaxFileMetaBytes); v > 0 {
+			maxExtra = v
+		}
+	}
+	// 额外 1 MiB 容纳 {"extra":...,"mode":...} 外壳与 JSON 转义；Extra 本身由
+	// ValidateExtraLimit 精确限制。
+	r.Body = http.MaxBytesReader(w, r.Body, maxExtra+(1<<20))
 	var req struct {
 		Extra map[string]any       `json:"extra"`
 		Mode  files.MetaUpdateMode `json:"mode,omitempty"`
@@ -84,7 +92,7 @@ func (h *Handlers) updateFileMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	extra := meta.TrimExtra(req.Extra)
 	if mode != files.MetaUpdateDelete {
-		if err := meta.ValidateExtra(extra); err != nil {
+		if err := meta.ValidateExtraLimit(extra, maxExtra); err != nil {
 			sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
 			return
 		}

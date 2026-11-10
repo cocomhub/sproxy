@@ -58,19 +58,19 @@ func TestValidate_TooLong(t *testing.T) {
 	}
 }
 
-// TestValidate_TooLarge 验证总大小超 16 KiB 被拒（防滥用）。
-func TestValidate_TooLarge(t *testing.T) {
+// TestValidateLimit_TooLarge 验证完整 JSON 序列化大小超过显式上限被拒。
+func TestValidateLimit_TooLarge(t *testing.T) {
 	t.Parallel()
-	err := ValidateExtra(map[string]any{"origin_name": strings.Repeat("y", 300)})
+	err := ValidateExtraLimit(map[string]any{"origin_name": strings.Repeat("y", 300)}, 1<<20)
 	if err != nil {
 		t.Fatalf("单字段 300B 应通过: %v", err)
 	}
-	// 构造超大：多条 500B 数组元素
+	// 构造超大：多条 500B 数组元素，超过 1KiB 显式上限。
 	big := make([]string, 40)
 	for i := range big {
 		big[i] = strings.Repeat("z", 500)
 	}
-	err = ValidateExtra(map[string]any{"mirror_urls": big})
+	err = ValidateExtraLimit(map[string]any{"mirror_urls": big}, 1<<10)
 	if err == nil || !strings.Contains(err.Error(), "超上限") {
 		t.Fatalf("总体超限应拒绝, err=%v", err)
 	}
@@ -148,13 +148,41 @@ func TestValidateExtra_CustomPrefix(t *testing.T) {
 	if err := ValidateExtra(map[string]any{"x_MyKey": 1}); err == nil {
 		t.Fatal("x_ 键名大写应拒绝")
 	}
-	// 非法：x_ 值类型不支持（struct）→ 拒绝
-	if err := ValidateExtra(map[string]any{"x_bad": struct{ A int }{1}}); err == nil {
-		t.Fatal("x_ 值不支持 struct 应拒绝")
+	// 合法：x_ 支持 JSON 可序列化的嵌套 map/array（用户裁定 2026-11-10）。
+	if err := ValidateExtra(map[string]any{
+		"x_object": map[string]any{
+			"metadata": map[string]any{"title": "t", "tags": []any{"a", "b"}},
+			"extra":    map[string]any{"files": []any{map[string]any{"path": "a.mp4"}}},
+		},
+	}); err != nil {
+		t.Fatalf("x_ 嵌套 map 应通过: %v", err)
+	}
+	// 非法：不可 JSON 序列化的值（chan）→ 拒绝
+	if err := ValidateExtra(map[string]any{"x_bad": make(chan int)}); err == nil {
+		t.Fatal("x_ 不可 JSON 序列化值应拒绝")
 	}
 	// 合法：x_ 布尔/数字/[]string
 	if err := ValidateExtra(map[string]any{"x_enabled": true, "x_count": float64(3), "x_tags": []string{"a"}}); err != nil {
 		t.Fatalf("x_ 标量应通过: %v", err)
+	}
+}
+
+// TestValidateLimit_NestedMapSize 验证嵌套 map 只受总序列化大小限制。
+func TestValidateLimit_NestedMapSize(t *testing.T) {
+	t.Parallel()
+	deep := map[string]any{}
+	cur := deep
+	for i := 0; i < 20; i++ {
+		next := map[string]any{}
+		cur["next"] = next
+		cur = next
+	}
+	cur["value"] = strings.Repeat("v", 200)
+	if err := ValidateExtra(map[string]any{"x_deep": deep}); err != nil {
+		t.Fatalf("嵌套 map 应通过默认上限: %v", err)
+	}
+	if err := ValidateExtraLimit(map[string]any{"x_deep": deep}, 64); err == nil {
+		t.Fatal("超过显式小上限应拒绝")
 	}
 }
 

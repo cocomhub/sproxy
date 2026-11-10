@@ -968,6 +968,9 @@ func (c *Config) validateMaxUpload() error {
 	if c.MaxUploadBytes < 0 {
 		return fmt.Errorf("max_upload_bytes=%d 非法：不能为负（0 = 默认 1 GiB）", int64(c.MaxUploadBytes))
 	}
+	if c.MaxFileMetaBytes < 0 {
+		return fmt.Errorf("max_file_meta_bytes=%d 非法：不能为负（0 = 默认 10 MiB）", int64(c.MaxFileMetaBytes))
+	}
 	return nil
 }
 

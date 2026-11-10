@@ -257,6 +257,7 @@ type config struct {
 	quota         QuotaScopeProvider
 	ledger        ChecksumLedgerProvider
 	chunkSize     func() int64
+	metaLimit     func() int64
 	uploadLimit   func() int64
 	versioning    Versioning
 	chunked       ChunkedUploads
@@ -358,6 +359,12 @@ func WithChunkSize(fn func() int64) Option {
 // fn 返回 <=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认，零回归）。
 func WithUploadBodyLimit(fn func() int64) Option {
 	return func(c *config) { c.uploadLimit = fn }
+}
+
+// WithMetaLimit 覆盖文件自定义元数据（FileMeta.Extra）最大字节数。
+// fn 返回 <=0 时回落 meta.DefaultMaxExtraBytes（10 MiB）。
+func WithMetaLimit(fn func() int64) Option {
+	return func(c *config) { c.metaLimit = fn }
 }
 
 // WithVersioning 注入版本策略。默认：关闭（同名不同 checksum → 409）。
