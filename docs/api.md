@@ -310,13 +310,15 @@ secretdata 等）经**卷状态缓存**（`volumestate`，TTL=0 + 写穿 + `volu
 
 - 认证：主 mux `user`（写子组）/ 隧道内层 `tunnel`
 - query 参数：`filename`（必填，经 `ValidateFilePath`）
-- 请求体（≤ 64 KiB）：
+- 请求体（≤ `max_file_meta_bytes`，默认 10 MiB；`extra` 完整 JSON 序列化后的上限同此）：
   ```json
   {"extra": {"code": "EXAMPLE-001", "maker": "STUDIO X"}, "mode": "merge"}
   ```
   - `mode`：`merge`（缺省，新增/覆盖同名键，不删旧键）/ `replace`（整表替换）/ `delete`（删指定键）
-  - `extra` 的键值经 `meta.TrimExtra` 清洗 + `meta.ValidateExtra` 校验；`merge`/`replace` 时不得为空，
+  - `extra` 的键值经 `meta.TrimExtra` 清洗 + `meta.ValidateExtraLimit` 校验；`merge`/`replace` 时不得为空，
     `delete` 至少一个键
+  - `x_` 自定义扩展允许任意可 JSON 序列化的**嵌套 map/array**（不再限制深度/键数），只受完整序列化
+    大小上限约束；白名单字段类型/长度不变
 - 响应：`{"success": true, "message": "meta extra 已更新"}`
 - 错误：`400` filename 为空 / 请求体非法 / `mode` 非法 / `extra` 为空或校验失败；
   `503` 元数据能力不可用（`ErrMetaUnavailable`）；`409` 其余域层失败（无 sidecar / 并发覆盖 / 卷不支持 /
