@@ -172,7 +172,7 @@ func TestValidateLimit_NestedMapSize(t *testing.T) {
 	t.Parallel()
 	deep := map[string]any{}
 	cur := deep
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		next := map[string]any{}
 		cur["next"] = next
 		cur = next
