@@ -417,7 +417,16 @@ jobs:
       - name: Install Playwright browsers
         run: |
           cd web/e2e
-          GOWORK=off go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps chromium
+          # 首选：浏览器 + 系统依赖（含 CJK 字体）。
+          # 兜底：GitHub runner 的 apt 镜像（security.ubuntu.com / azure.archive.ubuntu.com）
+          #   偶发 DNS 不可达（`Temporary failure resolving`）会让 `--with-deps` 整个失败。
+          #   本仓 UI e2e 全部是 DOM 断言（**无像素/截图比较**，见 web/e2e），且 ubuntu-latest
+          #   镜像自带 chromium 核心动态库 ⇒ 只需浏览器本体即可运行；系统依赖安装失败只告警，
+          #   不再判 job 失败（若真缺核心库，具体用例会以启动失败暴露，仍能“改坏了就红”）。
+          if ! GOWORK=off go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps chromium; then
+            echo "::warning::playwright install --with-deps 失败（apt 镜像不可达），回退为仅安装浏览器"
+            GOWORK=off go run github.com/mxschmitt/playwright-go/cmd/playwright install chromium
+          fi
       # 前端 JS 单测 + 语法检查（`node --check` / `node --test`）。
       # 放在**必检项** ui-e2e job 内：前端只有「真实浏览器 e2e」一道防线时，纯函数回归（渲染/格式化）
       # 会在 e2e 覆盖不到的角落静默变坏；两道一起跑才能保证「改坏了就红」。
