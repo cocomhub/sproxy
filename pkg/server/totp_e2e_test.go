@@ -207,6 +207,7 @@ func registerHTTP(url, owner string) (int, registerRespH, error) {
 // pkg/client + pkg/accesskey + pkg/otp 的公开面，不经任何 server 内测试 helper，
 // 验证「登录端点签发 → 客户端解封 → 会话请求 200」这条完整链不被装配细节偏差破坏。
 func TestTOTPLogin_FullChain(t *testing.T) {
+	t.Parallel()
 	hh, url, _ := newRealTOTPServerH(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 
@@ -258,6 +259,7 @@ func TestTOTPLogin_FullChain(t *testing.T) {
 // TestTOTPLogin_FullChain_Subdir 验证会话凭据下子目录列表可达（含 subdir 查询串的
 // 签名 canonical）：Mkdir + List(subdir) → 200。
 func TestTOTPLogin_FullChain_Subdir(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 	reg, err := noAuth.RegisterTOTP(context.Background(), "subdir-chain")
@@ -292,6 +294,7 @@ func TestTOTPLogin_FullChain_Subdir(t *testing.T) {
 // **错误签名** Authorization 头（ring 中不存在的随机 AK/SK）的 register 请求仍可达
 // （200）——register 不挂 authMiddleware，错误签名头被忽略而非 401（公开豁免断言）。
 func TestTOTPLogin_RegisterPublicExempt_BadSignature(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	req, err := http.NewRequest(http.MethodPost, url+"/api/credentials/register", strings.NewReader(`{"owner":"signed-wrong"}`))
 	if err != nil {
@@ -313,6 +316,7 @@ func TestTOTPLogin_RegisterPublicExempt_BadSignature(t *testing.T) {
 // TestTOTP_E2E_LoopbackFirstRegOK 验证真实 TCP（httptest.RemoteAddr=127.0.0.1）
 // 回环首注册 → 200 admin=true（U2 正向 e2e 断言）。
 func TestTOTP_E2E_LoopbackFirstRegOK(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	st, p := doRegisterToURL(t, url, "")
 	if st != http.StatusOK {
@@ -330,6 +334,7 @@ func TestTOTP_E2E_LoopbackFirstRegOK(t *testing.T) {
 // （无 admin）→ 403。真实 TCP 下无法伪造 RemoteAddr，改为 handler 直发注入
 // remoteNonLoop 来源（复用 register_handler_test.go 基建），断言拒绝且不落盘凭据。
 func TestTOTP_RemoteFirstRegistration_Forbidden(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 	st, body := serveRegister(t, h, remoteNonLoop, []byte(`{}`))
 	if st != http.StatusForbidden {
@@ -348,6 +353,7 @@ func TestTOTP_RemoteFirstRegistration_Forbidden(t *testing.T) {
 // TestRegisterTOTP_Disabled 验证 registration.disable=true → register 403（I4b）：
 // 已有 admin 的存量部署语义（回环亦 403）。
 func TestRegisterTOTP_Disabled(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, func(c *Config) { c.Registration.Disable = true }, nil, nil)
 	st, _ := doRegisterToURL(t, url, "")
 	if st != http.StatusForbidden {
@@ -359,6 +365,7 @@ func TestRegisterTOTP_Disabled(t *testing.T) {
 // （S4 交叉断言，getRole 走生产 *Handlers.getRole(ak)——Fix 2 消除测试私有转写漂移）；
 // 第二注册 admin=false 且 getRole==user。
 func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
+	t.Parallel()
 	hh, url, _ := newRealTOTPServerH(t, nil, nil, nil)
 
 	st1, p1 := doRegisterToURL(t, url, "first")
@@ -387,6 +394,7 @@ func TestRegisterTOTP_FirstIsAdmin(t *testing.T) {
 // 不：并发语义正是被测对象。8 个并发请求瞬时全部落在 5/min 窗口内时部分请求会
 // 429。因此并发注册数收敛到 2（避免 429 干扰断言），仍验证「恰一 admin」。
 func TestRegisterTOTP_ConcurrentFirstAdmin(t *testing.T) {
+	t.Parallel()
 	url, _, ring := newRealTOTPServer(t, nil, nil, nil)
 
 	const n = 2 // 并发双注册（D2）：恰一 pending；>5 并发会误触 5/min 注册限频 → 429
@@ -459,6 +467,7 @@ func assertTotpFirstAdminOutcome(t *testing.T, results []registerRespH, errs []e
 
 // TestTOTPLogin_WrongCode 验证错误动态码 → 401。
 func TestTOTPLogin_WrongCode(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 	reg, err := noAuth.RegisterTOTP(context.Background(), "wrong")
@@ -481,6 +490,7 @@ func TestTOTPLogin_WrongCode(t *testing.T) {
 // TestTOTPLogin_NonceReplay 验证 nonce 单次消费（D5）：同一 nonce 二次登录（正确 code）
 // → 拒绝（401），不得成功。
 func TestTOTPLogin_NonceReplay(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 	reg, err := noAuth.RegisterTOTP(context.Background(), "replay")
@@ -502,6 +512,7 @@ func TestTOTPLogin_NonceReplay(t *testing.T) {
 
 // TestLogin_UnknownLoginType_400 验证未知 login_type → 400（M8/M16）。
 func TestTOTPLogin_UnknownLoginType_400(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, nil, nil, nil)
 	noAuth := newNoCredentialTOTPClient(t, url)
 	reg, err := noAuth.RegisterTOTP(context.Background(), "lt")
@@ -530,6 +541,7 @@ func TestTOTPLogin_UnknownLoginType_400(t *testing.T) {
 // （sproxysig.Verify 用 time.Now 判 Exp）不影响本场景：session 条目过期由 GetEntry 的
 // aliveLocked（ring 注入时钟）判定 → 条目不可用 → 401，先于任何签名时间窗检查。
 func TestSessionExpiry_Request401(t *testing.T) {
+	t.Parallel()
 	fixed := time.Now()
 	var mu sync.Mutex
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return fixed }
@@ -578,6 +590,7 @@ func TestSessionExpiry_Request401(t *testing.T) {
 // TestLogin_NoTOTPSecret_404 已断言 404 + 两场景），本文件仅补「经真实 HTTP 链路」
 // 的窄断言：用简单模式注册一个 AK，然后走完整 login（无 TOTPSecret）→ 404。
 func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newRealTOTPServer(t, func(c *Config) { c.Registration.ForceTOTP = false }, nil, nil)
 	// 简单模式注册：响应含 sk/skey_id，无 base32_secret/TOTPSecret。
 	resp, err := http.Post(url+"/api/credentials/register", contentTypeJSON, strings.NewReader(`{}`))
@@ -642,6 +655,7 @@ func TestTOTPLogin_NoTOTPSecret_404(t *testing.T) {
 //   - 且用重启后 Key.TOTPSecret 复算 code 走完整登录端点 → 200（TOTP secret 持久化，
 //     登录闭环）。
 func TestAdminRole_TOTPPersistAfterRestart(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := accesskey.NewCredentialStore(filepath.Join(tmpDir, "anonymous", "meta"))
 	ring1 := accesskey.NewRing()

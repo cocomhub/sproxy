@@ -87,6 +87,7 @@ func newAuthSeamServer(t *testing.T, modifyCfg func(*Config), optsMod func(*Regi
 // 装配的默认链行为与 4A 一致：SproxySig 验签成功 → GET /api/files 200；操作审计 actor
 // 正确（= 命中 AK）。
 func TestAuthSeam_DefaultChain_BehavesAs4A(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
 
 	// GET /api/files 带合法 SproxySig 签名 → 200（默认链 = RingAuthenticator）。
@@ -126,6 +127,7 @@ func TestAuthSeam_DefaultChain_BehavesAs4A(t *testing.T) {
 // Principal 写入 ctx：PrincipalFrom(ctx) 可读 Owner 元数据；ActorFrom 统一写
 // Principal.AK（R4-M1）。
 func TestAuthSeam_HostAuthenticator_PrincipalInCtx(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr}
@@ -162,6 +164,7 @@ func TestAuthSeam_HostAuthenticator_PrincipalInCtx(t *testing.T) {
 // RingAuthenticator 的链（replace 默认链）：无 Authorization 头请求直接由 fake 认证
 // 成功；文件操作按 Principal.AK 落桶（Owner 不参与落桶）。
 func TestAuthSeam_HostAuthenticator_ReplaceChain_BucketByAK(t *testing.T) {
+	t.Parallel()
 	url, _, storageRoot := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		// replace 默认链：只含 fake（不含 RingAuthenticator）。
 		opts.Authenticators = []Authenticator{
@@ -217,6 +220,7 @@ func TestAuthSeam_HostAuthenticator_ReplaceChain_BucketByAK(t *testing.T) {
 // TestAuthSeam_ZeroCredentialWindow_HostAuthenticator 验证 ring 空（零凭据启动状态）
 // 时注入宿主 Authenticator → 文件列表 200：链先跑，handleNoCredentials 兜底不前置拦截。
 func TestAuthSeam_ZeroCredentialWindow_HostAuthenticator(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		// 零凭据窗口：空 Ring（无任何凭据）+ 宿主 Authenticator。
 		noAuth := defaultNoAuthRegOpts()
@@ -244,6 +248,7 @@ func TestAuthSeam_ZeroCredentialWindow_HostAuthenticator(t *testing.T) {
 // TestAuthSeam_RequireRole_FileGroupGate 验证文件组 requireRole 门禁：fake 返回
 // Role:"node" → 403；"user"/"admin" → 200；"" → 归一 user 放行（R3-M4）。
 func TestAuthSeam_RequireRole_FileGroupGate(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		role string
@@ -276,6 +281,7 @@ func TestAuthSeam_RequireRole_FileGroupGate(t *testing.T) {
 
 // TestRequireRole_Matrix 是 requireRole 直接单元测试（顺序/空值归一/401/403 语义）。
 func TestRequireRole_Matrix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		principal *Principal
@@ -312,6 +318,7 @@ func TestRequireRole_Matrix(t *testing.T) {
 // Authenticator）+ allow_insecure_loopback=true + 回环来源 → GET /api/files 200
 // （handleNoCredentials 回环直通合成最小 Principal，requireRole 放行）。
 func TestAuthSeam_LoopbackPassThrough_HTTP(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		noAuth := defaultNoAuthRegOpts()
 		opts.CredentialRing = noAuth.CredentialRing
@@ -331,6 +338,7 @@ func TestAuthSeam_LoopbackPassThrough_HTTP(t *testing.T) {
 
 // TestAuthSeam_NoCredentials_NonLoopback401 验证零凭据窗口 + 非回环来源 → 401。
 func TestAuthSeam_NoCredentials_NonLoopback401(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr, credentialRing: emptyTestRing(), allowInsecureLoopback: true}
@@ -356,6 +364,7 @@ func TestAuthSeam_NoCredentials_NonLoopback401(t *testing.T) {
 // TestAuthSeam_LoopbackPassThrough_SynthesizesPrincipal 白盒验证 handleNoCredentials
 // 回环直通分支合成最小 Principal{AK:"", Owner:"", Role:"user"} 写入 ctx（R4-I2）。
 func TestAuthSeam_LoopbackPassThrough_SynthesizesPrincipal(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr, allowInsecureLoopback: true}
@@ -396,6 +405,7 @@ func TestAuthSeam_LoopbackPassThrough_SynthesizesPrincipal(t *testing.T) {
 // Principal.Secret）→ POST /tunnel → 服务端用 PrincipalFrom(ctx).Secret 派生隧道密钥
 // → 隧道请求解密正常（复用 4A 隧道 E2E 加密帧路径）。
 func TestAuthSeam_TunnelChainDerivesKey(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		withTestCreds(opts) // 默认链：RingAuthenticator 填充 Secret
 	})
@@ -427,6 +437,7 @@ func TestAuthSeam_TunnelChainDerivesKey(t *testing.T) {
 // TestAuthSeam_HostAuthenticator_TunnelNoDerivation 验证宿主 fake 认证（Principal.Secret
 // 为空）→ POST /tunnel → 不派生隧道密钥（401：无 SproxySig 凭据不建立隧道）。
 func TestAuthSeam_HostAuthenticator_TunnelNoDerivation(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		opts.Authenticators = []Authenticator{
 			&fakeAuthenticator{principal: &Principal{AK: "ext-user-1", Role: string(accesskey.RoleUser)}},
@@ -449,6 +460,7 @@ func TestAuthSeam_HostAuthenticator_TunnelNoDerivation(t *testing.T) {
 // TestAuthSeam_APIKeysTakePrecedence 验证 APIKeys.Enabled=true 时 Bearer 路径仍走既有
 // 逻辑（Authenticator 链不生效）——即使宿主链会认证一切，无 Bearer 头仍 401。
 func TestAuthSeam_APIKeysTakePrecedence(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, func(cfg *Config) {
 		cfg.APIKeys = APIKeyConfig{
 			Enabled: true,
@@ -491,6 +503,7 @@ func TestAuthSeam_APIKeysTakePrecedence(t *testing.T) {
 // 请求无 Authorization 头 → 链首 RingAuthenticator 失败返回 error（不写响应）→ 链尾
 // fake 认证成功 → 200（未被前置 401 短路）。
 func TestAuthSeam_ChainFailureContinuesToNext(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		withTestCreds(opts)
 		opts.Authenticators = []Authenticator{
@@ -515,6 +528,7 @@ func TestAuthSeam_ChainFailureContinuesToNext(t *testing.T) {
 // 契约返回 (nil, nil) 时链内跳过该成员（不 panic 不解引用），后续成员仍可认证成功
 // （与 R4-I3 链失败继续语义一致）。
 func TestAuthSeam_HostAuthenticator_NilPrincipalContinue(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr}
@@ -547,6 +561,7 @@ func TestAuthSeam_HostAuthenticator_NilPrincipalContinue(t *testing.T) {
 // 默认链覆盖：空链 = 无任何 authenticator → 所有请求未认证，走 handleNoCredentials
 // 兜底（ring 空 + allow_insecure_loopback → 回环直通 200）。
 func TestAuthSeam_EmptyChain_RespectedReplace(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		noAuth := defaultNoAuthRegOpts()
 		opts.CredentialRing = noAuth.CredentialRing // 空 Ring
@@ -571,6 +586,7 @@ func TestAuthSeam_EmptyChain_RespectedReplace(t *testing.T) {
 // authenticator → 未认证（ring 非空 → 401）。此用例在修复前（空链被静默回退默认链）
 // 会返回 200，修复后 401。
 func TestAuthSeam_EmptyChain_NoAuthEvenWithSignature(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuthSeamServer(t, nil, func(opts *RegisterRoutesOpts) {
 		withTestCreds(opts)                     // 非空 Ring：testAccessKey
 		opts.Authenticators = []Authenticator{} // 显式空链（非 nil）→ replace 默认链为空
@@ -590,6 +606,7 @@ func TestAuthSeam_EmptyChain_NoAuthEvenWithSignature(t *testing.T) {
 
 // TestAuthSeam_EmptyChain_NonLoopback401 白盒验证显式空链 + 非回环来源 → 401。
 func TestAuthSeam_EmptyChain_NonLoopback401(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{})
 	h := &Handlers{cfgPtr: cfgPtr, credentialRing: emptyTestRing()}
@@ -618,6 +635,7 @@ func TestAuthSeam_EmptyChain_NonLoopback401(t *testing.T) {
 // TestAuthSeam_RingAuthenticator_PrincipalMapping 验证 RingAuthenticator 成功路径：
 // Principal.Secret 填充命中条目 SK（R5-I1）；Key.Role 空值（UpsertAK 直建）归一 user。
 func TestAuthSeam_RingAuthenticator_PrincipalMapping(t *testing.T) {
+	t.Parallel()
 	ring := ringForTestCreds() // UpsertAK(ak, "test") 直建，Role 为空
 	a := NewRingAuthenticator(ring, sproxysig.NewNoncePool())
 
@@ -648,6 +666,7 @@ func TestAuthSeam_RingAuthenticator_PrincipalMapping(t *testing.T) {
 // TestAuthSeam_RingAuthenticator_NoAuthHeaderError 验证 RingAuthenticator 对无
 // Authorization 头返回 error（不写响应，R4-I3）。
 func TestAuthSeam_RingAuthenticator_NoAuthHeaderError(t *testing.T) {
+	t.Parallel()
 	a := NewRingAuthenticator(ringForTestCreds(), sproxysig.NewNoncePool())
 	r := httptest.NewRequest("GET", "/api/files", nil)
 	p, err := a.Authenticate(context.Background(), r)
@@ -664,6 +683,7 @@ func TestAuthSeam_RingAuthenticator_NoAuthHeaderError(t *testing.T) {
 // TestAuthSeam_RingAuthenticator_GetKeyEmptyRole 验证 RingAuthenticator 经 GetKey 读
 // 空 Role 归一 user（R3-M4，含 UpsertAK 直建的空 Role key）。
 func TestAuthSeam_RingAuthenticator_GetKeyEmptyRole(t *testing.T) {
+	t.Parallel()
 	ak, sk, err := accesskey.GeneratePair(nil, "")
 	if err != nil {
 		t.Fatalf("GeneratePair: %v", err)

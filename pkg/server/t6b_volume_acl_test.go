@@ -138,6 +138,7 @@ func t6bArchiveEntries(t *testing.T, resp *http.Response) map[string]string {
 // ---- batch delete：disk2 文件可删 + ACL 排除遗留不可见 ----
 
 func TestT6b_BatchDelete_LocatesDisk2AndHidesExcludedDefault(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main allow:[alice] → bob 排除
 	url, _, _ := t6bServer(t, "bob", cfg)
 
@@ -192,6 +193,7 @@ func TestT6b_BatchDelete_LocatesDisk2AndHidesExcludedDefault(t *testing.T) {
 // ---- batch rename：disk2 文件可改名 + ACL 排除遗留源不存在 ----
 
 func TestT6b_BatchRename_LocatesDisk2AndHidesExcludedDefault(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob")
 	url, _, _ := t6bServer(t, "bob", cfg)
 
@@ -233,6 +235,7 @@ func TestT6b_BatchRename_LocatesDisk2AndHidesExcludedDefault(t *testing.T) {
 // ---- batch rename：跨卷目标 409（AD-4）----
 
 func TestT6b_BatchRename_CrossVolumeTargetConflict(t *testing.T) {
+	t.Parallel()
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8 // main 只够 1×8B → 第二个文件换 disk2
 	h := buildVolSetHandlers(t, cfg)
@@ -269,6 +272,7 @@ func TestT6b_BatchRename_CrossVolumeTargetConflict(t *testing.T) {
 // ---- search：跨卷 + ACL 排除默认卷不泄漏 ----
 
 func TestT6b_Search_CrossVolumeResults(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8 // main 只够 1×8B
 	h := buildVolSetHandlers(t, cfg)
@@ -317,6 +321,7 @@ func TestT6b_Search_CrossVolumeResults(t *testing.T) {
 }
 
 func TestT6b_Search_ACLExcludedDefaultNotLeaked(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	url, _, _ := t6bServer(t, "bob", cfg)
 
@@ -354,6 +359,7 @@ func TestT6b_Search_ACLExcludedDefaultNotLeaked(t *testing.T) {
 // ---- share：disk2 分享 + ACL 排除 create 404 + 未排除正常 ----
 
 func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)
@@ -390,6 +396,7 @@ func TestT6b_Share_Disk2CreateAndAccess(t *testing.T) {
 }
 
 func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
+	t.Parallel()
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	h := buildVolSetHandlers(t, cfg)
 	h.shareStore = share.NewStore(testLogger())
@@ -417,6 +424,7 @@ func TestT6b_Share_DefaultOpenNormal(t *testing.T) {
 }
 
 func TestT6b_Share_ACLExcludedDefaultCreate404(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	h := buildVolSetHandlers(t, cfg)
 	h.shareStore = share.NewStore(testLogger())
@@ -451,6 +459,7 @@ func t6bCreateShare(t *testing.T, baseURL, filename string, wantStatus int) shar
 // ---- mkdir：默认卷被 ACL 排除时落到视图卷（不直写默认卷遗留）----
 
 func TestT6b_Mkdir_WritesToViewVolumeWhenDefaultExcluded(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	url, _, _ := t6bServer(t, "bob", cfg)
 
@@ -493,6 +502,7 @@ func t6bPostForm(t *testing.T, baseURL, path string) (int, string) {
 // ---- archive：输入读取跨卷 + archive-dir 视图 + ACL ----
 
 func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
+	t.Parallel()
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)
@@ -522,6 +532,7 @@ func TestT6b_Archive_InputLocatesDisk2(t *testing.T) {
 }
 
 func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob") // main 排除 bob
 	url, _, _ := t6bServer(t, "bob", cfg)
 	const secret = "MAIN-ARCHIVE-SECRET"
@@ -557,6 +568,7 @@ func TestT6b_Archive_ACLExcludedDefaultInputSkipped(t *testing.T) {
 }
 
 func TestT6b_ArchiveDir_LocatesDisk2(t *testing.T) {
+	t.Parallel()
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)
@@ -590,6 +602,7 @@ func TestT6b_ArchiveDir_LocatesDisk2(t *testing.T) {
 }
 
 func TestT6b_ArchiveDir_ACLExcludedDefaultNotFound(t *testing.T) {
+	t.Parallel()
 	cfg, dirs := t6bVolCfg(t, true, "bob")
 	url, _, _ := t6bServer(t, "bob", cfg)
 	seedVolumeFile(t, dirs[0], "bob", "user/legacydir/secret.txt", []byte("SECRET"))
@@ -636,6 +649,7 @@ func uploadIntoDir(t *testing.T, baseURL, filename string, body []byte) (int, ht
 // ---- orphan 版本闭合：user 文件删除后版本仍可 list/restore ----
 
 func TestT6b_OrphanVersion_RestoreAfterFileDeleted(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 5}, // 容量小 → 上传即换 disk2
@@ -695,6 +709,7 @@ func TestT6b_OrphanVersion_RestoreAfterFileDeleted(t *testing.T) {
 // ---- uploadStatus?filename= 跨卷探测 ----
 
 func TestT6b_UploadStatus_FilenameProbesDisk2(t *testing.T) {
+	t.Parallel()
 	cfg, _ := t6bVolCfg(t, false, "alice")
 	cfg.Volumes[0].VolCapacity = 8
 	h := buildVolSetHandlers(t, cfg)

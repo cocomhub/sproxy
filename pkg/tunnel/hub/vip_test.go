@@ -15,6 +15,7 @@ var testVIPSubnet = netip.MustParsePrefix("100.64.0.0/10")
 
 // TestNewHubAllocator_Subnet 校验分配器返回配置子网。
 func TestNewHubAllocator_Subnet(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	if got := a.Subnet(); got != testVIPSubnet {
 		t.Fatalf("Subnet() = %v, want %v", got, testVIPSubnet)
@@ -24,6 +25,7 @@ func TestNewHubAllocator_Subnet(t *testing.T) {
 // TestHubAllocator_AllocUniqueInSubnet 校验连续分配的虚拟 IP 唯一、落在子网内、
 // 且从子网基址 +2（.1 保留网关）起递增。
 func TestHubAllocator_AllocUniqueInSubnet(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	want := netip.MustParseAddr("100.64.0.2")
 	seen := make(map[netip.Addr]bool)
@@ -47,6 +49,7 @@ func TestHubAllocator_AllocUniqueInSubnet(t *testing.T) {
 
 // TestHubAllocator_AllocStable 校验同一 (mesh, nodeID) 重复 Alloc 返回相同虚拟 IP。
 func TestHubAllocator_AllocStable(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	v1, err := a.Alloc("mesh-a", "node-a")
 	if err != nil {
@@ -65,6 +68,7 @@ func TestHubAllocator_AllocStable(t *testing.T) {
 
 // TestHubAllocator_MeshIsolation 校验不同 mesh 的节点各自获得独立虚拟 IP（分配互不干扰）。
 func TestHubAllocator_MeshIsolation(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	vA, err := a.Alloc("mesh-a", "node-x")
 	if err != nil {
@@ -81,6 +85,7 @@ func TestHubAllocator_MeshIsolation(t *testing.T) {
 
 // TestHubAllocator_ReleaseReuses 校验 Release 后虚拟 IP 可被后续节点复用。
 func TestHubAllocator_ReleaseReuses(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	v1, err := a.Alloc("mesh-a", "node-a")
 	if err != nil {
@@ -106,6 +111,7 @@ func TestHubAllocator_ReleaseReuses(t *testing.T) {
 // TestHubAllocator_ReleaseOwnKeyOnly 校验 Release 只释放指定 (mesh, nodeID) 的映射，
 // 不影响其他节点。
 func TestHubAllocator_ReleaseOwnKeyOnly(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	va, _ := a.Alloc("mesh-a", "node-a")
 	vb, _ := a.Alloc("mesh-b", "node-b")
@@ -122,6 +128,7 @@ func TestHubAllocator_ReleaseOwnKeyOnly(t *testing.T) {
 
 // TestHubAllocator_Exhaust 校验极小子网（/30）地址耗尽时 Alloc 返回错误。
 func TestHubAllocator_Exhaust(t *testing.T) {
+	t.Parallel()
 	small := netip.MustParsePrefix("100.64.0.0/30")
 	a := NewHubAllocator(small)
 	v1, err := a.Alloc("m", "a")
@@ -139,6 +146,7 @@ func TestHubAllocator_Exhaust(t *testing.T) {
 // TestHubAllocator_ReserveFromSnapshot 校验快照重建：已持久化的虚拟 IP 被保留，
 // 新节点不会占用已保留地址。
 func TestHubAllocator_ReserveFromSnapshot(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	snap := &Snapshot{
 		Nodes: []NodeSnap{
@@ -175,6 +183,7 @@ func TestHubAllocator_ReserveFromSnapshot(t *testing.T) {
 // （偏移 0）或网关（偏移 1）保留给节点——hub 分配从不产出这些地址，防损坏/伪造
 // 持久化文件破坏"首地址保留网关、从 .2 起分配"的不变量。
 func TestHubAllocator_ReserveRejectsReservedOffsets(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.0")); err == nil {
 		t.Fatal("网络地址（偏移 0）不应可保留")
@@ -195,6 +204,7 @@ func TestHubAllocator_ReserveRejectsReservedOffsets(t *testing.T) {
 // TestHubAllocator_TinySubnetExhaust 校验 /31、/32 极小子网无可分配地址（偏移 ≥2
 // 且 < maxHost 的范围内无主机）。
 func TestHubAllocator_TinySubnetExhaust(t *testing.T) {
+	t.Parallel()
 	for _, cidr := range []string{"100.64.0.0/31", "100.64.0.0/32"} {
 		a := NewHubAllocator(netip.MustParsePrefix(cidr))
 		if _, err := a.Alloc("m", "a"); err == nil {
@@ -206,6 +216,7 @@ func TestHubAllocator_TinySubnetExhaust(t *testing.T) {
 // TestHubAllocator_ReserveConflict 校验快照重建时的地址冲突处理：
 // 同一 VIP 被两个不同 key 保留 → 第二个报错。
 func TestHubAllocator_ReserveConflict(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	if err := a.Reserve("m", "a", netip.MustParseAddr("100.64.0.2")); err != nil {
 		t.Fatalf("首个 Reserve: %v", err)
@@ -217,6 +228,7 @@ func TestHubAllocator_ReserveConflict(t *testing.T) {
 
 // TestHubAllocator_ConcurrentAlloc 校验并发分配的虚拟 IP 唯一（-race 下稳定）。
 func TestHubAllocator_ConcurrentAlloc(t *testing.T) {
+	t.Parallel()
 	a := NewHubAllocator(testVIPSubnet)
 	const n = 64
 	results := make([]netip.Addr, n)
@@ -248,6 +260,7 @@ func TestHubAllocator_ConcurrentAlloc(t *testing.T) {
 
 // TestNewHubAllocator_RejectsIPv6 校验非 IPv4 子网被拒绝（panic，编程错误即暴露）。
 func TestNewHubAllocator_RejectsIPv6(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
@@ -258,6 +271,7 @@ func TestNewHubAllocator_RejectsIPv6(t *testing.T) {
 
 // TestHubAllocator_DefaultSubnet 校验默认虚拟子网为 CGNAT 100.64.0.0/10。
 func TestHubAllocator_DefaultSubnet(t *testing.T) {
+	t.Parallel()
 	want := netip.MustParsePrefix("100.64.0.0/10")
 	got, err := netip.ParsePrefix(DefaultVirtualSubnet)
 	if err != nil {

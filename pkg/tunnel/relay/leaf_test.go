@@ -32,6 +32,7 @@ func testLogger() *slog.Logger {
 }
 
 func TestDialAllowed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		addr string
@@ -68,6 +69,7 @@ func TestDialAllowed(t *testing.T) {
 // TestDialAllowed_ResolvedAddress 验证主机名放行时返回解析后的 IP:port（防 rebinding TOCTOU），
 // 且 IPv6 返回带方括号的 host:port（I21：之前 ip.String()+":"+port 拼出非法地址）。
 func TestDialAllowed_ResolvedAddress(t *testing.T) {
+	t.Parallel()
 	resolved, ok := DialAllowed("8.8.8.8:53")
 	if !ok {
 		t.Fatal("expected public IP allowed")
@@ -86,6 +88,7 @@ func TestDialAllowed_ResolvedAddress(t *testing.T) {
 }
 
 func TestNewDialPolicy(t *testing.T) {
+	t.Parallel()
 	// 默认（无白名单）等价 DialAllowed：私网拒绝
 	def := NewDialPolicy(nil)
 	if _, ok := def("192.168.1.10:22"); ok {
@@ -119,6 +122,7 @@ func TestNewDialPolicy(t *testing.T) {
 
 // TestNewDialPolicy_InvalidCIDR_Warns 验证非法 CIDR 不再静默丢弃，而是记录 Warn（S25）。
 func TestNewDialPolicy_InvalidCIDR_Warns(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（slog.SetDefault）才能断言告警输出，不能并行。
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -133,6 +137,7 @@ func TestNewDialPolicy_InvalidCIDR_Warns(t *testing.T) {
 // TestNewServiceDialPolicy 验证出口拨号策略对节点自身宣告的服务地址做精确放行，
 // 其余回落既有 NewDialPolicy 逻辑（公网 + 白名单 CIDR）。
 func TestNewServiceDialPolicy(t *testing.T) {
+	t.Parallel()
 	// "127.0.0.1"（无端口）放入宣告列表，确保精确命中后再被 SplitHostPort 拒绝
 	// 的分支被真正执行（I59：之前该用例未命中 exact，走的是 base 回落）。
 	svcAddrs := []string{"127.0.0.1:10022", "localhost:10022", "10.0.0.5:22", "127.0.0.1"}
@@ -198,6 +203,7 @@ func assertPolicyResolution(t *testing.T, policy func(string) (string, bool), tc
 // TestNewServiceDialPolicy_WithCIDR 验证服务地址白名单与 CIDR 白名单叠加：
 // 宣告地址、CIDR 内地址放行；CIDR 外私有地址拒绝。
 func TestNewServiceDialPolicy_WithCIDR(t *testing.T) {
+	t.Parallel()
 	policy := NewServiceDialPolicy([]string{"192.168.0.0/16"}, []string{"127.0.0.1:10022"})
 	cases := []struct {
 		addr string
@@ -219,6 +225,7 @@ func TestNewServiceDialPolicy_WithCIDR(t *testing.T) {
 // TestNewServiceDialPolicy_NoServiceAddrs 验证 serviceAddrs 为空时等价默认策略：
 // 私网拒绝、公网放行。
 func TestNewServiceDialPolicy_NoServiceAddrs(t *testing.T) {
+	t.Parallel()
 	policy := NewServiceDialPolicy(nil, nil)
 	if _, ok := policy("192.168.1.10:22"); ok {
 		t.Fatal("empty serviceAddrs policy should reject private")
@@ -230,6 +237,7 @@ func TestNewServiceDialPolicy_NoServiceAddrs(t *testing.T) {
 
 // TestNewDialPolicy_ResolvedCIDR 验证白名单命中时返回解析后的 IP:port。
 func TestNewDialPolicy_ResolvedCIDR(t *testing.T) {
+	t.Parallel()
 	withCidr := NewDialPolicy([]string{"192.168.0.0/16"})
 	resolved, ok := withCidr("192.168.5.100:22")
 	if !ok {
@@ -245,6 +253,7 @@ func TestNewDialPolicy_ResolvedCIDR(t *testing.T) {
 // 读侧用 goroutine + select ctx.Done() 包裹，防止 serveHTTP 未写响应时 io.ReadFull
 // 无限阻塞（I61）。
 func TestServeHTTP_RelaysToLocal(t *testing.T) {
+	t.Parallel()
 	// 本地 HTTP 服务（验证转发目标）
 	var gotPath string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -380,6 +389,7 @@ func (s *shortWriteStream) Bytes() []byte {
 // 确定性输入，故本用例可稳定地在退化实现下变红。真实链路的大载荷回归见
 // pkg/server 的 TestRelayStream_LargePayloadNotTruncated（那里 e2e 能稳定触发）。
 func TestServeHTTP_ShortWriteStreamNotTruncated(t *testing.T) {
+	t.Parallel()
 	payload := bytes.Repeat([]byte{0x5c}, 300000) // 300 KB ⇒ 约 300 轮 1 KB 短写
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(payload)
@@ -416,6 +426,7 @@ func TestServeHTTP_ShortWriteStreamNotTruncated(t *testing.T) {
 // 而非坏 metadata 解析，I60）。坏 metadata 解析路径由 TestServe_BadMeta_ClosesStream
 // 覆盖。
 func TestServeHTTP_BackendUnreachable_NoPanic(t *testing.T) {
+	t.Parallel()
 	pipeA, pipeB := xfertest.Pipe()
 	serverMux := mux.New(pipeA, mux.RoleListener)
 	clientMux := mux.New(pipeB, mux.RoleDialer)
@@ -462,6 +473,7 @@ func TestServeHTTP_BackendUnreachable_NoPanic(t *testing.T) {
 // 垃圾帧（非 JSON、非 dial 帧）→ Serve 解析失败 → 关闭该流（读侧返回错误），且
 // 不 panic。补齐 I60 的解析路径覆盖与 H1-T1 的流关闭断言。
 func TestServe_BadMeta_ClosesStream(t *testing.T) {
+	t.Parallel()
 	pipeA, pipeB := xfertest.Pipe()
 	serverMux := mux.New(pipeA, mux.RoleListener)
 	clientMux := mux.New(pipeB, mux.RoleDialer)
@@ -500,6 +512,7 @@ func TestServe_BadMeta_ClosesStream(t *testing.T) {
 // TestServe_DialFrameDispatch 验证 Serve 的 dial 帧分发：客户端写 dial 帧后进入
 // 字节中继，数据经出口 TCP 回显（I62）。
 func TestServe_DialFrameDispatch(t *testing.T) {
+	t.Parallel()
 	echoAddr := startEchoServer(t)
 
 	pipeA, pipeB := xfertest.Pipe()
@@ -554,6 +567,7 @@ func TestServe_DialFrameDispatch(t *testing.T) {
 // TestServe_DialAllowGate 验证 dialAllow=false 时 dial 帧被拒绝：流被关闭且目标
 // listener 零 accept（I62 门控）。
 func TestServe_DialAllowGate(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -605,6 +619,7 @@ func TestServe_DialAllowGate(t *testing.T) {
 
 // TestServe_DialPolicyRejected 验证拨号策略拒绝时 dial 帧不拨号、流被关闭（I62）。
 func TestServe_DialPolicyRejected(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -659,6 +674,7 @@ func TestServe_DialPolicyRejected(t *testing.T) {
 // TestPumpBidirectional 验证 pump 双向泵送：客户端写 payload + CloseWrite 后能读回
 // 完整回显（不截断在途响应，C1），且 pump 正常返回。
 func TestPumpBidirectional(t *testing.T) {
+	t.Parallel()
 	echoAddr := startEchoServer(t)
 	remote, err := net.Dial("tcp", echoAddr)
 	if err != nil {
@@ -724,6 +740,7 @@ func TestPumpBidirectional(t *testing.T) {
 // TestPump_NonCooperativeRemote_ForceClose 验证非合作远端（对 FIN 不回应、不关闭）
 // 在宽限期结束后被强制关闭两端，pump 返回、流被关（C1 防泄漏）。
 func TestPump_NonCooperativeRemote_ForceClose(t *testing.T) {
+	t.Parallel()
 	// 非合作服务：accept 后既不读也不写也不关（挂起）
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -801,6 +818,7 @@ func TestPump_NonCooperativeRemote_ForceClose(t *testing.T) {
 // TestServeHTTP_BodyMethods 验证带 body 的方法（POST/PUT/DELETE/OPTIONS）把流作为
 // 请求体转发到后端（I62 / S28）。
 func TestServeHTTP_BodyMethods(t *testing.T) {
+	t.Parallel()
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions} {
 		t.Run(method, func(t *testing.T) {
 			assertBodyMethodRelay(t, method)
@@ -891,6 +909,7 @@ func closeAcceptedStream(streamCh chan mux.Stream) {
 // TestServeHTTP_URLValidation 验证 I20 的 SSRF 防护：只放行相对路径，绝对 URL /
 // host 注入 / userinfo 注入 / 非法编码一律拒绝（返回 400），query 内 @ 正常保留。
 func TestServeHTTP_URLValidation(t *testing.T) {
+	t.Parallel()
 	var gotPath, gotQuery string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path

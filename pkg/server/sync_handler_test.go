@@ -149,6 +149,7 @@ func doSyncJSON(t *testing.T, method, url, body string) (int, []byte) {
 }
 
 func TestSyncAPI_CreateTask_Push(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	h, base := newSyncTestEnv(t, srv.URL, nil)
 	// seed 本地源文件到 anonymous 租户 user 桶，使 push 任务真正可成功（审查 M-2：
@@ -174,6 +175,7 @@ func TestSyncAPI_CreateTask_Push(t *testing.T) {
 }
 
 func TestSyncAPI_CreateTask_InvalidDirection(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, nil)
 
@@ -185,6 +187,7 @@ func TestSyncAPI_CreateTask_InvalidDirection(t *testing.T) {
 }
 
 func TestSyncAPI_CreateTask_RemoteMissing(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, nil)
 
@@ -201,6 +204,7 @@ func TestSyncAPI_CreateTask_RemoteMissing(t *testing.T) {
 // 不真正触发降级分支（降级由 syncmgr.TestCreateTask_QuotaHeadroomDegrades 覆盖；
 // 配额 enforce 由 reconcile 强制，见 TestReconcileQuota_TryReserveFailOnCompletion）。
 func TestSyncAPI_CreateTask_QuotaContract(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, func(c *Config) { c.MaxStorageBytes = 1024 })
 
@@ -212,6 +216,7 @@ func TestSyncAPI_CreateTask_QuotaContract(t *testing.T) {
 }
 
 func TestSyncAPI_ListAndGet(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, nil)
 
@@ -265,6 +270,7 @@ func TestSyncAPI_ListAndGet(t *testing.T) {
 }
 
 func TestSyncAPI_CancelTask(t *testing.T) {
+	t.Parallel()
 	blockCh := make(chan struct{})
 	defer close(blockCh)
 	srv := blockingListRemote(t, blockCh)
@@ -307,6 +313,7 @@ func TestSyncAPI_CancelTask(t *testing.T) {
 }
 
 func TestSyncAPI_DeleteTask(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	_, base := newSyncTestEnv(t, srv.URL, nil)
 
@@ -336,6 +343,7 @@ func TestSyncAPI_DeleteTask(t *testing.T) {
 }
 
 func TestSyncAPI_NotConfigured(t *testing.T) {
+	t.Parallel()
 	// 不注入 SyncManager → 400
 	dir := t.TempDir()
 	cfg := Default()
@@ -395,6 +403,7 @@ func doSyncOwner(t *testing.T, mux *http.ServeMux, method, path, body string) (i
 // TestSyncAPI_OwnerFiltering 验证同步任务 API 的多租户隔离（阶段 6 工作项 C）：
 // 不同 AK 用户只能看到/操作自己的任务；admin（空 owner）可见全部；API 返回 owner。
 func TestSyncAPI_OwnerFiltering(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	h, _ := newSyncTestEnv(t, srv.URL, nil)
 	// 预置源文件到各自 owner 租户 user 桶，使 push 任务可成功（避免快速 failed）
@@ -478,6 +487,7 @@ func assertSyncOwnerDenied(t *testing.T, mux *http.ServeMux, method, path, failP
 
 // TestSyncAPI_UnauthenticatedOwnerEmpty 验证未认证创建同步任务 → owner 空（全局兼容）。
 func TestSyncAPI_UnauthenticatedOwnerEmpty(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	h, _ := newSyncTestEnv(t, srv.URL, nil)
 	// 预置源文件到 anonymous 租户 user 桶（未认证创建的任务 owner 为空）
@@ -517,6 +527,7 @@ func TestSyncAPI_UnauthenticatedOwnerEmpty(t *testing.T) {
 // owner——CreateRequest.Owner 为 json:"-"，服务端 decode 后强制覆盖为 ActorFrom。
 // 请求 actor=A、body 声称 owner=B → 实际任务 owner 必须为 A。
 func TestSyncAPI_OwnerNotClientForgeable(t *testing.T) {
+	t.Parallel()
 	srv := emptyRemote(t)
 	h, base := newSyncTestEnv(t, srv.URL, nil)
 	mux := syncOwnerMux(h, "ak-A") // 注入 actor=ak-A
@@ -541,6 +552,7 @@ func TestSyncAPI_OwnerNotClientForgeable(t *testing.T) {
 // local 子目录 → alice user 桶 Scope committed == 两文件字节和（10）、Reserved 归 0，
 // 且创建期占位 1GiB 在完成 reconcile 时已释放（PerFileReserve 模式）。
 func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	remote.SeedFile("d1/a.txt", "aaaa")
 	remote.SeedFile("d1/b.txt", "bbbbbb")
@@ -596,6 +608,7 @@ func TestSyncAPI_PullChargesUserBucketQuota(t *testing.T) {
 // 的 dstFS；push 的 srcFS 是裸 LocalFS，数据单向流向远端 mock）——任务完成后 alice
 // user 桶 Usage 必须仍等于源文件预置字节（零额外记账），而非把推送出去的字节重复计费。
 func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	h, _ := newSyncTestEnv(t, srv.URL, func(c *Config) { c.OwnerQuotas = map[string]ByteSize{"alice": 100} })
 	_ = h
@@ -656,6 +669,7 @@ func TestSyncAPI_PushDoesNotChargeUserBucket(t *testing.T) {
 // 两个 6 字节不可能都通过租户聚合上限（6+6=12>10），至少一个文件/任务失败；
 // alice user 桶最终 committed<=10 且无预留泄漏。
 func TestQuota_TwoConcurrentPulls_CombinedUnderOwnerCap(t *testing.T) {
+	t.Parallel()
 	srv, remote := syncmock.NewServer(t)
 	// 两个独立子目录各 6 字节文件（src 不同避免去重吸收）。
 	remote.SeedFile("d1/a.txt", "aaaaaa")
