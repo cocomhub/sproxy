@@ -213,7 +213,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 	typ := "secretdata-test"
 	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
 		return defaultSecretdataSecret(ctx, v, set)
-	})
+	}, nil)
 	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	dataRoot := t.TempDir()
 	v := volume.Volume{Name: "sd", Type: typ, RootDir: dataRoot, Extra: map[string]any{
@@ -351,7 +351,7 @@ func TestSetupSecretBackends_Secretdata_MultiTarget(t *testing.T) {
 	typ := "secretdata-multitarget"
 	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
 		return defaultSecretdataSecret(ctx, v, set)
-	})
+	}, nil)
 	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 	primaryRoot := t.TempDir()
 	replicaRoot := t.TempDir()
@@ -1005,7 +1005,7 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 	typ := "secretdata-perowner-test"
 	registerSecretdataBackendWithFS(typ, func(ctx context.Context, v volume.Volume) ([]byte, error) {
 		return defaultSecretdataSecret(ctx, v, set)
-	})
+	}, nil)
 	t.Cleanup(func() { registry.UnregisterBackendForTest(typ) })
 
 	// alice 的默认桶里**手工放置**密钥（与 HTTP 面 /api/secrets 写入同一路径

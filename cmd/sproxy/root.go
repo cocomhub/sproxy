@@ -1147,7 +1147,13 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// `type: secretdata/secrets` 卷时 assembleVolumes 会对它们调用 registry.NewBackend，
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
-	registerSecretVolumeBackends()
+	// **待处理事项中枢**（用户裁定 2026-11-10）：登记「引擎无法自主决策 / 需重试」的存储问题
+	// （典型：改名后旧目录 meta 删除失败 ⇒ 容器内两个 dir-meta、dir_id 不在索引），供人工在
+	// Web UI 查看与处理，并由调度器定期重试。账本落 <storage_root>/meta/state/issues.json。
+	//
+	// 注意：IssueCenter 必须在 secret 后端**注册之前**创建，因为注册即注入（否则上报是 no-op）。
+	issueCenter := server.NewIssueCenter(server.DefaultIssuesStorePath(cfg.StorageRoot))
+	registerSecretVolumeBackendsWith(issueCenter)
 	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
 	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
 	// （RegisterRoutes **之后**）才注册 ⇒ config 里静态声明 `type: baidupcs` 等外部卷时，
@@ -1157,7 +1163,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	registerVolumeBackendTypes()
 	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
 	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
-	registerEnclosureWrappers()
+	registerEnclosureWrappersWith(issueCenter)
 	// 封装卷的推迟装配不需要「按类型标记」：装配层按**声明**判据（enclosure.IsDeclared：
 	// 显式 type: enclosure 或 wrapper 类型 + extra.source）跳过 registry.NewBackend，
 	// 卷集就绪后由 enclosure.AttachAll 补装。
