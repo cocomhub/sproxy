@@ -150,6 +150,7 @@ func deleteFile(t *testing.T, baseURL, filename string, content []byte) (int, []
 // TestVolumesAPI_List_SingleVolumeReturnsOne 单卷红线：真实 HTTP 装配（RegisterRoutes）下单卷
 // GET /api/volumes 返回恰 1 卷（default），usage=0、capacity=0（不限）。
 func TestVolumesAPI_List_SingleVolumeReturnsOne(t *testing.T) {
+	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 	status, out := listVolumes(t, url)
 	if status != http.StatusOK {
@@ -196,6 +197,7 @@ func TestVolumesAPI_List_IncludesType(t *testing.T) {
 // TestVolumesAPI_List_PerOwnerVisibility GET /api/volumes per-owner：alice 视图 main+disk2，
 // bob 视图 main+disk2+priv（allow:[bob]）。绝不可全局列卷——ACL 收紧卷对 alice 不可见。
 func TestVolumesAPI_List_PerOwnerVisibility(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -243,6 +245,7 @@ func TestVolumesAPI_List_PerOwnerVisibility(t *testing.T) {
 // TestVolumesAPI_Move_Success 跨卷 move 成功：main 文件 → disk2 同 rel；磁盘迁移、内容完整、
 // 双账本迁移（main 池 0、disk2 池 = size、owner user 桶 Scope 不变）。
 func TestVolumesAPI_Move_Success(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -294,6 +297,7 @@ func TestVolumesAPI_Move_Success(t *testing.T) {
 // GetSession("move")==nil 会误删 move 锁条目（超 10 分钟长 move 持锁被清理 → 同 rel 并发 move
 // 越过锁）。value=裸 upload_id 且无对应 session 的条目仍应被清理。
 func TestCleanupUploadingFilesPass_SkipsMoveLock(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	h := buildVolSetHandlers(t, cfg)
@@ -316,6 +320,7 @@ func TestCleanupUploadingFilesPass_SkipsMoveLock(t *testing.T) {
 // TestVolumesAPI_List_VolSetNilReturnsEmpty GET /api/volumes volSet nil（旧装配/手工构造路径）
 // 返回空列表 200（生产 RegisterRoutes 恒装配 volSet，此分支属防御覆盖）。
 func TestVolumesAPI_List_VolSetNilReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	h := &Handlers{}
 	req := httptest.NewRequest(http.MethodGet, "/api/volumes", nil)
 	rr := httptest.NewRecorder()
@@ -336,6 +341,7 @@ func TestVolumesAPI_List_VolSetNilReturnsEmpty(t *testing.T) {
 // （TestLocalMuxCoversAllTunnelRoutes 只探主 mux srvMux，对 localMux 侧是间接保证；此处
 // 直打 LocalHandler()：GET /api/volumes → 200、POST /api/volumes/move 缺参 → 400，均非 404）。
 func TestVolumesAPI_LocalMuxRegistered(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	var cfgPtr atomic.Pointer[Config]
@@ -426,6 +432,7 @@ func TestVolumesAPI_Move_ConcurrentDeleteIsNotExistReleasesOnce(t *testing.T) {
 
 // TestVolumesAPI_Move_SameVolumeNoop from==to：文件已在目标卷 → 200 无操作（幂等）。
 func TestVolumesAPI_Move_SameVolumeNoop(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -448,6 +455,7 @@ func TestVolumesAPI_Move_SameVolumeNoop(t *testing.T) {
 // TestVolumesAPI_Move_TargetExists409 AD-4 唯一性：目标卷已有同 rel（异常双份状态）→ 409，
 // 源文件不动（不产生第三份/不静默覆盖）。
 func TestVolumesAPI_Move_TargetExists409(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -476,6 +484,7 @@ func TestVolumesAPI_Move_TargetExists409(t *testing.T) {
 // TestVolumesAPI_Move_ACLDenied to/from 卷不在 owner 视图（allow 白名单收紧）→ 403；
 // 源在 from 卷但 to 不在视图 → 403；from 不在视图 → 403（不泄存在性）。
 func TestVolumesAPI_Move_ACLDenied(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -504,6 +513,7 @@ func TestVolumesAPI_Move_ACLDenied(t *testing.T) {
 
 // TestVolumesAPI_Move_SourceNotFound404 from 卷上源不存在 → 404。
 func TestVolumesAPI_Move_SourceNotFound404(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -520,6 +530,7 @@ func TestVolumesAPI_Move_SourceNotFound404(t *testing.T) {
 // TestVolumesAPI_Move_RejectsDirectory move 目标是目录（非文件）→ 400（跨卷目录移动不在
 // 本 API 范围——流式复制语义针对文件）。
 func TestVolumesAPI_Move_RejectsDirectory(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -538,6 +549,7 @@ func TestVolumesAPI_Move_RejectsDirectory(t *testing.T) {
 
 // TestVolumesAPI_Move_CapacityInsufficient507 目标卷容量不足（reserve 失败）→ 507；源不动。
 func TestVolumesAPI_Move_CapacityInsufficient507(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -571,6 +583,7 @@ func TestVolumesAPI_Move_CapacityInsufficient507(t *testing.T) {
 // TestVolumesAPI_Move_Concurrent 并发同文件 move：恰 1 成功，其余 409（锁）或 404（已迁走），
 // 绝无 500 / 数据损坏；最终文件完整落 disk2，双账本一致（main 0 / disk2 size）。
 func TestVolumesAPI_Move_Concurrent(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -670,6 +683,7 @@ func assertVolumesMoveConcurrentConsistency(t *testing.T, h *Handlers, dirs []st
 // TestVersionBucket_VolumePoolLedger T6a 发现-3：版本字节写/删必须计入 home 卷容量池
 // （磁盘2 文件的版本写 disk2/version，不再只靠 reconcile 自愈）。
 func TestVersionBucket_VolumePoolLedger(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 5}, // 容量小 → 文件落 disk2

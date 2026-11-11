@@ -189,6 +189,7 @@ func echoRoundTrip(t *testing.T, conn net.Conn, payload string) {
 // hub-A 路由表无 node-b，但经联邦看到 node-b（来自 hub-B），relay 拨号被转发到
 // hub-B，由 hub-B 拨 node-b 叶子出站 echo——跨 hub 转发路径闭环。
 func TestCrossHubRelay_EndToEnd_Echo(t *testing.T) {
+	t.Parallel()
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 
 	// hub-B：路由表注册 node-b（叶子）。
@@ -218,6 +219,7 @@ func TestCrossHubRelay_EndToEnd_Echo(t *testing.T) {
 // TestCrossHubRelay_ConcurrentDial：并发跨 hub 拨号（多条中继流同时经 A→B 链），
 // -race 稳定；每条流独立 echo 往返。
 func TestCrossHubRelay_ConcurrentDial(t *testing.T) {
+	t.Parallel()
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 	rtB := hub.NewMeshRouteTable()
 	rtB.AddNode("", "node-b", callerMux)
@@ -271,6 +273,7 @@ func TestCrossHubRelay_ConcurrentDial(t *testing.T) {
 // access_keys，客户端用 hub-A 凭据、hub-A 用 peer 凭据转发到 hub-B，全链路由
 // SproxySig 保护；错误 peer 凭据被 hub-B 拒绝（fail-closed）。
 func TestCrossHubRelay_AuthEndToEnd(t *testing.T) {
+	t.Parallel()
 	callerMux, echoAddr := newRelayEchoLeaf(t)
 	rtB := hub.NewMeshRouteTable()
 	rtB.AddNode("", "node-b", callerMux)
@@ -309,6 +312,7 @@ func TestCrossHubRelay_AuthEndToEnd(t *testing.T) {
 // 的转发（peer 凭据错误/未授权）→ 客户端收到 502（网关侧认证失败不误报为客户端
 // 未授权；跨 hub 转发 fail-closed，错误沿转发链传播）。
 func TestRelayStreamHandler_ForwardUpstream401_Maps502(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	mock.relayStatus = http.StatusUnauthorized // 模拟对端拒绝本 hub 凭据
 	rtA := hub.NewMeshRouteTable()
@@ -333,6 +337,7 @@ func TestRelayStreamHandler_ForwardUpstream401_Maps502(t *testing.T) {
 // TestRelayStreamHandler_ForwardHopLimit_Returns508：服务器级——客户端带超限
 // X-Relay-Hop 请求联邦目标 → hub 拒绝 508，且不向对端转发（mock 未被接触）。
 func TestRelayStreamHandler_ForwardHopLimit_Returns508(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -359,6 +364,7 @@ func TestRelayStreamHandler_ForwardHopLimit_Returns508(t *testing.T) {
 // TestRelayStreamHandler_ForwardPathLoop_Returns508：服务器级——客户端带含对端 ID
 // 的 X-Relay-Path 请求联邦目标 → hub 检测到回源拒绝 508，不向对端转发。
 func TestRelayStreamHandler_ForwardPathLoop_Returns508(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -385,6 +391,7 @@ func TestRelayStreamHandler_ForwardPathLoop_Returns508(t *testing.T) {
 // TestRelayStreamHandler_Forward_FailoverToSecondPeer：多对端上报同一节点时，首个
 // 对端失败（502）自动尝试第二个（成功）——故障转移（评审 #5，对齐 MeshConnect 多候选回退）。
 func TestRelayStreamHandler_Forward_FailoverToSecondPeer(t *testing.T) {
+	t.Parallel()
 	mockDown := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	mockDown.relayStatus = http.StatusBadGateway
 	mockUp := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
@@ -419,6 +426,7 @@ func TestRelayStreamHandler_Forward_FailoverToSecondPeer(t *testing.T) {
 // （路径含 X），X 命中防环 508——**508 不阻断故障转移**，继续尝试上报同节点的对端 Y
 // 并成功（每个 Forward 独立防环；旧实现 break 会跳过能真实服务的 Y）。
 func TestRelayStreamHandler_Forward_FailoverPastLoop(t *testing.T) {
+	t.Parallel()
 	mockX := newMockFedPeer(t, `[{"id":"node-z","addr":"10.0.0.9:9000","mesh":""}]`)
 	mockY := newMockFedPeer(t, `[{"id":"node-z","addr":"10.0.0.9:9000","mesh":""}]`)
 
@@ -454,6 +462,7 @@ func TestRelayStreamHandler_Forward_FailoverPastLoop(t *testing.T) {
 // TestRelayStreamHandler_ForwardErrorPropagation_502：上游对端返回 502 → 客户端
 // 收到 502（错误沿转发链传播，不静默挂起）。
 func TestRelayStreamHandler_ForwardErrorPropagation_502(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	mock.relayStatus = http.StatusBadGateway
 	rtA := hub.NewMeshRouteTable()
@@ -481,6 +490,7 @@ func TestRelayStreamHandler_ForwardErrorPropagation_502(t *testing.T) {
 // TestRelayStreamHandler_Forward_HeadersSent：转发请求携带防环头与对端认证头
 // （SproxySig），下游可据此防环与鉴权。
 func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -523,6 +533,7 @@ func TestRelayStreamHandler_Forward_HeadersSent(t *testing.T) {
 // 对端 hubC 时，hop 递增为 3、路径追加下一跳 peer.ID → hubA,hubB,hubC（评审 #3：
 // 多跳路径追加逻辑的服务器级覆盖）。
 func TestRelayStreamHandler_ForwardPath_Accumulation(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -557,6 +568,7 @@ func TestRelayStreamHandler_ForwardPath_Accumulation(t *testing.T) {
 // TestRelayStreamHandler_ForwardOversizedPath_400：X-Relay-Path 超限 → 400 拒绝
 // （防头部放大，评审 #6）。
 func TestRelayStreamHandler_ForwardOversizedPath_400(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -583,6 +595,7 @@ func TestRelayStreamHandler_ForwardOversizedPath_400(t *testing.T) {
 
 // TestRelayStreamHandler_ForwardUnknownTarget_404：目标非本地且非联邦候选 → 404。
 func TestRelayStreamHandler_ForwardUnknownTarget_404(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":""}]`)
 	rtA := hub.NewMeshRouteTable()
 	hA, tsA := newRelayTestHub(t, rtA)
@@ -609,6 +622,7 @@ func TestRelayStreamHandler_ForwardUnknownTarget_404(t *testing.T) {
 // TestRelayStreamHandler_ForwardNoFederation_404：未配置联邦转发器时，目标非本地
 // 保持 404（与旧行为一致，联邦转发不改变无联邦语义）。
 func TestRelayStreamHandler_ForwardNoFederation_404(t *testing.T) {
+	t.Parallel()
 	rtA := hub.NewMeshRouteTable()
 	_, tsA := newRelayTestHub(t, rtA) // 不 SetFederationClient
 	conn, err := relayConnectRaw(t, tsA.URL, "node-x", "1.2.3.4:80", nil)
@@ -625,6 +639,7 @@ func TestRelayStreamHandler_ForwardNoFederation_404(t *testing.T) {
 // 404（跨 hub 转发不绕过 mesh 隔离）。hub-A 的请求者 mesh 为 "A"，候选 node-x
 // 属于 mesh "B" → PeerForNode 不命中 → 404。
 func TestRelayStreamHandler_ForwardMeshIsolation_404(t *testing.T) {
+	t.Parallel()
 	mock := newMockFedPeer(t, `[{"id":"node-x","addr":"10.0.0.9:9000","mesh":"B"}]`)
 	rtA := hub.NewMeshRouteTable()
 	fcA, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "hubB", URL: mock.srv.URL}}, 30*time.Second, 5*time.Second, testutil.DiscardLogger())

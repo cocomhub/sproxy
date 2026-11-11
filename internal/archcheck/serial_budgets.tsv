@@ -31,7 +31,6 @@ cmd/sclient/tlsutil_test.go	2
 cmd/sclient/trash_test.go	1
 cmd/sclient/trust_login_test.go	11
 cmd/sclient/trust_register_context_test.go	6
-cmd/sclient/trust_test.go	15
 cmd/sclient/tunnel_xfer_pinning_test.go	1
 cmd/sclient/turn_rest_test.go	3
 cmd/sclient/upload_test.go	3
@@ -68,7 +67,6 @@ pkg/server/ai_insight_paths_test.go	1
 pkg/server/archive_test.go	1
 pkg/server/audit_handler_test.go	13
 pkg/server/audit_test.go	15
-pkg/server/auth_seam_test.go	20
 pkg/server/checksum_test.go	1
 pkg/server/chunked_complete_test.go	6
 pkg/server/chunked_download_test.go	2
@@ -119,7 +117,6 @@ pkg/server/prod_hardening_test.go	1
 pkg/server/quota_reconcile_test.go	7
 pkg/server/ratelimit/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
-pkg/server/relay_stream_forward_test.go	15
 pkg/server/relay_stream_largebody_test.go	2
 pkg/server/relay_stream_test.go	13
 pkg/server/remote_write_lock_test.go	1
@@ -142,10 +139,7 @@ pkg/server/share_test.go	3
 pkg/server/signaling_test.go	13
 pkg/server/stats_test.go	2
 pkg/server/store_test.go	4
-pkg/server/sync_handler_test.go	14
-pkg/server/t6b_volume_acl_test.go	15
 pkg/server/tlsgen_test.go	2
-pkg/server/totp_e2e_test.go	14
 pkg/server/upload_owner_test.go	1
 pkg/server/upload_volume_test.go	10
 pkg/server/uploading_lock_test.go	5
@@ -153,7 +147,6 @@ pkg/server/version_crossvolume_test.go	1
 pkg/server/version_test.go	3
 pkg/server/volume_wrapper_delete_test.go	1
 pkg/server/volume_wrapper_review4_test.go	5
-pkg/server/volumes_api_test.go	14
 pkg/server/volumes_test.go	12
 pkg/server/xfer_listener_test.go	12
 pkg/storage/seal_alias_test.go	1
@@ -183,7 +176,6 @@ pkg/tunnel/hub/register_ack_test.go	3
 pkg/tunnel/hub/signaling_client_test.go	6
 pkg/tunnel/hub/signaling_test.go	14
 pkg/tunnel/hub/tcp_server_test.go	6
-pkg/tunnel/hub/vip_test.go	14
 pkg/tunnel/hub/webrtc_signal_e2e_test.go	2
 pkg/tunnel/largebody_stress_test.go	1
 pkg/tunnel/mesh/direct_signal_test.go	5
@@ -205,7 +197,6 @@ pkg/tunnel/mux/mux_test.go	19
 pkg/tunnel/mux/udp_datagram_test.go	3
 pkg/tunnel/p2p/manual_signal_cleanup_test.go	4
 pkg/tunnel/p2p/manual_signal_test.go	7
-pkg/tunnel/relay/leaf_test.go	19
 pkg/tunnel/relay/leaf_udp_test.go	5
 pkg/tunnel/relay/leaf_vip_test.go	9
 pkg/tunnel/remote_key_test.go	3

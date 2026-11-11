@@ -265,3 +265,10 @@ net/http 内部 deadline 的真实触发。故登记 `testSleepBudgets["pkg/serv
 **不可并行的理由**：断言对象是「全局默认 logger 被替换后的渲染结果」，无法用测试内独立实例表达。
 此前这 5 例只是「恰好没有 `t.Parallel()`」而串行（理由未写成标记）；本次补标记固化纪律，
 防止后续批量并行化（R18 收敛）再次误加 `t.Parallel()`。
+
+## pkg/tunnel/relay/leaf_test.go（1 例补 `sproxy:serial:`，2026-11-11）
+
+`TestNewDialPolicy_InvalidCIDR_Warns` 经 `slog.SetDefault(...)` **接管进程级默认 logger**（配 `t.Cleanup`
+恢复）后断言告警输出；并行时与同包其它用例的日志写入互相竞争（实测 `bytes.Buffer` DATA RACE）。
+**不可并行的理由**：断言对象是「全局默认 logger 被替换后的输出」，无法用测试内独立实例表达。
+该文件其余 18 例不触碰全局 logger，已并行化（R18 批次 5）。
