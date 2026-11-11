@@ -117,7 +117,7 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 		"meta_pad_bytes": "8MiB",
 		"max_file_bytes": float64(4096),
 	}}
-	opts := secretdataOptionsFromVolume(v)
+	opts := secretdataOptionsFromVolumeWith(v, nil)
 	if opts.GCInterval != 30*time.Second {
 		t.Errorf("gc_interval 解析失败: %v（want 30s）", opts.GCInterval)
 	}
@@ -144,7 +144,7 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 		t.Errorf("max_file_bytes(数字) = %d，want 4096", got)
 	}
 	// 缺省：GCInterval 0（后台 GC 关闭，默认禁用）、dedup/preserve_mtime false、字节 0。
-	def := secretdataOptionsFromVolume(volume.Volume{Extra: map[string]any{}})
+	def := secretdataOptionsFromVolumeWith(volume.Volume{Extra: map[string]any{}}, nil)
 	if def.GCInterval != 0 || def.Dedup || def.PreserveMTime {
 		t.Errorf("缺省应全关，got GCInterval=%v dedup=%v preserve_mtime=%v", def.GCInterval, def.Dedup, def.PreserveMTime)
 	}
@@ -241,7 +241,7 @@ func TestSetupSecretBackends_Secretdata(t *testing.T) {
 }
 
 // TestRegisterSecretVolumeBackends_Unconditional（Imp-1 装配门控回归）：生产装配路径
-// registerSecretVolumeBackends() + storeSecretDataSet() 在**与 sync 解耦**下打通：
+// registerSecretVolumeBackendsWith(nil) + storeSecretDataSet() 在**与 sync 解耦**下打通：
 //   - registerSecretVolumeBackends 早于卷装配即注册 secrets/secretdata 生产类型
 //     （config 声明 type:secretdata/secrets 卷时 assembleVolumes 不会「未注册后端」panic）；
 //   - storeSecretDataSet 把装配卷集 Store 进 secretDataSet → 生产 "secretdata" 类型经
@@ -253,7 +253,7 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 	// sproxy:serial: 生产注册路径 CAS 全局单例（secretDataSet + 生产类型 Once），不并发。
 	ctx := context.Background()
 	// 第一步：生产类型注册（早于卷装配，幂等 Once——可安全重复调用）。
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 	if !hasBackendType("secretdata") {
 		t.Fatal("生产 secretata 类型未注册")
 	}
@@ -318,7 +318,7 @@ func TestRegisterSecretVolumeBackends_Unconditional(t *testing.T) {
 //   - secrets.fields = [target(volume-select,required)]。
 func TestRegisterSecretSchemas_SecretURLField(t *testing.T) {
 	// sproxy:serial: 生产注册路径全局单例（生产类型 Once 已消费，读取共享静态表）。
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 
 	sd := registry.BackendSchema("secretdata")
 	if len(sd) != 2 {
@@ -419,7 +419,7 @@ func rootContainerDirs(t *testing.T, root string) []string {
 // （卷集未就绪），而非「未注册后端」panic 或 nil 解引用。
 func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
 	// sproxy:serial: 依赖全局注册表/secretDataSet 单例（与 TestRegisterSecretVolumeBackends_Unconditional 同族）。
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 	t.Cleanup(func() { secretDataSet.Store(nil) })
 	ctx := context.Background()
 	v := volume.Volume{Name: "sd", Type: "secretdata", RootDir: "/tmp", Extra: map[string]any{
@@ -448,7 +448,7 @@ func TestSecretdataBackend_PreAssembly_NoSet(t *testing.T) {
 func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	// sproxy:serial: 依赖生产注册路径的全局单例（secretDataSet + 生产类型 Once）。
 	ctx := context.Background()
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 	t.Cleanup(func() { secretDataSet.Store(nil) })
 
 	localRoot := t.TempDir()
@@ -510,7 +510,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	// 给 target=main/videos 构造「需由装配层解析注入」的错误后端 ⇒ boot fail）→
 	// enclosure.AttachAll（真实 secretdata wrapper 经 main/videos 区域视图装配）。断言见子用例注释。
 	t.Run("nested_target_keeps_wrapper_type", func(t *testing.T) {
-		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		registerEnclosureWrappersWith(nil) // 生产封装处理层（secretdata/secrets wrapper）
 		mainDir := t.TempDir()
 		cfg := server.Default()
 		cfg.Addr = "127.0.0.1:0"
@@ -616,7 +616,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	// 断言：每层装配成功 + 数据面读回一致 + 各层物理落点为密文；变异（enclosure 组合能力退化 /
 	// secret_url 不支持嵌套 secrets 卷）→ 本子用例红。
 	t.Run("multi_layer_nesting_chain", func(t *testing.T) {
-		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		registerEnclosureWrappersWith(nil) // 生产封装处理层（secretdata/secrets wrapper）
 		base := t.TempDir()
 		mainDir := filepath.Join(base, "main")
 		keysDir := filepath.Join(base, "keys")
@@ -750,7 +750,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	// 变异：装配处不包装外部后端（`injectSeals` 略过 `acc.external`）→ ① 红；`SourceFS` 对外部源
 	// 改回裸 `be.FS()`（不取 `UnsealedSource`）→ 补装期前置校验/写入被自己的封印拒 → 红。
 	t.Run("multi_layer_chain_over_external_source", func(t *testing.T) {
-		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		registerEnclosureWrappersWith(nil) // 生产封装处理层（secretdata/secrets wrapper）
 		// 外部底座后端：测试注册的唯一类型名 + t.Cleanup 反注册（不改全局 seam ⇒ 并行安全模式）。
 		const extType = "testext-chain-base"
 		extDir := t.TempDir()
@@ -891,7 +891,7 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	//
 	// 断言：boot 成功 + vault 已装配 + 透明加解密可用 + 密文落盘。
 	t.Run("config_secretdata_refs_nested_secrets", func(t *testing.T) {
-		registerEnclosureWrappers() // 生产封装处理层（secretdata/secrets wrapper）
+		registerEnclosureWrappersWith(nil) // 生产封装处理层（secretdata/secrets wrapper）
 		base := t.TempDir()
 		mainDir := filepath.Join(base, "main")
 		if err := os.MkdirAll(mainDir, 0o755); err != nil {
@@ -1075,7 +1075,7 @@ func TestSecretdataVolume_PerOwnerDefaultSecrets(t *testing.T) {
 func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T) {
 	// sproxy:serial: 依赖生产注册路径全局单例（secretDataSet + 生产类型 Once）。
 	ctx := context.Background()
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 	t.Cleanup(func() { secretDataSet.Store(nil) })
 
 	localRoot := t.TempDir()
@@ -1276,8 +1276,8 @@ func dirBytes(t *testing.T, dir string) int64 {
 func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 	ctx := context.Background()
 	// 生产注册顺序：secret 后端类型（含 secretdata）+ 本 PR 新增的封装 wrapper 注册。
-	registerSecretVolumeBackends()
-	registerEnclosureWrappers()
+	registerSecretVolumeBackendsWith(nil)
+	registerEnclosureWrappersWith(nil)
 
 	// 装配卷集：源卷 main（本地）+ 封装卷 vault（main 的 alice/user/vault 子树）。
 	root := t.TempDir()
@@ -1535,7 +1535,7 @@ func TestDefaultSecretsFS_LocalTargetSubdirLayout(t *testing.T) {
 func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	registerEnclosureWrappers()
+	registerEnclosureWrappersWith(nil)
 
 	if w, ok := enclosure.LookupWrapper("secrets"); !ok || w.Name() != "secrets" {
 		t.Fatalf("生产装配必须注册 secrets wrapper（否则 secrets 封装卷 boot fail）: ok=%v", ok)
@@ -1629,7 +1629,7 @@ func plaintextOnDisk(t *testing.T, dir, plaintext string) bool {
 // 账本）上传记账、超限拒绝、删除释放——配额在 FS 层真实生效且与池同源。
 func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
 	t.Parallel()
-	registerSecretVolumeBackends()
+	registerSecretVolumeBackendsWith(nil)
 	t.Cleanup(func() { secretDataSet.Store(nil) })
 
 	localRoot := t.TempDir()

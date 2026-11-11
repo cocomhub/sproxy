@@ -162,10 +162,6 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 // **Dedup 不接线（方案 A 降级）**：去重降级为预留能力，装配层不再解析 extra.dedup 键
 // （该键被忽略，生产 Options.Dedup 恒 false = 不复用）。实验代码保留由测试直接构造
 // Options.Dedup 验证；生产 config 不启用。
-func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
-	return secretdataOptionsFromVolumeWith(v, nil)
-}
-
 // secretdataOptionsFromVolumeWith 同上，但注入**存储问题上报器**（可选；nil = 不上报，零回归）。
 //
 // 用户裁定 2026-11-10：改名/移动后旧目录 meta 删除失败等「引擎无法自主决策或需要重试」的问题，
@@ -593,8 +589,6 @@ var enclosureWrapperOnce sync.Once
 //
 // 密钥解析与 `type: secretdata` 同源（`extra.secret_url` → `secretDataSet` 卷集
 // `ResolveURL`），故同样经**懒解析**：注册发生在卷集就绪前，Build 发生在补装期（卷集已就绪）。
-func registerEnclosureWrappers() { registerEnclosureWrappersWith(nil) }
-
 // registerEnclosureWrappersWith 同上，但把**存储问题上报器**注入 secretdata 封装处理层
 // （用户裁定 2026-11-10：需人工感知且可定期重试的存储问题必须被登记）。nil = 不上报。
 func registerEnclosureWrappersWith(rep secretdata.IssueReporter) {
@@ -632,8 +626,6 @@ var secretDataSet = atomic.Pointer[registry.Set]{}
 // set 就绪后由 attachSecretdataVolumes 遍历已登记卷补装（分「先行/后置」两轮，见本文件「装配
 // 序」注释；registry.NewBackend + AttachExternal）
 // ——config 声明的 type:secretdata 卷可真正装配（config.example vault 示例可用）。
-func registerSecretVolumeBackends() { registerSecretVolumeBackendsWith(nil) }
-
 // registerSecretVolumeBackendsWith 同上，但把**存储问题上报器**下传给 secretdata 后端工厂
 // （用户裁定 2026-11-10：需要人工感知 / 可重试的存储问题必须被登记）。nil = 不上报（零回归）。
 func registerSecretVolumeBackendsWith(rep secretdata.IssueReporter) {
