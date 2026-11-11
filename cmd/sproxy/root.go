@@ -1234,6 +1234,23 @@ func (rt *runServerRuntime) setupServerCore() error {
 	}()
 	// 把中枢与扫描实现交给 HTTP 面（/api/issues 列表/详情/人工解决/手动扫描）。
 	h.SetIssueCenter(issueCenter, scan)
+
+	// **定期重试**（用户裁定 2026-11-10：「后续定期重试处理，最终必须成功」）：
+	// 执行器把领域侧修复能力（当前：清理非权威目录 meta）按事项类型分流；未覆盖的类型由
+	// Manager 转 needs_human（绝不静默跳过）。调度器未装配时注册为 no-op（零回归）。
+	issuesExecs := server.NewIssuesExecutors(server.ExecutorDeps{
+		Resolve: func(vol string) any {
+			be := h.Volumes().External(vol)
+			if be == nil {
+				return nil
+			}
+			return be.FS()
+		},
+		Log: logger,
+	})
+	if rerr := h.RegisterIssuesRetryTask(issuesExecs); rerr != nil {
+		logger.Warn("注册待处理事项重试任务失败（不影响启动）", "error", rerr.Error())
+	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg, h.Volumes())
