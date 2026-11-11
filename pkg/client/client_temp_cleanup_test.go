@@ -15,6 +15,7 @@ import (
 // 孤儿（请求中断/进程被强杀）**永远清不到**，`%TEMP%/sproxy-client/` 累积到 64GiB ✗。
 // 修复为**按时间节流**：首次立即清，之后每 clientTempCleanupInterval 清一次。
 func TestMaybeCleanupClientTemp_Throttled(t *testing.T) {
+	// sproxy:serial: 需读写包内节流状态（clientTempCleanupAt），本质串行；非全局 seam 替换。
 	// 不并行：操作包内清理时间戳（同包测试，按纪律不依赖全局 seam 替换，
 	// 这里只是重置自己的节流状态）。
 	reset := func(at time.Time) {
@@ -81,6 +82,7 @@ func TestStaleClientTempMaxAge_Reasonable(t *testing.T) {
 //
 // 安全性：只创建名字带本测试唯一前缀的文件；判据基于 mtime，活跃文件（刚写入）永不受影响。
 func TestMaybeCleanupClientTemp_RemovesAgedOrphanE2E(t *testing.T) {
+	// sproxy:serial: 需改写包内节流状态并触发真实清理，本质串行（非全局 seam 替换）。
 	dir := clientTempDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
