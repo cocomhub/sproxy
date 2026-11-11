@@ -15,12 +15,13 @@ import (
 // fakeLister 是卷集最小接口的测试替身。
 type fakeLister struct {
 	vols []volume.Volume
-	be   map[string]registry.ExternalBackend
+	vs   map[string]syncpkg.FS
 }
 
 func (f *fakeLister) All() []volume.Volume { return f.vols }
-func (f *fakeLister) External(name string) registry.ExternalBackend {
-	return f.be[name]
+func (f *fakeLister) VolumeView(name string, _ registry.ViewUse) (syncpkg.FS, bool) {
+	fs, ok := f.vs[name]
+	return fs, ok
 }
 
 // inspectorFS 把「审查能力」包进一个 sync.FS（嵌入接口 = 只实现需要的方法，
@@ -30,33 +31,27 @@ type inspectorFS struct {
 	insp *fakeInspector
 }
 
-func (f *inspectorFS) Trace(ctx context.Context, rel string, mode volume.InspectMode) (*volume.PathTrace, error) {
+func (f *inspectorFS) Trace(ctx context.Context, rel string, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	return f.insp.Trace(ctx, rel, mode)
 }
-func (f *inspectorFS) Explain(ctx context.Context, rel string, mode volume.InspectMode) (*volume.RealExplanation, error) {
+func (f *inspectorFS) Explain(ctx context.Context, rel string, mode syncpkg.InspectMode) (*syncpkg.RealExplanation, error) {
 	return f.insp.Explain(ctx, rel, mode)
 }
-func (f *inspectorFS) TraceTree(ctx context.Context, rel string, depth int, mode volume.InspectMode) (*volume.PathTrace, error) {
+func (f *inspectorFS) TraceTree(ctx context.Context, rel string, depth int, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	return f.insp.TraceTree(ctx, rel, depth, mode)
 }
-
-// fakeBackend 是 ExternalBackend 替身（FS 可注入）。
-type fakeBackend struct{ fs syncpkg.FS }
-
-func (b *fakeBackend) FS() syncpkg.FS { return b.fs }
-func (b *fakeBackend) Close() error   { return nil }
 
 // TestScanTargetsFromSet_OnlyInspectable 锁定：只挑「后端 FS 实现 StorageInspector」的卷；
 // 不支持审查的卷静默跳过（可选能力，属正常），nil 卷集返回空。
 func TestScanTargetsFromSet_OnlyInspectable(t *testing.T) {
 	t.Parallel()
-	insp := &fakeInspector{trace: &volume.PathTrace{Rel: "", Kind: "dir"}}
+	insp := &fakeInspector{trace: &syncpkg.PathTrace{Rel: "", Kind: "dir"}}
 	l := &fakeLister{
 		vols: []volume.Volume{{Name: "baidu"}, {Name: "local"}},
-		be: map[string]registry.ExternalBackend{
-			"baidu": &fakeBackend{fs: &inspectorFS{insp: insp}},
-			// local 的后端 FS 不支持审查（用 nil 模拟：Assert 失败 ⇒ 跳过）
-			"local": &fakeBackend{fs: nil},
+		vs: map[string]syncpkg.FS{
+			"baidu": &inspectorFS{insp: insp},
+			// local 的视图不支持审查（nil ⇒ 取不到/断言失败 ⇒ 跳过）
+			"local": nil,
 		},
 	}
 	got := ScanTargetsFromSet(l)
@@ -71,7 +66,7 @@ func TestScanTargetsFromSet_OnlyInspectable(t *testing.T) {
 // TestScanTargetsFromSet_SkipsMissingBackend 锁定：没有任何后端的卷被跳过（不 panic）。
 func TestScanTargetsFromSet_SkipsMissingBackend(t *testing.T) {
 	t.Parallel()
-	l := &fakeLister{vols: []volume.Volume{{Name: "ghost"}}, be: map[string]registry.ExternalBackend{}}
+	l := &fakeLister{vols: []volume.Volume{{Name: "ghost"}}, vs: map[string]syncpkg.FS{}}
 	if got := ScanTargetsFromSet(l); len(got) != 0 {
 		t.Fatalf("无后端应跳过，got %+v", got)
 	}

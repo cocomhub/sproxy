@@ -11,7 +11,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 func TestVolumeTrace_QueryAndDecode(t *testing.T) {
@@ -63,7 +63,7 @@ func TestVolumeExplain_DecodesOwnerAndAnomalies(t *testing.T) {
 	if ex.Kind != "chunk" || ex.Owner == nil || ex.Owner.Rel != "a/b.txt" || ex.Owner.ChunkIndex == nil || *ex.Owner.ChunkIndex != 2 {
 		t.Fatalf("owner 解码异常: %+v", ex)
 	}
-	if len(ex.Anomalies) != 1 || ex.Anomalies[0].Code != volume.AnomalyBlobOrphan {
+	if len(ex.Anomalies) != 1 || ex.Anomalies[0].Code != syncpkg.AnomalyBlobOrphan {
 		t.Fatalf("anomaly 解码异常: %+v", ex.Anomalies)
 	}
 }

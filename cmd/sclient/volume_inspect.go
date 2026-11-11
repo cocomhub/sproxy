@@ -20,10 +20,11 @@ import (
 	"strings"
 	"time"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
 	"github.com/cocomhub/sproxy/pkg/cli"
-	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/spf13/cobra"
 )
 
@@ -153,7 +154,7 @@ func resolveInspectTarget(cmd *cobra.Command, arg string, st *state.State, logic
 
 // emitTraceResult 输出正向结果（--json 或文本）。**两种模式共用同一退出码判定**：
 // 此前 JSON 分支提前 return，导致同一份数据文本模式退 3、JSON 模式退 0（不一致）。
-func emitTraceResult(cmd *cobra.Command, ios cli.IOStreams, tr *volume.PathTrace) error {
+func emitTraceResult(cmd *cobra.Command, ios cli.IOStreams, tr *syncpkg.PathTrace) error {
 	if jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON); jsonOut {
 		return writeInspectJSON(ios.Out, tr)
 	}
@@ -162,7 +163,7 @@ func emitTraceResult(cmd *cobra.Command, ios cli.IOStreams, tr *volume.PathTrace
 }
 
 // emitExplainResult 输出反向结果（--json 或文本）。
-func emitExplainResult(cmd *cobra.Command, ios cli.IOStreams, ex *volume.RealExplanation) error {
+func emitExplainResult(cmd *cobra.Command, ios cli.IOStreams, ex *syncpkg.RealExplanation) error {
 	if jsonOut, _ := cmd.Flags().GetBool(flagInspectJSON); jsonOut {
 		return writeInspectJSON(ios.Out, ex)
 	}
@@ -174,15 +175,15 @@ func emitExplainResult(cmd *cobra.Command, ios cli.IOStreams, ex *volume.RealExp
 //   - upload_in_progress：本进程在途上传（meta 未提交），是正常中间态；
 //   - dedup_shared：内容位于去重池，是设计内的共享布局。
 var inspectInformationalAnomalies = map[string]struct{}{
-	volume.AnomalyUploadInProgress: {},
-	volume.AnomalyDedupShared:      {},
+	syncpkg.AnomalyUploadInProgress: {},
+	syncpkg.AnomalyDedupShared:      {},
 }
 
-// inspectHasDiff 报告是否存在**真实差异**（详见 volume.Anomaly 码表）。
+// inspectHasDiff 报告是否存在**真实差异**（详见 syncpkg.Anomaly 码表）。
 //
 // 语义：退出码 3 = 索引声明与磁盘事实不一致（或缺/多/大小不符/meta 不可读）。
 // 上传中/去重共享不算差异——否则「上传中看一眼」就退 3，脚本无法区分。
-func inspectHasDiff(anomalies []volume.Anomaly) bool {
+func inspectHasDiff(anomalies []syncpkg.Anomaly) bool {
 	for _, a := range anomalies {
 		if _, ok := inspectInformationalAnomalies[a.Code]; ok {
 			continue
@@ -203,7 +204,7 @@ func writeInspectJSON(w io.Writer, v any) error {
 //
 // 每层显示**真实容器名**与其**逻辑目录名**（例如 `容器 kv… → kv`），
 // 这样才能把「盘上的随机目录」和「用户认识的目录」对上。
-func writeTraceText(w io.Writer, tr *volume.PathTrace) {
+func writeTraceText(w io.Writer, tr *syncpkg.PathTrace) {
 	head := displayRel(tr.Rel) + "   " + humanSize(tr.Size)
 	if tr.MTime > 0 {
 		head += "  mtime=" + time.Unix(0, tr.MTime).Format("2006-01-02 15:04")
@@ -243,7 +244,7 @@ func writeTraceText(w io.Writer, tr *volume.PathTrace) {
 }
 
 // writeChildren 递归渲染子树节点（紧凑行：名称/大小/类型/meta/分块数）。
-func writeChildren(w io.Writer, children []volume.PathTrace, depth int) {
+func writeChildren(w io.Writer, children []syncpkg.PathTrace, depth int) {
 	for i := range children {
 		c := &children[i]
 		fmt.Fprintln(w, indent(depth+1)+childBranch(i, len(children))+" "+childLine(c))
@@ -260,7 +261,7 @@ func childBranch(i, n int) string {
 }
 
 // childLine 渲染单个子项的一行摘要。
-func childLine(c *volume.PathTrace) string {
+func childLine(c *syncpkg.PathTrace) string {
 	line := baseName(c.Rel) + "   " + humanSize(c.Size) + "  [" + c.Kind + "]"
 	switch c.Mode {
 	case "uploading":
@@ -275,7 +276,7 @@ func childLine(c *volume.PathTrace) string {
 }
 
 // childBlobSummary 渲染 meta/分块/parity/dir_id 摘要。
-func childBlobSummary(c *volume.PathTrace) string {
+func childBlobSummary(c *syncpkg.PathTrace) string {
 	out := ""
 	if c.Meta != nil {
 		out += "  meta=" + path.Base(c.Meta.RealPath)
@@ -304,7 +305,7 @@ func baseName(rel string) string {
 }
 
 // uploadCommitted 取上传进度（nil 安全）。
-func uploadCommitted(up *volume.UploadProgress) int64 {
+func uploadCommitted(up *syncpkg.UploadProgress) int64 {
 	if up == nil {
 		return 0
 	}
@@ -312,7 +313,7 @@ func uploadCommitted(up *volume.UploadProgress) int64 {
 }
 
 // writeUploadProgress 渲染在途上传进度（已上传密文字节 ≈ 明文 + 每块开销）。
-func writeUploadProgress(w io.Writer, up *volume.UploadProgress) {
+func writeUploadProgress(w io.Writer, up *syncpkg.UploadProgress) {
 	if up == nil {
 		return
 	}
@@ -331,7 +332,7 @@ func writeUploadProgress(w io.Writer, up *volume.UploadProgress) {
 }
 
 // writeContainerRefs 输出带逻辑名的容器链，返回最深层层号。
-func writeContainerRefs(w io.Writer, refs []volume.ContainerRef) int {
+func writeContainerRefs(w io.Writer, refs []syncpkg.ContainerRef) int {
 	depth := 0
 	for i, c := range refs {
 		label := "容器 " + path.Base(c.RealPath)
@@ -377,7 +378,7 @@ func metaLabel(kind string) string {
 }
 
 // writeExplainText 渲染反向解释（设计 §5.5）。
-func writeExplainText(w io.Writer, ex *volume.RealExplanation) {
+func writeExplainText(w io.Writer, ex *syncpkg.RealExplanation) {
 	fmt.Fprintf(w, "真实路径 %s\n", ex.RealPath)
 	fmt.Fprintf(w, "用途     %s\n", ex.Kind)
 	if ex.Owner != nil {
@@ -407,7 +408,7 @@ func displayDir(dir string) string {
 }
 
 // ownerSuffix 渲染归属补充信息（分块序号 / parity）。
-func ownerSuffix(o *volume.LogicalRef) string {
+func ownerSuffix(o *syncpkg.LogicalRef) string {
 	switch {
 	case o == nil:
 		return ""
@@ -421,7 +422,7 @@ func ownerSuffix(o *volume.LogicalRef) string {
 }
 
 // containerSuffix 渲染容器 dir_id/parent 补充信息。
-func containerSuffix(c *volume.ContainerRef) string {
+func containerSuffix(c *syncpkg.ContainerRef) string {
 	if c == nil || c.DirID == "" {
 		return ""
 	}
@@ -432,7 +433,7 @@ func containerSuffix(c *volume.ContainerRef) string {
 }
 
 // renderRealEntry 渲染容器内单条目的用途行。
-func renderRealEntry(e volume.RealEntry) string {
+func renderRealEntry(e syncpkg.RealEntry) string {
 	owner := ""
 	if e.Owner != nil {
 		owner = "→ " + e.Owner.Rel + ownerSuffix(e.Owner)
@@ -448,7 +449,7 @@ func renderRealEntry(e volume.RealEntry) string {
 }
 
 // writeAnomalies 输出差异码（只读审计，不构成删除建议）。
-func writeAnomalies(w io.Writer, list []volume.Anomaly) {
+func writeAnomalies(w io.Writer, list []syncpkg.Anomaly) {
 	if len(list) == 0 {
 		return
 	}

@@ -14,6 +14,7 @@ package server
 // 设计约定：
 //   - 依赖经 `ExecutorDeps` **显式注入**（不读全局），便于测试与装配顺序解耦；
 //   - 领域包能力用**最小接口**（`DirMetaCleaner`）表达，`pkg/server` 不必依赖具体卷实现类型；
+//     取卷一律走 `Handlers.VolumeViewFS`（统一卷视图入口），不在本文件直接接触后端视图；
 //   - 执行器**必须幂等**（重试可能重复执行）：领域能力本身已保证（0 个残留也算成功）。
 
 import (
@@ -34,7 +35,7 @@ type DirMetaCleaner interface {
 
 // ExecutorDeps 是执行器所需的最小依赖（显式注入，便于测试与解耦装配顺序）。
 type ExecutorDeps struct {
-	// Resolve 返回指定卷的「可修复对象」（生产传 `volSet.External(vol).FS()`）。
+	// Resolve 返回指定卷的「可修复对象」（生产经 `Handlers.VolumeViewFS`，装配期已套装饰链与封印）。
 	// 返回 nil 表示该卷不可用/不存在 ⇒ 按"暂时失败"处理（退避重试，达上限转人工）。
 	Resolve func(volume string) any
 	// Log 可选（nil ⇒ 不记日志）。

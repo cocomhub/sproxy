@@ -7,8 +7,11 @@ on:
   push:
     branches: [master]
     paths-ignore:
-      - '*.md'
-      - 'docs/**'
+      # 注意（2026-11-11 实测修正）：GitHub 对 paths-ignore 是「**任一**改动文件匹配即跳过整个
+      # workflow」（与文档措辞"all"不符，已用 `gh run list` 取证：33 个文件的 PR 只含 1 个
+      # docs/ 文件 ⇒ CI 完全不触发）。因此**不能**把 `*.md`/`docs/**` 放进这里 ——
+      # 否则"文档搭在代码 PR 里"会让**代码改动得不到 CI 覆盖**（#1092/#1096 实测踩到）。
+      # 纯文档改动改走 ci-docs-only.yml（paths 恰好反向）。
       - 'CHANGELOG.md'
       - '.release-please-manifest.json'
       - '.gitignore'
@@ -21,8 +24,11 @@ on:
   pull_request:
     branches: [master]
     paths-ignore:
-      - '*.md'
-      - 'docs/**'
+      # 注意（2026-11-11 实测修正）：GitHub 对 paths-ignore 是「**任一**改动文件匹配即跳过整个
+      # workflow」（与文档措辞"all"不符，已用 `gh run list` 取证：33 个文件的 PR 只含 1 个
+      # docs/ 文件 ⇒ CI 完全不触发）。因此**不能**把 `*.md`/`docs/**` 放进这里 ——
+      # 否则"文档搭在代码 PR 里"会让**代码改动得不到 CI 覆盖**（#1092/#1096 实测踩到）。
+      # 纯文档改动改走 ci-docs-only.yml（paths 恰好反向）。
       - 'CHANGELOG.md'
       - '.release-please-manifest.json'
       - '.gitignore'

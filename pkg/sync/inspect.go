@@ -1,9 +1,16 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package volume
+package sync
 
-// inspect.go 定义「真实存储可解释」能力（设计 docs/designs/2026-11-04-secretdata-storage-inspection.md）。
+// inspect.go 定义「真实存储可解释」能力（FS 能力，与 RangeReader/WriteIfAbsent/MetaExtraUpdater 同族）。
+//
+// 为什么在 pkg/sync（2026-11-11 架构决策）：装饰器分布在 pkg/sync 与 pkg/volume 两层，而 pkg/sync 是 G0
+// 基础层、**不能**引用 pkg/volume —— 能力若留在 pkg/volume，位于 pkg/sync 链上的装饰器就无法转发，上层类型
+// 断言恒 false ⇒ **静默降级**（详见 docs/decorator-capability-forwarding.md）。把能力放到它该在的层，
+// 各层装饰器才能一致转发；pkg/volume 侧保留**类型别名**，调用点零改动。
+//
+// 原始说明（设计 docs/designs/2026-11-04-secretdata-storage-inspection.md）：
 //
 // 为什么定义在 pkg/volume 而不是 pkg/server 或 CLI：真实落点（容器链、meta pad、分块/parity、
 // blocklet、去重共享容器）**只有掌握布局的卷自己知道**；调用方无法反推。写在别处就是第二份

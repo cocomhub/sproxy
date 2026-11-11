@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package volume
+package sync
 
 // inspect_test.go 锁审查输出的**JSON 契约**（字段名/结构稳定性）。
 //
