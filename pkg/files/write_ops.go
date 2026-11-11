@@ -614,7 +614,7 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 // 用于索引条目记录物理归属（与搜索结果 volume 字段语义一致：目录为空，文件带卷名）。
 //
 // 判定**不得只比指针**（D2）：多卷装配下同一逻辑根会有多个实例——自动路由写入用的 root 与
-// `volSet.Root(name)` 并非同一指针（租户缓存 / OpenRoot 各建一次）⇒ 指针相等恒 false，上传
+// 卷根访问器返回的 root 并非同一指针（租户缓存 / OpenRoot 各建一次）⇒ 指针相等恒 false，上传
 // 落库的卷归属恒为空（/api/files 不显示卷 badge、「过滤卷 = main」漏掉这些文件）。
 // 改为**物理路径比对**：root 是该卷根自身**或**其下租户根（`<卷根>/<owner>`）即归属该卷；
 // 多卷根互为嵌套时取**最长匹配**（最具体者胜）。

@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -206,7 +205,7 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 	var httpClient *http.Client
 	if insecureTLS {
 		// 本地自签证书（WSL 联调等）：注入跳过校验的 HTTPClient（生产必须 false）。
-		httpClient = httpc.NewHTTPClient(httpc.Options{Transport: insecureTransport(), Timeout: 30 * time.Second})
+		httpClient = httpc.NewHTTPClient(httpc.Options{Transport: netutil.InsecureTransport(), Timeout: 30 * time.Second})
 		cfg.HTTPClient = httpClient
 	}
 	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
@@ -215,17 +214,4 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 		Priority: 10,
 	})
 	slog.Info("pikpak url resolver registered", "priority", 10, "insecure_tls", insecureTLS)
-}
-
-// insecureTransport 返回跳过 TLS 校验的 Transport（仅本地联调；绝不用于生产）。
-func insecureTransport() *http.Transport {
-	// 基座 = DefaultTransport.Clone()（保留 ProxyFromEnvironment/连接池调校）——
-	// 不裸构造 Transport（门禁 R19：丢默认调校）。
-	t, _ := http.DefaultTransport.(*http.Transport)
-	if t == nil {
-		t = netutil.IsolatedTransport()
-	}
-	t = t.Clone()
-	t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 本地联调专用
-	return t
 }

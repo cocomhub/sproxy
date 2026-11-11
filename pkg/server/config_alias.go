@@ -20,58 +20,30 @@ import (
 // ---- 类型别名（零成本，方法与字段随原类型）----
 type (
 	ACMEConfig              = config.ACMEConfig
-	ArchiveConfig           = config.ArchiveConfig
-	AuditConfig             = config.AuditConfig
-	AuditStartupConfig      = config.AuditStartupConfig
 	AuthConfig              = config.AuthConfig
 	AuthExternalConfig      = config.AuthExternalConfig
-	BandwidthConfig         = config.BandwidthConfig
 	ByteSize                = config.ByteSize
 	Config                  = config.Config
-	CredentialStoreConfig   = config.CredentialStoreConfig
-	CredentialsConfig       = config.CredentialsConfig
-	DedupConfig             = config.DedupConfig
-	FederationConfig        = config.FederationConfig
-	FederationPeerConfig    = config.FederationPeerConfig
-	GRPCTransportConfig     = config.GRPCTransportConfig
 	HubConfig               = config.HubConfig
 	LDAPConfig              = config.LDAPConfig
 	MaintenanceWindowConfig = config.MaintenanceWindowConfig
 	MeshConfig              = config.MeshConfig
-	MeshNodeConfig          = config.MeshNodeConfig
 	OIDCConfig              = config.OIDCConfig
-	OTELConfig              = config.OTELConfig
-	PikpakAccountConfig     = config.PikpakAccountConfig
-	PikpakConfig            = config.PikpakConfig
-	PikpakHybridConfig      = config.PikpakHybridConfig
-	QUICTransportConfig     = config.QUICTransportConfig
 	RateLimitConfig         = config.RateLimitConfig
 	RegistrationConfig      = config.RegistrationConfig
-	RemoteReadConfig        = config.RemoteReadConfig
-	RemoteWriteConfig       = config.RemoteWriteConfig
-	RotationConfig          = config.RotationConfig
 	SchedulerConfig         = config.SchedulerConfig
 	ServerTimeouts          = config.ServerTimeouts
-	SyncConfig              = config.SyncConfig
 	SyncRemoteConfig        = config.SyncRemoteConfig
-	TCPTransportConfig      = config.TCPTransportConfig
 	TLSConfig               = config.TLSConfig
 	TierPolicyConfig        = config.TierPolicyConfig
 	TransportConfigs        = config.TransportConfigs
-	TrashConfig             = config.TrashConfig
 	TrustedVolumeConfig     = config.TrustedVolumeConfig
-	UsageConfig             = config.UsageConfig
 	VaultConfig             = config.VaultConfig
-	VersionConfig           = config.VersionConfig
 	VolumeACLConfig         = config.VolumeACLConfig
-	VolumeACLMode           = config.VolumeACLMode
 	VolumeConfig            = config.VolumeConfig
 	VolumeMeshReaderConfig  = config.VolumeMeshReaderConfig
 	VolumeRetentionConfig   = config.VolumeRetentionConfig
-	VolumeStateConfig       = config.VolumeStateConfig
 	WSTransportConfig       = config.WSTransportConfig
-	WebConfig               = config.WebConfig
-	WebDAVConfig            = config.WebDAVConfig
 	XferTransportConfig     = config.XferTransportConfig
 )
 
@@ -111,9 +83,7 @@ type (
 	AIEventsConfig          = config.AIEventsConfig
 	AIInsightConfig         = config.AIInsightConfig
 	AILimit                 = config.AILimit
-	AIPrivacyConfig         = config.AIPrivacyConfig
 	AIQuotaConfig           = config.AIQuotaConfig
-	AISearchConfig          = config.AISearchConfig
 	APIKey                  = config.APIKey
 	APIKeyConfig            = config.APIKeyConfig
 	AlertConfig             = config.AlertConfig
@@ -142,6 +112,5 @@ const (
 	// DefaultMaxAge 是 CORS 预检默认缓存秒数（与 config 同源）。
 	DefaultMaxAge = config.DefaultMaxAge
 	// 集群节点角色（与 config 同源）。
-	ClusterRoleMaster  = config.ClusterRoleMaster
 	ClusterRoleReplica = config.ClusterRoleReplica
 )

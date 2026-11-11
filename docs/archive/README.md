@@ -33,3 +33,7 @@ SPDX-License-Identifier: Apache-2.0
 
 - [download-resume-weak-network.md](./download-resume-weak-network.md) — 弱网大文件下载失败三根因（整请求 Timeout / `--resume` 空操作 / CLI 刷 Usage）与 sidecar 续传口径
 - [stream-write-deadline.md](./stream-write-deadline.md) — **服务端** `server_timeouts.write` 掐断长时流式响应（下载/隧道/SSE）的根因与滑动写截止修复（含真实 A/B E2E）
+
+## 门禁棘轮削减（2026-11）
+
+- [gate-ratchet-reduction.md](./gate-ratchet-reduction.md) — 全部门禁棘轮可降性逐条分析、批次 1 交付、批次 2+ 计划与 5 个待裁定决策点（含 R27/R28/R46/R51/R57/R18 的具体降幅与风险）

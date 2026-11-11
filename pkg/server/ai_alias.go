@@ -23,10 +23,6 @@ type (
 	AIPrivacy = ai.AIPrivacy
 	// AIQuota 是 per-owner AI 调用配额。
 	AIQuota = ai.AIQuota
-	// AIUsage 是 AI 用量快照。
-	AIUsage = ai.AIUsage
-	// AIArtifactInfo 是 AI 产物元信息。
-	AIArtifactInfo = ai.AIArtifactInfo
 	// AIEventConsumer 订阅文件事件并路由到 AI 流水线。
 	AIEventConsumer = ai.AIEventConsumer
 	// InsightCache 是洞察结果缓存。
@@ -38,9 +34,7 @@ const (
 	ActionAIEmbed     = ai.ActionAIEmbed
 	ActionAISummarize = ai.ActionAISummarize
 	ActionAITag       = ai.ActionAITag
-	// MaxSummaryRunes 是摘要截断上限。
-	MaxSummaryRunes = ai.MaxSummaryRunes
-	maxSummaryRunes = ai.MaxSummaryRunes
+	maxSummaryRunes   = ai.MaxSummaryRunes
 )
 
 // ErrNotTextFile 是抽样为空（非文本）的错误。
