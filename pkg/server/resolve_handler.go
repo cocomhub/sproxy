@@ -32,5 +32,15 @@ func (h *Handlers) resolveURL(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]string{"error": err.Error()}, http.StatusBadGateway)
 		return
 	}
+	// **绝不回 200 + `null`**（修复 2026-11-11）：`json.Marshal(nil 指针)` 得到字面量 `null`，
+	// 客户端 `json.Decode(&out)` 对 `null` **不报错**且保持零值 ⇒ 调用方看到"成功但字段全空"，
+	// 真实故障被掩盖（实测 sdserver `/api/resolve` 全量 null ⇒ 误报"分享内无合格视频"）。
+	// 这里 fail-closed 成 502 + 明确文案，保证客户端一定能区分"空"与"结果"。
+	if info == nil {
+		h.logger.Error("resolve 返回 nil 载荷（fail-closed 成 502，避免 200+null）",
+			"handler", "resolveURL", "url", target)
+		sendJSONResponse(w, map[string]string{"error": "解析返回空载荷"}, http.StatusBadGateway)
+		return
+	}
 	sendJSONResponse(w, info, http.StatusOK)
 }

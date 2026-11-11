@@ -536,7 +536,24 @@ func doJSONStatusError(resp *http.Response) error {
 // doJSONDecodeBody 解析 JSON 响应体并自动检查 Success 字段（超出 10MB 上限拒收）。
 func doJSONDecodeBody(r io.Reader, respBody any) error {
 	limited := io.LimitReader(r, 10<<20) // 10MB 上限
-	if err := json.NewDecoder(limited).Decode(respBody); err != nil {
+	// **空体 / JSON null 必须视为错误**（修复 2026-11-11）：
+	//
+	// `json.Decoder.Decode` 对字面量 `null` **返回 nil error**，且对 struct 目标
+	// 是 **no-op**（`respBody` 保持零值）。于是"服务端返回 200 + `null`"会伪装成
+	// **成功但字段全空** —— 调用方只能拿到零值，症状漂移到最下游且极难定位
+	// （实测：sdserver 的 `/api/resolve` 全量返回 null ⇒ 上游报"分享内无合格视频"，
+	// 真实原因被掩盖 1619 次 / 成功仅 31 次）。
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %w", err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("响应体为空（期望 JSON 对象）")
+	}
+	if string(bytes.TrimSpace(data)) == "null" {
+		return fmt.Errorf("响应体为 JSON null（期望 JSON 对象；服务端可能返回了 nil 载荷）")
+	}
+	if err := json.Unmarshal(data, respBody); err != nil {
 		return fmt.Errorf("解析响应失败: %w", err)
 	}
 	// 自动检查 Success 字段
