@@ -80,9 +80,9 @@ type Item struct {
 	Occurrences int64 `json:"occurrences"`
 	// Retryable=false ⇒ 引擎无法自主决策 ⇒ 直接 needs_human（不自动重试）。
 	Retryable   bool      `json:"retryable"`
-	NextRetryAt time.Time `json:"next_retry_at,omitempty"`
+	NextRetryAt time.Time `json:"next_retry_at"`
 	LastError   string    `json:"last_error,omitempty"`
-	ResolvedAt  time.Time `json:"resolved_at,omitempty"`
+	ResolvedAt  time.Time `json:"resolved_at"`
 	Resolution  string    `json:"resolution,omitempty"` // 解决说明（自动/人工，审计用）
 }
 

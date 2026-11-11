@@ -164,7 +164,7 @@ func TestRunDue_BoundedRetriesThenNeedsHuman(t *testing.T) {
 		KindDirMetaCleanupFailed: func(context.Context, Item) error { return errors.New("远端 5xx") },
 	}
 	var last Item
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		clk.Advance(10 * time.Minute)
 		m.RunDue(ctx1(t), clk.now, fail)
 		last, _ = m.Get(m.List(ListFilter{})[0].ID)
