@@ -20,6 +20,7 @@ import (
 // openIssuesTab 打开 UI 并切到「待处理事项」tab。
 func openIssuesTab(t *testing.T, page playwright.Page) {
 	t.Helper()
+	// sproxy:serial: Playwright 真浏览器 + 真实服务端，独占浏览器/端口资源，不可并行
 	if err := page.Locator("#stats-btn").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("click stats-btn: %v", err)
 	}
@@ -30,6 +31,7 @@ func openIssuesTab(t *testing.T, page playwright.Page) {
 
 // TestStatsPanel_IssuesTab 待处理事项 tab：切换 → 面板渲染（非空）+ 发起 GET /api/issues。
 func TestStatsPanel_IssuesTab(t *testing.T) {
+	// sproxy:serial: 同上（真浏览器 + 真实服务端，独占资源）
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
@@ -72,6 +74,7 @@ func TestStatsPanel_IssuesTab(t *testing.T) {
 // 说明：若测试服务的鉴权让面板只渲染错误占位（无按钮），本用例改为直接断言**端点存在**
 // （非 404）——端点可达是本用例要锁的契约；按钮渲染由 TestStatsPanel_IssuesTab 覆盖。
 func TestIssuesTab_ScanRequest(t *testing.T) {
+	// sproxy:serial: 同上（真浏览器 + 真实服务端，独占资源）
 	baseURL, _, cleanup := testServer(t)
 	defer cleanup()
 
