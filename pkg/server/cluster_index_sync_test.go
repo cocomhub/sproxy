@@ -13,6 +13,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/files"
 	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestIndexSyncLoop_ReloadOnChange 验证 Watch 推 put → 装配层调用 ReloadIndex。
@@ -33,21 +34,22 @@ func TestIndexSyncLoop_ReloadOnChange(t *testing.T) {
 	if err := st.Put(ctx, "index/ownerA", data); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	// 条件轮询（不 time.Sleep 固定等待）。
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	// 条件轮询：统一走 testutil.WaitForBool（固定间隔/超时由共享实现承担，不在测试里裸 time.Sleep）。
+	ok := testutil.WaitForBool(8*time.Second, func() bool {
 		if svc.reloaded.Load() > 0 {
 			if svc.reloadedOwner() != "ownerA" {
 				t.Fatalf("owner = %s, want ownerA", svc.reloadedOwner())
 			}
-			return
+			return true
 		}
 		if svc.invalidatedCount() > 0 {
 			t.Fatalf("不应 InvalidateIndex（Load 应成功）: %d", svc.invalidatedCount())
 		}
-		time.Sleep(50 * time.Millisecond)
+		return false
+	})
+	if !ok {
+		t.Fatal("Watch put 后 ReloadIndex 未被调用")
 	}
-	t.Fatal("Watch put 后 ReloadIndex 未被调用")
 }
 
 // TestIndexSyncLoop_StaleRevIgnored 验证旧 rev 信封 → ReloadIndex 返回 false（不载入）。
@@ -66,12 +68,8 @@ func TestIndexSyncLoop_StaleRevIgnored(t *testing.T) {
 	})
 	data2, _ := json.Marshal(env2)
 	_ = st.Put(ctx, "index/ownerA", data2)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if svc.reloaded.Load() >= 1 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	if !testutil.WaitForBool(5*time.Second, func() bool { return svc.reloaded.Load() >= 1 }) {
+		t.Fatal("rev 2（应用）应触发 ReloadIndex")
 	}
 	// 再推 rev 1（旧）→ 不应触发 reload（applyRev=false 返回 false）
 	svc.reloaded.Store(0)
@@ -171,15 +169,16 @@ func TestResyncLoop_CatchesUp(t *testing.T) {
 	loop := newResyncLoop(ctx, st, svc, "index/", 30*time.Millisecond, slog.Default())
 	loop.Start()
 	defer loop.Stop()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	ok := testutil.WaitForBool(5*time.Second, func() bool {
 		if svc.reloaded.Load() > 0 {
 			if svc.reloadedOwner() != "ownerX" {
 				t.Fatalf("owner = %s, want ownerX", svc.reloadedOwner())
 			}
-			return
+			return true
 		}
-		time.Sleep(50 * time.Millisecond)
+		return false
+	})
+	if !ok {
+		t.Fatal("resync 后 ReloadIndex 未被调用")
 	}
-	t.Fatal("resync 后 ReloadIndex 未被调用")
 }
