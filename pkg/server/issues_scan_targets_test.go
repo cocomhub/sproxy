@@ -31,13 +31,13 @@ type inspectorFS struct {
 	insp *fakeInspector
 }
 
-func (f *inspectorFS) Trace(ctx context.Context, rel string, mode volume.InspectMode) (*volume.PathTrace, error) {
+func (f *inspectorFS) Trace(ctx context.Context, rel string, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	return f.insp.Trace(ctx, rel, mode)
 }
-func (f *inspectorFS) Explain(ctx context.Context, rel string, mode volume.InspectMode) (*volume.RealExplanation, error) {
+func (f *inspectorFS) Explain(ctx context.Context, rel string, mode syncpkg.InspectMode) (*syncpkg.RealExplanation, error) {
 	return f.insp.Explain(ctx, rel, mode)
 }
-func (f *inspectorFS) TraceTree(ctx context.Context, rel string, depth int, mode volume.InspectMode) (*volume.PathTrace, error) {
+func (f *inspectorFS) TraceTree(ctx context.Context, rel string, depth int, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	return f.insp.TraceTree(ctx, rel, depth, mode)
 }
 
@@ -45,7 +45,7 @@ func (f *inspectorFS) TraceTree(ctx context.Context, rel string, depth int, mode
 // 不支持审查的卷静默跳过（可选能力，属正常），nil 卷集返回空。
 func TestScanTargetsFromSet_OnlyInspectable(t *testing.T) {
 	t.Parallel()
-	insp := &fakeInspector{trace: &volume.PathTrace{Rel: "", Kind: "dir"}}
+	insp := &fakeInspector{trace: &syncpkg.PathTrace{Rel: "", Kind: "dir"}}
 	l := &fakeLister{
 		vols: []volume.Volume{{Name: "baidu"}, {Name: "local"}},
 		vs: map[string]syncpkg.FS{

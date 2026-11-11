@@ -117,3 +117,34 @@ func (f *FS) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncp
 func (f *FS) RapidRefresh(ctx context.Context, item syncpkg.VerifyItem) (bool, error) {
 	return f.PrefixFS.RapidRefresh(ctx, item)
 }
+
+// ---- 存储审查能力转发（2026-11-11 能力下沉 pkg/sync 后必须转发）----
+//
+// 为什么必须转发：装饰器不实现这两个接口时，上层 `fs.(StorageInspector)` 断言恒 false ⇒
+// **静默降级**（把"底层支持审查"误判为"不支持"）。本类型内嵌 `*syncpkg.PrefixFS`（其 Inner()
+// 已提升），故直接取内嵌 `PrefixFS` 下探（不调用解包方法，R22 门禁守）；底层未实现 ⇒ 返回 ErrUnsupported 交由调用方处置。
+func (f *FS) Trace(ctx context.Context, rel string, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
+	if v, ok := any(f.PrefixFS).(syncpkg.StorageInspector); ok {
+		return v.Trace(ctx, rel, mode)
+	}
+	return nil, syncpkg.ErrUnsupported
+}
+
+func (f *FS) Explain(ctx context.Context, realRel string, mode syncpkg.InspectMode) (*syncpkg.RealExplanation, error) {
+	if v, ok := any(f.PrefixFS).(syncpkg.StorageInspector); ok {
+		return v.Explain(ctx, realRel, mode)
+	}
+	return nil, syncpkg.ErrUnsupported
+}
+
+func (f *FS) TraceTree(ctx context.Context, rel string, depth int, mode syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
+	if v, ok := any(f.PrefixFS).(syncpkg.TreeInspector); ok {
+		return v.TraceTree(ctx, rel, depth, mode)
+	}
+	return nil, syncpkg.ErrUnsupported
+}
+
+var (
+	_ syncpkg.StorageInspector = (*FS)(nil)
+	_ syncpkg.TreeInspector    = (*FS)(nil)
+)

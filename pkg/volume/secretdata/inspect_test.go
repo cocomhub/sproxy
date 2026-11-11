@@ -25,7 +25,6 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 func writeFileT(t *testing.T, fsys *SecretdataFS, rel string, content []byte) {
@@ -44,7 +43,7 @@ func TestInspect_TraceFile(t *testing.T) {
 	content := data(600) // 64-128B 随机块 ⇒ 多块
 	writeFileT(t, fsys, "dir/movie.mp4", content)
 
-	tr, err := fsys.Trace(ctx, "dir/movie.mp4", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "dir/movie.mp4", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -67,14 +66,14 @@ func TestInspect_TraceFile(t *testing.T) {
 	}
 
 	// disk 模式：所有声明 blob 必须真实存在且大小一致。
-	trDisk, derr := fsys.Trace(ctx, "dir/movie.mp4", volume.InspectDisk)
+	trDisk, derr := fsys.Trace(ctx, "dir/movie.mp4", syncpkg.InspectDisk)
 	if derr != nil {
 		t.Fatalf("Trace(disk): %v", derr)
 	}
 	if len(trDisk.Anomalies) != 0 {
 		t.Fatalf("disk 模式不应有差异，got %+v", trDisk.Anomalies)
 	}
-	for _, ref := range append([]*volume.BlobRef{trDisk.Meta, trDisk.Parity}, blobRefsOf(trDisk.Chunks)...) {
+	for _, ref := range append([]*syncpkg.BlobRef{trDisk.Meta, trDisk.Parity}, blobRefsOf(trDisk.Chunks)...) {
 		if ref == nil {
 			continue
 		}
@@ -84,8 +83,8 @@ func TestInspect_TraceFile(t *testing.T) {
 	}
 }
 
-func blobRefsOf(chunks []volume.ChunkRef) []*volume.BlobRef {
-	out := make([]*volume.BlobRef, 0, len(chunks))
+func blobRefsOf(chunks []syncpkg.ChunkRef) []*syncpkg.BlobRef {
+	out := make([]*syncpkg.BlobRef, 0, len(chunks))
 	for i := range chunks {
 		out = append(out, &chunks[i].Blob)
 	}
@@ -102,7 +101,7 @@ func TestInspect_TraceDir(t *testing.T) {
 	}
 	writeFileT(t, fsys, "photos/a.jpg", data(50))
 
-	tr, err := fsys.Trace(ctx, "photos", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "photos", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace(dir): %v", err)
 	}
@@ -114,7 +113,7 @@ func TestInspect_TraceDir(t *testing.T) {
 	}
 
 	// 卷根同样可 trace（根容器）。
-	root, rerr := fsys.Trace(ctx, "", volume.InspectIndex)
+	root, rerr := fsys.Trace(ctx, "", syncpkg.InspectIndex)
 	if rerr != nil || root.Kind != "dir" || root.Meta == nil {
 		t.Fatalf("Trace(root) = %+v, %v", root, rerr)
 	}
@@ -127,13 +126,13 @@ func TestInspect_ExplainContainer(t *testing.T) {
 	ctx := context.Background()
 	writeFileT(t, fsys, "docs/a.txt", data(300))
 
-	tr, err := fsys.Trace(ctx, "docs/a.txt", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "docs/a.txt", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
 	container := path.Dir(tr.Meta.RealPath)
 
-	ex, err := fsys.Explain(ctx, container, volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, container, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(container): %v", err)
 	}
@@ -233,7 +232,7 @@ func TestInspect_DiskProbeIsConcurrent(t *testing.T) {
 	}
 	writeFileT(t, fsys, "p/f.bin", data(600)) // ≥2 块
 
-	if _, err := fsys.Trace(context.Background(), "p/f.bin", volume.InspectDisk); err != nil {
+	if _, err := fsys.Trace(context.Background(), "p/f.bin", syncpkg.InspectDisk); err != nil {
 		t.Fatalf("Trace(disk): %v", err)
 	}
 	if got := gfs.maxInFlight.Load(); got < 2 {
@@ -249,7 +248,7 @@ func BenchmarkInspect_TraceFile(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := fsys.Trace(ctx, "bench/f.bin", volume.InspectIndex); err != nil {
+		if _, err := fsys.Trace(ctx, "bench/f.bin", syncpkg.InspectIndex); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -261,7 +260,7 @@ func BenchmarkInspect_ExplainContainer(b *testing.B) {
 	for i := range 100 {
 		writeFilePerf(b, fsys, "bench/f"+strconv.Itoa(i)+".bin", 64)
 	}
-	tr, err := fsys.Trace(context.Background(), "bench/f0.bin", volume.InspectIndex)
+	tr, err := fsys.Trace(context.Background(), "bench/f0.bin", syncpkg.InspectIndex)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -270,7 +269,7 @@ func BenchmarkInspect_ExplainContainer(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := fsys.Explain(ctx, container, volume.InspectIndex); err != nil {
+		if _, err := fsys.Explain(ctx, container, syncpkg.InspectIndex); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -377,13 +376,13 @@ func TestInspect_ExplainChunkDoesNotReadContent(t *testing.T) {
 	}
 	ctx := context.Background()
 	writeFileT(t, fsys, "m/f.bin", data(400))
-	tr, err := fsys.Trace(ctx, "m/f.bin", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "m/f.bin", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
 
 	cfs.reads.Store(0)
-	if _, err := fsys.Explain(ctx, tr.Chunks[0].Blob.RealPath, volume.InspectIndex); err != nil {
+	if _, err := fsys.Explain(ctx, tr.Chunks[0].Blob.RealPath, syncpkg.InspectIndex); err != nil {
 		t.Fatalf("Explain(chunk): %v", err)
 	}
 	if n := cfs.reads.Load(); n != 0 {
@@ -391,7 +390,7 @@ func TestInspect_ExplainChunkDoesNotReadContent(t *testing.T) {
 	}
 
 	cfs.reads.Store(0)
-	if _, err := fsys.Explain(ctx, tr.Meta.RealPath, volume.InspectIndex); err != nil {
+	if _, err := fsys.Explain(ctx, tr.Meta.RealPath, syncpkg.InspectIndex); err != nil {
 		t.Fatalf("Explain(meta): %v", err)
 	}
 	if n := cfs.reads.Load(); n == 0 {
@@ -405,7 +404,7 @@ func TestInspect_ExplainFileMetaInFlight(t *testing.T) {
 	fsys := newFS(t)
 	ctx := context.Background()
 	writeFileT(t, fsys, "p/real.txt", data(120))
-	tr, err := fsys.Trace(ctx, "p/real.txt", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "p/real.txt", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -427,14 +426,14 @@ func TestInspect_ExplainFileMetaInFlight(t *testing.T) {
 	tok := fsys.beginUpload("p/new.txt", container, 1024)
 	defer fsys.endUpload(tok)
 
-	ex, err := fsys.Explain(ctx, path.Join(container, name), volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, path.Join(container, name), syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
 	if ex.Kind != "upload_in_progress" {
 		t.Fatalf("kind = %s, want upload_in_progress（不得报孤儿）", ex.Kind)
 	}
-	if hasAnomaly(ex.Anomalies, volume.AnomalyBlobOrphan) {
+	if hasAnomaly(ex.Anomalies, syncpkg.AnomalyBlobOrphan) {
 		t.Fatal("在途 file-meta 不得出现 blob_orphan")
 	}
 }
@@ -446,7 +445,7 @@ func TestInspect_ContainerIndexMapsAllBlobs(t *testing.T) {
 	ctx := context.Background()
 	writeFileT(t, fsys, "ci/a.bin", data(300))
 	writeFileT(t, fsys, "ci/b.bin", data(200))
-	tr, err := fsys.Trace(ctx, "ci/a.bin", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "ci/a.bin", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -458,7 +457,7 @@ func TestInspect_ContainerIndexMapsAllBlobs(t *testing.T) {
 	}
 	var wantChunks int
 	for _, rel := range []string{"ci/a.bin", "ci/b.bin"} {
-		t2, terr := fsys.Trace(ctx, rel, volume.InspectIndex)
+		t2, terr := fsys.Trace(ctx, rel, syncpkg.InspectIndex)
 		if terr != nil {
 			t.Fatalf("Trace(%s): %v", rel, terr)
 		}
@@ -516,7 +515,7 @@ func TestInspect_ContainersCarryLogicalNames(t *testing.T) {
 	}
 	writeFileT(t, fsys, "a/b/c.txt", data(200))
 
-	tr, err := fsys.Trace(ctx, "a/b/c.txt", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "a/b/c.txt", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -585,7 +584,7 @@ func TestInspect_TraceTree_ChildrenNoBackendIO(t *testing.T) {
 
 	cfs.lists.Store(0)
 	cfs.reads.Store(0)
-	tree, err := fsys.TraceTree(ctx, "root", 2, volume.InspectIndex)
+	tree, err := fsys.TraceTree(ctx, "root", 2, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree: %v", err)
 	}
@@ -617,7 +616,7 @@ func TestInspect_TraceTree_Depth(t *testing.T) {
 	writeFileT(t, fsys, "d/b.bin", data(120))
 	writeFileT(t, fsys, "d/sub/c.bin", data(40))
 
-	tree, err := fsys.TraceTree(ctx, "d", 1, volume.InspectIndex)
+	tree, err := fsys.TraceTree(ctx, "d", 1, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree(1): %v", err)
 	}
@@ -625,7 +624,7 @@ func TestInspect_TraceTree_Depth(t *testing.T) {
 		t.Fatalf("depth=1 不应展开子项, got %d", len(tree.Children))
 	}
 
-	tree2, err := fsys.TraceTree(ctx, "d", 2, volume.InspectIndex)
+	tree2, err := fsys.TraceTree(ctx, "d", 2, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree(2): %v", err)
 	}
@@ -637,7 +636,7 @@ func TestInspect_TraceTree_Depth(t *testing.T) {
 			t.Fatalf("子项字段缺失: %+v", c)
 		}
 	}
-	var sub *volume.PathTrace
+	var sub *syncpkg.PathTrace
 	for i := range tree2.Children {
 		if tree2.Children[i].Kind == "dir" {
 			sub = &tree2.Children[i]
@@ -650,7 +649,7 @@ func TestInspect_TraceTree_Depth(t *testing.T) {
 		t.Fatalf("depth=2 不应展开孙节点, got %d", len(sub.Children))
 	}
 
-	tree3, err := fsys.TraceTree(ctx, "d", 3, volume.InspectIndex)
+	tree3, err := fsys.TraceTree(ctx, "d", 3, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree(3): %v", err)
 	}
@@ -666,7 +665,7 @@ func TestInspect_TraceTree_Depth(t *testing.T) {
 	}
 }
 
-func namesOf(nodes []volume.PathTrace) []string {
+func namesOf(nodes []syncpkg.PathTrace) []string {
 	out := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		out = append(out, n.Rel)
@@ -683,17 +682,17 @@ func TestInspect_TraceTree_DepthClamped(t *testing.T) {
 		t.Fatalf("MakeDir: %v", err)
 	}
 	writeFileT(t, fsys, "x/y/z/w/f.bin", data(20))
-	tree, err := fsys.TraceTree(ctx, "x", 99, volume.InspectIndex)
+	tree, err := fsys.TraceTree(ctx, "x", 99, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree(99): %v", err)
 	}
 	// MaxTreeDepth=3 ⇒ 最多到 z 层（x→y→z），不会展开 w/f。
 	seen := 0
-	var walk func(ns []volume.PathTrace, level int)
-	walk = func(ns []volume.PathTrace, level int) {
+	var walk func(ns []syncpkg.PathTrace, level int)
+	walk = func(ns []syncpkg.PathTrace, level int) {
 		for _, n := range ns {
 			seen++
-			if level >= volume.MaxTreeDepth {
+			if level >= syncpkg.MaxTreeDepth {
 				if len(n.Children) != 0 {
 					t.Fatalf("超过 MaxTreeDepth 仍展开: level=%d rel=%s", level, n.Rel)
 				}
@@ -712,18 +711,18 @@ func TestInspect_TraceTree_NodeBudget(t *testing.T) {
 	t.Parallel()
 	fsys := newFS(t)
 	ctx := context.Background()
-	// 造 volume.MaxTreeNodes+5 个小文件（预算以根之外的节点计）。
-	for i := range volume.MaxTreeNodes + 5 {
+	// 造 syncpkg.MaxTreeNodes+5 个小文件（预算以根之外的节点计）。
+	for i := range syncpkg.MaxTreeNodes + 5 {
 		writeFileT(t, fsys, "big/f"+strconv.Itoa(i)+".bin", data(8))
 	}
-	tree, err := fsys.TraceTree(ctx, "big", 2, volume.InspectIndex)
+	tree, err := fsys.TraceTree(ctx, "big", 2, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree: %v", err)
 	}
-	if len(tree.Children) > volume.MaxTreeNodes {
-		t.Fatalf("子节点数 %d 超过上限 %d", len(tree.Children), volume.MaxTreeNodes)
+	if len(tree.Children) > syncpkg.MaxTreeNodes {
+		t.Fatalf("子节点数 %d 超过上限 %d", len(tree.Children), syncpkg.MaxTreeNodes)
 	}
-	if !hasAnomaly(tree.Anomalies, volume.AnomalyTruncated) {
+	if !hasAnomaly(tree.Anomalies, syncpkg.AnomalyTruncated) {
 		t.Fatalf("截断必须留 truncated anomaly, got %+v", tree.Anomalies)
 	}
 }
@@ -741,11 +740,11 @@ func TestInspect_TraceTree_ShowsUploadingChild(t *testing.T) {
 	defer fsys.endUpload(tok)
 	fsys.advanceUpload(tok, 1024)
 
-	tree, err := fsys.TraceTree(ctx, "up", 2, volume.InspectIndex)
+	tree, err := fsys.TraceTree(ctx, "up", 2, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("TraceTree: %v", err)
 	}
-	var found *volume.PathTrace
+	var found *syncpkg.PathTrace
 	for i := range tree.Children {
 		if strings.HasSuffix(tree.Children[i].Rel, "pending.bin") {
 			found = &tree.Children[i]
@@ -772,7 +771,7 @@ func TestInspect_TraceUploading(t *testing.T) {
 	fsys.advanceUpload(tok, 400)
 	fsys.advanceUpload(tok, 200)
 
-	tr, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "up/big.bin", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("上传中 Trace 不应 404: %v", err)
 	}
@@ -788,7 +787,7 @@ func TestInspect_TraceUploading(t *testing.T) {
 
 	// 上传结束后回到「不存在」（本用例未真正提交 meta）。
 	fsys.endUpload(tok)
-	if _, err := fsys.Trace(ctx, "up/big.bin", volume.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := fsys.Trace(ctx, "up/big.bin", syncpkg.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("上传结束后应恢复 404 语义, got %v", err)
 	}
 }
@@ -799,7 +798,7 @@ func TestInspect_ExplainUploadInProgress(t *testing.T) {
 	fsys := newFS(t)
 	ctx := context.Background()
 	writeFileT(t, fsys, "d/keep.txt", data(80))
-	tr, err := fsys.Trace(ctx, "d/keep.txt", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "d/keep.txt", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -814,7 +813,7 @@ func TestInspect_ExplainUploadInProgress(t *testing.T) {
 	defer fsys.endUpload(tok)
 
 	// ① 单 blob 解释。
-	ex, err := fsys.Explain(ctx, path.Join(container, inflight), volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, path.Join(container, inflight), syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -824,15 +823,15 @@ func TestInspect_ExplainUploadInProgress(t *testing.T) {
 	if ex.Owner == nil || ex.Owner.Rel != "d/new.bin" {
 		t.Fatalf("归属 = %+v, want d/new.bin", ex.Owner)
 	}
-	if hasAnomaly(ex.Anomalies, volume.AnomalyBlobOrphan) {
+	if hasAnomaly(ex.Anomalies, syncpkg.AnomalyBlobOrphan) {
 		t.Fatal("在途分块不得出现 blob_orphan")
 	}
-	if !hasAnomaly(ex.Anomalies, volume.AnomalyUploadInProgress) {
+	if !hasAnomaly(ex.Anomalies, syncpkg.AnomalyUploadInProgress) {
 		t.Fatalf("缺少 upload_in_progress 标记: %+v", ex.Anomalies)
 	}
 
 	// ② 容器逐条解释同样标注。
-	exC, err := fsys.Explain(ctx, container, volume.InspectIndex)
+	exC, err := fsys.Explain(ctx, container, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(container): %v", err)
 	}
@@ -849,7 +848,7 @@ func TestInspect_ExplainUploadInProgress(t *testing.T) {
 		t.Fatalf("在途条目数 = %d, want 1", inflightEntries)
 	}
 	for _, a := range exC.Anomalies {
-		if a.Code == volume.AnomalyBlobOrphan && strings.HasSuffix(a.RealPath, inflight) {
+		if a.Code == syncpkg.AnomalyBlobOrphan && strings.HasSuffix(a.RealPath, inflight) {
 			t.Fatal("容器解释不得把在途分块报成孤儿")
 		}
 	}
@@ -871,12 +870,12 @@ func TestInspect_ExplainContainerSubdirIsContainer(t *testing.T) {
 	}
 	writeFileT(t, fsys, "parent/child/f.txt", data(40))
 
-	root, err := fsys.Trace(ctx, "", volume.InspectIndex)
+	root, err := fsys.Trace(ctx, "", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace(root): %v", err)
 	}
 	rootContainer := path.Dir(root.Meta.RealPath)
-	ex, err := fsys.Explain(ctx, rootContainer, volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, rootContainer, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(root container): %v", err)
 	}
@@ -893,7 +892,7 @@ func TestInspect_ExplainContainerSubdirIsContainer(t *testing.T) {
 		}
 	}
 	for _, a := range ex.Anomalies {
-		if a.Code == volume.AnomalyBlobOrphan {
+		if a.Code == syncpkg.AnomalyBlobOrphan {
 			orphans++
 		}
 	}
@@ -924,7 +923,7 @@ func TestInspect_ExplainChunkVsParity(t *testing.T) {
 	ctx := context.Background()
 	writeFileT(t, fsys, "v.mp4", data(600))
 
-	tr, err := fsys.Trace(ctx, "v.mp4", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "v.mp4", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -935,7 +934,7 @@ func TestInspect_ExplainChunkVsParity(t *testing.T) {
 		t.Fatal("parity 与分块落点不应相同")
 	}
 
-	ex, err := fsys.Explain(ctx, tr.Parity.RealPath, volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, tr.Parity.RealPath, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(parity): %v", err)
 	}
@@ -947,7 +946,7 @@ func TestInspect_ExplainChunkVsParity(t *testing.T) {
 	}
 
 	// 普通分块必须判为 chunk（不能误判为 parity）。
-	ex2, err := fsys.Explain(ctx, tr.Chunks[0].Blob.RealPath, volume.InspectIndex)
+	ex2, err := fsys.Explain(ctx, tr.Chunks[0].Blob.RealPath, syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(chunk): %v", err)
 	}
@@ -962,7 +961,7 @@ func TestInspect_ExplainOrphan(t *testing.T) {
 	fsys := newFS(t)
 	ctx := context.Background()
 	writeFileT(t, fsys, "a/b.txt", data(80))
-	tr, err := fsys.Trace(ctx, "a/b.txt", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "a/b.txt", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Trace: %v", err)
 	}
@@ -973,17 +972,17 @@ func TestInspect_ExplainOrphan(t *testing.T) {
 	if werr := fsys.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, orphan), bytes.NewReader(data(32)), 32, 0); werr != nil {
 		t.Fatalf("写孤儿 blob: %v", werr)
 	}
-	ex, err := fsys.Explain(ctx, path.Join(container, orphan), volume.InspectIndex)
+	ex, err := fsys.Explain(ctx, path.Join(container, orphan), syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(orphan): %v", err)
 	}
 	if ex.Owner != nil {
 		t.Fatalf("孤儿不应有归属: %+v", ex.Owner)
 	}
-	if !hasAnomaly(ex.Anomalies, volume.AnomalyBlobOrphan) {
+	if !hasAnomaly(ex.Anomalies, syncpkg.AnomalyBlobOrphan) {
 		t.Fatalf("缺少 blob_orphan 差异码: %+v", ex.Anomalies)
 	}
-	if !strings.Contains(anomalyDetail(ex.Anomalies, volume.AnomalyBlobOrphan), "GC") {
+	if !strings.Contains(anomalyDetail(ex.Anomalies, syncpkg.AnomalyBlobOrphan), "GC") {
 		t.Fatal("孤儿文案必须指向 GC（不得暗示可直接删除）")
 	}
 }
@@ -993,8 +992,8 @@ func TestInspect_ExplainRejectsEscape(t *testing.T) {
 	t.Parallel()
 	fsys := newFS(t)
 	for _, p := range []string{"../other", "a/../../b", "/etc/passwd", `C:/Windows`, `a\..\..\b`} {
-		_, err := fsys.Explain(context.Background(), p, volume.InspectIndex)
-		if !errors.Is(err, volume.ErrOutsideVolume) {
+		_, err := fsys.Explain(context.Background(), p, syncpkg.InspectIndex)
+		if !errors.Is(err, syncpkg.ErrOutsideVolume) {
 			t.Fatalf("Explain(%q) err = %v, want ErrOutsideVolume", p, err)
 		}
 	}
@@ -1004,11 +1003,11 @@ func TestInspect_ExplainRejectsEscape(t *testing.T) {
 func TestInspect_ExplainNotFound(t *testing.T) {
 	t.Parallel()
 	fsys := newFS(t)
-	ex, err := fsys.Explain(context.Background(), "no/such/blob", volume.InspectIndex)
+	ex, err := fsys.Explain(context.Background(), "no/such/blob", syncpkg.InspectIndex)
 	if err != nil {
 		t.Fatalf("Explain(notfound) 应返回解释而不是错误: %v", err)
 	}
-	if ex.Kind != "unknown" || !hasAnomaly(ex.Anomalies, volume.AnomalyNotFound) {
+	if ex.Kind != "unknown" || !hasAnomaly(ex.Anomalies, syncpkg.AnomalyNotFound) {
 		t.Fatalf("not_found 解释异常: kind=%s anomalies=%+v", ex.Kind, ex.Anomalies)
 	}
 }
@@ -1019,7 +1018,7 @@ func TestInspect_DiskDetectsMissingAndMismatch(t *testing.T) {
 	fsys := newFS(t)
 	ctx := context.Background()
 	writeFileT(t, fsys, "x.bin", data(400))
-	tr, err := fsys.Trace(ctx, "x.bin", volume.InspectIndex)
+	tr, err := fsys.Trace(ctx, "x.bin", syncpkg.InspectIndex)
 	if err != nil || len(tr.Chunks) < 2 {
 		t.Fatalf("前置失败: %v (%d chunks)", err, len(tr.Chunks))
 	}
@@ -1035,14 +1034,14 @@ func TestInspect_DiskDetectsMissingAndMismatch(t *testing.T) {
 		t.Fatalf("删除 blob: %v", err)
 	}
 
-	trDisk, derr := fsys.Trace(ctx, "x.bin", volume.InspectDisk)
+	trDisk, derr := fsys.Trace(ctx, "x.bin", syncpkg.InspectDisk)
 	if derr != nil {
 		t.Fatalf("Trace(disk): %v", derr)
 	}
-	if !hasAnomaly(trDisk.Anomalies, volume.AnomalySizeMismatch) {
+	if !hasAnomaly(trDisk.Anomalies, syncpkg.AnomalySizeMismatch) {
 		t.Fatalf("缺少 size_mismatch: %+v", trDisk.Anomalies)
 	}
-	if !hasAnomaly(trDisk.Anomalies, volume.AnomalyBlobMissing) {
+	if !hasAnomaly(trDisk.Anomalies, syncpkg.AnomalyBlobMissing) {
 		t.Fatalf("缺少 blob_missing: %+v", trDisk.Anomalies)
 	}
 }
@@ -1051,7 +1050,7 @@ func TestInspect_DiskDetectsMissingAndMismatch(t *testing.T) {
 func TestInspect_TraceMissing(t *testing.T) {
 	t.Parallel()
 	fsys := newFS(t)
-	if _, err := fsys.Trace(context.Background(), "nope/x", volume.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := fsys.Trace(context.Background(), "nope/x", syncpkg.InspectIndex); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("err = %v, want fs.ErrNotExist", err)
 	}
 }
@@ -1060,15 +1059,15 @@ func TestInspect_TraceMissing(t *testing.T) {
 func TestAssertStorageInspector(t *testing.T) {
 	t.Parallel()
 	fsys := newFS(t)
-	if _, ok := volume.AssertStorageInspector(fsys); !ok {
+	if _, ok := syncpkg.AssertStorageInspector(fsys); !ok {
 		t.Fatal("SecretdataFS 必须实现 StorageInspector")
 	}
-	if _, ok := volume.AssertStorageInspector(struct{}{}); ok {
+	if _, ok := syncpkg.AssertStorageInspector(struct{}{}); ok {
 		t.Fatal("非实现者不应被判定为支持")
 	}
 }
 
-func hasAnomaly(list []volume.Anomaly, code string) bool {
+func hasAnomaly(list []syncpkg.Anomaly, code string) bool {
 	for _, a := range list {
 		if a.Code == code {
 			return true
@@ -1077,7 +1076,7 @@ func hasAnomaly(list []volume.Anomaly, code string) bool {
 	return false
 }
 
-func anomalyDetail(list []volume.Anomaly, code string) string {
+func anomalyDetail(list []syncpkg.Anomaly, code string) string {
 	for _, a := range list {
 		if a.Code == code {
 			return a.Detail

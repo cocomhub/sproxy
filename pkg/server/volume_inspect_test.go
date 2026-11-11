@@ -104,7 +104,7 @@ func TestVolumeInspect_TraceAndExplain(t *testing.T) {
 		t.Fatalf("trace status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var trResp struct {
-		Trace *volume.PathTrace `json:"trace"`
+		Trace *syncpkg.PathTrace `json:"trace"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &trResp); err != nil || trResp.Trace == nil {
 		t.Fatalf("trace 响应解析失败: %v (%s)", err, rec.Body.String())
@@ -123,7 +123,7 @@ func TestVolumeInspect_TraceAndExplain(t *testing.T) {
 		t.Fatalf("explain status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var exResp struct {
-		Explain *volume.RealExplanation `json:"explain"`
+		Explain *syncpkg.RealExplanation `json:"explain"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &exResp); err != nil || exResp.Explain == nil {
 		t.Fatalf("explain 响应解析失败: %v (%s)", err, rec.Body.String())
@@ -193,7 +193,7 @@ func TestVolumeInspect_TraceTree(t *testing.T) {
 		t.Fatalf("depth=2 status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Trace *volume.PathTrace `json:"trace"`
+		Trace *syncpkg.PathTrace `json:"trace"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.Trace == nil {
 		t.Fatalf("解析失败: %v (%s)", err, rec.Body.String())

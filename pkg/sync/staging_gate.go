@@ -354,3 +354,34 @@ func (g *StagingQuotaGateFS) RapidRefresh(ctx context.Context, item VerifyItem) 
 	}
 	return rr.RapidRefresh(ctx, item)
 }
+
+// ---- 存储审查能力转发（2026-11-11 能力下沉 pkg/sync 后必须转发）----
+//
+// 为什么必须转发：装饰器不实现这两个接口时，上层 `fs.(StorageInspector)` 断言恒 false ⇒
+// **静默降级**（把"底层支持审查"误判为"不支持"）。底层未实现 ⇒ 返回 ErrUnsupported，
+// 由调用方按"未实现"处置，而**不是**让断言失败。
+func (g *StagingQuotaGateFS) Trace(ctx context.Context, rel string, mode InspectMode) (*PathTrace, error) {
+	if f, ok := any(g.inner).(StorageInspector); ok {
+		return f.Trace(ctx, rel, mode)
+	}
+	return nil, ErrUnsupported
+}
+
+func (g *StagingQuotaGateFS) Explain(ctx context.Context, realRel string, mode InspectMode) (*RealExplanation, error) {
+	if f, ok := any(g.inner).(StorageInspector); ok {
+		return f.Explain(ctx, realRel, mode)
+	}
+	return nil, ErrUnsupported
+}
+
+func (g *StagingQuotaGateFS) TraceTree(ctx context.Context, rel string, depth int, mode InspectMode) (*PathTrace, error) {
+	if f, ok := any(g.inner).(TreeInspector); ok {
+		return f.TraceTree(ctx, rel, depth, mode)
+	}
+	return nil, ErrUnsupported
+}
+
+var (
+	_ StorageInspector = (*StagingQuotaGateFS)(nil)
+	_ TreeInspector    = (*StagingQuotaGateFS)(nil)
+)

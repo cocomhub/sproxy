@@ -10,8 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/state"
-	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/spf13/cobra"
 )
 
@@ -20,14 +21,14 @@ func TestWriteTraceText_RendersChainAndAnomalies(t *testing.T) {
 	idx := 0
 	onDisk := false
 	var buf bytes.Buffer
-	writeTraceText(&buf, &volume.PathTrace{
-		SchemaVersion: volume.SchemaVersion, Mode: "index", Rel: "photos/a.jpg", Kind: "file",
-		Size: 4096, Meta: &volume.BlobRef{RealPath: "k3f9a/sub/7xQz", Bytes: 1024},
-		Chunks: []volume.ChunkRef{{Index: 0, Blob: volume.BlobRef{RealPath: "k3f9a/sub/9ab", Bytes: 2048, Plain: 2000}, Blocklets: 1}},
-		Parity: &volume.BlobRef{RealPath: "k3f9a/sub/f5d", Bytes: 2048},
-		Anomalies: []volume.Anomaly{
-			{Code: volume.AnomalyBlobMissing, RealPath: "k3f9a/sub/x", Detail: "缺失"},
-			{Code: volume.AnomalySizeMismatch, RealPath: "k3f9a/sub/y", Detail: "大小不符"},
+	writeTraceText(&buf, &syncpkg.PathTrace{
+		SchemaVersion: syncpkg.SchemaVersion, Mode: "index", Rel: "photos/a.jpg", Kind: "file",
+		Size: 4096, Meta: &syncpkg.BlobRef{RealPath: "k3f9a/sub/7xQz", Bytes: 1024},
+		Chunks: []syncpkg.ChunkRef{{Index: 0, Blob: syncpkg.BlobRef{RealPath: "k3f9a/sub/9ab", Bytes: 2048, Plain: 2000}, Blocklets: 1}},
+		Parity: &syncpkg.BlobRef{RealPath: "k3f9a/sub/f5d", Bytes: 2048},
+		Anomalies: []syncpkg.Anomaly{
+			{Code: syncpkg.AnomalyBlobMissing, RealPath: "k3f9a/sub/x", Detail: "缺失"},
+			{Code: syncpkg.AnomalySizeMismatch, RealPath: "k3f9a/sub/y", Detail: "大小不符"},
 		},
 	})
 	out := buf.String()
@@ -44,16 +45,16 @@ func TestWriteTraceText_RendersChainAndAnomalies(t *testing.T) {
 func TestWriteTraceText_ShowsContainerLogicalNames(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	writeTraceText(&buf, &volume.PathTrace{
-		SchemaVersion: volume.SchemaVersion, Mode: "index", Rel: "photos/a.jpg", Kind: "file",
+	writeTraceText(&buf, &syncpkg.PathTrace{
+		SchemaVersion: syncpkg.SchemaVersion, Mode: "index", Rel: "photos/a.jpg", Kind: "file",
 		Size: 2048,
-		Containers: []volume.ContainerRef{
+		Containers: []syncpkg.ContainerRef{
 			{RealPath: "OypEIk", LogicalDir: ""},
 			{RealPath: "OypEIk/TmKKk", LogicalDir: "ak-6c/user"},
 			{RealPath: "OypEIk/TmKKk/y78eK", LogicalDir: "ak-6c/user/photos"},
 		},
-		Meta:   &volume.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/7xQz", Bytes: 1024},
-		Chunks: []volume.ChunkRef{{Index: 0, Blob: volume.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/9ab", Bytes: 2048, Plain: 2000}, Blocklets: 1}},
+		Meta:   &syncpkg.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/7xQz", Bytes: 1024},
+		Chunks: []syncpkg.ChunkRef{{Index: 0, Blob: syncpkg.BlobRef{RealPath: "OypEIk/TmKKk/y78eK/9ab", Bytes: 2048, Plain: 2000}, Blocklets: 1}},
 	})
 	out := buf.String()
 	for _, want := range []string{
@@ -70,11 +71,11 @@ func TestWriteTraceText_ShowsContainerLogicalNames(t *testing.T) {
 func TestWriteTraceText_Uploading(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	writeTraceText(&buf, &volume.PathTrace{
-		SchemaVersion: volume.SchemaVersion, Mode: "uploading", Rel: "photos/a.mp4", Kind: "file",
+	writeTraceText(&buf, &syncpkg.PathTrace{
+		SchemaVersion: syncpkg.SchemaVersion, Mode: "uploading", Rel: "photos/a.mp4", Kind: "file",
 		Size:       1000,
-		Containers: []volume.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
-		Upload:     &volume.UploadProgress{Rel: "photos/a.mp4", Container: "k3f9a", Total: 1000, Committed: 400, Chunks: 3},
+		Containers: []syncpkg.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
+		Upload:     &syncpkg.UploadProgress{Rel: "photos/a.mp4", Container: "k3f9a", Total: 1000, Committed: 400, Chunks: 3},
 	})
 	out := buf.String()
 	for _, want := range []string{
@@ -92,16 +93,16 @@ func TestWriteTraceText_Uploading(t *testing.T) {
 func TestWriteTraceText_RendersChildren(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	writeTraceText(&buf, &volume.PathTrace{
-		SchemaVersion: volume.SchemaVersion, Mode: "index", Rel: "photos", Kind: "dir", Size: 0,
-		Containers: []volume.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
-		Meta:       &volume.BlobRef{RealPath: "k3f9a/dm", Bytes: 1024},
-		Children: []volume.PathTrace{
+	writeTraceText(&buf, &syncpkg.PathTrace{
+		SchemaVersion: syncpkg.SchemaVersion, Mode: "index", Rel: "photos", Kind: "dir", Size: 0,
+		Containers: []syncpkg.ContainerRef{{RealPath: "k3f9a", LogicalDir: ""}},
+		Meta:       &syncpkg.BlobRef{RealPath: "k3f9a/dm", Bytes: 1024},
+		Children: []syncpkg.PathTrace{
 			{Rel: "photos/a.jpg", Kind: "file", Size: 2048,
-				Meta:   &volume.BlobRef{RealPath: "k3f9a/c1/m1", Bytes: 100},
-				Chunks: []volume.ChunkRef{{Index: 0, Blob: volume.BlobRef{RealPath: "k3f9a/c1/k1", Bytes: 2048}}}},
+				Meta:   &syncpkg.BlobRef{RealPath: "k3f9a/c1/m1", Bytes: 100},
+				Chunks: []syncpkg.ChunkRef{{Index: 0, Blob: syncpkg.BlobRef{RealPath: "k3f9a/c1/k1", Bytes: 2048}}}},
 			{Rel: "photos/up.bin", Kind: "file", Size: 4096, Mode: "uploading",
-				Upload: &volume.UploadProgress{Rel: "photos/up.bin", Total: 4096, Committed: 1024, Chunks: 1}},
+				Upload: &syncpkg.UploadProgress{Rel: "photos/up.bin", Total: 4096, Committed: 1024, Chunks: 1}},
 		},
 	})
 	out := buf.String()
@@ -119,16 +120,16 @@ func TestWriteExplainText_RendersOwnerParityAndEntries(t *testing.T) {
 	t.Parallel()
 	chunk := 2
 	var buf bytes.Buffer
-	writeExplainText(&buf, &volume.RealExplanation{
-		SchemaVersion: volume.SchemaVersion, Mode: "disk", RealPath: "k3f9a/sub/9ab", Kind: "chunk",
-		Owner:     &volume.LogicalRef{Rel: "photos/a.jpg", Role: "file", ChunkIndex: &chunk},
-		Container: &volume.ContainerRef{RealPath: "k3f9a/sub", LogicalDir: "photos", DirID: "d1", ParentID: "p0"},
+	writeExplainText(&buf, &syncpkg.RealExplanation{
+		SchemaVersion: syncpkg.SchemaVersion, Mode: "disk", RealPath: "k3f9a/sub/9ab", Kind: "chunk",
+		Owner:     &syncpkg.LogicalRef{Rel: "photos/a.jpg", Role: "file", ChunkIndex: &chunk},
+		Container: &syncpkg.ContainerRef{RealPath: "k3f9a/sub", LogicalDir: "photos", DirID: "d1", ParentID: "p0"},
 		Evidence:  []string{"索引反查命中（容器 + 分块名）"},
-		Entries: []volume.RealEntry{
-			{Name: "9ab", Kind: "chunk", Bytes: 2048, Owner: &volume.LogicalRef{Rel: "photos/a.jpg", Role: "file", ChunkIndex: &chunk}},
-			{Name: "f5d", Kind: "parity", Bytes: 2048, Owner: &volume.LogicalRef{Rel: "photos/a.jpg", Role: "file", Parity: true}},
+		Entries: []syncpkg.RealEntry{
+			{Name: "9ab", Kind: "chunk", Bytes: 2048, Owner: &syncpkg.LogicalRef{Rel: "photos/a.jpg", Role: "file", ChunkIndex: &chunk}},
+			{Name: "f5d", Kind: "parity", Bytes: 2048, Owner: &syncpkg.LogicalRef{Rel: "photos/a.jpg", Role: "file", Parity: true}},
 		},
-		Anomalies: []volume.Anomaly{{Code: volume.AnomalyBlobOrphan, RealPath: "k3f9a/sub/zz", Detail: "疑似孤儿"}},
+		Anomalies: []syncpkg.Anomaly{{Code: syncpkg.AnomalyBlobOrphan, RealPath: "k3f9a/sub/zz", Detail: "疑似孤儿"}},
 	})
 	out := buf.String()
 	for _, want := range []string{"用途     chunk", "归属     photos/a.jpg", "分块#2", "逻辑目录 photos", "dir_id=d1", "parity", "blob_orphan", "GC"} {

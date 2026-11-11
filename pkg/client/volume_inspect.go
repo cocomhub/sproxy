@@ -14,11 +14,11 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // VolumeTrace 返回逻辑路径 rel 在指定卷上的真实落点（disk=true 时对比磁盘）。
-func (c *FileClient) VolumeTrace(ctx context.Context, volName, rel string, disk bool) (*volume.PathTrace, error) {
+func (c *FileClient) VolumeTrace(ctx context.Context, volName, rel string, disk bool) (*syncpkg.PathTrace, error) {
 	if volName == "" {
 		return nil, fmt.Errorf("卷名不能为空")
 	}
@@ -28,7 +28,7 @@ func (c *FileClient) VolumeTrace(ctx context.Context, volName, rel string, disk 
 		q.Set("disk", "1")
 	}
 	var out struct {
-		Trace *volume.PathTrace `json:"trace"`
+		Trace *syncpkg.PathTrace `json:"trace"`
 	}
 	endpoint := "/api/volumes/" + url.PathEscape(volName) + "/trace?" + q.Encode()
 	if err := c.doJSON(ctx, "GET", endpoint, nil, &out); err != nil {
@@ -43,7 +43,7 @@ func (c *FileClient) VolumeTrace(ctx context.Context, volName, rel string, disk 
 // VolumeTraceTree 返回逻辑路径的**递归落点树**（depth 层；depth≤1 等价 VolumeTrace）。
 //
 // 子项由服务端按索引展开（不逐节点 disk 探测）；超出上限会被截断并带 truncated 异常。
-func (c *FileClient) VolumeTraceTree(ctx context.Context, volName, rel string, depth int, disk bool) (*volume.PathTrace, error) {
+func (c *FileClient) VolumeTraceTree(ctx context.Context, volName, rel string, depth int, disk bool) (*syncpkg.PathTrace, error) {
 	if volName == "" {
 		return nil, fmt.Errorf("卷名不能为空")
 	}
@@ -56,7 +56,7 @@ func (c *FileClient) VolumeTraceTree(ctx context.Context, volName, rel string, d
 		q.Set("disk", "1")
 	}
 	var out struct {
-		Trace *volume.PathTrace `json:"trace"`
+		Trace *syncpkg.PathTrace `json:"trace"`
 	}
 	endpoint := "/api/volumes/" + url.PathEscape(volName) + "/trace?" + q.Encode()
 	if err := c.doJSON(ctx, "GET", endpoint, nil, &out); err != nil {
@@ -69,7 +69,7 @@ func (c *FileClient) VolumeTraceTree(ctx context.Context, volName, rel string, d
 }
 
 // VolumeExplain 解释真实路径 realRel（卷根相对）的用途与逻辑归属。
-func (c *FileClient) VolumeExplain(ctx context.Context, volName, realRel string, disk bool) (*volume.RealExplanation, error) {
+func (c *FileClient) VolumeExplain(ctx context.Context, volName, realRel string, disk bool) (*syncpkg.RealExplanation, error) {
 	if volName == "" {
 		return nil, fmt.Errorf("卷名不能为空")
 	}
@@ -79,7 +79,7 @@ func (c *FileClient) VolumeExplain(ctx context.Context, volName, realRel string,
 		q.Set("disk", "1")
 	}
 	var out struct {
-		Explain *volume.RealExplanation `json:"explain"`
+		Explain *syncpkg.RealExplanation `json:"explain"`
 	}
 	endpoint := "/api/volumes/" + url.PathEscape(volName) + "/explain?" + q.Encode()
 	if err := c.doJSON(ctx, "GET", endpoint, nil, &out); err != nil {

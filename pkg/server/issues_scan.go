@@ -17,7 +17,7 @@ import (
 // ScanTarget 是一个待审查的卷（名字 + 可审查对象）。
 //
 // `Target` 传卷的底层对象（如 `*secretdata.SecretdataFS`）——本层用
-// `volume.AssertStorageInspector` 做**能力探测**：不支持审查的卷被跳过（不报错），
+// `syncpkg.AssertStorageInspector` 做**能力探测**：不支持审查的卷被跳过（不报错），
 // 因为审查是**可选能力**（仓内既有「可选能力 + Assert*」模式）。
 type ScanTarget struct {
 	Volume string
@@ -41,7 +41,7 @@ type ScanStats struct {
 //
 // 语义与边界：
 //   - **只读**：只调 `Trace`/`TraceTree`（不读内容、不修复、不删除）；
-//   - `depth` 钳制到 `[1, volume.MaxTreeDepth]`（防误用打爆大目录/远端后端）；
+//   - `depth` 钳制到 `[1, syncpkg.MaxTreeDepth]`（防误用打爆大目录/远端后端）；
 //   - **只登记需要人处理或可自动重试的差异**（见 `issueAnomalyKind`）；提示类异常
 //     （`dedup_shared`/`upload_in_progress`/`truncated` 等）**不登记**，避免噪声淹没真实问题；
 //   - 单卷审查失败只记 `Skipped`，**不中断**其它卷。
@@ -53,14 +53,14 @@ func (c *IssueCenter) ScanVolumesOnce(ctx context.Context, targets []ScanTarget,
 	if depth < 1 {
 		depth = 1
 	}
-	if depth > volume.MaxTreeDepth {
-		depth = volume.MaxTreeDepth
+	if depth > syncpkg.MaxTreeDepth {
+		depth = syncpkg.MaxTreeDepth
 	}
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			return st
 		}
-		insp, ok := volume.AssertStorageInspector(t.Target)
+		insp, ok := syncpkg.AssertStorageInspector(t.Target)
 		if !ok {
 			st.Skipped++
 			continue
@@ -77,15 +77,15 @@ func (c *IssueCenter) ScanVolumesOnce(ctx context.Context, targets []ScanTarget,
 }
 
 // traceVolume 选择 `TraceTree`（depth>1 且卷支持）或单节点 `Trace`。
-func traceVolume(ctx context.Context, target any, insp volume.StorageInspector, depth int) (*volume.PathTrace, error) {
-	if ti, ok := volume.AssertTreeInspector(target); ok && depth > 1 {
-		return ti.TraceTree(ctx, "", depth, volume.InspectIndex)
+func traceVolume(ctx context.Context, target any, insp syncpkg.StorageInspector, depth int) (*syncpkg.PathTrace, error) {
+	if ti, ok := syncpkg.AssertTreeInspector(target); ok && depth > 1 {
+		return ti.TraceTree(ctx, "", depth, syncpkg.InspectIndex)
 	}
-	return insp.Trace(ctx, "", volume.InspectIndex)
+	return insp.Trace(ctx, "", syncpkg.InspectIndex)
 }
 
 // reportTrace 递归遍历落点树，把异常登记为事项。
-func reportTrace(c *IssueCenter, volName string, tr *volume.PathTrace, st *ScanStats) {
+func reportTrace(c *IssueCenter, volName string, tr *syncpkg.PathTrace, st *ScanStats) {
 	if tr == nil {
 		return
 	}
@@ -95,7 +95,7 @@ func reportTrace(c *IssueCenter, volName string, tr *volume.PathTrace, st *ScanS
 		if !report {
 			continue
 		}
-		if a.Code == volume.AnomalyTruncated {
+		if a.Code == syncpkg.AnomalyTruncated {
 			st.Truncated = true
 		}
 		loc := strings.TrimSpace(tr.Rel)
@@ -121,7 +121,7 @@ func reportTrace(c *IssueCenter, volName string, tr *volume.PathTrace, st *ScanS
 }
 
 // scanDetail 生成面向**人工**的详细说明（含异常码、位置、实例说明与建议处置）。
-func scanDetail(a volume.Anomaly, tr *volume.PathTrace) string {
+func scanDetail(a syncpkg.Anomaly, tr *syncpkg.PathTrace) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "存储审查发现差异 %s：位置 %q（kind=%s）", a.Code, tr.Rel, tr.Kind)
 	if a.RealPath != "" {
@@ -139,19 +139,19 @@ func scanDetail(a volume.Anomaly, tr *volume.PathTrace) string {
 // anomalyAdvice 给出每种差异的处置建议（写入事项 Detail，供人工判断）。
 func anomalyAdvice(code string) string {
 	switch code {
-	case volume.AnomalyDirMetaAmbiguous:
+	case syncpkg.AnomalyDirMetaAmbiguous:
 		return "容器内有多个目录 meta（改名/移动时旧 meta 删除失败）。引擎按 Version 仲裁可继续" +
 			"工作，但布局异常；应先确认哪个 meta 与逻辑路径一致（可用 `sclient volume explain` 核对），" +
 			"再经 GC/清理路径删除旧 blob（**不要**直接手工删容器）"
-	case volume.AnomalyContainerNotIndexed:
+	case syncpkg.AnomalyContainerNotIndexed:
 		return "容器存在但索引无对应逻辑目录（索引未重建或外部创建）。可自动重试：重建/刷新索引后复核"
-	case volume.AnomalyParentUnresolved:
+	case syncpkg.AnomalyParentUnresolved:
 		return "目录 meta 的父引用在索引中缺失（父目录未加载或索引不完整）。需人工确认逻辑归属后再处置"
-	case volume.AnomalyMetaUnreadable:
+	case syncpkg.AnomalyMetaUnreadable:
 		return "meta 无法解密/损坏。需人工核对卷密钥是否与建卷时一致；**不要**删除 blob（可能仍可恢复）"
-	case volume.AnomalyBlobMissing:
+	case syncpkg.AnomalyBlobMissing:
 		return "索引声明存在但磁盘缺失（数据丢失）。需人工核对备份/副本后再决定恢复方式"
-	case volume.AnomalySizeMismatch:
+	case syncpkg.AnomalySizeMismatch:
 		return "磁盘大小与声明不符。需人工判断是截断还是声明过期"
 	default:
 		return ""
@@ -164,14 +164,14 @@ func anomalyAdvice(code string) string {
 // probe_failed 的临时态等）不登记，避免把正常状态当成问题（噪声会淹没真实告警）。
 func issueAnomalyKind(code string) (issues.Kind, bool, bool) {
 	switch code {
-	case volume.AnomalyDirMetaAmbiguous:
+	case syncpkg.AnomalyDirMetaAmbiguous:
 		// 需要人工仲裁（引擎不能自行决定保留哪一份 meta）⇒ 不自动重试。
 		return issues.KindDirMetaAmbiguous, false, true
-	case volume.AnomalyContainerNotIndexed:
+	case syncpkg.AnomalyContainerNotIndexed:
 		// 索引未重建 ⇒ 可自动重试（重建/刷新索引）。
 		return issues.KindContainerNotIndexed, true, true
-	case volume.AnomalyParentUnresolved, volume.AnomalyMetaUnreadable,
-		volume.AnomalyBlobMissing, volume.AnomalySizeMismatch:
+	case syncpkg.AnomalyParentUnresolved, syncpkg.AnomalyMetaUnreadable,
+		syncpkg.AnomalyBlobMissing, syncpkg.AnomalySizeMismatch:
 		return issues.KindOther, false, true
 	default:
 		// blob_orphan（疑似孤儿，GC 会复核）/ dedup_shared（提示）/ upload_in_progress（在途）/
@@ -211,7 +211,7 @@ func ScanTargetsFromSet(l VolumeLister) []ScanTarget {
 		// （见 docs/decorator-capability-forwarding.md）⇒ 直接断言装饰后的 FS 恒 false。
 		// 根治（把审查能力下沉到 `pkg/sync`，使其下方装饰器也能转发）见该文档 §3.5/§4。
 		inner := syncpkg.Innermost(raw)
-		if _, ok := volume.AssertStorageInspector(inner); !ok {
+		if _, ok := syncpkg.AssertStorageInspector(inner); !ok {
 			continue
 		}
 		out = append(out, ScanTarget{Volume: v.Name, Target: inner})

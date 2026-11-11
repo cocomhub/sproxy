@@ -18,7 +18,6 @@ import (
 
 	"github.com/cocomhub/sproxy/internal/httpjson"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // msgNotInspectable 是该卷不支持审查时的固定提示（501）。
@@ -36,8 +35,8 @@ func (h *Handlers) volumeTraceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	mode := inspectModeFrom(r)
 	depth := inspectDepthFrom(r)
-	tree, hasTree := volume.AssertTreeInspector(insp)
-	var tr *volume.PathTrace
+	tree, hasTree := syncpkg.AssertTreeInspector(insp)
+	var tr *syncpkg.PathTrace
 	var err error
 	if depth > 1 && hasTree {
 		// 子树：子项按**索引**展示（不逐节点做 disk 探测，避免一次请求打爆后端）；
@@ -51,7 +50,7 @@ func (h *Handlers) volumeTraceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Send(w, http.StatusOK, struct {
-		Trace *volume.PathTrace `json:"trace"`
+		Trace *syncpkg.PathTrace `json:"trace"`
 	}{Trace: tr})
 }
 
@@ -73,7 +72,7 @@ func (h *Handlers) volumeExplainHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	httpjson.Send(w, http.StatusOK, struct {
-		Explain *volume.RealExplanation `json:"explain"`
+		Explain *syncpkg.RealExplanation `json:"explain"`
 	}{Explain: ex})
 }
 
@@ -105,7 +104,7 @@ func (h *Handlers) traceKeyFor(w http.ResponseWriter, r *http.Request) (string, 
 }
 
 // inspectorFor 解析卷名 + ACL + 能力断言；失败时已写出响应。
-func (h *Handlers) inspectorFor(w http.ResponseWriter, r *http.Request) (volume.StorageInspector, bool) {
+func (h *Handlers) inspectorFor(w http.ResponseWriter, r *http.Request) (syncpkg.StorageInspector, bool) {
 	volName := strings.TrimSpace(r.PathValue("name"))
 	owner := normalizeOwner(ownerFromRequest(r))
 	if volName == "" {
@@ -132,7 +131,7 @@ func (h *Handlers) inspectorFor(w http.ResponseWriter, r *http.Request) (volume.
 	}
 	// 能力断言必须穿透装饰链（Guard/Wrap/Capacity 等）——用受认可的 Innermost，
 	// 不在业务代码里手写 Inner 链遍历（R22 门禁）。
-	insp, ok := volume.AssertStorageInspector(syncpkg.Innermost(fsys))
+	insp, ok := syncpkg.AssertStorageInspector(syncpkg.Innermost(fsys))
 	if !ok {
 		httpjson.SendError(w, http.StatusNotImplemented, msgNotInspectable)
 		return nil, false
@@ -150,26 +149,26 @@ func inspectDepthFrom(r *http.Request) int {
 	if err != nil || n < 1 {
 		return 1
 	}
-	if n > volume.MaxTreeDepth {
-		return volume.MaxTreeDepth
+	if n > syncpkg.MaxTreeDepth {
+		return syncpkg.MaxTreeDepth
 	}
 	return n
 }
 
 // inspectModeFrom 解析 disk=1/true（默认索引模式）。
-func inspectModeFrom(r *http.Request) volume.InspectMode {
+func inspectModeFrom(r *http.Request) syncpkg.InspectMode {
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("disk"))) {
 	case "1", "true", "yes":
-		return volume.InspectDisk
+		return syncpkg.InspectDisk
 	default:
-		return volume.InspectIndex
+		return syncpkg.InspectIndex
 	}
 }
 
 // writeInspectError 映射审查错误到 HTTP 状态（越界 403 / 不存在 404 / 其它 500）。
 func (h *Handlers) writeInspectError(w http.ResponseWriter, r *http.Request, handler, arg string, err error) {
 	switch {
-	case errors.Is(err, volume.ErrOutsideVolume):
+	case errors.Is(err, syncpkg.ErrOutsideVolume):
 		httpjson.SendError(w, http.StatusForbidden, "路径越出卷根")
 	case errors.Is(err, fs.ErrNotExist):
 		httpjson.SendError(w, http.StatusNotFound, "路径不存在")

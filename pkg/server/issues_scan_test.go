@@ -9,30 +9,31 @@ import (
 	"path/filepath"
 	"testing"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+
 	"github.com/cocomhub/sproxy/pkg/server/issues"
-	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // fakeInspector 是审查能力测试替身（同时实现 StorageInspector + TreeInspector）。
 // 记录被调用的 rel/depth，便于锁定"扫描走只读入口且深度被钳制"。
 type fakeInspector struct {
-	trace     *volume.PathTrace
+	trace     *syncpkg.PathTrace
 	traceErr  error
-	tree      *volume.PathTrace
+	tree      *syncpkg.PathTrace
 	treeErr   error
 	callsTree int
 	lastDepth int
 }
 
-func (f *fakeInspector) Trace(_ context.Context, _ string, _ volume.InspectMode) (*volume.PathTrace, error) {
+func (f *fakeInspector) Trace(_ context.Context, _ string, _ syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	return f.trace, f.traceErr
 }
 
-func (f *fakeInspector) Explain(_ context.Context, _ string, _ volume.InspectMode) (*volume.RealExplanation, error) {
+func (f *fakeInspector) Explain(_ context.Context, _ string, _ syncpkg.InspectMode) (*syncpkg.RealExplanation, error) {
 	return nil, nil
 }
 
-func (f *fakeInspector) TraceTree(_ context.Context, _ string, depth int, _ volume.InspectMode) (*volume.PathTrace, error) {
+func (f *fakeInspector) TraceTree(_ context.Context, _ string, depth int, _ syncpkg.InspectMode) (*syncpkg.PathTrace, error) {
 	f.callsTree++
 	f.lastDepth = depth
 	return f.tree, f.treeErr
@@ -44,11 +45,11 @@ func (f *fakeInspector) TraceTree(_ context.Context, _ string, depth int, _ volu
 func TestScanVolumesOnce_ReportsNeedsHumanAndRetryable(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
-	insp := &fakeInspector{trace: &volume.PathTrace{
+	insp := &fakeInspector{trace: &syncpkg.PathTrace{
 		Rel: "", Kind: "dir",
-		Anomalies: []volume.Anomaly{
-			{Code: volume.AnomalyDirMetaAmbiguous, RealPath: "OypE/abc", Detail: "容器内有 2 个 dir-meta"},
-			{Code: volume.AnomalyContainerNotIndexed, RealPath: "OypE/def", Detail: "dir_id 不在索引"},
+		Anomalies: []syncpkg.Anomaly{
+			{Code: syncpkg.AnomalyDirMetaAmbiguous, RealPath: "OypE/abc", Detail: "容器内有 2 个 dir-meta"},
+			{Code: syncpkg.AnomalyContainerNotIndexed, RealPath: "OypE/def", Detail: "dir_id 不在索引"},
 		},
 	}}
 	st := c.ScanVolumesOnce(context.Background(), []ScanTarget{{Volume: "baidu", Target: insp}}, 1)
@@ -85,12 +86,12 @@ func TestScanVolumesOnce_ReportsNeedsHumanAndRetryable(t *testing.T) {
 func TestScanVolumesOnce_IgnoresAdvisoryAnomalies(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
-	insp := &fakeInspector{trace: &volume.PathTrace{
+	insp := &fakeInspector{trace: &syncpkg.PathTrace{
 		Rel: "x", Kind: "file",
-		Anomalies: []volume.Anomaly{
-			{Code: volume.AnomalyDedupShared, Detail: "在去重池"},
-			{Code: volume.AnomalyUploadInProgress, Detail: "在途上传"},
-			{Code: volume.AnomalyBlobOrphan, Detail: "疑似孤儿（GC 复核）"},
+		Anomalies: []syncpkg.Anomaly{
+			{Code: syncpkg.AnomalyDedupShared, Detail: "在去重池"},
+			{Code: syncpkg.AnomalyUploadInProgress, Detail: "在途上传"},
+			{Code: syncpkg.AnomalyBlobOrphan, Detail: "疑似孤儿（GC 复核）"},
 		},
 	}}
 	st := c.ScanVolumesOnce(context.Background(), []ScanTarget{{Volume: "v", Target: insp}}, 1)
@@ -106,11 +107,11 @@ func TestScanVolumesOnce_IgnoresAdvisoryAnomalies(t *testing.T) {
 func TestScanVolumesOnce_RecursesChildren(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
-	insp := &fakeInspector{tree: &volume.PathTrace{
+	insp := &fakeInspector{tree: &syncpkg.PathTrace{
 		Rel: "", Kind: "dir",
-		Children: []volume.PathTrace{{
+		Children: []syncpkg.PathTrace{{
 			Rel: "jav/makers", Kind: "dir",
-			Anomalies: []volume.Anomaly{{Code: volume.AnomalyDirMetaAmbiguous, RealPath: "OypE/z"}},
+			Anomalies: []syncpkg.Anomaly{{Code: syncpkg.AnomalyDirMetaAmbiguous, RealPath: "OypE/z"}},
 		}},
 	}}
 	st := c.ScanVolumesOnce(context.Background(), []ScanTarget{{Volume: "baidu", Target: insp}}, 2)
@@ -132,10 +133,10 @@ func TestScanVolumesOnce_ClampsDepthAndSkipsUnsupported(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
 
-	insp := &fakeInspector{tree: &volume.PathTrace{Rel: "", Kind: "dir"}}
+	insp := &fakeInspector{tree: &syncpkg.PathTrace{Rel: "", Kind: "dir"}}
 	st := c.ScanVolumesOnce(context.Background(), []ScanTarget{{Volume: "v", Target: insp}}, 99)
-	if insp.lastDepth != volume.MaxTreeDepth {
-		t.Fatalf("depth 应钳制到 %d，got %d", volume.MaxTreeDepth, insp.lastDepth)
+	if insp.lastDepth != syncpkg.MaxTreeDepth {
+		t.Fatalf("depth 应钳制到 %d，got %d", syncpkg.MaxTreeDepth, insp.lastDepth)
 	}
 	if st.Volumes != 1 {
 		t.Fatalf("统计不符：%+v", st)
@@ -160,9 +161,9 @@ func TestScanVolumesOnce_ClampsDepthAndSkipsUnsupported(t *testing.T) {
 func TestScanVolumesOnce_IdempotentMerge(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
-	insp := &fakeInspector{trace: &volume.PathTrace{
+	insp := &fakeInspector{trace: &syncpkg.PathTrace{
 		Rel: "", Kind: "dir",
-		Anomalies: []volume.Anomaly{{Code: volume.AnomalyDirMetaAmbiguous, RealPath: "OypE/same"}},
+		Anomalies: []syncpkg.Anomaly{{Code: syncpkg.AnomalyDirMetaAmbiguous, RealPath: "OypE/same"}},
 	}}
 	targets := []ScanTarget{{Volume: "baidu", Target: insp}}
 	_ = c.ScanVolumesOnce(context.Background(), targets, 1)
@@ -186,12 +187,12 @@ func TestIssueKindForAnomaly_StableMapping(t *testing.T) {
 		retryable bool
 		report    bool
 	}{
-		{volume.AnomalyDirMetaAmbiguous, issues.KindDirMetaAmbiguous, false, true},
-		{volume.AnomalyContainerNotIndexed, issues.KindContainerNotIndexed, true, true},
-		{volume.AnomalyParentUnresolved, issues.KindOther, false, true},
-		{volume.AnomalyMetaUnreadable, issues.KindOther, false, true},
-		{volume.AnomalyBlobOrphan, "", false, false},
-		{volume.AnomalyDedupShared, "", false, false},
+		{syncpkg.AnomalyDirMetaAmbiguous, issues.KindDirMetaAmbiguous, false, true},
+		{syncpkg.AnomalyContainerNotIndexed, issues.KindContainerNotIndexed, true, true},
+		{syncpkg.AnomalyParentUnresolved, issues.KindOther, false, true},
+		{syncpkg.AnomalyMetaUnreadable, issues.KindOther, false, true},
+		{syncpkg.AnomalyBlobOrphan, "", false, false},
+		{syncpkg.AnomalyDedupShared, "", false, false},
 	}
 	for _, tc := range cases {
 		k, r, rep := IssueKindForAnomaly(tc.code)

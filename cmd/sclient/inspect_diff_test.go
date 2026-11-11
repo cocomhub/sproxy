@@ -12,27 +12,27 @@ package main
 import (
 	"testing"
 
-	"github.com/cocomhub/sproxy/pkg/volume"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 func TestInspectHasDiff(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		in   []volume.Anomaly
+		in   []syncpkg.Anomaly
 		want bool
 	}{
 		{"空", nil, false},
-		{"仅上传中", []volume.Anomaly{{Code: volume.AnomalyUploadInProgress}}, false},
-		{"仅去重共享", []volume.Anomaly{{Code: volume.AnomalyDedupShared}}, false},
-		{"上传中+去重共享", []volume.Anomaly{
-			{Code: volume.AnomalyUploadInProgress}, {Code: volume.AnomalyDedupShared},
+		{"仅上传中", []syncpkg.Anomaly{{Code: syncpkg.AnomalyUploadInProgress}}, false},
+		{"仅去重共享", []syncpkg.Anomaly{{Code: syncpkg.AnomalyDedupShared}}, false},
+		{"上传中+去重共享", []syncpkg.Anomaly{
+			{Code: syncpkg.AnomalyUploadInProgress}, {Code: syncpkg.AnomalyDedupShared},
 		}, false},
-		{"缺失 blob", []volume.Anomaly{{Code: volume.AnomalyBlobMissing}}, true},
-		{"孤儿 blob", []volume.Anomaly{{Code: volume.AnomalyBlobOrphan}}, true},
-		{"大小不符", []volume.Anomaly{{Code: volume.AnomalySizeMismatch}}, true},
-		{"信息码+真实差异", []volume.Anomaly{
-			{Code: volume.AnomalyUploadInProgress}, {Code: volume.AnomalyBlobMissing},
+		{"缺失 blob", []syncpkg.Anomaly{{Code: syncpkg.AnomalyBlobMissing}}, true},
+		{"孤儿 blob", []syncpkg.Anomaly{{Code: syncpkg.AnomalyBlobOrphan}}, true},
+		{"大小不符", []syncpkg.Anomaly{{Code: syncpkg.AnomalySizeMismatch}}, true},
+		{"信息码+真实差异", []syncpkg.Anomaly{
+			{Code: syncpkg.AnomalyUploadInProgress}, {Code: syncpkg.AnomalyBlobMissing},
 		}, true},
 	}
 	for _, c := range cases {
