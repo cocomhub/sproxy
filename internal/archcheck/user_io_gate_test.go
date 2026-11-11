@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,9 +44,7 @@ var userIOCallAllowlist = map[string]string{
 	"pkg/files/write_ops.go":        "统一写内核（WriteTarget 的 writeUserVisibleOpenExcl 是 O_EXCL 用户可见入口变体；其余 root.Open/OpenFile 均为内部 meta/删除）",
 	"pkg/server/files_service.go":   "meta sidecar 读写（mrel/meta 桶；不读用户内容本身）",
 	"pkg/server/meta_remote.go":     "跨节点 meta 面：读持有侧 sidecar 原始字节（meta 桶；不读用户内容本身，见评审 P2-10）",
-	"pkg/server/share.go":           "分享创建可读性探测（openUserVisibleRead 已覆盖；此处 Lstat 后关闭句柄）",
 	"pkg/server/s3/multipart.go":    "s3 part/会话与在途 meta（chunk 桶明文暂存是刻意取舍，见设计文档）",
-	"pkg/server/s3/server.go":       "s3 目标写（writeUserVisible 收敛后残余复核点）",
 	"pkg/files/block_write.go":      "块写临时文件（块写已显式拒绝加密卷，非加密卷 temp 暂存）",
 	"pkg/files/chunked_download.go": "openPlainChunkSource（**非加密卷**专用分块下载；加密走 OpenDecrypted 分支）",
 	"pkg/files/chunked_upload.go":   "在途 temp 暂存 + encryptFinalizeRoot 读明文 tmp（内部 finalize 单遍加密）",
@@ -92,5 +91,17 @@ func TestUserIOGate(t *testing.T) {
 		t.Fatalf("用户内容读写不得直接 `root.Open/OpenFile`（R25：会绕过用户可见入口的加解密/封印）；\n"+
 			"确需直操作请走 openUserVisibleRead/writeUserVisible，或（内部布局面）显式登记 userIOCallAllowlist 并写明理由。违规点：\n  %s",
 			strings.Join(offenders, "\n  "))
+	}
+	// 门禁自检（防白名单空转）：每条登记必须仍能在该文件命中 root.Open/OpenFile。
+	// 迁移/删除后必须同步删除登记项，否则白名单会默默放宽未来判断（比报红更危险）。
+	for rel := range userIOCallAllowlist {
+		data, rerr := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if rerr != nil {
+			t.Fatalf("白名单文件不存在（请同步删除登记项）: %s: %v", rel, rerr)
+		}
+		matched := slices.ContainsFunc(strings.Split(string(data), "\n"), rootCallRe.MatchString)
+		if !matched {
+			t.Fatalf("白名单文件已无 root.Open/OpenFile 调用（请同步删除登记项，避免白名单空转）: %s", rel)
+		}
 	}
 }

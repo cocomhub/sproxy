@@ -5,6 +5,7 @@
 package netutil
 
 import (
+	"crypto/tls"
 	"net/http"
 	"sync"
 )
@@ -61,5 +62,19 @@ func IsolatedTransport() *http.Transport {
 	}
 	tr := base.Clone()
 	tr.TLSClientConfig = nil
+	return tr
+}
+
+// InsecureTransport 返回**跳过 TLS 证书校验**的隔离副本（独立连接池）。
+//
+// 语义与 IsolatedTransport 相同（DefaultTransport.Clone() 基座 + 独立连接池），
+// 仅额外把 TLSClientConfig.InsecureSkipVerify 置 true。
+//
+// **仅本地联调**（WSL 自签证书等）：生产禁用——InsecureSkipVerify 会失去
+// 中间人防护（gosec G402），调用方必须显式 opt-in（如配置 insecure_tls）。
+// 放在 pkg/netutil 是为了保持「Transport 唯一构造点」（门禁 R19/R57）。
+func InsecureTransport() *http.Transport {
+	tr := IsolatedTransport()
+	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // G402: 仅本地自签联调，调用方显式 opt-in
 	return tr
 }

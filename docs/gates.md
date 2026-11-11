@@ -33,7 +33,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | --- | --- |
 | `audit_calls.tsv` | R35-a：审计调用点棘轮（唯一提供方 `pkg/audit`，非测试源码调用面白名单） |
 | `audit_action_allowlist.tsv` | R39：审计动作常量必须有**可达**的非测试使用点（防「死常量」与「只被无调用方的包装引用」两种假绿；清单**防腐化**，已有可达引用即须删登记） |
-| `external_fs_calls.tsv` | 外部文件系统调用点登记（R26 卷根直连适配器棘轮） |
+| `external_fs_calls.tsv` | R27：外部卷后端 FS（`be.FS()`）直连点棘轮（封印绕过面；只降不升） |
 | `openread_notexist.tsv` | OpenRead 的 not-exist 契约调用点登记 |
 | `quota_acquire_sites.tsv` | R36-a：配额/容量获取入口棘轮（adapter / probe / pending，只减不增） |
 | `quota_capability_wiring.tsv` | 配额能力装配登记（装饰器能力透传） |
@@ -41,7 +41,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `recovery_handlers.tsv` | R37：统一恢复清单（唯一编排入口 + legacy 棘轮 + 防腐化） |
 | `route_classes.tsv` | R38：路由分类表（tunnel / auth / user / reader / public，双向一一对应） |
 | `serial_budgets.tsv` | R14/R18：串行测试预算棘轮（新增测试默认 `t.Parallel()`） |
-| `set_root_calls.tsv` | `SetRoot` 调用点棘轮（存储根装配唯一入口） |
+| `set_root_calls.tsv` | R28：`Set.Root(...)` 卷根访问器棘轮（绕过统一存储卷视图；只降不升） |
 | `usage_provider_calls.tsv` | 用量出口调用点登记（唯一用量提供方） |
 | `waitq_resources.tsv` | R36-c：`waitq.Resource` 适配器登记（资源名/单位/超时/上界/优先级） |
 
@@ -142,3 +142,13 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `volume_state_gate_test.go` | R44 | 卷状态缓存**唯一装配点**（R29 同形教训：横切关注点不能变成 N 个调用点各自的义务）。 |
 | `xfer_send_atomicity_test.go` | — | 传输层 `Send` 必须经 `iostream.WriteFull` 写足（防半帧），新增传输实现绕过即红。 |
 | `gate_index_gate_test.go` | R56 | `docs/gates.md` 索引必须覆盖全部门禁文件（`internal/archcheck/*_test.go`，除公共辅助 `arch_test.go`）；扫描面下限 60 防假绿。手工回填过的索引没有机制约束必然腐化（与 R55 同模式），本门禁把「加门禁必须登记索引」变成判据。 |
+
+## 5. 棘轮削减路线图（2026-11-11）
+
+棘轮类门禁（TSV 登记 / 白名单）**只减不增**；削减分三类：**可重构消除** / **计数噪音**（文本计数把注释算进去） / **设计保留**（不动）。
+逐门禁的可降性、降幅、风险与待裁定决策（D1–D5，含 R27 是否改 AST、R46 口径收窄、R43 破坏性语义反转、R51 别名全量迁移、R46/V4 台账只读化）见
+**[`docs/archive/gate-ratchet-reduction.md`](./archive/gate-ratchet-reduction.md)**。
+
+已交付（批次 1）：`serial_budgets.tsv` 修正 10 行陈旧路径；`external_fs_calls.tsv` 预算 60→51（删 3 条陈旧+收紧）；`set_root_calls.tsv` 预算 16→14；R25 白名单删 2 条陈旧+加防腐化自检；R57 归零（`pkg/netutil.InsecureTransport()`）；R51 246→209 行（删 34 条零引用别名）。
+
+**纪律提醒**：给棘轮刷新基线的 PR 必须在提交信息里说明「为什么不是做假工作」；登记项须有双向自检（`R26`/`R42` 是范本），否则会出现「文件已删/已迁移但登记残留」的静默放宽。

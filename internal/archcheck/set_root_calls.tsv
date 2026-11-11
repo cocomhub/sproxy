@@ -13,7 +13,7 @@
 # `Set.HasLocalRoot(name)`（语义显式化）。**2026-10-16 已迁移 7 处探针（21 → 14）**：
 # `pkg/files/copy_ops.go`×2、`pkg/files/write_ops.go`×4、`pkg/volume/registry/set.go`×1。
 #
-# 剩余 12 处（+2 处注释）均为**真需 root**：所需方法（`Abs`/`Stat`/`SealAt`/`ListOwners`/
+# 剩余 14 处（+2 处注释）均为**真需 root**：所需方法（`Abs`/`Stat`/`SealAt`/`ListOwners`/
 # `OpenDecrypted`/`OpenFileEncrypted`/`LogicalSize`…）**不在** `FS`（7 方法）与 `StorageVolume`
 # （Name/Kind/FS/Close）之内 —— `storage.Root` 有 **32 个导出方法**，把调用方全迁到统一视图需要
 # 32 方法巨型接口或重写写内核，均非迁移（M3 复核结论）。故此处**棘轮 + 逐条理由**。
@@ -22,11 +22,10 @@
 pkg/files/checksum_rebuild.go	1	自愈遍历需按卷读 sidecar：FileMetaPolicy.ReadMetaRaw(root, mrel) 的接口以 *storage.Root 为参数（无 FS 版能力），且需 ReadDir 逐层遍历
 pkg/files/read.go	1	读路径解析卷根后走 Root 的 OpenDecrypted/Stat（用户可见读语义，FS 无法表达）
 pkg/files/version_store.go	2	版本桶操作需 Root 的 OpenDecrypted/AtomicRename（版本原子替换）；另 1 处为 volumeNameForTenant 的租户根→卷名解析（版本记账需按卷名查询卷自报物理足迹能力——FS/StorageVolume 均不提供「卷名→足迹」，且不复用 volumePoolForTenant 因该函数受 helper_impl_drift_test 源码体等价断言守卫）
-pkg/files/write_ops.go	2	统一写内核：写/删路径需 Root 的 OpenFileEncrypted/Remove/Stat（内核本身就是用户可见语义层）；另 1 处为注释
+pkg/files/write_ops.go	1	统一写内核：写/删路径需 Root 的 OpenFileEncrypted/Remove/Stat（内核本身就是用户可见语义层）
 pkg/server/handlers.go	1	owner→卷根绝对路径映射：需 Root.Abs（绝对路径互操作，FS 无此语义）
 pkg/server/enclosure/nested.go	2	封印判定：需 Root.SealAt（封印控制面，FS 不暴露）
 pkg/server/volumes.go	2	卷内文件存在性探测（Root.Stat）与租户绝对路径映射（Root.Abs）
-pkg/server/volume_export.go	1	注释（说明 `volSet.Root("")` 为 nil 的语义）
 pkg/server/volume_retention.go	1	卷级版本清理：需 storage.ListOwners(root) 扫描卷根磁盘
 pkg/volume/enclosure/attach.go	1	封装卷**特权源视图**（R26 已登记：必须在封印注入前取得且不受封印影响）
 cmd/sproxy/pikpak_register.go	1	装配期：取默认卷根构造 pikpak 凭据存储（含 Root 入口的密钥管理）

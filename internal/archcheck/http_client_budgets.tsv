@@ -1,4 +1,4 @@
 # 裸 HTTP 客户端/传输构造点基线（棘轮：只减不增）。
 # 生成：ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run TestHTTPClientConstructionRatchet
 # 新增必须写明理由；豁免目录理由见 http_client_ratchet_test.go 头注释。
-cmd/sproxy/pikpak_register.go	1
+# 2026-11-11：基线已归零——仅剩的 pidpak insecure Transport 构造点已上移到 pkg/netutil.InsecureTransport()（R19 豁免位）。

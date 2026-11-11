@@ -514,7 +514,7 @@ func (h *Handlers) importOneFile(ic *importEntryCtx) error {
 	// 复用既有写路径（files.WriteFile：原子写 + checksum 门禁 + 台账登记，不 bypass 台账）。
 	// 写前先探测同名已存在：未显式 overwrite → 跳过 + 报告（幂等防误覆盖）。
 	// checksum 用 pkg/checksum.Reader（单一事实源）。
-	// 探测卷名：显式卷用显式名；空（未指定）→ 使用默认卷名（volSet.Root("") 为 nil 会
+	// 探测卷名：显式卷用显式名；空（未指定）→ 使用默认卷名（卷根访问器对空名返回 nil 会
 	// 导致 volumeFileExists 恒 miss → 覆盖保护失效，故必须先归一，语义与
 	// exportVolumeHandler 的 volName 解析一致）。
 	probeVol := ic.explicitVol

@@ -95,3 +95,23 @@ func TestDefaultTransport_KeepsDefaults(t *testing.T) {
 		t.Error("应继承 MaxIdleConns=100")
 	}
 }
+
+// TestInsecureTransport_SkipsVerify：跳过 TLS 证书校验（仅本地联调），且为隔离副本。
+func TestInsecureTransport_SkipsVerify(t *testing.T) {
+	t.Parallel()
+	tr := InsecureTransport()
+	if tr == nil {
+		t.Fatal("InsecureTransport 返回 nil")
+	}
+	if tr.TLSClientConfig == nil || !tr.TLSClientConfig.InsecureSkipVerify {
+		t.Fatalf("InsecureTransport 必须置 InsecureSkipVerify=true，实得 %+v", tr.TLSClientConfig)
+	}
+	// 隔离副本：与 IsolatedTransport 不是同一实例（避免互相污染 TLS 配置）。
+	if tr == IsolatedTransport() {
+		t.Fatal("InsecureTransport 必须是独立副本，不得复用 IsolatedTransport 实例")
+	}
+	// 仍保留标准库基座调校。
+	if tr.Proxy == nil {
+		t.Error("应继承 ProxyFromEnvironment（非 nil）")
+	}
+}
