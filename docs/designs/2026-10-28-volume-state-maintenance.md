@@ -520,6 +520,12 @@ per-volume 映射），验证多卷同名场景；再评估 A 作为「台账只
 | 台账只读化（§15.1 步骤 3：`Set/Delete/Rename` 不再写台账） | **暂缓** | 读路径要完全脱离台账，只能靠「卷自报 checksum」（`rootfs.ListDir` 读 meta sidecar——需把 meta 读取下沉到卷层，架构倒置）或给 `volumestate` 增加 checksum 维度（缓存关闭时仍要台账兜底）。**当前已无正确性缺陷**（§15.1.2 卷维度隔离），在明确上述口径前保持「写台账 + 按卷读」。 |
 | 旧无卷键不自动迁移 | 保持 | 只读兜底已保证兼容；需要清理时跑 `sclient checksum rebuild`（现按卷写入）。 |
 
+> **2026-11-11 口径已定（本次裁定）**：读路径采用「**视图条目自报 checksum 优先 + 台账兜底**」；本地卷的自报由
+> `pkg/volumestate.CacheFS` 在 cache-miss 回源后经**装配层注入的 `metaReader`** 补齐并随快照缓存——**不**把 meta
+> 读取下沉到 `rootfs`（避免 §15.1.3 指出的架构倒置）。另发现 list 路径当前**丢弃** `ExternalEntry.Checksum`
+> （`pkg/files/read_ops.go:282` 只查台账，而 search 已用 `e.Checksum`，见 `pkg/files/search_external.go:140`）⇒ 口径漂移，
+> 由该方案 S1 修复。分期与验收见 [`docs/designs/2026-11-11-checksum-ledger-read-path.md`](./2026-11-11-checksum-ledger-read-path.md)。
+
 ### 15.2 `searchIndex` → TreeView 投影
 
 现状：本地卷 list/search 走 `searchIndex`（含内容索引、向量索引、集群 `IndexSync` 快照/rev、
