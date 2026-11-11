@@ -71,7 +71,7 @@ SPDX-License-Identifier: Apache-2.0
 - **D1**：R27 计数改 AST 还是改写注释？（AST 更符合「断言对象=锁定形态」，且免 8 文件注释 churn；代价是改门禁判定法，须补变异用例）
 - **D2**：R51 别名全量迁移是否排期？（终态删文件；机械但量大，`Config` 别名一处牵动 ~202 文件）
 - **D3**：R46 口径收窄是否接受？（真实可降点只有 5，其余是噪音；不收窄则数字无法反映收敛）
-- **D4**：R46/V4 台账只读化路线（用户口径）：读路径改「卷自报 checksum」还是「`volumestate` 承载 checksum 视图」？§15.2 TreeView 投影的 3 个口径。
+- **D4（已裁定 2026-11-11）**：R46/V4 台账只读化读路径口径 ⇒ **「视图条目自报 checksum 优先 + 台账兜底」**，本地卷自报由 `pkg/volumestate.CacheFS` 经装配层注入的 `metaReader` 在 cache-miss 时补齐（**不**把 meta 读取下沉到 `rootfs`）。分期 S1–S4 + 验收见 `docs/designs/2026-11-11-checksum-ledger-read-path.md`；已顺带定位 S1 修复项（list 路径丢弃 `ExternalEntry.Checksum`，而 search 已用）。
 - **D5**：R43 破坏性语义反转（`tls.enabled`→`disable_tls` 等）是否排期？
 
 ## 5. 仍有效的判断与踩坑
