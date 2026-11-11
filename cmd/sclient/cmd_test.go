@@ -24,6 +24,7 @@ import (
 // ---- root command ----
 
 func TestRootCmd_Use(t *testing.T) {
+	t.Parallel()
 	cmd := NewRootCmd()
 	if cmd.Use != "sclient" {
 		t.Errorf("rootCmd.Use = %q, want %q", cmd.Use, "sclient")
@@ -31,6 +32,7 @@ func TestRootCmd_Use(t *testing.T) {
 }
 
 func TestRootCmd_SubCommands(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	ios := cli.IOStreams{Out: io.Discard}
@@ -69,6 +71,7 @@ func TestRootCmd_SubCommands(t *testing.T) {
 }
 
 func TestRootCmd_PersistentFlags(t *testing.T) {
+	t.Parallel()
 	// 验证 persistent flags 已注册
 	cmd := NewRootCmd()
 	flagNames := []string{"config", "server", "output", "verbose", "chunked", "chunk-size", "concurrency"}
@@ -83,6 +86,7 @@ func TestRootCmd_PersistentFlags(t *testing.T) {
 // ---- upload command ----
 
 func TestUploadCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdUpload(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -113,6 +117,7 @@ func TestUploadCmd(t *testing.T) {
 // ---- download command ----
 
 func TestDownloadCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdDownload(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -138,6 +143,7 @@ func TestDownloadCmd(t *testing.T) {
 // ---- delete command ----
 
 func TestDeleteCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdDelete(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -163,6 +169,7 @@ func TestDeleteCmd(t *testing.T) {
 // ---- ls command（旧名 list 保留为别名）----
 
 func TestLsCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdLs(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -182,6 +189,7 @@ func TestLsCmd(t *testing.T) {
 // ---- relay command ----
 
 func TestRelayCmd_Registered(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	cmd := NewCmdRelay(factory, cli.IOStreams{Out: io.Discard}, nil)
 	if cmd.Use != "relay" {
@@ -192,6 +200,7 @@ func TestRelayCmd_Registered(t *testing.T) {
 // ---- diag command ----
 
 func TestDiagCmd_Registered(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdDiag(cli.IOStreams{Out: io.Discard})
 	if cmd.Use != "diag" {
 		t.Errorf("diagCmd.Use = %q, want 'diag'", cmd.Use)
@@ -201,6 +210,7 @@ func TestDiagCmd_Registered(t *testing.T) {
 // ---- batch-delete command ----
 
 func TestBatchDeleteCmd_Registered(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdBatchDelete(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -212,6 +222,7 @@ func TestBatchDeleteCmd_Registered(t *testing.T) {
 // ---- archive command ----
 
 func TestArchiveCmd_Registered(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	cmd := NewCmdArchive(factory, cli.IOStreams{Out: io.Discard})
 	if cmd.Use != "archive [flags] <file...>" {
@@ -222,6 +233,7 @@ func TestArchiveCmd_Registered(t *testing.T) {
 // ---- mv command ----
 
 func TestMvCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard}, st)
@@ -240,6 +252,7 @@ func TestMvCmd(t *testing.T) {
 // ---- stat command ----
 
 func TestStatCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	cmd := NewCmdStat(factory, cli.IOStreams{Out: io.Discard}, &testConfigProvider{cfg: client.DefaultConfig()})
 
@@ -260,6 +273,7 @@ func TestStatCmd(t *testing.T) {
 // ---- search command ----
 
 func TestSearchCmd(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	cmd := NewCmdSearch(factory, cli.IOStreams{Out: io.Discard})
 
@@ -277,6 +291,7 @@ func TestSearchCmd(t *testing.T) {
 // ---- version command ----
 
 func TestVersionCmd(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdVersion(cli.IOStreams{Out: io.Discard})
 	if !strings.HasPrefix(cmd.Use, "version") {
 		t.Errorf("versionCmd.Use = %q, want prefix 'version'", cmd.Use)
@@ -286,6 +301,7 @@ func TestVersionCmd(t *testing.T) {
 // ---- initLogger ----
 
 func TestCLientInitLogger(t *testing.T) {
+	t.Parallel()
 	logger := initLogger(false)
 	if logger == nil {
 		t.Fatal("initLogger returned nil")
@@ -309,6 +325,7 @@ func TestCLientInitLogger(t *testing.T) {
 // ---- helper tests ----
 
 func TestResolveRemotePathOrErr(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: ""}
 	got, err := st.ResolveRemotePathOrErr("test.txt")
 	if err != nil {
@@ -322,6 +339,7 @@ func TestResolveRemotePathOrErr(t *testing.T) {
 // ---- Upload command RunE 测试 ----
 
 func TestUploadCommand(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	srcFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
@@ -347,6 +365,7 @@ func TestUploadCommand(t *testing.T) {
 // ---- Download command RunE 测试 ----
 
 func TestDownloadCommand_Success(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "out.txt")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -385,6 +404,7 @@ func TestDownloadCommand_Success(t *testing.T) {
 // ---- Delete command RunE 测试 ----
 
 func TestDeleteCommand_Success(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/files/stat" {
 			w.Header().Set("X-File-Checksum", "abc123")
@@ -411,6 +431,7 @@ func TestDeleteCommand_Success(t *testing.T) {
 // ---- List command RunE 测试 ----
 
 func TestListCommand(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"files":[{"name":"a.txt","size":10}],"total":1}`))
 	}))
@@ -427,6 +448,7 @@ func TestListCommand(t *testing.T) {
 }
 
 func TestListCommand_WithSubdirFlag(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"files":[{"name":"sub/","size":0,"is_dir":true}],"total":1}`))
 	}))
@@ -448,6 +470,7 @@ func TestListCommand_WithSubdirFlag(t *testing.T) {
 // ---- Error path tests ----
 
 func TestUploadCommand_FileNotFound(t *testing.T) {
+	t.Parallel()
 	// 使用真实的 HTTP 客户端但指向无法连接的地址
 	svc := client.NewFileClient("http://127.0.0.1:1")
 	factory := clientfactory.NewMock(svc, nil)
@@ -460,6 +483,7 @@ func TestUploadCommand_FileNotFound(t *testing.T) {
 }
 
 func TestDeleteCommand_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/files/stat" {
 			w.Header().Set("X-File-Checksum", "abc123")
@@ -484,6 +508,7 @@ func TestDeleteCommand_ChecksumMismatch(t *testing.T) {
 }
 
 func TestListCommand_EmptyResult(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"files":[],"total":0}`))
 	}))
@@ -513,6 +538,7 @@ func TestRmdirCmd_Use(t *testing.T) {
 }
 
 func TestRmdirCmd_HappyPath(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"success":true,"message":"deleted"}`))
@@ -534,6 +560,7 @@ func TestRmdirCmd_HappyPath(t *testing.T) {
 }
 
 func TestRmdirCmd_Force(t *testing.T) {
+	t.Parallel()
 	// --force = 「用户已确认」⇒ CLI 直接删（跳过 List 非空探测）并**必须把 force=true 发给服务端**
 	// ——服务端 rmdir 恒要求该确认（此前 CLI 从不发送 ⇒ rmdir 含 --force 也恒 400）。
 	listCalled := false
@@ -582,6 +609,7 @@ func TestRmdirCmd_Force(t *testing.T) {
 }
 
 func TestRmdirCmd_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 	}))
@@ -601,6 +629,7 @@ func TestRmdirCmd_ServerError(t *testing.T) {
 // ---- mv command additional tests ----
 
 func TestMvCommand_StatNotFound(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -619,6 +648,7 @@ func TestMvCommand_StatNotFound(t *testing.T) {
 }
 
 func TestMvCommand_ChecksumEmpty(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-File-Checksum", "")
 		w.Header().Set("X-File-Size", "0")
@@ -639,6 +669,7 @@ func TestMvCommand_ChecksumEmpty(t *testing.T) {
 }
 
 func TestMvCommand_PathTraversal(t *testing.T) {
+	t.Parallel()
 	factory := clientfactory.NewMock(nil, nil)
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdMv(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, st)

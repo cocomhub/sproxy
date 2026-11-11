@@ -252,6 +252,7 @@ func auditActions(t *testing.T, buf *bytes.Buffer, action string) []map[string]a
 // TestCredentials_Renew_Roundtrip 验证 renew 全链路：返回结构、旧 SK 解 wrap 得新 SK、
 // 新 SK 立即可用、旧 SK 仍可用（多 SK 共存）。
 func TestCredentials_Renew_Roundtrip(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
@@ -310,6 +311,7 @@ func TestCredentials_Renew_Roundtrip(t *testing.T) {
 
 // TestCredentials_Renew_TTLServer 是上述用例的完整实现（分开写便于通过 modifyCfg）。
 func TestCredentials_Renew_TTLServer(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
@@ -351,6 +353,7 @@ func TestCredentials_Renew_TTLServer(t *testing.T) {
 
 // TestCredentials_SKList_OwnListing 验证本人列表含 renew 新条目（sk_id/expires 元数据）。
 func TestCredentials_SKList_OwnListing(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, "", testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	renewResp, list := renewAndListOwnSK(t, url)
@@ -410,6 +413,7 @@ func assertSKListContainsRenew(t *testing.T, list skListResponse, wantSKID strin
 // SK 解不开（按 key 隔离）：admin 查看 user 列表，每条 wrapped_secret 用 user 自己 SK
 // 派生密钥可解、用 admin SK 派生密钥解不开。
 func TestCredentials_SKList_WrapKeyIsolation(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	st, data := signedGet(t, url+"/api/credentials/"+testAccessKey+"/sk", testAdminKey, testAdminSecret)
@@ -444,6 +448,7 @@ func TestCredentials_SKList_WrapKeyIsolation(t *testing.T) {
 // TestCredentials_SKList_ForbiddenForNonOwner 验证非本人非 admin 查看 SK 列表 → 404，
 // 且不泄漏目标 AK 的条目数据。
 func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
+	t.Parallel()
 	akA, skA := testAccessKey, testAccessSecret
 	akB, skB := "ak-test-b-12eeb123", strings.Repeat("33", 32)
 	url, _, ring := newCredentialsTestServer(t, "", "", akA, skA, nil, nil)
@@ -485,6 +490,7 @@ func TestCredentials_SKList_ForbiddenForNonOwner(t *testing.T) {
 //   - 再删同名 404（幂等失败）；
 //   - audit 记录 credential_sk_delete。
 func TestCredentials_SKDelete(t *testing.T) {
+	t.Parallel()
 	var auditBuf bytes.Buffer
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf, nil)
 
@@ -537,6 +543,7 @@ func TestCredentials_SKDelete(t *testing.T) {
 //   - until 过去时间 → 该 SK 立即 401；
 //   - 其他条目仍可用。
 func TestCredentials_SKExpire(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	// admin 列出 user 的条目找 initial 条目。
@@ -587,6 +594,7 @@ func TestCredentials_SKExpire(t *testing.T) {
 //   - until 非法格式 → 400；
 //   - until 空串 → 恢复永久有效（零值清除过期）。
 func TestCredentials_SKExpire_InvalidUntil(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, nil, nil)
 
 	st, data := signedGet(t, url+"/api/credentials/"+testAccessKey+"/sk", testAccessKey, testAccessSecret)
@@ -679,6 +687,7 @@ func renewNewSKAndID(t *testing.T, url, ak, oldSKHex string) (string, string) {
 // 客户端（仍持上一轮旧 SK，未保存新 SK）再次 renew 时，返回的信封仍能用旧 SK 解开，
 // 不因 CoreEntry 已前移（第二轮 renew 把新条目变成 CoreEntry）而断盲盒。
 func TestCredentials_Renew_AfterSecondRenewOldSKReusable(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, "", "", testAccessKey, testAccessSecret, nil, nil)
 	oldSK := mustDecodeHex(t, testAccessSecret)
 
@@ -722,6 +731,7 @@ func TestCredentials_Renew_AfterSecondRenewOldSKReusable(t *testing.T) {
 // 更新）。store 与产品 CredentialStore 共享同一 source-of-truth——直接用真实 store
 // 指向不可写路径注入必失败，无需引入接口替身。
 func TestCredentials_PersistFailure(t *testing.T) {
+	t.Parallel()
 	var auditBuf bytes.Buffer
 	// 用「目录路径上放置同名文件」制造 Save 必失败：MkdirAll(filepath.Dir(path)) 在
 	// path 的父目录是普通文件时恒失败（所有平台一致，不依赖只读权限位）。
@@ -756,6 +766,7 @@ func TestCredentials_PersistFailure(t *testing.T) {
 // TestCredentials_RoleAdmin 验证 getRole 边界（4B-1 起读账号级 Key.Role，DEC-A）：
 // admin 角色 → admin；普通用户 → user；未知 AK → user。
 func TestCredentials_RoleAdmin(t *testing.T) {
+	t.Parallel()
 	cfgPtr := &atomic.Pointer[Config]{}
 	cfgPtr.Store(&Config{CredentialTTL: 30 * 24 * time.Hour})
 	h := &Handlers{cfgPtr: cfgPtr, credentialRing: accesskey.NewRing()}
@@ -790,6 +801,7 @@ func TestCredentials_RoleAdmin(t *testing.T) {
 
 // TestCredentials_AKList_Admin 验证 admin 全量列表返回 AK 摘要且不下发明文 SK。
 func TestCredentials_AKList_Admin(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	st, data := signedGet(t, url+"/api/credentials", testAdminKey, testAdminSecret)
 	if st != http.StatusOK {
@@ -826,6 +838,7 @@ func TestCredentials_AKList_Admin(t *testing.T) {
 // TestCredentials_AKAdd_Admin 验证 admin 新增 AK 后新凭据立即可认证；显式 secret 单次
 // 返回。
 func TestCredentials_AKAdd_Admin(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	newAK := "ak-new-00112233445566aabb"
@@ -856,6 +869,7 @@ func TestCredentials_AKAdd_Admin(t *testing.T) {
 //   - secret 非 64-hex / 非 32B → 400（hex 解码校验）；
 //   - 显式 secret 不回传（响应不含 secret 字段）。
 func TestCredentials_AKAdd_Edge(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	// 1. ak 为空 → 400。
@@ -910,6 +924,7 @@ func TestCredentials_AKAdd_Edge(t *testing.T) {
 
 // TestCredentials_AKDelete_Security 验证 DELETE /api/credentials/{ak} 全链路安全检查。
 func TestCredentials_AKDelete_Security(t *testing.T) {
+	t.Parallel()
 	var auditBuf bytes.Buffer
 	url, _, ring := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, &auditBuf, nil)
 	target := testAccessKey
@@ -970,6 +985,7 @@ func TestCredentials_AKDelete_Security(t *testing.T) {
 // TestCredentials_NoAdmin_Hard403 验证 4A 无 admin 部署（ring 只有普通用户条目）时
 // admin-only 端点恒 403（GET /api/credentials、POST /api/credentials、DELETE /{ak}）。
 func TestCredentials_NoAdmin_Hard403(t *testing.T) {
+	t.Parallel()
 	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 
 	st, body := signedGet(t, url+"/api/credentials", testAccessKey, testAccessSecret)
@@ -993,6 +1009,7 @@ func TestCredentials_NoAdmin_Hard403(t *testing.T) {
 // TestCredentials_Renew_StillOwnOnlyInNoAdmin 验证即使无 admin，renew/own sk 列表
 // 作为本人操作仍可用（权限分档不因无 admin 而全锁）。
 func TestCredentials_Renew_StillOwnOnlyInNoAdmin(t *testing.T) {
+	t.Parallel()
 	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 	renewURL := url + "/api/credentials/" + testAccessKey + "/renew"
 	st, _ := doSignedJSON(t, http.MethodPost, renewURL, testAccessKey, testAccessSecret, map[string]any{})
@@ -1009,6 +1026,7 @@ func TestCredentials_Renew_StillOwnOnlyInNoAdmin(t *testing.T) {
 
 // TestCredentials_NoAuthUnauthorized 验证主 mux（direct 面）无凭据访问凭据管理端点 401。
 func TestCredentials_NoAuthUnauthorized(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/credentials", nil)
 	resp, err := testHTTPClient(t).Do(req)
@@ -1023,6 +1041,7 @@ func TestCredentials_NoAuthUnauthorized(t *testing.T) {
 
 // TestCredentials_NonOwnerRenewNotFound 验证 renew 仅限本人：admin renew user 的 AK → 404。
 func TestCredentials_NonOwnerRenewNotFound(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	st, _ := doSignedJSON(t, http.MethodPost, url+"/api/credentials/"+testAccessKey+"/renew", testAdminKey, testAdminSecret, map[string]any{})
 	if st != http.StatusNotFound {
@@ -1033,6 +1052,7 @@ func TestCredentials_NonOwnerRenewNotFound(t *testing.T) {
 // TestCredentials_Renew_RingNil_500 验证凭据 Ring 未装配（服务端配置错误）时 renew
 // 返回 500 而非泛化的 400（Minor 6：errCredentialRingUnavailable → InternalServerError）。
 func TestCredentials_Renew_RingNil_500(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir

@@ -115,6 +115,7 @@ func (e *ownerDownloadEnv) setOwnerQuota(owner string, bytes int64) {
 // 60 字节到 version 桶 → Usage 100=user40+version60）→ Adjust diff -20 使 user 桶收敛 40；
 // 删除 user 文件 → ReleaseUsage 释放 user 40，version 桶占用保留（Usage 60）；bob 配额独立。
 func TestQuota_UploadCommitAndDelete(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	// 配额需足够容纳版本字节（旧文件 60）叠加覆盖写预留（新 40）：60+60+40=160 ≤ 200。
 	env.setOwnerQuota("alice", 200)
@@ -156,6 +157,7 @@ func TestQuota_UploadCommitAndDelete(t *testing.T) {
 
 // TestQuota_TenantLimitRejected 验证超过租户上限时上传被拒绝（507 InsufficientStorage）。
 func TestQuota_TenantLimitRejected(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 10)
 	umux := actorUploadDeleteMux(env.h, "alice")
@@ -207,6 +209,7 @@ func TestQuota_HumanReadableConfig_Enforced(t *testing.T) {
 // TestQuota_CloudDownloadCommitAndDelete 验证云端下载配额对账：
 // create 预留 → complete Commit(result.Size)；delete ReleaseUsage → Usage 0。
 func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
+	t.Parallel()
 	content := []byte(strings.Repeat("x", 60))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -247,6 +250,7 @@ func TestQuota_CloudDownloadCommitAndDelete(t *testing.T) {
 
 // TestQuota_CloudTenantLimitRejected 验证云端下载超租户上限时创建被拒（错误可映射 507）。
 func TestQuota_CloudTenantLimitRejected(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 1024*1024, nil, testLogger())
 	cfg := &cloud.CloudDownloadConfig{
@@ -276,6 +280,7 @@ func TestQuota_CloudTenantLimitRejected(t *testing.T) {
 // TryReserve(pre) → createTarGz 后 Commit(actual) → Usage == 归档实际大小；
 // 同名已存在（errArchiveExists）→ Release() → 不泄漏预留。
 func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	// 需大于归档预占（源大小 + 100MB 占位），否则 TryReserve(pre) 直接 507。
 	env.setOwnerQuota("alice", 1<<30)
@@ -350,6 +355,7 @@ func TestQuota_ArchiveCommitAndConflictRelease(t *testing.T) {
 // 归档创建 → archive 桶 Scope 计入实际大小；deleteCloudArchive 删除文件并释放 Scope，
 // 不依赖周期扫描自愈。
 func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
@@ -416,6 +422,7 @@ func TestCloudArchive_DeleteReleasesScope(t *testing.T) {
 // TestVersionQuota_CommitAndRelease 验证 P5 版本桶配额（审查重要 3）：
 // saveVersion 写版本文件后 version 桶 Scope 计入版本字节；删除版本后释放。
 func TestVersionQuota_CommitAndRelease(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.Versioning.Enabled = true
@@ -492,6 +499,7 @@ func TestVersionQuota_CommitAndRelease(t *testing.T) {
 // TestQuota_ChunkedUploadCommitAndDelete 验证分块上传配额对账：
 // init TryReserve(TotalSize) → complete Commit(TotalSize) → Usage == TotalSize。
 func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 100}
 
@@ -541,6 +549,7 @@ func TestQuota_ChunkedUploadCommitAndDelete(t *testing.T) {
 // TestQuota_RmdirReleasesUsage 验证 rmdir 递归删除后释放 user 桶配额（I2 修复）：
 // 与单文件/批量 delete 一致，删除目录树后 user 桶 committed 归零，不依赖周期扫描自愈。
 func TestQuota_RmdirReleasesUsage(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 1000)
 	mux := http.NewServeMux()
@@ -579,6 +588,7 @@ func TestQuota_RmdirReleasesUsage(t *testing.T) {
 // TestQuota_VersionRestoreCommitsUsage 验证版本恢复把版本文件拷回 user 桶时记账（I3 修复）：
 // 恢复前删除目标文件（user 桶归零），恢复后 user 桶 == 版本文件大小。
 func TestQuota_VersionRestoreCommitsUsage(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 200)
 	env.h.cfgPtr.Load().Versioning.Enabled = true
@@ -654,6 +664,7 @@ func TestQuota_VersionRestoreCommitsUsage(t *testing.T) {
 // SyncQuotaStore 返回的 resolver 把 TryReserve/Release 落到 owner 的 user 桶 Scope，
 // 使 owner_quotas 对 sync 生效（原全局 syncQuotaAdapter 只受 max_storage_bytes 约束）。
 func TestQuota_SyncScopeAdapter(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 100)
 	store := env.h.SyncQuotaStore()
@@ -693,6 +704,7 @@ func TestQuota_SyncScopeAdapter(t *testing.T) {
 // 解析到精确 path 子 Scope 由后续任务（sync/cloud 装配、任务 8 记账模板）完成；此处用
 // TryReserve 直接验证子 Scope 上限机制（即写路径接入后 507 的实现基础）。
 func TestQuota_BucketLimits_PathScope(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
@@ -795,6 +807,7 @@ func assertPathScopeHTTPWrites(t *testing.T, env *ownerDownloadEnv, umux *http.S
 // 子 Scope，但沿父链聚合到租户 Scope 的 owner 兜底（120）仍生效：
 // TryReserve(140) 在 user 桶子 Scope 汇总到租户 0+140>120 → 507，且 user 桶不泄漏预留。
 func TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
@@ -842,6 +855,7 @@ func TestQuota_BucketLimits_SubdirWriteStillCapsByOwnerLimit(t *testing.T) {
 // best-effort 降级（跳过保存版本），覆盖写路径继续：上传 TryReserve(10) 余量 50≥10 成功、
 // user Adjust(60→10)。
 func TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	// 上限 110 让「首次上传 60」通过（余量 110），但「version 桶放旧文件 60」失败（余量 50<60）。
 	env.setOwnerQuota("alice", 110)
@@ -889,6 +903,7 @@ func TestVersionQuota_QuotaFullSkipsVersioningKeepsUserBucket(t *testing.T) {
 // TestQuotaScopeFor_LongestPrefix 验证 http route 式写路径解析：rel 首段=功能桶根，
 // 沿 children 段树最长前缀命中；未配置子目录回落功能桶。
 func TestQuotaScopeFor_LongestPrefix(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
@@ -921,6 +936,7 @@ func TestQuotaScopeFor_LongestPrefix(t *testing.T) {
 // bucket_limits[user/videos/hd]=100、owner=200，向子目录上传使子目录累计超限 → 507，
 // 不泄漏预留；删除子目录文件后子目录/桶/租户同步释放。
 func TestQuota_UploadSubdir507(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
@@ -950,6 +966,7 @@ func TestQuota_UploadSubdir507(t *testing.T) {
 // TestQuota_RmdirSubdir_ReleasesPerFileScope 验证 rmdir 删除子树按各文件 rel 分键释放：
 // 子目录内两个 BucketLimits 键（user/videos/hd、user/videos/4k）各自扣除对应文件字节。
 func TestQuota_RmdirSubdir_ReleasesPerFileScope(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100, "user/videos/4k": 100}
