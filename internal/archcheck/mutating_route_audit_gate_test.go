@@ -140,10 +140,14 @@ func goSourceFiles(t *testing.T, dir string, includeTests bool) []string {
 	return out
 }
 
-// actionConsts 收集 `Action* = "<value>"` 常量（value → 常量名；同名多值时取首个）。
+// actionConsts 收集审计动作常量（value → 常量名；同名多值时取首个）。
+//
+// 命名口径放宽（2026-11-11）：除 `ActionXxx [Action|string] = "..."` 外，也认仓库实际的
+// 非导出命名（如 `auditActionCredRegister = "credential_register"`，无类型标注）——
+// 否则这类常量的场景证据（测试体内引用该常量）会被判为「无证据」，迫使测试写裸字面量。
 func actionConsts(t *testing.T, root string) map[string]string {
 	t.Helper()
-	re := regexp.MustCompile(`\b(Action[A-Za-z0-9_]*)\s+(?:Action|string)\s*=\s*"([^"]+)"`)
+	re := regexp.MustCompile(`\b([A-Za-z0-9_]*[Aa]ction[A-Za-z0-9_]*)\s*(?:Action|string)?\s*=\s*"([^"]+)"`)
 	out := map[string]string{}
 	for _, dir := range []string{filepath.Join(root, "pkg", "server"), filepath.Join(root, "pkg", "audit"), filepath.Join(root, "pkg", "files")} {
 		for _, p := range goSourceFiles(t, dir, false) {

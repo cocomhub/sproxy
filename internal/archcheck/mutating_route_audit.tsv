@@ -13,7 +13,9 @@
 # 故这类行的登记需要人工核对场景矩阵（docs/testing/audit-scenarios.md）。
 #
 # 格式：<pattern>	<action=值 | pending>	<备注（pending 必填）>
-# pending_budget=42
+# pending_budget=36
+# 2026-11-11 下调 42→36：补齐/确认 6 条场景证据后转 action（cloud_archive ×3、volume_rebalance、
+# credential_register 经 `actionConsts` 识别非导出 `auditAction*` 常量、notify_test 新增场景用例）。
 # 2026-11-02 上调 41→42：R38 解析插件登录面（externalAuthRoutes 动态注册）后，
 # POST /auth/ldap/login 首次进入 backlog（同批 OIDC 两条为 GET，不属变更型）。
 # 2026-11-02 上调 38→41：R38/R35-b 扫描面扩展到 `.Handle(` 形态后，3 条此前**不可见**的
@@ -53,18 +55,18 @@ POST /api/ai/summarize	pending	handler=aiInsight actions=NONE
 POST /api/ai/tag	pending	handler=aiInsight actions=NONE
 POST /api/batch/delete	pending	handler=batchDelete actions=NONE
 POST /api/batch/rename	pending	handler=batchRename actions=NONE
-POST /api/cloud/archive	pending	handler=cloudArchiveBatch action=cloud_archive 无测试场景证据
+POST /api/cloud/archive	action=cloud_archive	
 POST /api/cloud/download	pending	handler=cloudCreateDownload actions=NONE
 POST /api/cloud/download/batch	pending	handler=cloudCreateBatchDownload actions=NONE
-POST /api/cloud/groups/{id}/archive	pending	handler=cloudArchiveGroup action=cloud_archive 无测试场景证据
+POST /api/cloud/groups/{id}/archive	action=cloud_archive	
 POST /api/cloud/groups/{id}/cancel	pending	handler=cloudCancelGroup actions=NONE
 POST /api/cloud/groups/{id}/resume	pending	handler=cloudResumeGroup actions=NONE
-POST /api/cloud/tasks/{id}/archive	pending	handler=cloudArchiveTask action=cloud_archive 无测试场景证据
+POST /api/cloud/tasks/{id}/archive	action=cloud_archive	
 POST /api/cloud/tasks/{id}/resume	pending	handler=cloudResumeTask actions=NONE
 POST /api/credentials	pending	handler=akAddHandler actions=NONE
 POST /api/credentials/{ak}/renew	pending	handler=renewCredentialHandler actions=NONE
 POST /api/credentials/{ak}/sk/{skID}/expire	pending	handler=skExpireHandler actions=NONE
-POST /api/notify/test	pending	handler=notifyTestHandler actions=notify_test,test
+POST /api/notify/test	action=notify_test	
 POST /api/relay/stream	pending	handler=authMiddleware actions=NONE
 POST /api/signal/answer	pending	handler=authMiddleware actions=NONE
 POST /api/signal/candidate	pending	handler=authMiddleware actions=NONE
@@ -74,7 +76,7 @@ POST /api/sync/tasks/{id}/retry	pending	handler=syncRetryTask actions=NONE
 POST /api/tags	pending	handler=tagsHandler actions=NONE
 POST /api/trash/empty	pending	handler=emptyTrashHandler actions=NONE
 POST /api/trash/restore	pending	handler=restoreTrashHandler actions=NONE
-POST /api/volumes/rebalance	pending	handler=rebalanceVolumeHandler actions=volume_move,volume_rebalance
+POST /api/volumes/rebalance	action=volume_rebalance	
 POST /delete	pending	handler=delete actions=NONE
 POST /mkdir	pending	handler=mkdir actions=NONE
 POST /rename	pending	handler=rename actions=NONE
@@ -86,7 +88,7 @@ POST /upload/init	pending	handler=uploadInit actions=NONE
 PUT /api/files/meta	action=file_meta_update	
 POST /api/volumes/refresh	action=volume_refresh	
 POST /api/credentials/login	action=credential_login	
-POST /api/credentials/register	pending	handler=registerCredentialHandler note=成功路径已记 credential_register，但缺少 Test* 场景断言（补断言后转 action）
+POST /api/credentials/register	action=credential_register	
 POST /api/credentials/nonce	pending	handler=nonceHandler note=TOTP 挑战签发，非业务变更
 POST /tunnel	pending	note=隧道传输入口（内部路由各自审计），非业务变更
 POST /auth/ldap/login	pending	note=插件登录面（LDAP 会话签发，未接业务审计；属既有债，扫描面修正后暴露）

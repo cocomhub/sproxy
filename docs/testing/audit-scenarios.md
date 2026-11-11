@@ -72,6 +72,7 @@ grep -rhoE 'recordFileAudit\([^,]+, *"[a-z_]+"' --include=*.go pkg/files/ | sed 
 | `credential_ak_list` / `_ak_add` / `_sk_list` / `_renew` / `_sk_expire` | `pkg/server/audit_credential_scenarios_test.go`（并断言**不含 SK 明文**） | ✅ |
 | `credential_login` / `credential_login_denied` | `pkg/server/audit_login_scenarios_test.go`（TOTP 成功 + 未知 nonce 被拒；不含 nonce/密钥本体） | ✅ |
 | `config_update` / `verify` / `backup` | `pkg/server/audit_test.go`、`cmd/sproxy/*_test.go` | ✅ |
+| `notify_test`（渠道自检，可能外发真实消息） | `pkg/server/audit_notify_scenarios_test.go`（mock wecom；断言 action/result/object_type） | ✅ |
 
 ### 2.5 传输层 / 读面
 
