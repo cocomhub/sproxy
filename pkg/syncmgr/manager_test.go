@@ -1195,18 +1195,13 @@ func TestInjectResultsForTest_ConcurrentWithFinishTask(t *testing.T) {
 
 	// 轮询到终态（completed 或 failed 均可，执行器与注入竞争终态归属）。
 	// 关键是 -race 全程无 WARNING（编译时钉死并发安全）。
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	if !testutil.WaitForBool(10*time.Second, func() bool {
 		st := mgr.Get(task.ID, "")
 		if st == nil {
 			t.Fatal("任务不应被删除")
 		}
-		if st.Status == StatusCompleted || st.Status == StatusFailed {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("任务未在 10s 内到达终态，最后 %q", st.Status)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return st.Status == StatusCompleted || st.Status == StatusFailed
+	}) {
+		t.Fatalf("任务未在 10s 内到达终态，最后 %q", mgr.Get(task.ID, "").Status)
 	}
 }

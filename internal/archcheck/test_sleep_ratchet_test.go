@@ -39,7 +39,9 @@ import (
 // 2026-11-07 +1：pkg/server/write_deadline_test.go 流式写截止回归（有意计时：制造
 // 「响应总时长 > WriteTimeout 但每步有进展」的真实时序，WriteTimeout 语义本身即墙钟，
 // 无可条件化替代）。
-const testSleepTotalBudget = 62
+// 2026-11-11 −4：`pkg/server/cluster_index_sync_test.go` 3 处条件轮询 + `pkg/syncmgr/manager_test.go` 1 处
+// 终态轮询改走 `testutil.WaitForBool`（固定间隔/超时由共享实现承担，测试里不再裸 `time.Sleep`）。
+const testSleepTotalBudget = 58
 
 // testSleepBudgets 是每文件预算（冻结值）。未列出的测试文件预算为 0。
 // 数字对应 2026-09-14 的实测快照；转换掉一处就顺手下调，勿上调。
@@ -74,7 +76,6 @@ var testSleepBudgets = map[string]int{
 	"pkg/tunnel/xfer/ext/webrtc/turnrest_test.go":         1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_test.go":            1,
 	"pkg/tunnel/xfer/internal/tcp/tcp_tls_test.go":        1,
-	"pkg/syncmgr/manager_test.go":                         1, // 终态轮询 10ms 间隔（并发安全回归测试，见 TestInjectResultsForTest_ConcurrentWithFinishTask）
 	"pkg/volume/ext/pikpak/hybrid_test.go":                2, // TestHybridDownload_ParallelPools 模拟分享/账号不同延迟
 	"test/e2e_mesh_node_test.go":                          3,
 	"test/e2e_mesh_rr_test.go":                            3,
@@ -83,7 +84,7 @@ var testSleepBudgets = map[string]int{
 	"test/chaos/chaos_test.go":                            1, // NetPartition 恢复轮询 200ms（条件轮询替代；分区恢复无事件可轮询）
 	"test/chaos/net_chaos.go":                             2, // Pause 挂起轮询 50ms + Delay 注入（网络混沌必需固定等待）
 	"test/chaos/node.go":                                  1, // waitReady 就绪轮询 200ms（条件轮询替代）
-	"pkg/server/cluster_index_sync_test.go":               4, // Watch/resync 条件轮询 50ms（集群同步事件无固定等待替代）
+	"pkg/server/cluster_index_sync_test.go":               1, // 负例断言（旧 rev 不得触发 reload）需有界等待窗口；其余 3 处已改 testutil.WaitForBool（2026-11-11）
 	"pkg/server/event_index_bridge_test.go":               3, // 桥接条件轮询 50ms + 非文件事件负例 200ms + owner 可见性等待 20ms（事件驱动失效无固定等待替代）
 	"web/e2e/owner_login_e2e_test.go":                     1, // 结果区条件轮询 200ms 间隔（Playwright 等待必需）
 }
