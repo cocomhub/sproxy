@@ -34,5 +34,4 @@ pkg/volume/capacity/ledger.go	1	账本自身的读写（`meta/quota/` 保留区�
 pkg/server/source_volume.go	1	源定位（分享/AI 抽样/版本可见性）：经 volSet.External(卷).FS() 后**立即**套 trusted.Guard(Wrap)（与下载/转存同一装饰链；封印由装配处 SealBackend 保证）
 pkg/volume/registry/views.go	1	U2 统一取卷入口 VolumeView：`sv.FS()` 取**装配期已登记**的统一存储卷数据面（本地 localBackend / 外部 capacity.Backend），随后**必套** trusted.Guard/Wrap 装饰链（内置默认或装配层覆盖）⇒ 不新增封印绕过面（消费方拿到的恒为装饰后视图）
 pkg/server/issues_scan.go	1	存储审查（启动扫描/手动触发 /api/issues/scan）：经 volSet.External(卷).FS() 取 FS 后**仅类型断言** StorageInspector/TreeInspector（只解 meta、不读内容、不修改）⇒ 非封印绕过面
-pkg/server/issues_executors.go	1	待处理事项的执行器：**仅注释**提及取卷方式（说明生产应经统一卷视图入口），无实际 FS 调用 ⇒ 非封印绕过面
 cmd/sproxy/root.go	1	待处理事项重试执行器解析目标卷的对象：经 `volSet.External(vol)` 取**后端视图**并交给领域侧的「清理非权威目录 meta」能力（`CleanupStaleDirMeta`）。**评估：非封印绕过面** —— 该能力只删**本卷自身的残留 dir-meta blob**（改名/移动时旧 meta 删除失败的产物），既不读取也不修改**用户内容**，更不访问"被封装卷占用的源子目录"（封印要防的正是后者）。**为何不走 `VolumeView`**：`trusted.Guard/Wrap` 装饰器当前**不转发** `StorageInspector`/`DirMetaCleaner` 等可选能力 ⇒ 经统一视图取到的 FS 无法完成审查与清理（会静默失效）⇒ 需先扩展装饰器转发能力（独立工作项，涉及核心装饰链，R21 门禁守）才能消除本直连点

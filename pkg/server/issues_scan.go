@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/server/issues"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -185,7 +186,8 @@ func IssueKindForAnomaly(code string) (issues.Kind, bool, bool) { return issueAn
 // VolumeLister 是卷集的**最小读取接口**（便于测试注入替身；生产传 `*registry.Set`）。
 type VolumeLister interface {
 	All() []volume.Volume
-	External(name string) registry.ExternalBackend
+	// VolumeView 返回卷的统一视图（`VolumeView(…, ViewUser)`：装配期已套 Guard/Wrap 与封印）。
+	VolumeView(name string, use registry.ViewUse) (syncpkg.FS, bool)
 }
 
 // ScanTargetsFromSet 从卷集提取**可审查目标**：只取「后端同步视图实现 StorageInspector」的卷。
@@ -198,15 +200,17 @@ func ScanTargetsFromSet(l VolumeLister) []ScanTarget {
 	}
 	var out []ScanTarget
 	for _, v := range l.All() {
-		be := l.External(v.Name)
-		if be == nil {
+		raw, ok := l.VolumeView(v.Name, registry.ViewUser)
+		if !ok || raw == nil {
 			continue
 		}
-		fs := be.FS()
-		if _, ok := volume.AssertStorageInspector(fs); !ok {
+		// **能力断言必须穿透装饰链**（Guard/Wrap/Capacity…）：用受认可的 `syncpkg.Innermost`，
+		// 不在业务代码里手写 Inner 链遍历（与 `volume_inspect.go` 同一做法，R22 门禁守）。
+		inner := syncpkg.Innermost(raw)
+		if _, ok := volume.AssertStorageInspector(inner); !ok {
 			continue
 		}
-		out = append(out, ScanTarget{Volume: v.Name, Target: fs})
+		out = append(out, ScanTarget{Volume: v.Name, Target: inner})
 	}
 	return out
 }
