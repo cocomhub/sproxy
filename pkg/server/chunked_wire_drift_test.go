@@ -68,6 +68,15 @@ type frozenChunkStatusResponse struct {
 	FileChecksum  string `json:"file_checksum,omitempty"`
 	Filename      string `json:"filename,omitempty"`
 	Message       string `json:"message,omitempty"`
+	// —— 2026-11-10 有意扩展（进度可视化二期 T4）：服务端写入阶段进度 ——
+	// 全部 omitempty ⇒ 对旧客户端**向后兼容**（旧客户端忽略未知字段，不会解析失败）。
+	// 同步要求：SDK（pkg/client/chunked.go 的 statusData）也必须解析这几个字段，
+	// 否则本测试的「SDK 字段存在性」断言会失败——这正是该门禁的价值。
+	Stage        string `json:"stage,omitempty"`
+	EncryptDone  int64  `json:"encrypt_done,omitempty"`
+	EncryptTotal int64  `json:"encrypt_total,omitempty"`
+	RemoteDone   int64  `json:"remote_done,omitempty"`
+	RemoteTotal  int64  `json:"remote_total,omitempty"`
 }
 
 type frozenUploadSessionInfo struct {
