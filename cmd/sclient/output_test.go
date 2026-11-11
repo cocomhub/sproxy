@@ -15,6 +15,7 @@ import (
 )
 
 func TestPrintFileList(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		files    []client.FileInfo
@@ -82,6 +83,7 @@ func TestPrintFileList(t *testing.T) {
 // ---- JSONFormatter tests ----
 
 func TestJSONFormatter_PrintFileList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintFileList(nil)
@@ -92,6 +94,7 @@ func TestJSONFormatter_PrintFileList(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintFileList_WithFiles(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintFileList([]client.FileInfo{
@@ -107,6 +110,7 @@ func TestJSONFormatter_PrintFileList_WithFiles(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintShareList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintShareList(nil)
@@ -117,6 +121,7 @@ func TestJSONFormatter_PrintShareList(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintShareList_WithShares(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintShareList([]client.ShareLink{
@@ -132,6 +137,7 @@ func TestJSONFormatter_PrintShareList_WithShares(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintStat(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintStat(&client.FileInfo{Name: "file.txt", Size: 42, Checksum: "deadbeef"}, "file.txt")
@@ -145,6 +151,7 @@ func TestJSONFormatter_PrintStat(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintStat_Directory(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintStat(&client.FileInfo{Name: "mydir", IsDir: true, Size: 0, Checksum: ""}, "mydir")
@@ -155,6 +162,7 @@ func TestJSONFormatter_PrintStat_Directory(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintShareCreated(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintShareCreated(&client.ShareLink{
@@ -170,6 +178,7 @@ func TestJSONFormatter_PrintShareCreated(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintShareRevoked(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintShareRevoked("tok123")
@@ -183,6 +192,7 @@ func TestJSONFormatter_PrintShareRevoked(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintUpdateResult(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintUpdateResult("log_level", "debug")
@@ -196,6 +206,7 @@ func TestJSONFormatter_PrintUpdateResult(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintStats(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintStats(&client.StatsResponse{
@@ -209,6 +220,7 @@ func TestJSONFormatter_PrintStats(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintConfig(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintConfig(&client.ConfigResponse{
@@ -222,6 +234,7 @@ func TestJSONFormatter_PrintConfig(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintCloudTaskList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintCloudTaskList([]cloudTaskInfo{
@@ -237,6 +250,7 @@ func TestJSONFormatter_PrintCloudTaskList(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintCloudTaskCancelResult(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintCloudTaskCancelResult("task-1", true, "")
@@ -250,6 +264,7 @@ func TestJSONFormatter_PrintCloudTaskCancelResult(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintVersionList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintVersionList("test.txt", []client.VersionInfo{
@@ -265,6 +280,7 @@ func TestJSONFormatter_PrintVersionList(t *testing.T) {
 }
 
 func TestJSONFormatter_PrintfAndPrintln(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	// These are no-ops in JSON mode
@@ -276,6 +292,7 @@ func TestJSONFormatter_PrintfAndPrintln(t *testing.T) {
 }
 
 func TestJSONFormatter_Printf(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.Printf("format %s", "should be ignored")
@@ -285,6 +302,7 @@ func TestJSONFormatter_Printf(t *testing.T) {
 }
 
 func TestJSONFormatter_Println(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.Println("should be ignored")
@@ -296,6 +314,7 @@ func TestJSONFormatter_Println(t *testing.T) {
 // ---- TextFormatter tests ----
 
 func TestTextFormatter_PrintShareList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareList(nil)
@@ -306,6 +325,7 @@ func TestTextFormatter_PrintShareList(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareList([]client.ShareLink{
@@ -321,6 +341,7 @@ func TestTextFormatter_PrintShareList_WithShares(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareList([]client.ShareLink{
@@ -333,6 +354,7 @@ func TestTextFormatter_PrintShareList_Expired(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareList_UnlimitedDownloads(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareList([]client.ShareLink{
@@ -345,6 +367,7 @@ func TestTextFormatter_PrintShareList_UnlimitedDownloads(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareList_LongToken(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	longToken := "abcdefghijklmnopqrstuvwxyz1234567890ABCDEF"
@@ -361,6 +384,7 @@ func TestTextFormatter_PrintShareList_LongToken(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareCreated(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareCreated(&client.ShareLink{
@@ -376,6 +400,7 @@ func TestTextFormatter_PrintShareCreated(t *testing.T) {
 }
 
 func TestTextFormatter_PrintShareRevoked(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintShareRevoked("tok123")
@@ -389,6 +414,7 @@ func TestTextFormatter_PrintShareRevoked(t *testing.T) {
 }
 
 func TestTextFormatter_PrintUpdateResult(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintUpdateResult("log_level", "debug")
@@ -402,6 +428,7 @@ func TestTextFormatter_PrintUpdateResult(t *testing.T) {
 }
 
 func TestTextFormatter_PrintCloudTaskList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintCloudTaskList(nil)
@@ -412,6 +439,7 @@ func TestTextFormatter_PrintCloudTaskList(t *testing.T) {
 }
 
 func TestTextFormatter_PrintCloudTaskList_WithTasks(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintCloudTaskList([]cloudTaskInfo{
@@ -431,6 +459,7 @@ func TestTextFormatter_PrintCloudTaskList_WithTasks(t *testing.T) {
 }
 
 func TestTextFormatter_PrintCloudTaskCancelResult(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintCloudTaskCancelResult("task-1", true, "")
@@ -441,6 +470,7 @@ func TestTextFormatter_PrintCloudTaskCancelResult(t *testing.T) {
 }
 
 func TestTextFormatter_PrintCloudTaskCancelResult_Failed(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintCloudTaskCancelResult("task-1", false, "already completed")
@@ -454,6 +484,7 @@ func TestTextFormatter_PrintCloudTaskCancelResult_Failed(t *testing.T) {
 }
 
 func TestTextFormatter_PrintVersionList(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintVersionList("test.txt", nil)
@@ -464,6 +495,7 @@ func TestTextFormatter_PrintVersionList(t *testing.T) {
 }
 
 func TestTextFormatter_PrintVersionList_WithVersions(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintVersionList("test.txt", []client.VersionInfo{
@@ -479,6 +511,7 @@ func TestTextFormatter_PrintVersionList_WithVersions(t *testing.T) {
 }
 
 func TestTextFormatter_PrintStat(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintStat(&client.FileInfo{Name: "test.txt", Size: 42, Checksum: "abc123"}, "test.txt")
@@ -495,6 +528,7 @@ func TestTextFormatter_PrintStat(t *testing.T) {
 }
 
 func TestTextFormatter_PrintStat_Directory(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintStat(&client.FileInfo{Name: "mydir", IsDir: true, Size: 0, Checksum: ""}, "mydir")
@@ -505,6 +539,7 @@ func TestTextFormatter_PrintStat_Directory(t *testing.T) {
 }
 
 func TestTextFormatter_PrintStat_WithModTime(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintStat(&client.FileInfo{Name: "f.txt", Size: 10, Checksum: "x", ModTime: 1700000000000000000}, "f.txt")
@@ -515,6 +550,7 @@ func TestTextFormatter_PrintStat_WithModTime(t *testing.T) {
 }
 
 func TestTextFormatter_Printf(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.Printf("hello %s", "world")
@@ -524,6 +560,7 @@ func TestTextFormatter_Printf(t *testing.T) {
 }
 
 func TestTextFormatter_Println(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.Println("hello world")
@@ -535,6 +572,7 @@ func TestTextFormatter_Println(t *testing.T) {
 // ---- Utility functions ----
 
 func TestBoolStr(t *testing.T) {
+	t.Parallel()
 	if got := boolStr(true); got != "已设置" {
 		t.Fatalf("expected '已设置', got %q", got)
 	}
@@ -576,6 +614,7 @@ func TestBuildFormatter(t *testing.T) {
 }
 
 func TestJsonOutputIsValid(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintShareCreated(&client.ShareLink{
@@ -588,6 +627,7 @@ func TestJsonOutputIsValid(t *testing.T) {
 }
 
 func TestJsonOutput_PrintFileListIsValid(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintFileList([]client.FileInfo{
@@ -600,6 +640,7 @@ func TestJsonOutput_PrintFileListIsValid(t *testing.T) {
 }
 
 func TestJsonOutput_PrintStatsIsValid(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewJSONFormatter(&buf)
 	fm.PrintStats(&client.StatsResponse{
@@ -616,6 +657,7 @@ func TestJsonOutput_PrintStatsIsValid(t *testing.T) {
 }
 
 func TestTextFormatter_PrintStats(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintStats(&client.StatsResponse{
@@ -651,6 +693,7 @@ func TestTextFormatter_PrintStats(t *testing.T) {
 }
 
 func TestTextFormatter_PrintConfig(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintConfig(&client.ConfigResponse{
@@ -667,6 +710,7 @@ func TestTextFormatter_PrintConfig(t *testing.T) {
 }
 
 func TestTextFormatter_PrintCloudTaskList_LongFields(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintCloudTaskList([]cloudTaskInfo{
@@ -687,6 +731,7 @@ func TestTextFormatter_PrintCloudTaskList_LongFields(t *testing.T) {
 }
 
 func TestTextFormatter_PrintVersionList_LongChecksum(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	fm := NewTextFormatter(&buf)
 	fm.PrintVersionList("test.txt", []client.VersionInfo{

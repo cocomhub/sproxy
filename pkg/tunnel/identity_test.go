@@ -15,6 +15,7 @@ import (
 
 // TestIdentityGenerate_Basic 验证生成的身份：公钥 32B、指纹为 sha256:<64 hex>。
 func TestIdentityGenerate_Basic(t *testing.T) {
+	t.Parallel()
 	id, err := GenerateIdentity()
 	if err != nil {
 		t.Fatalf("GenerateIdentity: %v", err)
@@ -41,6 +42,7 @@ func TestIdentityGenerate_Basic(t *testing.T) {
 
 // TestIdentityGenerate_Unique 验证两次生成的身份指纹不同。
 func TestIdentityGenerate_Unique(t *testing.T) {
+	t.Parallel()
 	id1, err := GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +58,7 @@ func TestIdentityGenerate_Unique(t *testing.T) {
 
 // TestFingerprintFromPublicKey_Deterministic 验证同公钥指纹确定。
 func TestFingerprintFromPublicKey_Deterministic(t *testing.T) {
+	t.Parallel()
 	id, err := GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -73,6 +76,7 @@ func TestFingerprintFromPublicKey_Deterministic(t *testing.T) {
 
 // TestIdentitySaveLoad_Roundtrip 验证保存后加载指纹一致。
 func TestIdentitySaveLoad_Roundtrip(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	id, err := GenerateIdentity()
 	if err != nil {
@@ -92,6 +96,7 @@ func TestIdentitySaveLoad_Roundtrip(t *testing.T) {
 
 // TestIdentitySave_Perm0600 验证身份文件权限 0600（Windows chmod 是 no-op，跳过）。
 func TestIdentitySave_Perm0600(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("os.Chmod 在 Windows 上是 no-op，权限位不可靠")
 	}
@@ -111,6 +116,7 @@ func TestIdentitySave_Perm0600(t *testing.T) {
 
 // TestIdentitySave_CreatesDirs 验证保存时自动创建父目录。
 func TestIdentitySave_CreatesDirs(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "a", "b", "identity.json")
 	id, _ := GenerateIdentity()
 	if err := SaveIdentity(id, path); err != nil {
@@ -123,6 +129,7 @@ func TestIdentitySave_CreatesDirs(t *testing.T) {
 
 // TestIdentitySave_OverwritesExisting 验证覆盖已有文件（原子替换）。
 func TestIdentitySave_OverwritesExisting(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	id1, _ := GenerateIdentity()
 	id2, _ := GenerateIdentity()
@@ -143,6 +150,7 @@ func TestIdentitySave_OverwritesExisting(t *testing.T) {
 
 // TestIdentityLoad_NotExist 验证加载不存在的文件返回 IsNotExist。
 func TestIdentityLoad_NotExist(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.json")
 	_, err := LoadIdentity(path)
 	if !os.IsNotExist(err) {
@@ -152,6 +160,7 @@ func TestIdentityLoad_NotExist(t *testing.T) {
 
 // TestIdentityLoad_CorruptJSON 验证损坏 JSON 返回 ErrIdentityFileCorrupt（fail-closed，不静默重建）。
 func TestIdentityLoad_CorruptJSON(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	if err := os.WriteFile(path, []byte("not json at all"), 0600); err != nil {
 		t.Fatal(err)
@@ -167,6 +176,7 @@ func TestIdentityLoad_CorruptJSON(t *testing.T) {
 
 // TestIdentityLoad_BadPrivateKey 验证私钥非法的身份文件返回 ErrIdentityFileCorrupt。
 func TestIdentityLoad_BadPrivateKey(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	data := []byte(`{"private_key":"zz","public_key":"zz"}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -180,6 +190,7 @@ func TestIdentityLoad_BadPrivateKey(t *testing.T) {
 
 // TestIdentityLoad_ShortPrivateKey 验证私钥长度非 32B 返回 ErrIdentityFileCorrupt。
 func TestIdentityLoad_ShortPrivateKey(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	data := []byte(`{"private_key":"abcdef","public_key":"abcdef"}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -193,6 +204,7 @@ func TestIdentityLoad_ShortPrivateKey(t *testing.T) {
 
 // TestIdentityLoad_KeyMismatch 验证公钥与私钥派生不一致返回 ErrIdentityFileCorrupt。
 func TestIdentityLoad_KeyMismatch(t *testing.T) {
+	t.Parallel()
 	id1, _ := GenerateIdentity()
 	id2, _ := GenerateIdentity()
 	data := []byte(`{"private_key":"` + hex.EncodeToString(id1.privateKey.Seed()) +
@@ -209,6 +221,7 @@ func TestIdentityLoad_KeyMismatch(t *testing.T) {
 
 // TestLoadOrCreateIdentity 验证不存在时创建、存在时复用。
 func TestLoadOrCreateIdentity(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	id1, err := LoadOrCreateIdentity(path)
 	if err != nil {
@@ -225,6 +238,7 @@ func TestLoadOrCreateIdentity(t *testing.T) {
 
 // TestLoadOrCreateIdentity_Corrupt 验证已存在但损坏的文件直接报错（不覆盖）。
 func TestLoadOrCreateIdentity_Corrupt(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "identity.json")
 	if err := os.WriteFile(path, []byte("garbage"), 0600); err != nil {
 		t.Fatal(err)
@@ -237,6 +251,7 @@ func TestLoadOrCreateIdentity_Corrupt(t *testing.T) {
 
 // TestParseFingerprint 验证指纹输入归一化：接受纯 hex、sha256: 前缀、大写 hex，拒绝非法。
 func TestParseFingerprint(t *testing.T) {
+	t.Parallel()
 	id, _ := GenerateIdentity()
 	fp := id.Fingerprint()
 	hexOnly := strings.TrimPrefix(fp, fingerprintPrefix)
@@ -292,6 +307,7 @@ func TestParseFingerprint(t *testing.T) {
 // TestParseFingerprint_CaseInsensitivePrefix 验证前缀 "sha256:" 大小写不敏感（m-3）：
 // "SHA256:" / "Sha256:" 等变体应被接受并归一化为小写前缀。
 func TestParseFingerprint_CaseInsensitivePrefix(t *testing.T) {
+	t.Parallel()
 	id, _ := GenerateIdentity()
 	fp := id.Fingerprint()
 	hexOnly := strings.TrimPrefix(fp, fingerprintPrefix)
@@ -310,6 +326,7 @@ func TestParseFingerprint_CaseInsensitivePrefix(t *testing.T) {
 // TestIdentitySave_NoTempResidue 验证 SaveIdentity 使用唯一临时文件（m-5）：
 // 保存成功后目录中不应残留固定名或通配临时文件（崩溃残留路径.tmp 的场景已消除）。
 func TestIdentitySave_NoTempResidue(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "identity.json")
 	id, _ := GenerateIdentity()
@@ -332,6 +349,7 @@ func TestIdentitySave_NoTempResidue(t *testing.T) {
 
 // TestFingerprintMatches 验证指纹恒时比较。
 func TestFingerprintMatches(t *testing.T) {
+	t.Parallel()
 	id, _ := GenerateIdentity()
 	fp := id.Fingerprint()
 	if !FingerprintMatches(fp, fp) {
@@ -348,6 +366,7 @@ func TestFingerprintMatches(t *testing.T) {
 // TestIdentity_SignVerify 验证身份签名/验签（proof of possession）：
 // 自身签名可验证；他人公钥或篡改消息验签失败。
 func TestIdentity_SignVerify(t *testing.T) {
+	t.Parallel()
 	id, err := GenerateIdentity()
 	if err != nil {
 		t.Fatal(err)
@@ -375,6 +394,7 @@ func TestIdentity_SignVerify(t *testing.T) {
 
 // TestIdentity_SignNil 验证空身份 Sign/Verify 返回安全默认（nil/false），不 panic。
 func TestIdentity_SignNil(t *testing.T) {
+	t.Parallel()
 	var nilID *Identity
 	if sig := nilID.Sign([]byte("x")); sig != nil {
 		t.Fatalf("expected nil signature, got %v", sig)
@@ -386,6 +406,7 @@ func TestIdentity_SignNil(t *testing.T) {
 
 // TestPinContains 验证 pin 列表匹配（含归一化）。
 func TestPinContains(t *testing.T) {
+	t.Parallel()
 	id, _ := GenerateIdentity()
 	fp := id.Fingerprint()
 	hexOnly := strings.TrimPrefix(fp, fingerprintPrefix)
