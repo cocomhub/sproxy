@@ -4355,7 +4355,9 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 			// 登记为**可自动重试**事项（用户裁定 2026-11-10）：该容器当前有两个 dir-meta，
 			// 引擎按 Version 仲裁可继续工作，但布局已异常（`sclient volume explain` 会报
 			// dir_meta_ambiguous）⇒ 必须让人能看见，并由机制**定期重试清理**直到成功。
-			s.reportStorageIssue(issueKindDirMetaCleanupFailed, srcRel,
+			// **Path 存容器路径**（而非逻辑路径）：这是重试执行器 `CleanupStaleDirMeta(ctx, container)`
+			// 需要的入参；逻辑路径已写在 Detail 里供人工阅读（"位置"列给机器、"详细原因"列给人）。
+			s.reportStorageIssue(issueKindDirMetaCleanupFailed, container,
 				fmt.Sprintf("改名/移动后删除旧目录 meta 失败：逻辑路径 %q → %q；container=%s old_blob=%s new_blob=%s；err=%v。该容器现有两个目录 meta（引擎按 Version 仲裁可继续工作，但布局异常）；应重试删除旧 blob 直到成功，成功后本事项自动解除；成功前请勿手工删除该容器。",
 					srcRel, dstRel, container, oldName, newName, derr),
 				true)
