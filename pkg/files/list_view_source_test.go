@@ -40,6 +40,9 @@ type viewListSet struct {
 	calls int
 	// unsupported=true 模拟「缓存被 disable」⇒ 能力不可用，必须回落实时扫描。
 	unsupported bool
+	// viewChecksum 非 nil 时，为每条返回值填上「卷自报 checksum」（模拟 secretdata/S3
+	// 的 O(1) 自报），用于验证 list 路径是否优先采用自报值而非台账。
+	viewChecksum func(name string) string
 }
 
 func (v *viewListSet) ListDirView(_ context.Context, volName, owner, subdir string) ([]ExternalEntry, bool, error) {
@@ -76,9 +79,13 @@ func (v *viewListSet) ListDirView(_ context.Context, volName, owner, subdir stri
 		if ierr != nil {
 			continue
 		}
-		out = append(out, ExternalEntry{
+		ent := ExternalEntry{
 			Name: e.Name(), IsDir: e.IsDir(), Size: info.Size(), MTime: info.ModTime().UnixNano(),
-		})
+		}
+		if v.viewChecksum != nil {
+			ent.Checksum = v.viewChecksum(e.Name())
+		}
+		out = append(out, ent)
 	}
 	return out, true, nil
 }
@@ -175,6 +182,37 @@ func TestList_ViewSourceEquivalentToScan(t *testing.T) {
 	viewRoot := listFileInfos(t, env, "")
 	if len(idxRoot) != len(viewRoot) {
 		t.Fatalf("根目录条目数不一致：扫描 %d / 视图 %d (%+v vs %+v)", len(idxRoot), len(viewRoot), idxRoot, viewRoot)
+	}
+}
+
+// TestList_ViewChecksumPreferredOverLedger 钉住读口径：卷自报 checksum 优先于台账。
+//
+// 背景（docs/designs/2026-11-11-checksum-ledger-read-path.md §S1）：list 路径此前只查台账，
+// 丢弃了装配层已透传的 `ExternalEntry.Checksum`，而 search 路径已采用自报值 ⇒ 两条读路径
+// 对同一份数据给出不同 checksum。变异：去掉「自报优先」⇒ 本用例拿到台账值（不同）⇒ 红。
+func TestList_ViewChecksumPreferredOverLedger(t *testing.T) {
+	t.Parallel()
+	env := viewEnv(t, false)
+	body := []byte("prefer-view-checksum")
+	ledgerSum := sha256Hex(body)
+	env.upload(t, "alice", "docs/p.txt", body, ledgerSum, 0)
+
+	const viewSum = "view–自报–checksum"
+	env.viewList = &viewListSet{env: env, viewChecksum: func(name string) string {
+		if name == "p.txt" {
+			return viewSum
+		}
+		return ""
+	}}
+	env.rebuild()
+
+	files := listFileInfos(t, env, "docs")
+	if len(files) != 1 || files[0].Name != "p.txt" {
+		t.Fatalf("期望列出 p.txt，got %+v", files)
+	}
+	if files[0].Checksum != viewSum {
+		t.Fatalf("checksum = %q，期望采用卷自报值 %q（台账值 %q 不得覆盖自报值）",
+			files[0].Checksum, viewSum, ledgerSum)
 	}
 }
 

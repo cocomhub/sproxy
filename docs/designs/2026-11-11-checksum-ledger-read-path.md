@@ -53,7 +53,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 片 | 内容 | 前置 | 验证 |
 | --- | --- | --- | --- |
-| **S1 口径对齐** | `fileInfosFromViewEntries` 优先 `e.Checksum`；抽 helper 统一 list/search 取值 | 无 | `TestList_ViewChecksumPreferredOverLedger`（构造 `e.Checksum` 与台账不同值 ⇒ 取视图值；变异：仍先查台账 ⇒ 红） |
+| **S1 口径对齐** ✅ 已交付 | `fileInfosFromViewEntries` 优先 `e.Checksum`（未自报时回落台账）；与 search 路径同口径 | 无 | `TestList_ViewChecksumPreferredOverLedger`（构造 `e.Checksum` 与台账不同值 ⇒ 取视图值；变异：仍先查台账 ⇒ 红） |
 | **S2 本地卷自报** | `volumestate` 增注入式 `metaReader`（opts）；`CacheFS.ListDir` 回源后补 checksum 并缓存；装配层经 `*storage.Root` + `files/meta` 提供 reader | S1 | 本地卷 list 的 checksum 不依赖台账（清空台账后 list 仍正确）；缓存命中不重复读 sidecar（计数注入）；变异：不做补全 ⇒ 红 |
 | **S3 台账写路径窄化** | 读路径去掉台账兜底；`Set/Delete/Rename` 停写；`checksum_rebuild` 只保留显式导入 | S2 | 全量 list/stat/search 用例（含多卷同名、加密卷、外部卷）；R46 计数按其真实值下调 |
 | **S4 收口** | 删 `checksums.json` 写路径 + R46 门禁与 TSV（0 行时无意义） | S3 | `go test ./internal/archcheck/` 全绿；回归套件全绿 |

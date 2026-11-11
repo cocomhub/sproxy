@@ -279,7 +279,14 @@ func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, en
 			relName = strings.Trim(subdir, "/") + "/" + e.Name
 		}
 		fi := FileInfo{Name: e.Name, Size: e.Size, ModTime: e.MTime, Volume: volName}
-		fi.Checksum = csAt(relName)
+		// 读口径（docs/designs/2026-11-11-checksum-ledger-read-path.md §S1）：**卷自报
+		// checksum 优先**（装配层 ListDirView 仅在 `ChecksumType=="sha256"` 时透传，
+		// 与 search 路径同口径），未自报时回落台账（过渡期；台账只读化后此兜底随 S3 删）。
+		if e.Checksum != "" {
+			fi.Checksum = e.Checksum
+		} else {
+			fi.Checksum = csAt(relName)
+		}
 		out = append(out, fi)
 	}
 	return out

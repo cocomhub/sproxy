@@ -154,3 +154,5 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 已交付（批次 1）：`serial_budgets.tsv` 修正 10 行陈旧路径；`external_fs_calls.tsv` 预算 60→51（删 3 条陈旧+收紧）；`set_root_calls.tsv` 预算 16→14；R25 白名单删 2 条陈旧+加防腐化自检；R57 归零（`pkg/netutil.InsecureTransport()`）；R51 246→209 行（删 34 条零引用别名）。
 
 **纪律提醒**：给棘轮刷新基线的 PR 必须在提交信息里说明「为什么不是做假工作」；登记项须有双向自检（`R26`/`R42` 是范本），否则会出现「文件已删/已迁移但登记残留」的静默放宽。
+
+**台账只读化进展**：D4 口径已裁定后，**S1（list 采用卷自报 checksum，未自报回落台账）已交付**；S2–S4 见设计文档。
