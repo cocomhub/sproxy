@@ -102,6 +102,19 @@ type Options struct {
 	// 上限 MaxUploadConcurrency（防下游限流/本地磁盘压力）。
 	UploadConcurrency int
 
+	// IssueReporter 上报**无法自主决策或需要重试**的存储问题（可选；nil = 不上报，零回归）。
+	//
+	// 为什么需要（用户裁定 2026-11-10）：「记录失败事件审计重试能力，后续定期重试处理，最终必须
+	// 成功，支持 web ui 人工查看…提供详细失败原因便于人工接入处理；特别是这种启动时发现残留数据
+	// 无法自主决策的情况必须能人工感知」。此前问题只写一条 WARN 日志 ⇒ 运维无从感知、无从重试。
+	//
+	// 用**最小接口**注入（装配层适配到 `pkg/server/issues`）⇒ `pkg/volume` 不反向依赖 `pkg/server`。
+	IssueReporter IssueReporter
+
+	// VolumeName 是本卷名（装配层从卷声明注入）。上报存储问题时随带上，
+	// 便于人工在多卷部署下**按卷定位**（"哪个卷残留"是第一信息）。
+	VolumeName string
+
 	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib）。**实验性**：k-of-k+1
 	// XOR parity，**单块**损坏/丢失恢复，未生产验证（§13.3 标注）。写入时对 ≥2 个数据分块
 	// 按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密分块文件，同 blob 格式），
@@ -245,6 +258,29 @@ type dirCreation struct {
 	dirPath   string // 逻辑目录
 	container string // 随机容器目录名
 	dmName    string // 目录 meta blob 名
+}
+
+// IssueReporter 是「存储问题上报」的最小能力接口（装配层适配 `pkg/server/issues`）。
+//
+// `retryable=false` 表示**引擎无法自主决策**（需要人工接入）；`true` 表示可自动重试。
+// detail 必须写明「发生了什么 + 为何不能自动决策 + 人工需要做什么」。
+type IssueReporter interface {
+	// volume 是**本卷名**（由 Options.VolumeName 传入）——人工需要按卷定位问题
+	// （多卷部署时"哪个卷残留"是第一信息）。
+	ReportStorageIssue(volume, kind, path, detail string, retryable bool)
+}
+
+// 上报用的稳定类型码（与 pkg/server/issues.Kind 对齐）。
+const (
+	issueKindDirMetaCleanupFailed = "dir_meta_cleanup_failed"
+)
+
+// reportStorageIssue 是 nil-safe 的上报封装（未装配 reporter ⇒ 静默 no-op，零回归）。
+func (s *SecretdataFS) reportStorageIssue(kind, p, detail string, retryable bool) {
+	if s == nil || s.opts.IssueReporter == nil {
+		return
+	}
+	s.opts.IssueReporter.ReportStorageIssue(s.opts.VolumeName, kind, p, detail, retryable)
 }
 
 // SecretdataFS 是透明加解密的 sync.FS 包装，底层为任意 sync.FS。
@@ -4259,7 +4295,7 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 	// meta 里** ⇒ 既无法完成、也无法保住改名意图，而旧实现直接 fail-closed ⇒ **整卷拒绝挂载 =
 	// 服务启动失败** ✗（确定性用例
 	// TestRenameDir_InterruptedMove_CrashAtAnyStep_MountsAndKeepsData 逐崩溃点实证）。
-	if werr := s.rewriteDirMetaRef(ctx, oldContainer, toName, toParentID); werr != nil {
+	if werr := s.rewriteDirMetaRef(ctx, oldContainer, toName, toParentID, from, to); werr != nil {
 		return werr // meta 未变 ⇒ 物理未动 ⇒ 无中间态（无需回滚）
 	}
 	// 容器名是**随机名**（与逻辑 basename 无关）⇒ 同父改名时目标容器路径**与源相同**，此时不得
@@ -4284,7 +4320,7 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 // rewriteDirMetaRef 重写容器内目录 meta 的 Name/ParentDirID（目录移动/改名；一个文件，
 // 子树其它目录/文件 blob 零改动）。内容变化 → 目录 meta 名内嵌哈希变化，故生成新随机盐
 // 与新 blob 名：先写新、后删旧（同容器内，无半态）。无变化则跳过（目标同名同父）。
-func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName, newParentID string) error {
+func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName, newParentID, srcRel, dstRel string) error {
 	oldName, oldBlob, err := findDirMetaBlob(ctx, s.inner, container)
 	if err != nil {
 		return err
@@ -4316,6 +4352,13 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 		if derr := s.inner.Delete(cctx, path.Join(container, oldName)); derr != nil && !errors.Is(derr, os.ErrNotExist) {
 			slog.Warn("secretdata: 删除旧目录 meta 失败，容器内将短暂并存两个目录 meta（加载期按最新时间仲裁）",
 				"container", container, "old", oldName, "new", newName, "error", derr)
+			// 登记为**可自动重试**事项（用户裁定 2026-11-10）：该容器当前有两个 dir-meta，
+			// 引擎按 Version 仲裁可继续工作，但布局已异常（`sclient volume explain` 会报
+			// dir_meta_ambiguous）⇒ 必须让人能看见，并由机制**定期重试清理**直到成功。
+			s.reportStorageIssue(issueKindDirMetaCleanupFailed, srcRel,
+				fmt.Sprintf("改名/移动后删除旧目录 meta 失败：逻辑路径 %q → %q；container=%s old_blob=%s new_blob=%s；err=%v。该容器现有两个目录 meta（引擎按 Version 仲裁可继续工作，但布局异常）；应重试删除旧 blob 直到成功，成功后本事项自动解除；成功前请勿手工删除该容器。",
+					srcRel, dstRel, container, oldName, newName, derr),
+				true)
 		}
 		cancel()
 		// 注：独立审核曾疑「改名不更新 dirPhysTotal ⇒ 真值漂移」——**已实测证伪**（2026-10-18）：

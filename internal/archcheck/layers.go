@@ -195,6 +195,8 @@ var Levels = map[string]int{
 	"github.com/cocomhub/sproxy/pkg/server/metrics": 2,
 	// checksum 巡检（server 作用域）：依赖 checksum/storage ⇒ G2。
 	"github.com/cocomhub/sproxy/pkg/server/verify": 2,
+	// 待处理事项（用户裁定 2026-11-10）：只依赖标准库 ⇒ 与 verify 同层（G2）。
+	"github.com/cocomhub/sproxy/pkg/server/issues": 2,
 	// 用量统计（server 作用域）：依赖 quota/storage/capacity ⇒ G2。
 	"github.com/cocomhub/sproxy/pkg/server/ops": 2,
 	// 阈值告警引擎（server 作用域）：依赖 config/notify/ai ⇒ G2。

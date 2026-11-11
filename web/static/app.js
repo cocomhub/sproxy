@@ -940,6 +940,9 @@ function switchStatsTab(tab) {
   document.getElementById('audit-panel').style.display = tab === 'audit' ? 'block' : 'none';
   document.getElementById('volumes-panel').style.display = tab === 'volumes' ? 'block' : 'none';
   document.getElementById('credentials-panel').style.display = tab === 'credentials' ? 'block' : 'none';
+  var issuesPanelEl = document.getElementById('issues-panel');
+  if (issuesPanelEl) issuesPanelEl.style.display = tab === 'issues' ? 'block' : 'none';
+  if (tab === 'issues') void showIssues();
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
   document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
@@ -962,6 +965,63 @@ function switchStatsTab(tab) {
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
+// showIssues 拉取「待处理事项」并渲染（用户裁定 2026-11-10：启动发现的残留/失败必须能被人工看到）。
+// 支持按状态/卷/仅未解决筛选，并可直接「标记已解决」或「立即审查存储」。
+async function showIssues() {
+  const panel = document.getElementById('issues-panel');
+  if (!panel) return;
+  const sel = document.getElementById('issues-status');
+  const volEl = document.getElementById('issues-volume');
+  const unEl = document.getElementById('issues-unresolved');
+  const filters = {
+    status: sel ? sel.value : '',
+    volume: volEl ? volEl.value.trim() : '',
+    unresolved: unEl ? !!unEl.checked : false,
+  };
+  try {
+    const res = await sclientTransport.coreRequest('GET', issuesListQuery(filters), {});
+    const data = sclientUtil.decodeJSON(res.body);
+    panel.innerHTML = issuesPanelHtml(data, filters);
+  } catch (e) {
+    panel.innerHTML = '<div style="color:#c0392b;font-size:13px;">加载失败：' + escHtmlIssues(e.message) + '</div>';
+    return;
+  }
+  const refreshBtn = document.getElementById('issues-refresh-btn');
+  if (refreshBtn) refreshBtn.addEventListener('click', function () { void showIssues(); });
+  const statusSel = document.getElementById('issues-status');
+  if (statusSel) statusSel.addEventListener('change', function () { void showIssues(); });
+  const unBox = document.getElementById('issues-unresolved');
+  if (unBox) unBox.addEventListener('change', function () { void showIssues(); });
+  const scanBtn = document.getElementById('issues-scan-btn');
+  if (scanBtn) scanBtn.addEventListener('click', async function () {
+    const msg = document.getElementById('issues-msg');
+    if (msg) msg.textContent = '正在审查存储...';
+    try {
+      const r = await sclientTransport.coreRequest('POST', '/api/issues/scan', {});
+      const d = sclientUtil.decodeJSON(r.body);
+      if (msg) msg.textContent = '审查完成：卷 ' + (d.volumes || 0) + '，节点 ' + (d.nodes || 0) + '，新登记 ' + (d.reported || 0);
+      void showIssues();
+    } catch (e) {
+      if (msg) msg.textContent = '审查失败：' + e.message;
+    }
+  });
+  panel.querySelectorAll('.issues-resolve-btn').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      const id = btn.dataset.id;
+      const note = prompt('请填写人工处置说明（必填，供审计）：', '');
+      if (!note) return;
+      try {
+        await sclientTransport.coreRequest('POST', issuesResolveQuery(id, note), {});
+        showToast('已标记解决', 'success');
+        void showIssues();
+      } catch (e) { showToast('标记失败: ' + e.message, 'error'); }
+    });
+  });
+}
+
+// escHtmlIssues 供 showIssues 的错误提示使用（复用 issues.js 的 escHtml）。
+function escHtmlIssues(s) { return typeof issuesEscHtml === 'function' ? issuesEscHtml(s) : String(s || ''); }
+
 // showCredentials 拉取 AK 列表（admin-only；403 → 提示无权限）。
 async function showCredentials() {
   const panel = document.getElementById('credentials-panel');
@@ -3638,6 +3698,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('volumes-tab').addEventListener('click', function() { switchStatsTab('volumes'); });
   document.getElementById('vol-manage-tab').addEventListener('click', function() { switchStatsTab('vol-manage'); });
   document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
+  document.getElementById('issues-tab').addEventListener('click', function() { switchStatsTab('issues'); });
   document.getElementById('secret-tab').addEventListener('click', function() { switchStatsTab('secret'); });
   document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
   document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });

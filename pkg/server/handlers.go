@@ -98,6 +98,19 @@ func (h *Handlers) SetAIPrivacy(p *AIPrivacy) { h.aiPrivacy = p }
 // SetNodeRegistry 注入集群节点注册表（装配层调用；nil = 单节点零回归）。
 func (h *Handlers) SetNodeRegistry(r *NodeRegistry) { h.nodeRegistry = r }
 
+// SetIssueCenter 注入「待处理事项」中枢与可选的手动扫描实现（装配根在**卷装配完成后**调用；
+// 路由已在 RegisterRoutes 期注册，本方法只发布依赖 → 见 IssuesAPI 的并发语义注释）。
+func (h *Handlers) SetIssueCenter(c *IssueCenter, scanner func(ctx context.Context) ScanStats) {
+	if h.issuesAPI == nil {
+		return
+	}
+	h.issuesAPI.SetCenter(c)
+	h.issuesAPI.SetScanner(scanner)
+}
+
+// IssuesAPI 返回事项 HTTP 面（供 API/UI 装配与测试；未创建时为 nil）。
+func (h *Handlers) IssuesAPI() *IssuesAPI { return h.issuesAPI }
+
 // SetShareStore 注入分享存储后端（statestore.md §5.2 装配层改动：nil = 未装配，
 // RegisterRoutes 已装配 *share.Store 本地形态；非 nil = 分享切 StateStore 后端
 // （share.StateBackedStore，逐 token key + Consume CAS，见 state_share.go））。

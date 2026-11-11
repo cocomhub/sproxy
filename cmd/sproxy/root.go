@@ -717,7 +717,11 @@ type runServerRuntime struct {
 	cloudDial    func(ctx context.Context, addr string) (net.Conn, error)
 	writeGuard   *leader.WriteGuard
 	h            *server.Handlers
-	cleanups     []func()
+	// issueCenter 是**待处理事项中枢**（用户裁定 2026-11-10）：登记「引擎无法自主决策 / 需重试」
+	// 的存储问题（如改名后旧目录 meta 删除失败、dir_id 不在索引）。持有于 runtime ⇒
+	// 启动扫描、定期重试与 API/Web UI 共享**同一份**账本。
+	issueCenter *server.IssueCenter
+	cleanups    []func()
 }
 
 // addCleanup 按注册顺序追加一条析构闭包（nil 跳过）。
@@ -1147,7 +1151,14 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// `type: secretdata/secrets` 卷时 assembleVolumes 会对它们调用 registry.NewBackend，
 	// 未注册即「未注册后端」启动 panic）。与 sync 开关解耦（Imp-1 装配门控修复：默认配置
 	// sync 关闭时 secret 后端不再不可达）。
-	registerSecretVolumeBackends()
+	// **待处理事项中枢**（用户裁定 2026-11-10）：登记「引擎无法自主决策 / 需重试」的存储问题
+	// （典型：改名后旧目录 meta 删除失败 ⇒ 容器内两个 dir-meta、dir_id 不在索引），供人工在
+	// Web UI 查看与处理，并由调度器定期重试。账本落 <storage_root>/meta/state/issues.json。
+	//
+	// 注意：IssueCenter 必须在 secret 后端**注册之前**创建，因为注册即注入（否则上报是 no-op）。
+	issueCenter := server.NewIssueCenter(server.DefaultIssuesStorePath(cfg.StorageRoot))
+	rt.issueCenter = issueCenter
+	registerSecretVolumeBackendsWith(issueCenter)
 	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
 	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
 	// （RegisterRoutes **之后**）才注册 ⇒ config 里静态声明 `type: baidupcs` 等外部卷时，
@@ -1157,7 +1168,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	registerVolumeBackendTypes()
 	// 封装处理层（wrapper）注册：必须在 enclosure.Parse 之前（RegisterRoutes →
 	// assembleVolumes 内解析声明；未注册的 wrapper 判 ErrUnknownWrapper = boot fail）。
-	registerEnclosureWrappers()
+	registerEnclosureWrappersWith(issueCenter)
 	// 封装卷的推迟装配不需要「按类型标记」：装配层按**声明**判据（enclosure.IsDeclared：
 	// 显式 type: enclosure 或 wrapper 类型 + extra.source）跳过 registry.NewBackend，
 	// 卷集就绪后由 enclosure.AttachAll 补装。
@@ -1206,6 +1217,23 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsEnclosure); err != nil {
 		return fmt.Errorf(errFmtSecretAssembly, err)
 	}
+
+	// **启动存储审查**（用户裁定 2026-11-10）：异步、只读、浅层（depth=1）——
+	// 「特别是启动时发现残留数据无法自主决策的情况必须能人工感知到问题并接入处理」。
+	// 设计约束：绝不用 start-up 阻塞（审查要访问远端后端）⇒ goroutine + 超时；失败只记日志。
+	// 同一实现也提供**手动触发**入口（POST /api/issues/scan）⇒ 与启动扫描共用一份逻辑。
+	scan := func(sctx context.Context) server.ScanStats {
+		return issueCenter.ScanVolumesOnce(sctx, server.ScanTargetsFromSet(h.Volumes()), 1)
+	}
+	go func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		st := scan(sctx)
+		logger.Info("启动存储审查完成（差异已登记为待处理事项）",
+			"volumes", st.Volumes, "skipped", st.Skipped, "nodes", st.Nodes, "reported", st.Reported)
+	}()
+	// 把中枢与扫描实现交给 HTTP 面（/api/issues 列表/详情/人工解决/手动扫描）。
+	h.SetIssueCenter(issueCenter, scan)
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg, h.Volumes())

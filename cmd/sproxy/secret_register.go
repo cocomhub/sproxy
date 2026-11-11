@@ -162,8 +162,14 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 // **Dedup 不接线（方案 A 降级）**：去重降级为预留能力，装配层不再解析 extra.dedup 键
 // （该键被忽略，生产 Options.Dedup 恒 false = 不复用）。实验代码保留由测试直接构造
 // Options.Dedup 验证；生产 config 不启用。
-func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
+// secretdataOptionsFromVolumeWith 同上，但注入**存储问题上报器**（可选；nil = 不上报，零回归）。
+//
+// 用户裁定 2026-11-10：改名/移动后旧目录 meta 删除失败等「引擎无法自主决策或需要重试」的问题，
+// 必须能被人工感知并可定期重试 ⇒ 装配根把 `server.IssueCenter` 注入到这里（见 root.go）。
+func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReporter) secretdata.Options {
 	return secretdata.Options{
+		IssueReporter:      rep,
+		VolumeName:         v.Name,
 		Algorithm:          vcExtraStr(v, "algorithm"),
 		Block:              vcExtraBlockPolicy(v),
 		TempDir:            vcExtraStr(v, "temp_dir"),
@@ -194,7 +200,7 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 // resolveSecret 按卷解析密钥字节（secret_url → set.ResolveURL 读取；注入解耦）。
 // 多 target 装配：extra.targets（多 local root 副本列表）→ 构造副本底层 FS →
 // NewBackendMultiplicas（写复制全部 target、读主失败回退副本）；无副本 → 单卷 NewBackend。
-func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error), protocols ...string) {
+func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error), rep secretdata.IssueReporter, protocols ...string) {
 	registry.RegisterBackend(typ, func(ctx context.Context, v volume.Volume) (registry.ExternalBackend, error) {
 		secret, err := resolveSecret(ctx, v)
 		if err != nil {
@@ -208,7 +214,7 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 		if err != nil {
 			return nil, err
 		}
-		opts := secretdataOptionsFromVolume(v)
+		opts := secretdataOptionsFromVolumeWith(v, rep)
 		opts.Secret = secret
 		// 本地 target（LocalFS）→ 关闭快照/meta 缓存：本地列举与读取是微秒级，缓存无收益，
 		// 只会多占磁盘（快照曾达 401MB）并引入失效管理成本。外部卷才需要。
@@ -520,6 +526,9 @@ func vcExtraBlockPolicy(v volume.Volume) shardseal.BlockPolicy {
 // **源视图**（`EnclosureFS(PrefixFS(源卷特权 FS, 声明子路径))`）提供。
 type secretdataWrapper struct {
 	resolveSecret func(ctx context.Context, v volume.Volume) ([]byte, error)
+	// issueReporter 上报「引擎无法自主决策 / 需重试」的存储问题（可选；nil = 不上报）。
+	// 经构造注入（不使用包级可变状态）。
+	issueReporter secretdata.IssueReporter
 }
 
 // Name 返回注册名（`extra.wrapper` 引用它；与文档/示例一致）。
@@ -533,7 +542,8 @@ func (w secretdataWrapper) Build(ctx context.Context, v volume.Volume, src syncp
 	if err != nil {
 		return nil, err
 	}
-	opts := secretdataOptionsFromVolume(v)
+	// 封装卷路径同样注入上报器（改名/移动发生在封装卷语义下时也要能感知）。
+	opts := secretdataOptionsFromVolumeWith(v, w.issueReporter)
 	opts.Secret = secret
 	// 多副本（extra.targets：多本地根）与 `type: secretdata` 同语义：主底层 = 封装卷源视图，
 	// 副本为独立本地根（写复制、读主失败回退副本）。
@@ -579,9 +589,11 @@ var enclosureWrapperOnce sync.Once
 //
 // 密钥解析与 `type: secretdata` 同源（`extra.secret_url` → `secretDataSet` 卷集
 // `ResolveURL`），故同样经**懒解析**：注册发生在卷集就绪前，Build 发生在补装期（卷集已就绪）。
-func registerEnclosureWrappers() {
+// registerEnclosureWrappersWith 同上，但把**存储问题上报器**注入 secretdata 封装处理层
+// （用户裁定 2026-11-10：需人工感知且可定期重试的存储问题必须被登记）。nil = 不上报。
+func registerEnclosureWrappersWith(rep secretdata.IssueReporter) {
 	enclosureWrapperOnce.Do(func() {
-		enclosure.RegisterWrapper(secretdataWrapper{resolveSecret: func(ctx context.Context, v volume.Volume) ([]byte, error) {
+		enclosure.RegisterWrapper(secretdataWrapper{issueReporter: rep, resolveSecret: func(ctx context.Context, v volume.Volume) ([]byte, error) {
 			set := secretDataSet.Load()
 			if set == nil {
 				return nil, fmt.Errorf("enclosure: 封装卷 %q 补装时卷集未就绪", v.Name)
@@ -614,7 +626,9 @@ var secretDataSet = atomic.Pointer[registry.Set]{}
 // set 就绪后由 attachSecretdataVolumes 遍历已登记卷补装（分「先行/后置」两轮，见本文件「装配
 // 序」注释；registry.NewBackend + AttachExternal）
 // ——config 声明的 type:secretdata 卷可真正装配（config.example vault 示例可用）。
-func registerSecretVolumeBackends() {
+// registerSecretVolumeBackendsWith 同上，但把**存储问题上报器**下传给 secretdata 后端工厂
+// （用户裁定 2026-11-10：需要人工感知 / 可重试的存储问题必须被登记）。nil = 不上报（零回归）。
+func registerSecretVolumeBackendsWith(rep secretdata.IssueReporter) {
 	registerSecretsBackend()
 	registerSecretSchemas()
 	registry.MarkDeferredType("secretdata")
@@ -626,7 +640,7 @@ func registerSecretVolumeBackends() {
 				return nil, fmt.Errorf("secretdata backend: 卷 %q 装配完成但卷集未就绪", v.Name)
 			}
 			return defaultSecretdataSecret(ctx, v, set)
-		}, "secretdata")
+		}, rep, "secretdata")
 	})
 }
 

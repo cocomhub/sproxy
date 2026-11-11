@@ -384,6 +384,13 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// （巡检读全卷台账+重算，非 per-file 用户面）。路由表由 pkg/server/verify 声明。
 	router.Register(srvMux, localMux, verify.RoutePrefix, verify.Routes(h.verifyHandler),
 		bindHandler, h.routeWrapper)
+	// **待处理事项运维面**（用户裁定 2026-11-10）：`GET /api/issues`（列表，含详细失败原因）、
+	// `GET /api/issues/detail`、`POST /api/issues/resolve`（人工处置闭环，记录说明供审计）、
+	// `POST /api/issues/scan`（立即触发存储审查）。分类 auth（已认证的运维面，同 /api/verify）。
+	if h.issuesAPI == nil {
+		h.issuesAPI = NewIssuesAPI(nil) // center 由装配根在卷装配完成后注入（见 SetIssueCenter）
+	}
+	router.Register(srvMux, localMux, issuesRoutePrefix, h.issuesAPI.Routes(), bindHandler, h.routeWrapper)
 	// checksum 台账运维修复面（§15.1 步骤②）：从对象 meta 重建台账（部分缺失时显式触发）。
 	// 元数据补录（写面：fileRoute 写子组；读面：fileRouteRead 只读子组）。
 	// 卷 API（主 mux：fileRoute[Read] = authMiddleware + requireRole，per-owner 文件面）。

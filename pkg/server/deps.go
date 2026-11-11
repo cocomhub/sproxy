@@ -365,4 +365,7 @@ type opsDeps struct {
 	// usage.enabled=true 时由 setupUsageReport 装配，nil = 未启用零回归——
 	// /api/usage/report 400、/metrics 仅 owner 计数不落盘）。
 	usageStore *usageStore
+	// issuesAPI 是「待处理事项」HTTP 面（用户裁定 2026-11-10）：列表/详情/人工解决/手动扫描。
+	// 由 RegisterRoutes 创建（center 先为空），装配根在卷装配完成后经 SetIssueCenter 注入。
+	issuesAPI *IssuesAPI
 }
