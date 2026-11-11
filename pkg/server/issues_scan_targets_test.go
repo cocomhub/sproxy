@@ -71,3 +71,56 @@ func TestScanTargetsFromSet_SkipsMissingBackend(t *testing.T) {
 		t.Fatalf("无后端应跳过，got %+v", got)
 	}
 }
+
+// cleanerFS 把「目录 meta 清理能力」包进 sync.FS（嵌入接口 = 只实现需要的方法）。
+type cleanerFS struct {
+	syncpkg.FS
+	removed int
+}
+
+func (f *cleanerFS) CleanupStaleDirMeta(_ context.Context, _ string) (int, error) {
+	return f.removed, nil
+}
+
+// wrappingFS 模拟装饰器链（实现 Inner ⇒ Innermost 会下探到最内层）。
+type wrappingFS struct {
+	syncpkg.FS
+	inner syncpkg.FS
+}
+
+func (w *wrappingFS) Inner() syncpkg.FS { return w.inner }
+
+// TestCleanupTargetResolver_InnermostCapability 锁定：解析器经统一卷视图取 FS 并**穿透装饰链**
+// 到最内层，使 `DirMetaCleaner` 断言命中；卷视图缺失/nil 卷集 ⇒ nil（按“暂时失败”处理）。
+// 变异：不做 `Innermost`（直接断言装饰后 FS）⇒ 能力断言恒 false ⇒ 红。
+func TestCleanupTargetResolver_InnermostCapability(t *testing.T) {
+	t.Parallel()
+	want := &cleanerFS{removed: 2}
+	l := &fakeLister{
+		vols: []volume.Volume{{Name: "sd"}, {Name: "plain"}, {Name: "missing"}},
+		vs: map[string]syncpkg.FS{
+			"sd": &wrappingFS{inner: want}, // 装饰器包一层，能力在最内层
+			// "plain" 视图为 nil（取不到）；"missing" 未装配
+			"plain": nil,
+		},
+	}
+	resolve := CleanupTargetResolver(l)
+
+	got := resolve("sd")
+	cleaner, ok := got.(DirMetaCleaner)
+	if !ok {
+		t.Fatalf("穿透最内层后应命中 DirMetaCleaner，got %T", got)
+	}
+	if n, err := cleaner.CleanupStaleDirMeta(t.Context(), "container"); err != nil || n != 2 {
+		t.Fatalf("CleanupStaleDirMeta = (%d, %v)，want (2, nil)", n, err)
+	}
+	if resolve("plain") != nil {
+		t.Fatalf("视图为 nil 的卷应返回 nil，got %T", resolve("plain"))
+	}
+	if resolve("missing") != nil {
+		t.Fatal("未装配的卷应返回 nil")
+	}
+	if CleanupTargetResolver(nil)("x") != nil {
+		t.Fatal("nil 卷集应返回 nil")
+	}
+}

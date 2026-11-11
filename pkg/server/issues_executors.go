@@ -14,9 +14,8 @@ package server
 // 设计约定：
 //   - 依赖经 `ExecutorDeps` **显式注入**（不读全局），便于测试与装配顺序解耦；
 //   - 领域包能力用**最小接口**（`DirMetaCleaner`）表达，`pkg/server` 不必依赖具体卷实现类型；
-//     取卷由**装配层**解析后在 `Resolve` 里返回（`cmd/sproxy` 经 `h.Volumes().External(vol)`
-//     取后端视图；选它而不走统一卷视图 `VolumeView` 的原因见 `internal/archcheck/external_fs_calls.tsv`
-//     的 R27 登记——`DirMetaCleaner` 是**消费包自定义**的可选能力，装饰链不转发，经统一视图会静默失效）；
+//     取卷统一走 `CleanupTargetResolver`（`VolumeView` + `sync.Innermost`，与 `ScanTargetsFromSet`
+//     同一穿透做法）——不再经 `External(vol)` 的后端 FS 视图直连（R27）。
 //   - 执行器**必须幂等**（重试可能重复执行）：领域能力本身已保证（0 个残留也算成功）。
 
 import (
@@ -25,6 +24,8 @@ import (
 	"log/slog"
 
 	"github.com/cocomhub/sproxy/pkg/server/issues"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // DirMetaCleaner 是「清理非权威目录 meta」的最小能力接口
@@ -33,6 +34,28 @@ import (
 // 约定：**幂等** —— 无残留（0/1 个目录 meta）时返回 `(0, nil)`，因此可安全重复执行。
 type DirMetaCleaner interface {
 	CleanupStaleDirMeta(ctx context.Context, container string) (int, error)
+}
+
+// CleanupTargetResolver 返回「事项修复目标解析器」：按卷名取**统一卷视图**（`VolumeView`）
+// 并穿透装饰链到**最内层领域 FS**（与 `ScanTargetsFromSet` 的 `sync.Innermost` 同一做法）。
+//
+// 为什么这样取（而不是直接对后端 FS 视图断言）：
+//   - `VolumeView` 是唯一取卷入口（装配期已套封印/容量/状态缓存，键空间经 `ResolveUserLocation`）；
+//   - 能力断言必须**穿透装饰链**——装饰器不转发 `DirMetaCleaner` 这类消费包自定义能力，
+//     直接断言装饰后的 FS 会恒 false（静默失效）；`Innermost` 是仓内受认可的穿透方式（R22 门禁守）。
+//
+// 返回 nil ⇒ 卷不可用/不存在（调用方按“暂时失败”重试，达上限转人工）。
+func CleanupTargetResolver(l VolumeLister) func(volume string) any {
+	return func(volume string) any {
+		if l == nil {
+			return nil
+		}
+		fsys, ok := l.VolumeView(volume, registry.ViewUser)
+		if !ok || fsys == nil {
+			return nil
+		}
+		return syncpkg.Innermost(fsys)
+	}
 }
 
 // ExecutorDeps 是执行器所需的最小依赖（显式注入，便于测试与解耦装配顺序）。
