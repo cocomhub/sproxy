@@ -255,3 +255,13 @@ net/http 内部 deadline 的真实触发。故登记 `testSleepBudgets["pkg/serv
 （`testSleepTotalBudget` 61 → 62）。参数取 10 轮 × 50ms、grace 250ms：控制组必被截断（总时长 2×grace），
 修复组每步间隔 50ms 仅为 grace 的 1/5（CI 负载下仍有 5× 余量）。
 
+
+## pkg/telemetry/tracing_test.go（5 例补 `sproxy:serial:` 标记，2026-11-11）
+
+`TestTracerStartEnd` / `TestTracerNestedSpans` / `TestTracerWithTag` /
+`TestTracerTagsAppearInChildSpan` / `TestTracerDoubleEndProducesWarning` 经 `captureLog`/
+`captureLogAt` **接管进程级 `slog.Default()`**（`slog.SetDefault`）后断言渲染输出；并行时与
+`tracer_log_test.go` / `slog_test.go` 的同因用例（已标记）互相抢全局默认 logger ⇒ `-race` 报竞态。
+**不可并行的理由**：断言对象是「全局默认 logger 被替换后的渲染结果」，无法用测试内独立实例表达。
+此前这 5 例只是「恰好没有 `t.Parallel()`」而串行（理由未写成标记）；本次补标记固化纪律，
+防止后续批量并行化（R18 收敛）再次误加 `t.Parallel()`。

@@ -114,6 +114,7 @@ const (
 // AK(sk-<32hex>)/sk(64-hex)/skey_id(skey-)/admin=true；条目 ExpiresAt ≈ now+TTL；
 // 用下发 SK+skey_id 签名 GET /api/files → 200。
 func TestRegister_SimpleMode_Success(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.CredentialTTL = 48 * time.Hour })
 
 	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
@@ -174,6 +175,7 @@ func signedGetEntryHelp2(t *testing.T, h http.Handler, path, ak, entryID, sk str
 // TestRegister_LoopbackGate_FirstAdmin 验证 U2：无 admin 时非回环来源 403；回环
 // （IPv4 与 ::1）200 admin=true；首个 admin 后远程来源按 registration.disable 放行。
 func TestRegister_LoopbackGate_FirstAdmin(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, nil)
 
 	// 非回环来源 → 403（且不落盘凭据）。
@@ -241,6 +243,7 @@ func roleOf2(t *testing.T, ring *accesskey.Ring, ak string) string {
 // TestRegister_RemoteRegistrationAfterAdmin 验证首个 admin 后禁止注册
 // （registration.disable=true）：回环亦 403（I4b：存量部署语义）。
 func TestRegister_RemoteRegistrationAfterAdmin(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRegisterTestServer(t, func(c *Config) { c.Registration.Disable = true })
 	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
 	if st != http.StatusForbidden {
@@ -253,6 +256,7 @@ func TestRegister_RemoteRegistrationAfterAdmin(t *testing.T) {
 // TestRegister_FirstUserIsAdmin_S4 验证 DEC-A 与 S4：granted==admin 与 getRole==admin
 // 一一对应；第二注册 admin=false / getRole==user。
 func TestRegister_FirstUserIsAdmin_S4(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, nil)
 
 	_, body := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"first"}`))
@@ -273,6 +277,7 @@ func TestRegister_FirstUserIsAdmin_S4(t *testing.T) {
 // TestRegister_ConcurrentSingleAdmin 验证 D2 原子性：并发注册 → 恰一个 admin=true 且
 // 全 ring 唯一 admin。经真实 httptest.Server（复用注册端点限频窗口内多 IP 同上限）。
 func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
+	t.Parallel()
 	rh, _, ring := newRegisterTestServer(t, nil)
 	ts := httptest.NewServer(rh)
 	defer ts.Close()
@@ -325,6 +330,7 @@ func TestRegister_ConcurrentSingleAdmin(t *testing.T) {
 // admin 诞生。断言：本次注册 admin=true 且恰 1 个 admin，既有 user 账号的角色/条目
 // 不被改动。
 func TestRegister_FirstAdminGrantedWithExistingUser(t *testing.T) {
+	t.Parallel()
 	pre := accesskey.NewRing()
 	skB, _ := hex.DecodeString(testAccessSecret)
 	_ = pre.UpsertAK(testAccessKey, "existing")
@@ -354,6 +360,7 @@ func TestRegister_FirstAdminGrantedWithExistingUser(t *testing.T) {
 // 注册保持 admin（不降级）**；重复注册追加新 SK 条目而非覆盖。经白盒直接调用
 // AddRegistration（公开端点每次生成全新 AK，无法指定目标 AK）覆盖 exists 分支。
 func TestRegister_RepeatedRegistrationSameAKPreservesAccount(t *testing.T) {
+	t.Parallel()
 	ring := accesskey.NewRing()
 	skB, _ := hex.DecodeString(testAccessSecret)
 
@@ -426,6 +433,7 @@ func countAdmins(ring *accesskey.Ring) int {
 // TestAdminRole_AKDeleteRejected 验证 I6：DELETE /api/credentials/{ak} 目标是
 // Role==admin 的 AK（confirm+force 齐）→ 400（admin 角色 AK 不可删除）。
 func TestAdminRole_AKDeleteRejected(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	st, body := doSignedJSON(t, http.MethodDelete, url+"/api/credentials/"+testAdminKey, testAdminKey, testAdminSecret, map[string]any{
 		"confirm": testAdminKey, "force": true,
@@ -441,6 +449,7 @@ func TestAdminRole_AKDeleteRejected(t *testing.T) {
 // TestRequireRole_NodeDenied 验证 requireRole 文件组门禁：Role==node 的 AK 签名访问
 // GET /api/files → 403；user 正常 200。
 func TestRequireRole_NodeDenied(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 	nodeAK := "ak-node-00774455aabbccdd"
 	nodeSK := strings.Repeat("55", 32)
@@ -472,6 +481,7 @@ func TestRequireRole_NodeDenied(t *testing.T) {
 // TestAdminRole_AKAddRoleField 验证 akAddHandler 支持 role：node → 200 GetKey.Role==
 // RoleNode；admin → 拒绝 400（管理端点不可创建 admin）。
 func TestAdminRole_AKAddRoleField(t *testing.T) {
+	t.Parallel()
 	url, _, ring := newCredentialsTestServer(t, testAdminKey, testAdminSecret, testAccessKey, testAccessSecret, nil, nil)
 
 	nodeAK := "ak-node-00998877ffeeddcc"
@@ -505,6 +515,7 @@ func TestAdminRole_AKAddRoleField(t *testing.T) {
 // 隧道握手密钥/pinning 身份由 xfer 会话层闭合。本例钉住「nil 放行」的既有行为，
 // 防未来 xfer 面引入带身份 ctx 时 gate 行为突变（见 task-3-report.md 已知边界）。
 func TestLocalMuxGate_XferNilPrincipalPasses(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRegisterTestServer(t, nil)
 
 	// 无任何 Principal 的裸 GET /api/files（模拟 xfer handleStream 构造的内层请求）——
@@ -570,6 +581,7 @@ func tunnelClientFor(t *testing.T, baseURL, ak, sk string) *tunnel.Client {
 // （fail-closed，node 无法借隧道访问文件）。覆盖：GE /api/files、分块下载
 // GET /download/chunk、分块上传 POST /upload/init（F1 收口：chunk 组纳入 gate）。
 func TestRegister_TunnelInnerGateNodeDenied(t *testing.T) {
+	t.Parallel()
 	const nodeAK = "ak-node-tun-cafebabecafebabe"
 	const nodeSK = "9999999999999999999999999999999999999999999999999999999999999999"
 	base := newTunnelRoleServer(t, nodeAK, nodeSK, accesskey.RoleNode)
@@ -606,6 +618,7 @@ func TestRegister_TunnelInnerGateNodeDenied(t *testing.T) {
 // TestRegister_TunnelInnerGateUserAllowed 验证对向：Role==user 的 AK 开隧道 → 内层
 // GET /api/files → 200（user 隧道文件操作可用且落自身租户）；分块下载组 user 放行。
 func TestRegister_TunnelInnerGateUserAllowed(t *testing.T) {
+	t.Parallel()
 	const userAK = "ak-user-tun-deadbeefdeadbeef"
 	const userSK = "8888888888888888888888888888888888888888888888888888888888888888"
 	base := newTunnelRoleServer(t, userAK, userSK, accesskey.RoleUser)
@@ -659,6 +672,7 @@ func TestRegister_TunnelInnerGateUserAllowed(t *testing.T) {
 // TestRegister_TunnelInnerGateUserChunk 验证 F1 对向：user AK 经传统 POST /tunnel
 // 内层分块下载组放行（chunk 组纳入 gate 后仅拦非文件组角色，user 200）。
 func TestRegister_TunnelInnerGateUserChunk(t *testing.T) {
+	t.Parallel()
 	const userAK = "ak-user-chunk-cafebabecafebabe"
 	const userSK = "7777777777777777777777777777777777777777777777777777777777777777"
 	base := newTunnelRoleServer(t, userAK, userSK, accesskey.RoleUser)
@@ -714,6 +728,7 @@ func newRegisterAuditServer(t *testing.T, mod func(*Config)) (http.Handler, *byt
 // role 与 skey_id，且不含 sk 明文）；远程首注册被拒 → credential_register_denied。
 // 仿既有 credentials_handler_test.go 的 auditActions(...) 断言模式。
 func TestRegister_AuditTrail(t *testing.T) {
+	t.Parallel()
 	h, buf := newRegisterAuditServer(t, nil)
 
 	// 远程首注册被拒 → credential_register_denied（无 admin 源，root 拒绝）。
@@ -769,6 +784,7 @@ func TestRegister_AuditTrail(t *testing.T) {
 // TestRegister_ZeroCredentialBootstrap 验证 U3：bootstrapCredentials 在 store 为空时
 // 不生成任何凭据（ring.Len()==0）——首启 anonymous 移除，系统以零凭据等待注册。
 func TestRegister_ZeroCredentialBootstrap(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := accesskey.NewCredentialStore(tmpDir + "/tenant/meta")
 	ring := accesskey.NewRing()
@@ -791,6 +807,7 @@ func TestRegister_ZeroCredentialBootstrap(t *testing.T) {
 // TestRegister_NoAuthUnauthorizedOther 验证 register 无 Authorization 头可直达；其余
 // /api/credentials/* 仍 401。
 func TestRegister_NoAuthUnauthorizedOther(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRegisterTestServer(t, nil)
 
 	st, _ := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
@@ -837,6 +854,7 @@ func serveNonce(t *testing.T, h http.Handler, remoteAddr string, body []byte) (i
 // ak-<32hex>；otpauth URI 含 secret=<base32>；base32_secret 无 padding 且能按
 // base32 解码回约 20B；GetKey(ak).TOTPSecret 非 nil 且 20B。
 func TestRegisterTOTP_Success(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 
 	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"totp1"}`))
@@ -887,6 +905,7 @@ func TestRegisterTOTP_Success(t *testing.T) {
 
 // TestRegisterTOTP_NoSKEntry 验证 TOTP 注册不建 SK 条目：GetKey(ak).Entries 为空。
 func TestRegisterTOTP_NoSKEntry(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 
 	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
@@ -903,6 +922,7 @@ func TestRegisterTOTP_NoSKEntry(t *testing.T) {
 
 // TestRegisterTOTP_FirstUserAdmin 验证 TOTP 模式首 user 即 admin、第二注册 admin=false。
 func TestRegisterTOTP_FirstUserAdmin(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 
 	_, b1 := serveRegister(t, h, loopRemoteV4, []byte(`{"owner":"first"}`))
@@ -926,6 +946,7 @@ func TestRegisterTOTP_FirstUserAdmin(t *testing.T) {
 // TestRegisterTOTP_DefaultSimpleMode 验证 force_totp=false（默认）回归：简单模式仍
 // 返回 {sk, skey_id} 且无 otpauth 字段（force_totp 分支 + omitempty 互斥省略）。
 func TestRegisterTOTP_DefaultSimpleMode(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRegisterTestServer(t, nil) // ForceTOTP 默认 false
 
 	st, body := serveRegister(t, h, loopRemoteV4, []byte(`{}`))
@@ -949,6 +970,7 @@ func TestRegisterTOTP_DefaultSimpleMode(t *testing.T) {
 
 // TestRegisterTOTP_LoopbackGate 验证 U2：force_totp 分支同样受回环门禁（远程首注册 403）。
 func TestRegisterTOTP_LoopbackGate(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 
 	st, body := serveRegister(t, h, remoteNonLoop, []byte(`{}`))
@@ -994,6 +1016,7 @@ type nonceResp struct {
 // TestNonceEndpoint_Success 验证 nonce 端点（force_totp=true）：POST → 200
 // {nonce, expires_at}；两次不同；零凭据窗口回环可达（TOTP 登录前置步骤）。
 func TestNonceEndpoint_Success(t *testing.T) {
+	t.Parallel()
 	h, _, ring := newRegisterTestServer(t, func(c *Config) { c.Registration.ForceTOTP = true })
 	if n := ring.Len(); n != 0 {
 		t.Fatalf("预置 = %d 个凭据, want 0（零凭据语义）", n)
@@ -1038,6 +1061,7 @@ func TestNonceEndpoint_Success(t *testing.T) {
 // FAIL）。故在连发循环前注入**严格递增时钟**，使每个 nonce 的 expiresAt 互不相同，
 // 池满淘汰对绝对最早（first, T0）完全确定。
 func TestNonceEndpoint_PoolCap(t *testing.T) {
+	t.Parallel()
 	hh, _, _ := newRegisterHandlers(t, nil, func(c *Config) { c.Registration.ForceTOTP = true })
 	h := hh.Handler()
 
@@ -1084,6 +1108,7 @@ func TestNonceEndpoint_PoolCap(t *testing.T) {
 // nonce 从某来源 IP 签发后，另一来源 IP 消费被拒、同 IP 消费成功且二次消费失败。
 // 入口 = h 的 totpNoncePool（RegisterRoutes 装配时非 nil）。
 func TestNoncePool_ConsumeRejectsAllIPExceptIssuer(t *testing.T) {
+	t.Parallel()
 	hh, _, _ := newRegisterHandlers(t, nil, func(c *Config) { c.Registration.ForceTOTP = true })
 	h := hh.Handler()
 	count := nonceCountFor(hh)
@@ -1354,6 +1379,7 @@ func signedGetWithSKID(t *testing.T, h http.Handler, path, ak, entryID, skHexStr
 // SK（I3）；ring 新增 session 条目（Kind==totp_wrap、WrapKeyID 为空 M13、Meta.Type=="login"
 // IP 绑定）；session skeyID 立即可用（签名 GET /api/credentials/<ak>/sk → 200）。
 func TestLogin_Success(t *testing.T) {
+	t.Parallel()
 	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1403,6 +1429,7 @@ func TestLogin_Success(t *testing.T) {
 // TestLogin_WrongCode_401 验证错误动态码 → 401，且该 nonce 已被消费（同 nonce 再登录也
 // 不应成功——防同 nonce 爆破，D5）。
 func TestLogin_WrongCode_401(t *testing.T) {
+	t.Parallel()
 	_, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1440,6 +1467,7 @@ func mustJSON(t *testing.T, v any) []byte {
 // 第 6 次登录（**含正确动态码 + 正确 nonce**）→ 401（锁定窗口内）；ring 注入 now 前进
 // 超过 LoginFailWindow → 自动解锁，可登录成功。
 func TestLogin_PerAKLockout(t *testing.T) {
+	t.Parallel()
 	fixed := time.Now()
 	var mu sync.Mutex
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return fixed }
@@ -1495,6 +1523,7 @@ func TestLogin_PerAKLockout(t *testing.T) {
 // 覆盖两种来源：force_totp=false 注册的 AK（简单模式，无 TOTP 分支）+ 构造 ring 中存在
 // 但无 TOTPSecret 的 AK。
 func TestLogin_NoTOTPSecret_404(t *testing.T) {
+	t.Parallel()
 	// 场景 A：force_totp=false 注册的 AK（简单模式）；登录端点存在但无 TOTPSecret。
 	_, h, _, _ := newTOTPTestServer(t, func(c *Config) { c.Registration.ForceTOTP = false }, nil)
 	simpleAK, _ := registerSimpleFor(t, h)
@@ -1536,6 +1565,7 @@ func registerSimpleFor(t *testing.T, h http.Handler) (string, string) {
 // （已被首次消费，R2-N2 语义：池中存在但已消费 → 记失败，但首登已成功，故第二次为
 // 无效 nonce → 拒绝）。
 func TestLogin_NonceReplay(t *testing.T) {
+	t.Parallel()
 	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1555,6 +1585,7 @@ func TestLogin_NonceReplay(t *testing.T) {
 
 // TestLogin_NonceExpired 验证 nonce 过期：注入过期时间后消费 → 401/400。
 func TestLogin_NonceExpired(t *testing.T) {
+	t.Parallel()
 	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1581,6 +1612,7 @@ func TestLogin_NonceExpired(t *testing.T) {
 // TestLogin_NonceIPMismatch 验证 nonce IP 绑定（D5）：nonce 从 127.0.0.1 签发、从另一
 // 来源 IP 消费 → 401（注入 RemoteAddr 变化）。
 func TestLogin_NonceIPMismatch(t *testing.T) {
+	t.Parallel()
 	_, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	// nonce 从 127.0.0.1 签发（loopRemoteV4）。
@@ -1598,6 +1630,7 @@ func TestLogin_NonceIPMismatch(t *testing.T) {
 // 携带池中不存在的 nonce 连发多条 login → 均 401 但不累计失败计数；随后正确 nonce +
 // 正确 code 登录成功（未被误锁）。
 func TestLogin_GarbageNonceDoesNotCountFailure(t *testing.T) {
+	t.Parallel()
 	hh, h, _, _ := newTOTPTestServer(t, func(c *Config) {
 		c.Registration.LoginFailLimit = 5 // 保持默认阈值——若垃圾 nonce 计失败，4 条后就该锁
 	}, nil)
@@ -1624,6 +1657,7 @@ func TestLogin_GarbageNonceDoesNotCountFailure(t *testing.T) {
 // TestLogin_PoolPruneOnConsume 验证 nonce 池登录侧淘汰（M16）：插入过期 nonce 后 login
 // 消费触发惰性清理（池大小收缩断言）。
 func TestLogin_PoolPruneOnConsume(t *testing.T) {
+	t.Parallel()
 	hh, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1652,6 +1686,7 @@ func TestLogin_PoolPruneOnConsume(t *testing.T) {
 //   - 客户端 body 带 ttl 字段被忽略（不改 session TTL）；
 //   - session 条目在 ExpiresAt 后签名 → 401（ring 注入 now 前进使条目过期）。
 func TestLogin_TTLServersideAndScenarios(t *testing.T) {
+	t.Parallel()
 	fixed := time.Now()
 	var mu sync.Mutex
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return fixed }
@@ -1705,6 +1740,7 @@ func TestLogin_TTLServersideAndScenarios(t *testing.T) {
 
 // TestLogin_UnknownLoginType_400 验证 login_type 未知值 → 400（M8/M16）。
 func TestLogin_UnknownLoginType_400(t *testing.T) {
+	t.Parallel()
 	_, h, _, _ := newTOTPTestServer(t, nil, nil)
 	ak, b32 := registerTOTPFor(t, h, "")
 	nonce := obtainNonce(t, h, loopRemoteV4)
@@ -1722,6 +1758,7 @@ func TestLogin_UnknownLoginType_400(t *testing.T) {
 // session 条目被清除（仅保留存活条目）。ring 注入 now——先签近过期 session，再推进 now
 // 使其过期，再次登录时旧过期条目应被剪掉。
 func TestLogin_SessionPruneOnAdd(t *testing.T) {
+	t.Parallel()
 	start := time.Now().Truncate(time.Second)
 	var mu sync.Mutex
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
@@ -1773,6 +1810,7 @@ func TestLogin_SessionPruneOnAdd(t *testing.T) {
 // TestLogin_EmptyAKTrackerskip 验证空 AK 不登记失败锁定（防 map 污染 DoS）：
 // 空 AK + 垃圾/未知 nonce → 401 不计失败；登录返回 401 而非 500。
 func TestLogin_EmptyAKTrackerskip(t *testing.T) {
+	t.Parallel()
 	_, h, _, _ := newTOTPTestServer(t, nil, nil)
 	st, body := serveLogin(t, h, loopRemoteV4, mustJSON(t, map[string]any{
 		"ak": "", "nonce": "deadbeefdeadbeefdeadbeefdeadbeef", "code": "123456",

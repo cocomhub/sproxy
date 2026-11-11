@@ -35,6 +35,7 @@ func (p *testConfigProvider) LoadConfig() (*client.Config, error) {
 // ---- Search command RunE 测试 ----
 
 func TestSearchCommand_HappyPath(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/files/search" {
 			t.Errorf("expected path /api/files/search, got %s", r.URL.Path)
@@ -60,6 +61,7 @@ func TestSearchCommand_HappyPath(t *testing.T) {
 }
 
 func TestSearchCommand_NoResults(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"files":[],"total":0}`))
 	}))
@@ -79,6 +81,7 @@ func TestSearchCommand_NoResults(t *testing.T) {
 }
 
 func TestSearchCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
@@ -97,6 +100,7 @@ func TestSearchCommand_ServerError(t *testing.T) {
 // ---- Mv command RunE 测试 ----
 
 func TestMvCommand_HappyPath(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/files/stat":
@@ -128,6 +132,7 @@ func TestMvCommand_HappyPath(t *testing.T) {
 }
 
 func TestMvCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Stat endpoint returns valid checksum
 		w.Header().Set("X-File-Checksum", "abc123")
@@ -150,6 +155,7 @@ func TestMvCommand_ServerError(t *testing.T) {
 // ---- Batch-delete command RunE 测试 ----
 
 func TestBatchDeleteCommand(t *testing.T) {
+	t.Parallel()
 	// Create a local file for checksum computation by batch-delete
 	srcDir := t.TempDir()
 	srcFile := filepath.Join(srcDir, "a.txt")
@@ -180,6 +186,7 @@ func TestBatchDeleteCommand(t *testing.T) {
 }
 
 func TestBatchDeleteCommand_AllFail(t *testing.T) {
+	t.Parallel()
 	srcDir := t.TempDir()
 	srcFile := filepath.Join(srcDir, "a.txt")
 	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
@@ -212,6 +219,7 @@ func TestBatchDeleteCommand_AllFail(t *testing.T) {
 // ---- Archive command RunE 测试 ----
 
 func TestArchiveCommand(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "out.tar.gz")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +239,7 @@ func TestArchiveCommand(t *testing.T) {
 }
 
 func TestArchiveCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "out.tar.gz")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +261,7 @@ func TestArchiveCommand_ServerError(t *testing.T) {
 // ---- Archive-dir command RunE 测试 ----
 
 func TestArchiveDirCommand_HappyPath(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "backup.tar.gz")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +281,7 @@ func TestArchiveDirCommand_HappyPath(t *testing.T) {
 }
 
 func TestArchiveDirCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "backup.tar.gz")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +307,7 @@ func TestArchiveDirCommand_ServerError(t *testing.T) {
 // TestVersionCommand_Run 已移除，版本命令不再通过 rootCmd 注册
 
 func TestTunnelCommand_MissingKey(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://127.0.0.1:18083")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard})
@@ -307,6 +319,7 @@ func TestTunnelCommand_MissingKey(t *testing.T) {
 }
 
 func TestTunnelCommand_WithConfigKey(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tunnel" {
 			w.WriteHeader(http.StatusOK)
@@ -329,6 +342,7 @@ func TestTunnelCommand_WithConfigKey(t *testing.T) {
 }
 
 func TestTunnelCommand_HeaderFlag(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -346,6 +360,7 @@ func TestTunnelCommand_HeaderFlag(t *testing.T) {
 }
 
 func TestTunnelCommand_MethodFlag(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -363,6 +378,7 @@ func TestTunnelCommand_MethodFlag(t *testing.T) {
 }
 
 func TestTunnelCommand_DataFlag(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -380,6 +396,7 @@ func TestTunnelCommand_DataFlag(t *testing.T) {
 }
 
 func TestTunnelCommand_ErrorOnNoTunnelKey(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://127.0.0.1:18083")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdTunnel(factory, cli.IOStreams{ErrOut: io.Discard})
@@ -393,6 +410,7 @@ func TestTunnelCommand_ErrorOnNoTunnelKey(t *testing.T) {
 // ---- Batch-rename command RunE 测试 ----
 
 func TestBatchRenameCommand_AllSuccess(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// batch-rename 先 stat 获取 checksum
 		if r.URL.Path == "/api/files/stat" || r.Method == "HEAD" {
@@ -427,6 +445,7 @@ func TestBatchRenameCommand_AllSuccess(t *testing.T) {
 }
 
 func TestBatchRenameCommand_StatFails(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -444,6 +463,7 @@ func TestBatchRenameCommand_StatFails(t *testing.T) {
 }
 
 func TestBatchRenameCommand_OddArgs(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdBatchRename(clientfactory.NewMock(nil, nil), cli.IOStreams{ErrOut: io.Discard})
 	cmd.SetArgs([]string{"old.txt", "new.txt", "orphan.txt"})
 	err := cmd.Execute()
@@ -455,6 +475,7 @@ func TestBatchRenameCommand_OddArgs(t *testing.T) {
 // ---- 补充 error path 测试 ----
 
 func TestUploadCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	srcFile := filepath.Join(tmpDir, "test.txt")
 	if err := os.WriteFile(srcFile, []byte("hello"), 0644); err != nil {
@@ -478,6 +499,7 @@ func TestUploadCommand_ServerError(t *testing.T) {
 }
 
 func TestDownloadCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	dst := filepath.Join(t.TempDir(), "out.txt")
 
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -497,6 +519,7 @@ func TestDownloadCommand_ServerError(t *testing.T) {
 }
 
 func TestDeleteCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Stat returns OK, Delete returns error
 		if r.URL.Path == "/api/files/stat" {
@@ -522,6 +545,7 @@ func TestDeleteCommand_ServerError(t *testing.T) {
 }
 
 func TestListCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}))
@@ -541,6 +565,7 @@ func TestListCommand_ServerError(t *testing.T) {
 // ---- Config command error paths ----
 
 func TestConfigCommand_UnknownSubcommand(t *testing.T) {
+	t.Parallel()
 	cfgSvc := &cliConfigProvider{cfgFile: filepath.Join(t.TempDir(), "config.yaml")}
 
 	var buf strings.Builder
@@ -553,6 +578,7 @@ func TestConfigCommand_UnknownSubcommand(t *testing.T) {
 }
 
 func TestConfigCommand_SetMissingValue(t *testing.T) {
+	t.Parallel()
 	cfgSvc := &cliConfigProvider{cfgFile: filepath.Join(t.TempDir(), "config.yaml")}
 
 	var buf strings.Builder
@@ -567,6 +593,7 @@ func TestConfigCommand_SetMissingValue(t *testing.T) {
 // ---- Pwd command（已迁移）----
 
 func TestPwdCommand(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdPwd(st, cli.IOStreams{Out: &buf})
@@ -580,6 +607,7 @@ func TestPwdCommand(t *testing.T) {
 }
 
 func TestPwdCommand_WithCurrentDir(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdPwd(st, cli.IOStreams{Out: &buf})
@@ -595,6 +623,7 @@ func TestPwdCommand_WithCurrentDir(t *testing.T) {
 // ---- Mkdir command（已迁移）----
 
 func TestMkdirCommand_HappyPath(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mkdir" {
 			t.Errorf("expected path /mkdir, got %s", r.URL.Path)
@@ -620,6 +649,7 @@ func TestMkdirCommand_HappyPath(t *testing.T) {
 }
 
 func TestMkdirCommand_ServerError(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 	}))
@@ -641,6 +671,7 @@ func TestMkdirCommand_ServerError(t *testing.T) {
 // ---- Cd command（已迁移）----
 
 func TestCdCommand_PrintCurrent(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
@@ -654,6 +685,7 @@ func TestCdCommand_PrintCurrent(t *testing.T) {
 }
 
 func TestCdCommand_WithCurrentDir(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: &buf})
@@ -667,6 +699,7 @@ func TestCdCommand_WithCurrentDir(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToSubdir(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"newdir"})
@@ -679,6 +712,7 @@ func TestCdCommand_ChangeToSubdir(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToRoot(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"/"})
@@ -691,6 +725,7 @@ func TestCdCommand_ChangeToRoot(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToParent(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{".."})
@@ -703,6 +738,7 @@ func TestCdCommand_ChangeToParent(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToParentFromNested(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: "a/b/c"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{".."})
@@ -715,6 +751,7 @@ func TestCdCommand_ChangeToParentFromNested(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToDot(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"."})
@@ -727,6 +764,7 @@ func TestCdCommand_ChangeToDot(t *testing.T) {
 }
 
 func TestCdCommand_InvalidPath(t *testing.T) {
+	t.Parallel()
 	var errBuf strings.Builder
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: &errBuf})
@@ -745,6 +783,7 @@ func TestCdCommand_InvalidPath(t *testing.T) {
 }
 
 func TestCdCommand_FromRootToParent(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{".."})
@@ -757,6 +796,7 @@ func TestCdCommand_FromRootToParent(t *testing.T) {
 }
 
 func TestCdCommand_ChangeToNested(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: "subdir"}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"nested"})
@@ -769,6 +809,7 @@ func TestCdCommand_ChangeToNested(t *testing.T) {
 }
 
 func TestCdCommand_CleanDots(t *testing.T) {
+	t.Parallel()
 	st := &state.State{CurrentDir: ""}
 	cmd := NewCmdCd(st, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"././subdir"})
@@ -783,6 +824,7 @@ func TestCdCommand_CleanDots(t *testing.T) {
 // ---- resolveOutputPath 测试 ----
 
 func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
+	t.Parallel()
 	got, err := resolveOutputPath("http://example.com/data/file.txt", "/tmp/out.txt", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -793,6 +835,7 @@ func TestResolveOutputPath_SpecifiedFile(t *testing.T) {
 }
 
 func TestResolveOutputPath_FromURLPath(t *testing.T) {
+	t.Parallel()
 	baseDir := t.TempDir()
 
 	got, err := resolveOutputPath("http://example.com/data/report.pdf", "", baseDir)
@@ -805,6 +848,7 @@ func TestResolveOutputPath_FromURLPath(t *testing.T) {
 }
 
 func TestResolveOutputPath_RootPathDefaultsToIndexHTML(t *testing.T) {
+	t.Parallel()
 	baseDir := t.TempDir()
 
 	got, err := resolveOutputPath("http://example.com/", "", baseDir)
@@ -817,6 +861,7 @@ func TestResolveOutputPath_RootPathDefaultsToIndexHTML(t *testing.T) {
 }
 
 func TestResolveOutputPath_InvalidURL(t *testing.T) {
+	t.Parallel()
 	baseDir := t.TempDir()
 
 	_, err := resolveOutputPath("://invalid-url\t", "", baseDir)
@@ -826,6 +871,7 @@ func TestResolveOutputPath_InvalidURL(t *testing.T) {
 }
 
 func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
+	t.Parallel()
 	baseDir := t.TempDir()
 
 	// Create a file that conflicts
@@ -849,6 +895,7 @@ func TestResolveOutputPath_ConflictAppendsSuffix(t *testing.T) {
 // 因此测试直接调用 RunE 函数
 
 func TestConfigShowCmd_Integration(t *testing.T) {
+	t.Parallel()
 	// 统一 context：config show 从 config.yaml 合成视图读取。
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	ccfg := contextcfg.NewDefault()

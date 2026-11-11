@@ -3,7 +3,6 @@ cmd/sclient/cd_scope_test.go	2
 cmd/sclient/cd_test.go	8
 cmd/sclient/cloud_download_group_test.go	17
 cmd/sclient/cloud_download_test.go	31
-cmd/sclient/cmd_rune_test.go	47
 cmd/sclient/cmd_test.go	31
 cmd/sclient/config_test.go	4
 cmd/sclient/context_test.go	8
@@ -128,7 +127,6 @@ pkg/server/quota_reconcile_test.go	7
 pkg/server/quota_write_path_test.go	17
 pkg/server/ratelimit/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
-pkg/server/register_handler_test.go	38
 pkg/server/relay_stream_forward_test.go	15
 pkg/server/relay_stream_largebody_test.go	2
 pkg/server/relay_stream_test.go	13
@@ -169,7 +167,7 @@ pkg/server/xfer_listener_test.go	12
 pkg/storage/seal_alias_test.go	1
 pkg/telemetry/ext/otel/provider_test.go	4
 pkg/telemetry/ext/otel/tracer_test.go	3
-pkg/telemetry/tracing_test.go	15
+pkg/telemetry/tracing_test.go	10
 pkg/testutil/mockdht/dht_test.go	4
 pkg/testutil/mockxfer/mockxfer_test.go	7
 pkg/testutil/testutil_test.go	11
