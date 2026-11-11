@@ -36,6 +36,7 @@ func hasLogLine(t *testing.T, output, substr string) bool {
 }
 
 func TestTracerStartEnd(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染输出，不能并行。
 	output := captureLog(t, func() {
 		tracer := New()
 		ctx := t.Context()
@@ -53,6 +54,7 @@ func TestTracerStartEnd(t *testing.T) {
 }
 
 func TestTracerNestedSpans(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染输出，不能并行。
 	output := captureLog(t, func() {
 		tracer := New()
 		ctx := t.Context()
@@ -72,6 +74,7 @@ func TestTracerNestedSpans(t *testing.T) {
 }
 
 func TestTracerWithTag(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染输出，不能并行。
 	output := captureLog(t, func() {
 		tracer := New()
 		ctx := t.Context()
@@ -101,6 +104,7 @@ func TestTracerEndTwiceSafe(t *testing.T) {
 }
 
 func TestTracerTagsAppearInChildSpan(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染输出，不能并行。
 	output := captureLog(t, func() {
 		tracer := New()
 		ctx := t.Context()
@@ -128,6 +132,7 @@ func TestTracerWithTagAfterEnd(t *testing.T) {
 }
 
 func TestTracerDoubleEndProducesWarning(t *testing.T) {
+	// sproxy:serial: 需要接管全局 slog default（captureLog）才能断言渲染输出，不能并行。
 	output := captureLog(t, func() {
 		tracer := New()
 		ctx := t.Context()
