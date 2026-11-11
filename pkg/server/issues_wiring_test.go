@@ -17,7 +17,7 @@ import (
 func TestIssueCenter_ReportStorageIssue(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
-	c.ReportStorageIssue(string(issues.KindDirMetaCleanupFailed), "jav/makers/natural-high/ACME",
+	c.ReportStorageIssue("baidu", string(issues.KindDirMetaCleanupFailed), "jav/makers/natural-high/ACME",
 		"改名后删除旧目录 meta 失败：应重试删旧 blob", true)
 
 	got := c.Manager().List(issues.ListFilter{})
@@ -36,7 +36,7 @@ func TestIssueCenter_ReportStorageIssue(t *testing.T) {
 func TestIssueCenter_NilSafe(t *testing.T) {
 	t.Parallel()
 	var c *IssueCenter
-	c.ReportStorageIssue("k", "p", "d", true) // 不应 panic
+	c.ReportStorageIssue("v", "k", "p", "d", true) // 不应 panic
 	if c.Manager() != nil {
 		t.Fatal("nil center 的 Manager 应为 nil")
 	}
@@ -51,9 +51,9 @@ func TestIssueCenter_SatisfiesSecretdataReporter(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter(filepath.Join(t.TempDir(), "issues.json"))
 	var rep interface {
-		ReportStorageIssue(kind, path, detail string, retryable bool)
+		ReportStorageIssue(volume, kind, path, detail string, retryable bool)
 	} = c
-	rep.ReportStorageIssue(string(issues.KindDirMetaCleanupFailed), "p", "d", true)
+	rep.ReportStorageIssue("baidu", string(issues.KindDirMetaCleanupFailed), "p", "d", true)
 	if got := len(c.Manager().List(issues.ListFilter{})); got != 1 {
 		t.Fatalf("经最小接口上报后应有 1 条，got %d", got)
 	}
@@ -64,7 +64,7 @@ func TestIssueCenter_PersistsAndResumes(t *testing.T) {
 	t.Parallel()
 	p := filepath.Join(t.TempDir(), "issues.json")
 	c1 := NewIssueCenter(p)
-	c1.ReportStorageIssue(string(issues.KindDirMetaCleanupFailed), "container-A", "旧 meta 删除失败", true)
+	c1.ReportStorageIssue("baidu", string(issues.KindDirMetaCleanupFailed), "container-A", "旧 meta 删除失败", true)
 
 	c2 := NewIssueCenter(p)
 	got := c2.Manager().List(issues.ListFilter{})
@@ -91,7 +91,7 @@ func TestDefaultIssuesStorePath(t *testing.T) {
 func TestIssueCenter_RunIssuesOnce(t *testing.T) {
 	t.Parallel()
 	c := NewIssueCenter("")
-	c.ReportStorageIssue(string(issues.KindDirMetaCleanupFailed), "p1", "d1", true)
+	c.ReportStorageIssue("baidu", string(issues.KindDirMetaCleanupFailed), "p1", "d1", true)
 
 	// 首次（未到期）不执行
 	if res := c.RunIssuesOnce(context.Background(), time.Now(), map[issues.Kind]issues.RetryFunc{

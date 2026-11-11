@@ -20,14 +20,14 @@ type captureReporter struct {
 }
 
 type capturedIssue struct {
-	Kind, Path, Detail string
-	Retryable          bool
+	Volume, Kind, Path, Detail string
+	Retryable                  bool
 }
 
-func (r *captureReporter) ReportStorageIssue(kind, path, detail string, retryable bool) {
+func (r *captureReporter) ReportStorageIssue(volume, kind, path, detail string, retryable bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.issues = append(r.issues, capturedIssue{Kind: kind, Path: path, Detail: detail, Retryable: retryable})
+	r.issues = append(r.issues, capturedIssue{Volume: volume, Kind: kind, Path: path, Detail: detail, Retryable: retryable})
 }
 
 func (r *captureReporter) snapshot() []capturedIssue {

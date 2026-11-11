@@ -36,3 +36,4 @@ pkg/volume/capacity/ledger.go	1	账本自身的读写（`meta/quota/` 保留区�
 pkg/server/source_volume.go	1	源定位（分享/AI 抽样/版本可见性）：经 volSet.External(卷).FS() 后**立即**套 trusted.Guard(Wrap)（与下载/转存同一装饰链；封印由装配处 SealBackend 保证）
 pkg/server/files_meta_extra_source.go	2	元数据补录（PUT /api/files/meta）：经 volSet.External(卷).FS() 取 FS 后**仅类型断言** MetaExtraUpdater（不裸读写用户内容；UpdateMetaExtra 由 trusted/secretdata 装饰链的旁路更新实现，封印语义由装配处保证）⇒ 非封印绕过面
 pkg/volume/registry/views.go	1	U2 统一取卷入口 VolumeView：`sv.FS()` 取**装配期已登记**的统一存储卷数据面（本地 localBackend / 外部 capacity.Backend），随后**必套** trusted.Guard/Wrap 装饰链（内置默认或装配层覆盖）⇒ 不新增封印绕过面（消费方拿到的恒为装饰后视图）
+pkg/server/issues_scan.go	1	存储审查（启动扫描/手动触发 /api/issues/scan）：经 volSet.External(卷).FS() 取 FS 后**仅类型断言** StorageInspector/TreeInspector（只解 meta、不读内容、不修改）⇒ 非封印绕过面

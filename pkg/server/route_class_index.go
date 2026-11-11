@@ -94,6 +94,9 @@ func buildMutatingIndex() map[string]bool {
 	for _, rt := range verify.Routes(nil) {
 		add(rt.Method, verify.RoutePrefix+rt.Path, rt.Mutating)
 	}
+	for _, rt := range NewIssuesAPI(nil).Routes() {
+		add(rt.Method, issuesRoutePrefix+rt.Path, rt.Mutating)
+	}
 	for _, rt := range syncRoutes() {
 		add(rt.Method, syncRoutePrefix+rt.Path, rt.Mutating)
 	}

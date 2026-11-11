@@ -111,6 +111,10 @@ type Options struct {
 	// 用**最小接口**注入（装配层适配到 `pkg/server/issues`）⇒ `pkg/volume` 不反向依赖 `pkg/server`。
 	IssueReporter IssueReporter
 
+	// VolumeName 是本卷名（装配层从卷声明注入）。上报存储问题时随带上，
+	// 便于人工在多卷部署下**按卷定位**（"哪个卷残留"是第一信息）。
+	VolumeName string
+
 	// Erasure 是否启用 XOR 奇偶纠错（k-of-k+1，纯 XOR、纯 stdlib）。**实验性**：k-of-k+1
 	// XOR parity，**单块**损坏/丢失恢复，未生产验证（§13.3 标注）。写入时对 ≥2 个数据分块
 	// 按 max 长度补零对齐后逐字节 XOR 生成奇偶校验段（独立加密分块文件，同 blob 格式），
@@ -261,7 +265,9 @@ type dirCreation struct {
 // `retryable=false` 表示**引擎无法自主决策**（需要人工接入）；`true` 表示可自动重试。
 // detail 必须写明「发生了什么 + 为何不能自动决策 + 人工需要做什么」。
 type IssueReporter interface {
-	ReportStorageIssue(kind, path, detail string, retryable bool)
+	// volume 是**本卷名**（由 Options.VolumeName 传入）——人工需要按卷定位问题
+	// （多卷部署时"哪个卷残留"是第一信息）。
+	ReportStorageIssue(volume, kind, path, detail string, retryable bool)
 }
 
 // 上报用的稳定类型码（与 pkg/server/issues.Kind 对齐）。
@@ -274,7 +280,7 @@ func (s *SecretdataFS) reportStorageIssue(kind, p, detail string, retryable bool
 	if s == nil || s.opts.IssueReporter == nil {
 		return
 	}
-	s.opts.IssueReporter.ReportStorageIssue(kind, p, detail, retryable)
+	s.opts.IssueReporter.ReportStorageIssue(s.opts.VolumeName, kind, p, detail, retryable)
 }
 
 // SecretdataFS 是透明加解密的 sync.FS 包装，底层为任意 sync.FS。

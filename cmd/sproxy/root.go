@@ -1221,13 +1221,19 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// **启动存储审查**（用户裁定 2026-11-10）：异步、只读、浅层（depth=1）——
 	// 「特别是启动时发现残留数据无法自主决策的情况必须能人工感知到问题并接入处理」。
 	// 设计约束：绝不用 start-up 阻塞（审查要访问远端后端）⇒ goroutine + 超时；失败只记日志。
+	// 同一实现也提供**手动触发**入口（POST /api/issues/scan）⇒ 与启动扫描共用一份逻辑。
+	scan := func(sctx context.Context) server.ScanStats {
+		return issueCenter.ScanVolumesOnce(sctx, server.ScanTargetsFromSet(h.Volumes()), 1)
+	}
 	go func() {
 		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		st := issueCenter.ScanVolumesOnce(sctx, server.ScanTargetsFromSet(h.Volumes()), 1)
+		st := scan(sctx)
 		logger.Info("启动存储审查完成（差异已登记为待处理事项）",
 			"volumes", st.Volumes, "skipped", st.Skipped, "nodes", st.Nodes, "reported", st.Reported)
 	}()
+	// 把中枢与扫描实现交给 HTTP 面（/api/issues 列表/详情/人工解决/手动扫描）。
+	h.SetIssueCenter(issueCenter, scan)
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg, h.Volumes())

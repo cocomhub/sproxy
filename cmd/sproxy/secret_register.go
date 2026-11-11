@@ -173,6 +173,7 @@ func secretdataOptionsFromVolume(v volume.Volume) secretdata.Options {
 func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReporter) secretdata.Options {
 	return secretdata.Options{
 		IssueReporter:      rep,
+		VolumeName:         v.Name,
 		Algorithm:          vcExtraStr(v, "algorithm"),
 		Block:              vcExtraBlockPolicy(v),
 		TempDir:            vcExtraStr(v, "temp_dir"),

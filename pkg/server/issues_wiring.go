@@ -55,12 +55,13 @@ func (c *IssueCenter) Manager() *issues.Manager {
 //
 // 约定：`kind` 是领域包定义的稳定类型码，必须与 `issues.Kind` 取值对齐（见 issues.Kind* 常量）；
 // `detail` 必须写明「发生了什么 + 为何不能自动决策 + 人工需要做什么」。
-func (c *IssueCenter) ReportStorageIssue(kind, path, detail string, retryable bool) {
+func (c *IssueCenter) ReportStorageIssue(volume, kind, path, detail string, retryable bool) {
 	if c == nil || c.manager == nil {
 		return
 	}
 	c.manager.Report(issues.Item{
 		Kind:      issues.Kind(kind),
+		Volume:    volume,
 		Path:      path,
 		Detail:    detail,
 		Source:    "storage",
