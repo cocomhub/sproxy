@@ -21,6 +21,11 @@ import (
 )
 
 // msgNotInspectable 是该卷不支持审查时的固定提示（501）。
+//
+// 何时走到这里（2026-11-11 收口后语义）：装饰器**全部转发**审查能力（R21 守）⇒ 接口断言
+// **恒成立**，此时"不支持"只能由底层返回的 `syncpkg.ErrUnsupported` 表达 ⇒ 必须映射为 501
+// （而不是 500「审查失败」）—— 否则用户无法区分"这个卷本来就不支持审查"（正常，非错误）
+// 与"审查本身出错了"（真错误）。
 const msgNotInspectable = "该卷不支持真实存储审查（仅 secretdata 等实现该能力的卷）"
 
 // volumeTraceHandler 处理 GET /api/volumes/{name}/trace?path=&disk=。
@@ -129,9 +134,11 @@ func (h *Handlers) inspectorFor(w http.ResponseWriter, r *http.Request) (syncpkg
 		httpjson.SendError(w, http.StatusNotFound, "卷不存在")
 		return nil, false
 	}
-	// 能力断言必须穿透装饰链（Guard/Wrap/Capacity 等）——用受认可的 Innermost，
-	// 不在业务代码里手写 Inner 链遍历（R22 门禁）。
-	insp, ok := syncpkg.AssertStorageInspector(syncpkg.Innermost(fsys))
+	// 直接断言**装饰后**的 FS 即可：R21（装饰器能力对等门禁）保证每个装饰器都转发
+	// `StorageInspector`/`TreeInspector` ⇒ 断言必然成立；底层未实现时转发实现返回
+	// `ErrUnsupported`，接口断言**仍成立**，由调用方按"未实现"处置。
+	// 因此**不再**需要 `Innermost` 解包（收口，2026-11-11）：解包会绕过装饰器语义。
+	insp, ok := syncpkg.AssertStorageInspector(fsys)
 	if !ok {
 		httpjson.SendError(w, http.StatusNotImplemented, msgNotInspectable)
 		return nil, false
@@ -165,11 +172,14 @@ func inspectModeFrom(r *http.Request) syncpkg.InspectMode {
 	}
 }
 
-// writeInspectError 映射审查错误到 HTTP 状态（越界 403 / 不存在 404 / 其它 500）。
+// writeInspectError 映射审查错误到 HTTP 状态（越界 403 / 不存在 404 / 未实现 501 / 其它 500）。
 func (h *Handlers) writeInspectError(w http.ResponseWriter, r *http.Request, handler, arg string, err error) {
 	switch {
 	case errors.Is(err, syncpkg.ErrOutsideVolume):
 		httpjson.SendError(w, http.StatusForbidden, "路径越出卷根")
+	case errors.Is(err, syncpkg.ErrUnsupported):
+		// 装饰器转发恒成立 ⇒ "不支持审查"由底层能力返回 ErrUnsupported 表达（非错误）。
+		httpjson.SendError(w, http.StatusNotImplemented, msgNotInspectable)
 	case errors.Is(err, fs.ErrNotExist):
 		httpjson.SendError(w, http.StatusNotFound, "路径不存在")
 	default:

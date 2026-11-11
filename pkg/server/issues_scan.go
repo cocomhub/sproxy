@@ -204,17 +204,15 @@ func ScanTargetsFromSet(l VolumeLister) []ScanTarget {
 		if !ok || raw == nil {
 			continue
 		}
-		// **能力断言必须穿透装饰链**（Guard/Wrap/Capacity…）：用受认可的 `syncpkg.Innermost`，
-		// 不在业务代码里手写 Inner 链遍历（与 `volume_inspect.go` 同一做法，R22 门禁守）。
-		//
-		// 为什么必须解包：11 个装饰器当前**都不转发** `StorageInspector`/`TreeInspector`
-		// （见 docs/decorator-capability-forwarding.md）⇒ 直接断言装饰后的 FS 恒 false。
-		// 根治（把审查能力下沉到 `pkg/sync`，使其下方装饰器也能转发）见该文档 §3.5/§4。
-		inner := syncpkg.Innermost(raw)
-		if _, ok := syncpkg.AssertStorageInspector(inner); !ok {
+		// 直接断言**装饰后**的 FS：R21 保证 11 个装饰器全部转发 `StorageInspector`/
+		// `TreeInspector` ⇒ 断言必然成立（底层未实现时，转发实现返回 `ErrUnsupported`，
+		// 接口断言**仍成立**，由调用方按"未实现"处置）。
+		// 因此**不再**用 `Innermost` 解包（收口，2026-11-11；根治见
+		// docs/decorator-capability-forwarding.md §3.5/§4）。
+		if _, ok := syncpkg.AssertStorageInspector(raw); !ok {
 			continue
 		}
-		out = append(out, ScanTarget{Volume: v.Name, Target: inner})
+		out = append(out, ScanTarget{Volume: v.Name, Target: raw})
 	}
 	return out
 }
