@@ -717,7 +717,11 @@ type runServerRuntime struct {
 	cloudDial    func(ctx context.Context, addr string) (net.Conn, error)
 	writeGuard   *leader.WriteGuard
 	h            *server.Handlers
-	cleanups     []func()
+	// issueCenter 是**待处理事项中枢**（用户裁定 2026-11-10）：登记「引擎无法自主决策 / 需重试」
+	// 的存储问题（如改名后旧目录 meta 删除失败、dir_id 不在索引）。持有于 runtime ⇒
+	// 启动扫描、定期重试与 API/Web UI 共享**同一份**账本。
+	issueCenter *server.IssueCenter
+	cleanups    []func()
 }
 
 // addCleanup 按注册顺序追加一条析构闭包（nil 跳过）。
@@ -1153,6 +1157,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	//
 	// 注意：IssueCenter 必须在 secret 后端**注册之前**创建，因为注册即注入（否则上报是 no-op）。
 	issueCenter := server.NewIssueCenter(server.DefaultIssuesStorePath(cfg.StorageRoot))
+	rt.issueCenter = issueCenter
 	registerSecretVolumeBackendsWith(issueCenter)
 	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
 	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
@@ -1212,6 +1217,17 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if err := attachSecretdataVolumes(ctx, h.Volumes(), cfg.StorageRoot, logger, secretdataRefsEnclosure); err != nil {
 		return fmt.Errorf(errFmtSecretAssembly, err)
 	}
+
+	// **启动存储审查**（用户裁定 2026-11-10）：异步、只读、浅层（depth=1）——
+	// 「特别是启动时发现残留数据无法自主决策的情况必须能人工感知到问题并接入处理」。
+	// 设计约束：绝不用 start-up 阻塞（审查要访问远端后端）⇒ goroutine + 超时；失败只记日志。
+	go func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		st := issueCenter.ScanVolumesOnce(sctx, server.ScanTargetsFromSet(h.Volumes()), 1)
+		logger.Info("启动存储审查完成（差异已登记为待处理事项）",
+			"volumes", st.Volumes, "skipped", st.Skipped, "nodes", st.Nodes, "reported", st.Reported)
+	}()
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
 	registerPikpakDownloader(cfg, h.Volumes())
