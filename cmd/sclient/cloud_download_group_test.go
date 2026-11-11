@@ -20,6 +20,7 @@ import (
 )
 
 func TestCloudDownloadGroupCmd_Use(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil, nil)
@@ -29,6 +30,7 @@ func TestCloudDownloadGroupCmd_Use(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Subcommands(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{}, nil, nil)
@@ -43,6 +45,7 @@ func TestCloudDownloadGroupCmd_Subcommands(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Submit(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodPost {
 			var req struct {
@@ -84,6 +87,7 @@ func TestCloudDownloadGroupCmd_Submit(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_SubmitWithUrlFile(t *testing.T) {
+	t.Parallel()
 	var gotURLs []map[string]string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodPost {
@@ -135,6 +139,7 @@ func TestCloudDownloadGroupCmd_SubmitWithUrlFile(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_PreflightConflict(t *testing.T) {
+	t.Parallel()
 	// 两个目录结尾 URL 自动生成相同文件名 index.html → 客户端预校验应拦截，服务端不应被调用。
 	serverHit := false
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +169,7 @@ func TestCloudDownloadGroupCmd_PreflightConflict(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_List(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodGet {
 			groups := []map[string]any{
@@ -191,6 +197,7 @@ func TestCloudDownloadGroupCmd_List(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_ListEmpty(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
@@ -215,6 +222,7 @@ func TestCloudDownloadGroupCmd_ListEmpty(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Cancel(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/groups/") && strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -239,6 +247,7 @@ func TestCloudDownloadGroupCmd_Cancel(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Delete(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/groups/") && r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusOK)
@@ -264,6 +273,7 @@ func TestCloudDownloadGroupCmd_Delete(t *testing.T) {
 
 // TestCloudDownloadGroupCmd_DeleteRequiresYes 验证未传 --yes 时组 delete 拒绝执行。
 func TestCloudDownloadGroupCmd_DeleteRequiresYes(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -283,6 +293,7 @@ func TestCloudDownloadGroupCmd_DeleteRequiresYes(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Archive(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/groups/") && strings.HasSuffix(r.URL.Path, "/archive") && r.Method == http.MethodPost {
 			result := map[string]any{
@@ -312,6 +323,7 @@ func TestCloudDownloadGroupCmd_Archive(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Resume(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/groups/") && strings.HasSuffix(r.URL.Path, "/resume") && r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -346,6 +358,7 @@ func TestCloudDownloadGroupCmd_Resume(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
+	t.Parallel()
 	// mock group detail + download endpoint
 	var calledGroup, calledDownload bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -401,6 +414,7 @@ func TestCloudDownloadGroupCmd_DownloadSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_DownloadSubcommandNotCompleted(t *testing.T) {
+	t.Parallel()
 	// mock group detail 返回 downloading 状态子任务，download 不应被调用
 	var calledDownload bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -495,6 +509,7 @@ func TestCloudDownloadGroupCmd_DownloadArchiveSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_ResumeChainSubcommand(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)
@@ -512,6 +527,7 @@ func TestCloudDownloadGroupCmd_ResumeChainSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_Wait(t *testing.T) {
+	t.Parallel()
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/groups/group-wait" && r.Method == http.MethodGet {
@@ -555,6 +571,7 @@ func TestCloudDownloadGroupCmd_Wait(t *testing.T) {
 }
 
 func TestCloudDownloadGroupCmd_NoURLs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownloadGroup(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, nil, nil)

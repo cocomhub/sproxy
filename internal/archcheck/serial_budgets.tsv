@@ -1,8 +1,6 @@
 cmd/sclient/batch_test.go	2
 cmd/sclient/cd_scope_test.go	2
 cmd/sclient/cd_test.go	8
-cmd/sclient/cloud_download_group_test.go	17
-cmd/sclient/cloud_download_test.go	31
 cmd/sclient/config_test.go	4
 cmd/sclient/context_test.go	8
 cmd/sclient/diag_test.go	1
@@ -29,7 +27,6 @@ cmd/sclient/share_integration_test.go	1
 cmd/sclient/share_test.go	3
 cmd/sclient/socks_test.go	2
 cmd/sclient/stat_test.go	3
-cmd/sclient/sync_test.go	17
 cmd/sclient/tlsutil_test.go	2
 cmd/sclient/trash_test.go	1
 cmd/sclient/trust_login_test.go	11
@@ -86,7 +83,6 @@ pkg/server/cloud_download_handler_test.go	26
 pkg/server/cloud_newlayout_test.go	1
 pkg/server/cloud_owner_test.go	12
 pkg/server/cloud_url_validation_test.go	7
-pkg/server/config/config_federation_test.go	16
 pkg/server/config/config_mesh_node_test.go	2
 pkg/server/config/config_mesh_readers_test.go	10
 pkg/server/config/config_mesh_test.go	2
@@ -121,7 +117,6 @@ pkg/server/metrics_labeled_test.go	4
 pkg/server/metrics_test.go	9
 pkg/server/prod_hardening_test.go	1
 pkg/server/quota_reconcile_test.go	7
-pkg/server/quota_write_path_test.go	17
 pkg/server/ratelimit/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
 pkg/server/relay_stream_forward_test.go	15

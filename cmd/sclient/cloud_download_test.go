@@ -32,6 +32,7 @@ func sha256Hex(data []byte) string {
 }
 
 func TestCloudDownloadCmd_UseAndArgs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
@@ -164,6 +165,7 @@ func (e *chainMockEnv) handleTaskDelete(w http.ResponseWriter) {
 }
 
 func TestCloudDownloadCmd_ChainOperation(t *testing.T) {
+	t.Parallel()
 	tasks := []map[string]any{
 		{
 			"id":         "chain-1",
@@ -224,6 +226,7 @@ func TestCloudDownloadCmd_IntegrityMustPassFlag(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_KeepFiles(t *testing.T) {
+	t.Parallel()
 	tasks := []map[string]any{
 		{
 			"id":         "keep-1",
@@ -255,6 +258,7 @@ func TestCloudDownloadCmd_KeepFiles(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_NoURLs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
@@ -266,6 +270,7 @@ func TestCloudDownloadCmd_NoURLs(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
+	t.Parallel()
 	// --batch 已随 readURLsFromFile 一同移除，改用 --url-file 验证等价行为。
 	tasks := []map[string]any{
 		{
@@ -297,6 +302,7 @@ func TestCloudDownloadCmd_BatchFileFlag(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_NewFlags(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
@@ -320,6 +326,7 @@ func TestCloudDownloadCmd_NewFlags(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_Subcommands(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
@@ -334,6 +341,7 @@ func TestCloudDownloadCmd_Subcommands(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_MigratedGroupStubs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{}, &state.State{}, nil)
@@ -370,6 +378,7 @@ func findSubCommand(cmd *cobra.Command, name string) *cobra.Command {
 }
 
 func TestCloudDownloadCmd_SubmitSubcommand(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost {
 			resp := map[string]any{
@@ -405,6 +414,7 @@ func TestCloudDownloadCmd_SubmitSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitSubcommand(t *testing.T) {
+	t.Parallel()
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/wait-1") && r.Method == http.MethodGet {
@@ -445,6 +455,7 @@ func TestCloudDownloadCmd_WaitSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_FetchSubcommandRemoved(t *testing.T) {
+	t.Parallel()
 	// fetch 子命令已移除：注册表中不应存在名为 fetch 的子命令
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
@@ -467,6 +478,7 @@ func TestCloudDownloadCmd_FetchSubcommandRemoved(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ArchiveSubcommand(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost {
 			result := map[string]any{
@@ -496,6 +508,7 @@ func TestCloudDownloadCmd_ArchiveSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ResumeChainSubcommand(t *testing.T) {
+	t.Parallel()
 	// resume-chain 需要 cache_dir 或 KVStore，直接测试会失败，只验证命令存在性与 Use
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
@@ -535,6 +548,7 @@ func TestCloudDownloadCmd_ResumeChainSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ListSubcommand(t *testing.T) {
+	t.Parallel()
 	// list 命令已通过 cloud_list 实现，验证子命令存在即可
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
@@ -604,6 +618,7 @@ func TestCloudDownloadCmd_DownloadSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_DownloadSubcommandNotCompleted(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/tasks/task-pending-1" && r.Method == http.MethodGet {
 			task := map[string]any{
@@ -677,6 +692,7 @@ func TestCloudDownloadCmd_DownloadArchiveSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_DeleteSubcommand(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotMethod string
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -708,6 +724,7 @@ func TestCloudDownloadCmd_DeleteSubcommand(t *testing.T) {
 
 // TestCloudDownloadCmd_DeleteRequiresYes 验证未传 --yes 时 delete 拒绝执行且返回非零。
 func TestCloudDownloadCmd_DeleteRequiresYes(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -727,6 +744,7 @@ func TestCloudDownloadCmd_DeleteRequiresYes(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ResumeDownloadSubcommand(t *testing.T) {
+	t.Parallel()
 	var gotPath string
 	var gotBody map[string]bool
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -762,6 +780,7 @@ func TestCloudDownloadCmd_ResumeDownloadSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_CancelSubcommand(t *testing.T) {
+	t.Parallel()
 	// cancel 命令已通过 cloud_cancel 实现，验证子命令存在即可
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
@@ -774,6 +793,7 @@ func TestCloudDownloadCmd_CancelSubcommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_SubmitBatchCommand(t *testing.T) {
+	t.Parallel()
 	urlFile := filepath.Join(t.TempDir(), "batch-submit.txt")
 	os.WriteFile(urlFile, []byte("https://example.com/batch-submit.zip\n"), 0644)
 
@@ -812,6 +832,7 @@ func TestCloudDownloadCmd_SubmitBatchCommand(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitNoPending(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/done-1") && r.Method == http.MethodGet {
 			task := map[string]any{
@@ -843,6 +864,7 @@ func TestCloudDownloadCmd_WaitNoPending(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitTimeout(t *testing.T) {
+	t.Parallel()
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/timeout-1") && r.Method == http.MethodGet {
@@ -874,6 +896,7 @@ func TestCloudDownloadCmd_WaitTimeout(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_SubmitNoURLs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
@@ -885,6 +908,7 @@ func TestCloudDownloadCmd_SubmitNoURLs(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitNoArgs(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdCloudDownload(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
@@ -896,6 +920,7 @@ func TestCloudDownloadCmd_WaitNoArgs(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ArchiveSubcommandSingle(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/") && strings.HasSuffix(r.URL.Path, "/archive") && r.Method == http.MethodPost {
 			result := map[string]any{
@@ -925,6 +950,7 @@ func TestCloudDownloadCmd_ArchiveSubcommandSingle(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ArchiveSubcommandNoName(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/archive" && r.Method == http.MethodPost {
 			result := map[string]any{
@@ -954,6 +980,7 @@ func TestCloudDownloadCmd_ArchiveSubcommandNoName(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_MultipleURLs(t *testing.T) {
+	t.Parallel()
 	tasks := []map[string]any{
 		{
 			"id":         "multi-1",
@@ -989,6 +1016,7 @@ func TestCloudDownloadCmd_MultipleURLs(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_ChainOperationWithPolling(t *testing.T) {
+	t.Parallel()
 	tasks := []map[string]any{
 		{
 			"id":         "poll-chain-1",
@@ -1017,6 +1045,7 @@ func TestCloudDownloadCmd_ChainOperationWithPolling(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_SubmitMultipleURLs(t *testing.T) {
+	t.Parallel()
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/cloud/download/batch" && r.Method == http.MethodPost {
 			resp := map[string]any{
@@ -1062,6 +1091,7 @@ func TestCloudDownloadCmd_SubmitMultipleURLs(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitTaskFailed(t *testing.T) {
+	t.Parallel()
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/fail-1") && r.Method == http.MethodGet {
@@ -1104,6 +1134,7 @@ func TestCloudDownloadCmd_WaitTaskFailed(t *testing.T) {
 }
 
 func TestCloudDownloadCmd_WaitTaskCancelled(t *testing.T) {
+	t.Parallel()
 	pollCount := 0
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/cloud/tasks/cancel-1") && r.Method == http.MethodGet {

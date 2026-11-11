@@ -79,6 +79,7 @@ func newSyncMockServer(t *testing.T, finalStatus string) (*httptest.Server, *syn
 
 // TestSyncCmd_UseAndSubcommands 验证父命令 Use 与 push/pull 子命令注册。
 func TestSyncCmd_UseAndSubcommands(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{}, &state.State{}, nil)
@@ -99,6 +100,7 @@ func TestSyncCmd_UseAndSubcommands(t *testing.T) {
 
 // TestSyncCmd_Push_CreatesTask 验证 push flag 解析 → CreateSyncTask 请求体 + 简洁输出。
 func TestSyncCmd_Push_CreatesTask(t *testing.T) {
+	t.Parallel()
 	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -131,6 +133,7 @@ func TestSyncCmd_Push_CreatesTask(t *testing.T) {
 
 // TestSyncCmd_Push_IncludeExclude 验证 include/exclude 传递。
 func TestSyncCmd_Push_IncludeExclude(t *testing.T) {
+	t.Parallel()
 	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -151,6 +154,7 @@ func TestSyncCmd_Push_IncludeExclude(t *testing.T) {
 
 // TestSyncCmd_Push_RequiresRemote 验证 --remote 必填。
 func TestSyncCmd_Push_RequiresRemote(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
@@ -166,6 +170,7 @@ func TestSyncCmd_Push_RequiresRemote(t *testing.T) {
 
 // TestSyncCmd_Push_InvalidConflict 验证非法 --conflict 值报错。
 func TestSyncCmd_Push_InvalidConflict(t *testing.T) {
+	t.Parallel()
 	svc := client.NewFileClient("http://test.local")
 	factory := clientfactory.NewMock(svc, nil)
 	cmd := NewCmdSync(factory, cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &state.State{}, nil)
@@ -181,6 +186,7 @@ func TestSyncCmd_Push_InvalidConflict(t *testing.T) {
 
 // TestSyncCmd_Push_ConflictRenameMapsToUnderscore 验证 CLI conflict-rename → 服务端 conflict_rename。
 func TestSyncCmd_Push_ConflictRenameMapsToUnderscore(t *testing.T) {
+	t.Parallel()
 	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -198,6 +204,7 @@ func TestSyncCmd_Push_ConflictRenameMapsToUnderscore(t *testing.T) {
 
 // TestSyncCmd_Pull_Direction 验证 pull 请求体方向与 src/dst 语义。
 func TestSyncCmd_Pull_Direction(t *testing.T) {
+	t.Parallel()
 	mock, capture := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -218,6 +225,7 @@ func TestSyncCmd_Pull_Direction(t *testing.T) {
 
 // TestSyncCmd_Push_Wait 验证 --wait 轮询直至 completed 并展示进度。
 func TestSyncCmd_Push_Wait(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "completed")
 	defer mock.Close()
 
@@ -240,6 +248,7 @@ func TestSyncCmd_Push_Wait(t *testing.T) {
 
 // TestSyncCmd_Push_Wait_Failed 验证 --wait 任务失败返回非零并打印 Error。
 func TestSyncCmd_Push_Wait_Failed(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "failed")
 	defer mock.Close()
 
@@ -264,6 +273,7 @@ func TestSyncCmd_Push_Wait_Failed(t *testing.T) {
 // TestSyncCmd_Push_Wait_JSON 验证 --wait --json 组合：stdout 为纯 JSON（终态任务），
 // 不夹带"等待..."等人工提示行，脚本可整段解析。
 func TestSyncCmd_Push_Wait_JSON(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "completed")
 	defer mock.Close()
 
@@ -295,6 +305,7 @@ func TestSyncCmd_Push_Wait_JSON(t *testing.T) {
 // --json 是根命令持久化 flag：经根命令执行（root.SetArgs），验证
 // "sclient sync push --json" 与 "sclient --json sync push" 行为一致。
 func TestSyncCmd_Push_JSON(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -385,6 +396,7 @@ func TestSyncCmd_Report(t *testing.T) {
 
 // TestSyncCmd_Push_JSON_BeforeSubcommand 验证根级 --json（sclient --json sync push）同样生效。
 func TestSyncCmd_Push_JSON_BeforeSubcommand(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -410,6 +422,7 @@ func TestSyncCmd_Push_JSON_BeforeSubcommand(t *testing.T) {
 
 // TestSyncCmd_Push_CreatedTaskFailed 验证创建响应即 failed 时命令非零退出。
 func TestSyncCmd_Push_CreatedTaskFailed(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sync/tasks", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -442,6 +455,7 @@ func TestSyncCmd_Push_CreatedTaskFailed(t *testing.T) {
 // TestSyncCmd_Push_Wait_JSON_Failed 验证 --wait --json + failed：stdout 为纯 JSON
 // （status=failed），且退出码非零（审查 I-1 回归：--json 提前 return 曾跳过状态检查）。
 func TestSyncCmd_Push_Wait_JSON_Failed(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "failed")
 	defer mock.Close()
 
@@ -470,6 +484,7 @@ func TestSyncCmd_Push_Wait_JSON_Failed(t *testing.T) {
 // TestSyncCmd_Push_JSON_CreatedTaskFailed 验证创建即 failed + --json：输出 JSON 且非零退出
 // （审查 I-1 回归）。
 func TestSyncCmd_Push_JSON_CreatedTaskFailed(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "")
 	defer mock.Close()
 
@@ -520,6 +535,7 @@ func newCreateFailedMockServer(t *testing.T) *httptest.Server {
 
 // TestSyncCmd_Push_Wait_Cancelled 验证 --wait + cancelled → 非零退出（对齐云端 cancelled 计入失败）。
 func TestSyncCmd_Push_Wait_Cancelled(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "cancelled")
 	defer mock.Close()
 
@@ -540,6 +556,7 @@ func TestSyncCmd_Push_Wait_Cancelled(t *testing.T) {
 
 // TestSyncCmd_Wait_TimeoutExpired 验证 --wait --timeout 过期返回 error（不伪造终态）。
 func TestSyncCmd_Wait_TimeoutExpired(t *testing.T) {
+	t.Parallel()
 	mock, _ := newSyncMockServer(t, "") // 恒 syncing
 	defer mock.Close()
 
