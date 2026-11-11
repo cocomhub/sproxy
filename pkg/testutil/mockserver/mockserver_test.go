@@ -10,6 +10,7 @@ import (
 )
 
 func TestMockChecksumStore_SetGet(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	cs.Set("file.txt", "abc123")
 	got, ok := cs.Get("file.txt")
@@ -19,6 +20,7 @@ func TestMockChecksumStore_SetGet(t *testing.T) {
 }
 
 func TestMockChecksumStore_GetMissing(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	_, ok := cs.Get("missing.txt")
 	if ok {
@@ -27,6 +29,7 @@ func TestMockChecksumStore_GetMissing(t *testing.T) {
 }
 
 func TestMockChecksumStore_Delete(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	cs.Set("f.txt", "x")
 	cs.Delete("f.txt")
@@ -37,6 +40,7 @@ func TestMockChecksumStore_Delete(t *testing.T) {
 }
 
 func TestMockChecksumStore_Rename(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	cs.Set("old", "cksum")
 	cs.Rename("old", "new")
@@ -48,6 +52,7 @@ func TestMockChecksumStore_Rename(t *testing.T) {
 }
 
 func TestMockChecksumStore_DeletePrefix(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	cs.Set("dir1/a.txt", "1")
 	cs.Set("dir1/b.txt", "2")
@@ -62,6 +67,7 @@ func TestMockChecksumStore_DeletePrefix(t *testing.T) {
 }
 
 func TestMockChecksumStore_GetAll(t *testing.T) {
+	t.Parallel()
 	cs := mockserver.NewChecksumStore()
 	cs.Set("a", "1")
 	cs.Set("b", "2")
@@ -72,6 +78,7 @@ func TestMockChecksumStore_GetAll(t *testing.T) {
 }
 
 func TestMockUploadStore_CreateAndGetSession(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	s, err := us.CreateSession("sid1", "f.txt", 100, 64, 2, "", 0)
 	if err != nil {
@@ -92,6 +99,7 @@ func TestMockUploadStore_CreateAndGetSession(t *testing.T) {
 }
 
 func TestMockUploadStore_CreateSessionDuplicate(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	_, err := us.CreateSession("sid1", "f.txt", 100, 64, 2, "", 0)
 	if err != nil {
@@ -104,6 +112,7 @@ func TestMockUploadStore_CreateSessionDuplicate(t *testing.T) {
 }
 
 func TestMockUploadStore_MarkAndCheckChunks(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	_, err := us.CreateSession("sid1", "f.txt", 100, 64, 3, "", 0)
 	if err != nil {
@@ -133,6 +142,7 @@ func TestMockUploadStore_MarkAndCheckChunks(t *testing.T) {
 }
 
 func TestMockUploadStore_MarkChunkOutOfRange(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	_, err := us.CreateSession("sid1", "f.txt", 100, 64, 2, "", 0)
 	if err != nil {
@@ -151,6 +161,7 @@ func TestMockUploadStore_MarkChunkOutOfRange(t *testing.T) {
 }
 
 func TestMockUploadStore_CompleteSession(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	_, err := us.CreateSession("sid1", "f.txt", 100, 64, 2, "", 0)
 	if err != nil {
@@ -173,6 +184,7 @@ func TestMockUploadStore_CompleteSession(t *testing.T) {
 }
 
 func TestMockUploadStore_GetOrCreateSession(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 
 	// Create new
@@ -198,6 +210,7 @@ func TestMockUploadStore_GetOrCreateSession(t *testing.T) {
 }
 
 func TestMockUploadStore_DeleteSession(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	_, err := us.CreateSession("sid1", "f.txt", 100, 64, 2, "", 0)
 	if err != nil {
@@ -211,6 +224,7 @@ func TestMockUploadStore_DeleteSession(t *testing.T) {
 }
 
 func TestMockUploadStore_GetSessionByFilename(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	us.CreateSession("sid1", "a.txt", 100, 64, 2, "", 0)
 	us.CreateSession("sid2", "b.txt", 200, 64, 2, "", 0)
@@ -229,6 +243,7 @@ func TestMockUploadStore_GetSessionByFilename(t *testing.T) {
 }
 
 func TestMockUploadStore_HealthAndStop(t *testing.T) {
+	t.Parallel()
 	us := mockserver.NewUploadStore()
 	if err := us.Health(); err != nil {
 		t.Fatal("expected Health() to return nil")

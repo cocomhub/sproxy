@@ -62,6 +62,7 @@ func testRegFrameJSON(t *testing.T, nodeID, extra string) string {
 }
 
 func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 
@@ -91,6 +92,7 @@ func TestHubServer_RegisterReadFailure_SilentNoRegErr(t *testing.T) {
 }
 
 func TestHubServerRegisterAndRemove(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -150,6 +152,7 @@ func TestHubServerRegisterAndRemove(t *testing.T) {
 }
 
 func TestHubServerBadToken(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -213,6 +216,7 @@ func TestHubServerBadToken(t *testing.T) {
 }
 
 func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log, 1)
@@ -244,6 +248,7 @@ func TestHubServer_TryHandleConn_MaxConns(t *testing.T) {
 }
 
 func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log) // 不传上限 = 无上限
@@ -261,6 +266,7 @@ func TestHubServer_TryHandleConn_NoLimit(t *testing.T) {
 // 非 JSON 裸字符串被当作 nodeID，但裸帧无 AK/proof 凭据 → 注册被拒绝（REG_ERR），节点不注册。
 // （nil auth 现视为 fail-closed，见 NewHubServer；本测试用合法 accessKeys 验证拒绝路径。）
 func TestHubServerBareNodeID(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -314,6 +320,7 @@ func TestHubServerBareNodeID(t *testing.T) {
 // TestHubServerRegisterSecretCapability 验证 per-node secret 下发（I1）：
 // 声明 per-node-secret 能力的节点，REG_OK 携带 secret，且 LookupInfo 返回一致。
 func TestHubServerRegisterSecretCapability(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -383,6 +390,7 @@ func TestHubServerRegisterSecretCapability(t *testing.T) {
 // TestHubServerRegisterNoCapabilityPlainAck 验证未声明能力的节点：
 // REG_OK 为纯 "REG_OK"，NodeInfo.Secret 为空（行为不变）。
 func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -442,6 +450,7 @@ func TestHubServerRegisterNoCapabilityPlainAck(t *testing.T) {
 // TestHubServerJSONMissingNodeID 覆盖 S2：合法 JSON 但缺 node_id 应报错并回发
 // REG_ERR（而非把 JSON 垃圾整串当裸串回退）。
 func TestHubServerJSONMissingNodeID(t *testing.T) {
+	t.Parallel()
 	log := testutil.DiscardLogger()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), log)
@@ -568,6 +577,7 @@ func registerRawFrame(t *testing.T, srv *HubServer, frame string) (string, func(
 // TestHubServer_DiscIdentity_ValidProof：disc 临时注册携带真实节点 per-node secret
 // 派生的 HMAC 证明 → 注册成功且 RealNodeID 记录。
 func TestHubServer_DiscIdentity_ValidProof(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	secret, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
@@ -603,6 +613,7 @@ func meshRegFrameJSON(t *testing.T, nodeID, ak string) string {
 // TestHubServer_RegisterMeshFromAK（M-9）：注册 AK 解析出 mesh 并写入 NodeInfo.Mesh，
 // 节点落入对应 mesh 的独立 RouteTable（跨 mesh 不可见）。
 func TestHubServer_RegisterMeshFromAK(t *testing.T) {
+	t.Parallel()
 	const (
 		akA = "ak-mesh-a-0011223344556677" // AccessKeyMesh → "mesh-a"
 		akB = "ak-mesh-b-8899aabbccddeeff" // AccessKeyMesh → "mesh-b"
@@ -650,6 +661,7 @@ func TestHubServer_RegisterMeshFromAK(t *testing.T) {
 // per-node secret）或 real_node_id 与 disc base 不匹配 → hub fail-closed 拒绝注册
 // （防冒充他人污染 accept 侧链路池）。
 func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	_, closeReal := registerNodeAndGetSecret(t, srv, "victim-a")
@@ -683,6 +695,7 @@ func TestHubServer_DiscIdentity_ForgedRejected(t *testing.T) {
 // TestHubServer_RegisterAssignsVirtualIP 校验稳定节点注册后获得有效且位于虚拟子网内
 // 的虚拟 IP，并写入路由表 NodeInfo。
 func TestHubServer_RegisterAssignsVirtualIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	m := newTestMux(t)
@@ -707,6 +720,7 @@ func TestHubServer_RegisterAssignsVirtualIP(t *testing.T) {
 // TestHubServer_RegisterTransientNoVIP 校验瞬态节点（mesh-/p2p-/disc- 临时身份）
 // 不分配虚拟 IP（防每次 mesh connect 分配/释放 VIP、vipTable 出现濒死条目）。
 func TestHubServer_RegisterTransientNoVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 
@@ -746,6 +760,7 @@ func TestHubServer_RegisterTransientNoVIP(t *testing.T) {
 // TestHubServer_RegisterVIPInAck 校验声明 virtual-ip 能力的节点收到 REG_OK 携带本节点
 // 虚拟 IP（防 Discover=false 的出口节点静默失效），且与路由表一致。
 func TestHubServer_RegisterVIPInAck(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	dial, serverConn, _ := pipeXfer()
@@ -800,6 +815,7 @@ func TestHubServer_RegisterVIPInAck(t *testing.T) {
 // TestHubServer_DisconnectKeepsVIP 校验连接断开（RemoveIfOwned）**不**释放虚拟 IP：
 // 同 node-id 重连复用旧地址（稳定），消除"断开释放/并发重注册"重复分配竞态。
 func TestHubServer_DisconnectKeepsVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 
@@ -832,6 +848,7 @@ func TestHubServer_DisconnectKeepsVIP(t *testing.T) {
 // TestHubServer_RemoveReleasesVIP 校验管理端踢出（MeshRouteTable.Remove）回收虚拟 IP，
 // 新节点可复用被释放的地址。
 func TestHubServer_RemoveReleasesVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 
@@ -858,6 +875,7 @@ func TestHubServer_RemoveReleasesVIP(t *testing.T) {
 
 // TestMeshRouteTable_VirtualIPLookup 校验 VirtualIPOf / NodeByVirtualIP 反查与 mesh 隔离。
 func TestMeshRouteTable_VirtualIPLookup(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	vipA := netip.MustParseAddr("100.64.0.2")
 	vipB := netip.MustParseAddr("100.64.0.3")
@@ -884,6 +902,7 @@ func TestMeshRouteTable_VirtualIPLookup(t *testing.T) {
 // TestHubServer_CrossMeshReRegisterReleasesOldVIP（S-2）校验节点从 mesh-a 换注册到
 // mesh-b 时，旧 mesh 的虚拟 IP 被释放（不再占旧 mesh 的地址空间）。
 func TestHubServer_CrossMeshReRegisterReleasesOldVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	alloc := srv.Allocator().(*hubAllocator)
@@ -929,6 +948,7 @@ func TestHubServer_CrossMeshReRegisterReleasesOldVIP(t *testing.T) {
 // TestHubServer_RemoveReRegister_NoDupVIP（I-1 回归）并发执行 Remove（管理端踢出）
 // 与 registerNode（重注册），最终分配器的 assigned 表不得出现两个 key 共享同一 VIP。
 func TestHubServer_RemoveReRegister_NoDupVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	alloc := srv.Allocator().(*hubAllocator)
@@ -960,6 +980,7 @@ func TestHubServer_RemoveReRegister_NoDupVIP(t *testing.T) {
 // 稳定节点名（如主机名不可解析时 mesh node 回落字面量 "mesh-node"）仍能获得虚拟 IP，
 // 不被瞬态前缀过滤误伤（静默失效）。
 func TestHubServer_RegisterStableMeshPrefixedNodeGetsVIP(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 	m := newTestMux(t)
@@ -978,6 +999,7 @@ func TestHubServer_RegisterStableMeshPrefixedNodeGetsVIP(t *testing.T) {
 // per-node-secret）的节点，REG_OK 携带虚拟 IP 且格式为 "REG_OK::<vip>"（secret 空
 // 占位），向后兼容解析正确。
 func TestHubServer_RegisterVIPInAck_NoSecret(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, NewAuthenticator(testRing()), testutil.DiscardLogger())
 	dial, serverConn, _ := pipeXfer()
@@ -1032,6 +1054,7 @@ func TestHubServer_RegisterVIPInAck_NoSecret(t *testing.T) {
 // 并发 Remove + registerNode 后，**路由表内**不得出现两个节点共享同一虚拟 IP
 // （分配器侧由 TestHubServer_RemoveReRegister_NoDupVIP 锁定，本测试补路由表侧不变量）。
 func TestHubServer_RemoveReRegister_NoDupVIPInRouteTable(t *testing.T) {
+	t.Parallel()
 	rt := NewMeshRouteTable()
 	srv := NewHubServer(rt, nil, testutil.DiscardLogger())
 
