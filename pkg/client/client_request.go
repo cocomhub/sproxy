@@ -549,18 +549,47 @@ func doJSONDecodeBody(r io.Reader, respBody any) error {
 // clientTempRoot 是客户端签名临时文件的固定父目录名（收敛散落残留）。
 const clientTempRoot = "sproxy-client"
 
-// staleClientTempMaxAge 是孤儿判定阈值：超过该时长未更新的临时文件视为强杀残留。
-const staleClientTempMaxAge = 6 * time.Hour
+// staleClientTempMaxAge 是孤儿判定阈值：超过该时长**未更新**的临时文件视为强杀/中断残留。
+//
+// 判据基于 mtime，因此**正在写入的活跃临时文件不会被误删**（它的 mtime 总是新的）。
+// 取 1h：既能及时回收长跑进程中断留下的巨型残留（实测单个可达 2GiB），
+// 又留足"请求 body 预填 + 长请求发送"的时间余量。
+const staleClientTempMaxAge = time.Hour
 
-// clientTempDir 返回客户端临时目录，并在首次调用时 best-effort 清理孤儿文件
+// clientTempCleanupInterval 是**孤儿清理的节流间隔**。
+//
+// 为什么需要（2026-11-10 实测缺陷：临时文件堆积 64GiB）：
+// 此前用 `sync.Once` ⇒ **每个进程只在首次调用时清理一次**。而批量上传这类**长跑进程**
+// （sdserver 可连续运行数小时）运行期间产生的孤儿（请求被中断、进程被强杀、连接重置）
+// **永远清不到** ⇒ `%TEMP%/sproxy-client/sproxy-sig-body-*` 持续累积到几十 GiB。
+// 改为按时间节流（而不是 Once）后，长跑进程也会周期性回收；由于判据是 mtime，
+// 活跃文件不受影响。
+const clientTempCleanupInterval = 10 * time.Minute
+
+// clientTempDir 返回客户端临时目录，并**节流**地 best-effort 清理孤儿文件
 // （进程被强杀时 defer cleanup 不会执行，残留会累积）。
 func clientTempDir() string {
 	dir := filepath.Join(os.TempDir(), clientTempRoot)
-	clientTempCleanupOnce.Do(func() {
-		// 复用 pkg/tempclean 的唯一清理实现（同时覆盖 secretdata / multipart 残留）。
-		tempclean.CleanupStale(staleClientTempMaxAge)
-	})
+	maybeCleanupClientTemp()
 	return dir
 }
 
-var clientTempCleanupOnce sync.Once
+// maybeCleanupClientTemp 节流执行孤儿清理（每 clientTempCleanupInterval 一次）。
+//
+// 复用 pkg/tempclean 的**唯一清理实现**（同时覆盖 secretdata / multipart 残留），
+// 不另造清理逻辑。
+func maybeCleanupClientTemp() {
+	clientTempCleanupMu.Lock()
+	defer clientTempCleanupMu.Unlock()
+	if time.Since(clientTempCleanupAt) < clientTempCleanupInterval {
+		return
+	}
+	clientTempCleanupAt = time.Now()
+	tempclean.CleanupStale(staleClientTempMaxAge)
+}
+
+var (
+	clientTempCleanupMu sync.Mutex
+	// clientTempCleanupAt 是上次清理时间（零值 ⇒ 首次调用立即清理）。
+	clientTempCleanupAt time.Time
+)
