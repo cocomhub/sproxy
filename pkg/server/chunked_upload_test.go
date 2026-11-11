@@ -95,6 +95,7 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 }
 
 func TestUploadInit_HappyPath(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -134,6 +135,7 @@ func TestUploadInit_HappyPath(t *testing.T) {
 }
 
 func TestUploadInit_InvalidFilename(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -159,6 +161,7 @@ func TestUploadInit_InvalidFilename(t *testing.T) {
 }
 
 func TestUploadInit_InvalidChecksum(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -184,6 +187,7 @@ func TestUploadInit_InvalidChecksum(t *testing.T) {
 }
 
 func TestUploadChunk_Success(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -225,6 +229,7 @@ func TestUploadChunk_Success(t *testing.T) {
 }
 
 func TestUploadChunk_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -261,6 +266,7 @@ func TestUploadChunk_ChecksumMismatch(t *testing.T) {
 }
 
 func TestUploadChunk_Idempotent(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -289,6 +295,7 @@ func TestUploadChunk_Idempotent(t *testing.T) {
 }
 
 func TestUploadStatus_Partial(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -329,6 +336,7 @@ func TestUploadStatus_Partial(t *testing.T) {
 }
 
 func TestUploadComplete_FullFlow(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -384,6 +392,7 @@ func TestUploadComplete_FullFlow(t *testing.T) {
 }
 
 func TestUploadComplete_MissingChunks(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -410,6 +419,7 @@ func TestUploadComplete_MissingChunks(t *testing.T) {
 }
 
 func TestDownloadChunk_FirstChunk(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -481,6 +491,7 @@ func TestDownloadChunk_FirstChunk(t *testing.T) {
 }
 
 func TestDownloadChunk_EntireFile(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -531,6 +542,7 @@ func TestDownloadChunk_EntireFile(t *testing.T) {
 }
 
 func TestDownloadChunk_InvalidOffset(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -558,6 +570,7 @@ func TestDownloadChunk_InvalidOffset(t *testing.T) {
 }
 
 func TestDownloadChunk_PathTraversal(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -574,6 +587,7 @@ func TestDownloadChunk_PathTraversal(t *testing.T) {
 // ---- Helpers ----
 
 func TestUploadComplete_SubDir(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -678,6 +692,7 @@ func uploadChunk(t *testing.T, baseURL, uploadID string, chunkIndex int, chunkCS
 // ---- L3: 分块上传端到端链路测试 ----
 
 func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -717,6 +732,7 @@ func TestChunkedUpload_MultiChunkLargeFile(t *testing.T) {
 }
 
 func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -778,6 +794,7 @@ func TestChunkedUpload_ResumeAfterInterrupt(t *testing.T) {
 }
 
 func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -813,6 +830,7 @@ func TestChunkedUpload_AlreadyExists_ChecksumMatch(t *testing.T) {
 }
 
 func TestChunkedUpload_AlreadyExists_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -841,6 +859,7 @@ func TestChunkedUpload_AlreadyExists_ChecksumMismatch(t *testing.T) {
 }
 
 func TestChunkedUploadStatus_ByFilename(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -869,6 +888,7 @@ func TestChunkedUploadStatus_ByFilename(t *testing.T) {
 }
 
 func TestChunkedDigestConsistency(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -916,6 +936,7 @@ func TestChunkedDigestConsistency(t *testing.T) {
 }
 
 func TestChunkedDownload_EmptyFile(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -942,6 +963,7 @@ func TestChunkedDownload_EmptyFile(t *testing.T) {
 }
 
 func TestChunkedDownload_RangeNotSatisfiable(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -964,6 +986,7 @@ func TestChunkedDownload_RangeNotSatisfiable(t *testing.T) {
 }
 
 func TestChunkedUpload_Resume(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -1059,6 +1082,7 @@ func helperChunkedUploadResumeVerifyDownload(t *testing.T, url string, fileData 
 }
 
 func TestChunkedUpload_RetryExhausted(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -1165,6 +1189,7 @@ func TestRecordCompleteMetadata_FileMTime(t *testing.T) {
 }
 
 func TestChunkedUpload_ContextCancelled(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 
@@ -1239,6 +1264,7 @@ func TestMergeAndRenameFile_FullFlow(t *testing.T) {
 // TestUploadInit_RejectsNestedUploadID 验证 F4 修复：upload_id 含路径分隔符/穿越
 // 会被拒绝（此前未认证者可构造 "ak-A/evil" 跨 owner 前缀会话 / .__chunked__ 穿越）。
 func TestUploadInit_RejectsNestedUploadID(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerWithChunked(t, nil)
 	defer cleanup()
 

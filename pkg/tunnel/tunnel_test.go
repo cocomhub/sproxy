@@ -30,6 +30,7 @@ const testHexKey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 var _ = GenerateKey
 
 func TestNewLocalHandler_returnsUnauthorizedOnEmptyKey(t *testing.T) {
+	t.Parallel()
 	// 认证驱动：无 ctx 密钥 → 401
 	h := NewLocalHandler(nil, nil, nil)
 	rec := httptest.NewRecorder()
@@ -41,6 +42,7 @@ func TestNewLocalHandler_returnsUnauthorizedOnEmptyKey(t *testing.T) {
 }
 
 func TestNewLocalHandlerForwardsAbsoluteURL(t *testing.T) {
+	t.Parallel()
 	// 创建一个测试用后端服务器
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Custom", "hello")
@@ -77,6 +79,7 @@ func TestNewLocalHandlerForwardsAbsoluteURL(t *testing.T) {
 }
 
 func TestNewLocalHandler_dispatchesRelativeURL(t *testing.T) {
+	t.Parallel()
 	// 本地 handler：模拟文件列表
 	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -113,6 +116,7 @@ func TestNewLocalHandler_dispatchesRelativeURL(t *testing.T) {
 }
 
 func TestNewLocalHandler_dispatchesWithQueryAndHeaders(t *testing.T) {
+	t.Parallel()
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
@@ -149,6 +153,7 @@ func TestNewLocalHandler_dispatchesWithQueryAndHeaders(t *testing.T) {
 }
 
 func TestNewLocalHandler_dispatchesUploadBody(t *testing.T) {
+	t.Parallel()
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if !bytes.Contains(body, []byte("file-content")) {
@@ -185,6 +190,7 @@ func TestNewLocalHandler_dispatchesUploadBody(t *testing.T) {
 }
 
 func TestNewLocalHandler_forwardsAbsoluteURL(t *testing.T) {
+	t.Parallel()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("external-response"))
 	}))
@@ -222,6 +228,7 @@ func TestNewLocalHandler_forwardsAbsoluteURL(t *testing.T) {
 }
 
 func TestNewLocalHandler_withNil_actsLikeExternalForward(t *testing.T) {
+	t.Parallel()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -250,6 +257,7 @@ func TestNewLocalHandler_withNil_actsLikeExternalForward(t *testing.T) {
 }
 
 func TestIsRelativePath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		url      string
 		expected bool
@@ -273,6 +281,7 @@ func TestIsRelativePath(t *testing.T) {
 }
 
 func TestNewLocalHandler_responseHeadersInMetadata(t *testing.T) {
+	t.Parallel()
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Custom", "val")
 		w.Header().Set("X-File-Checksum", "deadbeef")
@@ -308,6 +317,7 @@ func TestNewLocalHandler_responseHeadersInMetadata(t *testing.T) {
 }
 
 func TestNewClient_rejectsInvalidKey(t *testing.T) {
+	t.Parallel()
 	_, err := NewClient("short", "http://localhost/tunnel", 0, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid key")
@@ -318,6 +328,7 @@ var _ = testKey
 var _ = GenerateKey
 
 func TestEncryptDecrypt_Roundtrip(t *testing.T) {
+	t.Parallel()
 	plaintext := []byte("hello encryption!")
 	ciphertext, err := Encrypt(testKey, plaintext, []byte(AADMeta))
 	if err != nil {
@@ -333,6 +344,7 @@ func TestEncryptDecrypt_Roundtrip(t *testing.T) {
 }
 
 func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
+	t.Parallel()
 	ciphertext, err := Encrypt(testKey, nil, []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
@@ -347,6 +359,7 @@ func TestEncryptDecrypt_EmptyPlaintext(t *testing.T) {
 }
 
 func TestEncryptDecrypt_ShortKey(t *testing.T) {
+	t.Parallel()
 	_, err := Encrypt([]byte("short"), []byte("data"), []byte(AADMeta))
 	if err == nil {
 		t.Error("expected error for short key")
@@ -358,6 +371,7 @@ func TestEncryptDecrypt_ShortKey(t *testing.T) {
 }
 
 func TestEncryptDecrypt_AADMismatch(t *testing.T) {
+	t.Parallel()
 	ciphertext, err := Encrypt(testKey, []byte("secret"), []byte(AADMeta))
 	if err != nil {
 		t.Fatal(err)
@@ -460,6 +474,7 @@ func tunnelRoundTripDo(b *testing.B, tun *Tunnel, payload []byte) {
 
 // Test metadata frame encoding/decoding roundtrip
 func TestMetadataFrameRoundtrip(t *testing.T) {
+	t.Parallel()
 	meta := []byte(`{"method":"POST","url":"/upload","headers":{"X-File-Checksum":"abc"}}`)
 	frame, err := encodeMetadataFrame(testKey, meta)
 	if err != nil {
@@ -478,6 +493,7 @@ func TestMetadataFrameRoundtrip(t *testing.T) {
 
 // Test that local handler receives the correct request method and URL
 func TestNewLocalHandler_preservesMethodAndURL(t *testing.T) {
+	t.Parallel()
 	var capturedMethod, capturedURL string
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
@@ -524,6 +540,7 @@ func TestNewLocalHandler_preservesMethodAndURL(t *testing.T) {
 
 // Test that handler body io.Reader works with multipart form parsing
 func TestNewLocalHandler_bodyMultiPartCompatible(t *testing.T) {
+	t.Parallel()
 	boundary := "testBoundary123"
 	multipartBody := fmt.Sprintf("--%s\r\nContent-Disposition: form-data; name=\"file\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--%s--\r\n", boundary, boundary)
 
@@ -574,6 +591,7 @@ func TestNewLocalHandler_bodyMultiPartCompatible(t *testing.T) {
 
 // Test that large streaming body works through dispatchLocal
 func TestNewLocalHandler_largeStreamingBody(t *testing.T) {
+	t.Parallel()
 	// 1MB payload
 	payload := bytes.Repeat([]byte("A"), 1024*1024)
 
@@ -614,6 +632,7 @@ func TestNewLocalHandler_largeStreamingBody(t *testing.T) {
 
 // Test that response headers with multiple values are preserved
 func TestNewLocalHandler_multiValueResponseHeaders(t *testing.T) {
+	t.Parallel()
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Set-Cookie", "session=abc")
 		w.Header().Add("Set-Cookie", "token=xyz")
@@ -647,6 +666,7 @@ func TestNewLocalHandler_multiValueResponseHeaders(t *testing.T) {
 
 // Test the full roundtrip: request and response metadata
 func TestNewLocalHandler_metadataRoundtrip(t *testing.T) {
+	t.Parallel()
 	// Custom request headers should arrive intact
 	var gotRequestHeaders map[string]string
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +711,7 @@ func TestNewLocalHandler_metadataRoundtrip(t *testing.T) {
 
 // Test that empty body works in dispatchLocal
 func TestNewLocalHandler_emptyBody(t *testing.T) {
+	t.Parallel()
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -724,6 +745,7 @@ func TestNewLocalHandler_emptyBody(t *testing.T) {
 
 // Verify that a relative URL without a leading slash is NOT dispatched locally
 func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
+	t.Parallel()
 	localWasCalled := false
 	local := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		localWasCalled = true
@@ -757,6 +779,7 @@ func TestNewLocalHandler_rejectsNonLeadingSlash(t *testing.T) {
 // traceparent 头复制到外层 /tunnel 请求，使服务端外层 requestLogMiddleware 记录的
 // 外层请求 trace_id 与客户端 trace 关联（全链路追踪在隧道模式下不断链）。
 func TestClientDo_PropagatesTraceparentToOuterRequest(t *testing.T) {
+	t.Parallel()
 	var gotTraceparent string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTraceparent = r.Header.Get("Traceparent")
@@ -783,6 +806,7 @@ func TestClientDo_PropagatesTraceparentToOuterRequest(t *testing.T) {
 
 // TestReplayProtector_Validate 测试重放保护器的验证逻辑。
 func TestReplayProtector_Validate(t *testing.T) {
+	t.Parallel()
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 	jti := "abcdef0123456789abcdef0123456789"
@@ -815,6 +839,7 @@ func TestReplayProtector_Validate(t *testing.T) {
 
 // TestReplayProtector_Cleanup 测试过期条目清理。
 func TestReplayProtector_Cleanup(t *testing.T) {
+	t.Parallel()
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 
@@ -843,6 +868,7 @@ func TestReplayProtector_Cleanup(t *testing.T) {
 
 // TestReplayProtector_Len 测试 Len 方法。
 func TestReplayProtector_Len(t *testing.T) {
+	t.Parallel()
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 
@@ -858,6 +884,7 @@ func TestReplayProtector_Len(t *testing.T) {
 
 // TestReplayProtector_InvalidJTI 测试无效 jti 的各种情况。
 func TestReplayProtector_InvalidJTI(t *testing.T) {
+	t.Parallel()
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 
@@ -882,6 +909,7 @@ func TestReplayProtector_InvalidJTI(t *testing.T) {
 
 // TestReplayProtector_IATBoundary 测试 IAT 窗口边界条件。
 func TestReplayProtector_IATBoundary(t *testing.T) {
+	t.Parallel()
 	rp := NewReplayProtector()
 	now := time.Now().Unix()
 
@@ -899,6 +927,7 @@ func TestReplayProtector_IATBoundary(t *testing.T) {
 }
 
 func TestResponseJSON(t *testing.T) {
+	t.Parallel()
 	resp := Response{
 		Proto:         "HTTP/1.1",
 		Status:        200,
@@ -924,6 +953,7 @@ func TestResponseJSON(t *testing.T) {
 // 非 sk- 前缀等（I-1：客户端派生与服务端 HKDF info 共用的单一解析实现）。
 // 随机段接受标准 32hex 与 legacy 16hex 双兼容（与 pkg/accesskey.ParseMesh 同语料）。
 func TestAccessKeyMesh(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		ak   string
 		want string
