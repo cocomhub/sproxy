@@ -64,6 +64,14 @@ type ChunkStatusResponse struct {
 	FileChecksum  string `json:"file_checksum,omitempty"`
 	Filename      string `json:"filename,omitempty"`
 	Message       string `json:"message,omitempty"`
+	// —— 服务端写入阶段进度（进度可视化二期 T4，2026-11-10）——
+	// 客户端（sdserver 进度页）轮询本接口即可展示「服务端加密 / 远端卷上传」两阶段推进，
+	// 与客户端侧的「分块上传」阶段一起构成完整三段视图。全部 omitempty ⇒ **向后兼容**。
+	Stage        string `json:"stage,omitempty"`
+	EncryptDone  int64  `json:"encrypt_done,omitempty"`
+	EncryptTotal int64  `json:"encrypt_total,omitempty"`
+	RemoteDone   int64  `json:"remote_done,omitempty"`
+	RemoteTotal  int64  `json:"remote_total,omitempty"`
 }
 
 // UploadSessionInfo 是 GET /upload/sessions 列表中单个会话的信息条目。

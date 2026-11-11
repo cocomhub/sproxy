@@ -1848,6 +1848,10 @@ func (wc writeCtx) sourceReplayable() bool { return wc.sourcePath != "" }
 //   - deliverInMemory：直接把内存密文交内层（无本地副本）。
 func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleavedUpload, wc writeCtx) shardseal.ChunkSink {
 	mt := s.blobMTime(wc.mtime)
+	// 加密阶段进度（二期 T2，2026-11-10 用户要求）：加密器**逐块交付**（sink 串行调用），
+	// 每交付一块就上报「已加密字节 / 总字节」⇒ 进度页可显示「加密 42%（1.9/4.6GB）」。
+	// 未注入回调时 ReportUploadProgress 静默 no-op（零回归）。
+	var encDone atomic.Int64
 	return func(name string, blob []byte) error {
 		// **块级并发**：sink 只做「落本地/拷内存 + 登记 + 投递」，上传由 worker 并行执行。
 		// 块级字段必须用**局部变量**（此前是 iu.chunkMD5 共享字段，并发下会串值）。
@@ -1871,6 +1875,10 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 			return serr
 		}
 		s.advanceUpload(wc.upToken, int64(len(blob)))
+		// 注：`len(blob)` 是**密文物理字节**（含 nonce/tag/padding）⇒ 累加会**超过**明文 size。
+		// 进度展示必须按**明文口径**（否则 UI 会出现「106%」）⇒ 夹取到 wc.size。
+		done := min(encDone.Add(int64(len(blob))), wc.size)
+		syncpkg.ReportUploadProgress(ctx, syncpkg.StageEncrypt, done, wc.size)
 		return nil
 	}
 }

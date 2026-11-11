@@ -578,6 +578,11 @@ type Service struct {
 	// 回退复制用例注入失败（返回 ENOTSUP 等）；生产路径永不设置（同 deleteBeforeRemoveHook
 	// 模式，字段挂实例非包级避免并行串扰）。
 	linkFunc func(oldRel, newRel string) error
+	// uploadProgress 是**服务端写入阶段进度**注册表（进度可视化二期 T4，2026-11-10）：
+	// 把卷层上报的 encrypt/remote 阶段进度按逻辑路径暂存，供 GET /upload/status 读出。
+	// **惰性初始化**（见 progressRegistry）⇒ 无需改动任何既有构造函数；**只做可观测**，不参与写入逻辑。
+	uploadProgress     *uploadProgressRegistry
+	uploadProgressOnce sync.Once
 	// index 是按 owner 维度的文件搜索索引（roadmap P0）：首次使用全量构建 + 写路径
 	// 增量维护；nil 仅存在于直接零值构造的 Service（测试/旧装配不触达搜索路径时）。
 	index *searchIndex

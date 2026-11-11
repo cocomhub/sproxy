@@ -762,6 +762,13 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 		Completed     bool   `json:"completed"`
 		FileChecksum  string `json:"file_checksum"`
 		Message       string `json:"message"`
+		// 服务端写入阶段进度（进度可视化二期 T4）：供调用方（sdserver 进度页）展示
+		// 「服务端加密 / 远端卷上传」两阶段。全部可选（旧服务端不返回 ⇒ 零值，向后兼容）。
+		Stage        string `json:"stage"`
+		EncryptDone  int64  `json:"encrypt_done"`
+		EncryptTotal int64  `json:"encrypt_total"`
+		RemoteDone   int64  `json:"remote_done"`
+		RemoteTotal  int64  `json:"remote_total"`
 	}
 	if json.NewDecoder(io.LimitReader(statusResp.Body, 1<<20)).Decode(&statusData) != nil || !statusData.Success {
 		statusResp.Body.Close()

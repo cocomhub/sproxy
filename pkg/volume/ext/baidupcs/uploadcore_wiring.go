@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"time"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+
 	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs/uploadcore"
 )
 
@@ -60,6 +62,12 @@ func (s *Storage) uploadStaged(ctx context.Context, key, remote string, st *stag
 	defer release()
 
 	mode := s.coreMode
+	// 远端卷上传阶段进度（二期 T3）：起点 0 / 终点 size（与加密阶段同为**明文口径**，便于 UI 分区）。
+	// 未注入回调时 ReportUploadProgress 静默 no-op（零回归）。
+	if st != nil && st.size > 0 {
+		syncpkg.ReportUploadProgress(ctx, syncpkg.StageRemote, 0, st.size)
+		defer syncpkg.ReportUploadProgress(ctx, syncpkg.StageRemote, st.size, st.size)
+	}
 	if mode == "" {
 		mode = "auto"
 	}
