@@ -206,6 +206,10 @@ func ScanTargetsFromSet(l VolumeLister) []ScanTarget {
 		}
 		// **能力断言必须穿透装饰链**（Guard/Wrap/Capacity…）：用受认可的 `syncpkg.Innermost`，
 		// 不在业务代码里手写 Inner 链遍历（与 `volume_inspect.go` 同一做法，R22 门禁守）。
+		//
+		// 为什么必须解包：11 个装饰器当前**都不转发** `StorageInspector`/`TreeInspector`
+		// （见 docs/decorator-capability-forwarding.md）⇒ 直接断言装饰后的 FS 恒 false。
+		// 根治（把审查能力下沉到 `pkg/sync`，使其下方装饰器也能转发）见该文档 §3.5/§4。
 		inner := syncpkg.Innermost(raw)
 		if _, ok := volume.AssertStorageInspector(inner); !ok {
 			continue
