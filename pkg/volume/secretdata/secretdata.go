@@ -215,7 +215,16 @@ type metaEntry struct {
 	mtime    int64  // 逻辑层 mtime（meta 内原始值，不被 blob mtime 打散影响）
 	dirSeg   string // 随机容器目录名（5-30）
 	metaName string // 文件 meta 加密 blob 名（含 z 标记）
-	meta     *shardseal.Meta
+	// origSHA256 是**热字段**：整文件明文 SHA-256（从 `meta.Original.SHA256` 提升）。
+	// 为什么要提升（P1，2026-11-12）：`Stat` 要自报 checksum，若为此把整个 `meta`
+	// （含 blocklets，单文件实测可常驻 78 MB）读进内存，就把热路径拖进了冷数据。
+	// meta 为 nil 时本字段仍可用 ⇒ 热路径零加载。
+	origSHA256 string
+
+	// meta 是**冷结构**（Chunks/Blocklets/Parity/...），**可为 nil**：
+	// 快照不再承载它（P1），只有真正需要时（openRead/OpenRangeRead/纠删恢复/GC 确认）
+	// 才由 ensureEntryMeta 从 metacache/meta blob 惰性加载。
+	meta *shardseal.Meta
 	// dataDir 是数据分块所在的容器目录。默认 = dirSeg（自包含 blob）；去重引用文件时
 	// 指向卷级去重容器（分块在该容器，meta blob 仍在 dirSeg）。"" = 与 dirSeg 相同。
 	dataDir string
@@ -225,6 +234,17 @@ type metaEntry struct {
 	// parity 的落盘长度；去重引用条目只计本条目 meta blob，共享内容归 dedupBlob 计数）。
 	// 由写路径/加载路径填充，供 TrueUsage/TrueSize 报告真值（trueusage.go）。
 	phys int64
+}
+
+// hotOrigSHA256 返回整文件明文 SHA-256：热字段优先，必要时回退到已加载的 meta。
+func (e *metaEntry) hotOrigSHA256() string {
+	if e.origSHA256 != "" {
+		return e.origSHA256
+	}
+	if e.meta != nil {
+		return e.meta.Original.SHA256
+	}
+	return ""
 }
 
 // dedupBlob 是去重内容池条目：一个整文件内容对应一个共享加密分块 blob 与其引用计数。
@@ -848,8 +868,9 @@ func entryOf(rel, seg string, size, mtime int64, isDir bool) syncpkg.Entry {
 // 2026-10-27-remote-derived-state-cache.md §6）。目录条目不携带 checksum（目录无哈希）。
 func entryOfChecked(rel, seg string, e *metaEntry) syncpkg.Entry {
 	ent := entryOf(rel, seg, e.size, e.mtime, false)
-	if e.meta != nil && e.meta.Original.SHA256 != "" {
-		ent.Checksum = e.meta.Original.SHA256
+	// 热字段优先（快照已携带，无需加载冷结构 meta）。
+	if ck := e.hotOrigSHA256(); ck != "" {
+		ent.Checksum = ck
 		ent.ChecksumType = "sha256"
 		ent.Checksums = map[string]string{"sha256": ent.Checksum}
 	}
@@ -971,9 +992,10 @@ func (s *SecretdataFS) Stat(ctx context.Context, rel string) (*syncpkg.Entry, er
 	}
 	// Stat 也带整文件 SHA-256（S2，2026-10-27）：与 ListDir 同源（内存 meta 直取），
 	// 但 meta 可能为 nil（旧条目/降级路径）⇒ 防御：nil 时 checksum 留空（调用方 stat 兜底）。
+	// P1：checksum 优先取热字段 origSHA256（快照携带）——**不**为自报 checksum 加载冷结构 meta。
 	ent := &syncpkg.Entry{Name: path.Base(rel), Path: rel, Size: e.size, MTime: e.mtime, IsDir: false}
-	if e.meta != nil && e.meta.Original.SHA256 != "" {
-		ent.Checksum = e.meta.Original.SHA256
+	if ck := e.hotOrigSHA256(); ck != "" {
+		ent.Checksum = ck
 		ent.ChecksumType = "sha256"
 		ent.Checksums = map[string]string{"sha256": ent.Checksum}
 	}
