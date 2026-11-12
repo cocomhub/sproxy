@@ -218,19 +218,56 @@ func (s *SecretdataFS) readDirMetaFast(ctx context.Context, rel string) (*dirMet
 // ensureEntryMeta 确保索引条目带 meta：缺失（旧条目/快照降级）时从权威 blob 回源自愈，
 // 并回填精简缓存 —— 保证「启动后访问文件」在 meta 缺失时仍能正确读出内容，且下次启动
 // 直接命中缓存。任一失败返回错误（调用方按既有语义处理）。
+// ensureEntryMeta 确保条目的**冷结构** `meta` 已加载（按需/惰性），并接入内存缓存 L1b。
+//
+// P2（2026-11-12）：命中的是「**共享实例 + 字节预算上限**」的缓存，而不是每次重新下载解释；
+// 更重要的是：**淘汰时必须回清 `e.meta`** —— 否则读过的文件会永久常驻，读量大时回到 OOM。
 func (s *SecretdataFS) ensureEntryMeta(ctx context.Context, e *metaEntry) error {
 	s.mu.RLock()
 	loaded := e.meta != nil
+	rel := e.rel
+	blobKey := path.Join(e.dirSeg, e.metaName)
 	s.mu.RUnlock()
 	if loaded {
 		return nil
 	}
-	m, _, merr := s.readFileMetaFast(ctx, path.Join(e.dirSeg, e.metaName))
+	// L1b 命中（键 = 逻辑 rel）⇒ 直接挂共享实例：零远端调用 + 零反序列化。
+	if m, ok := s.metaCache.get(rel); ok && rel != "" {
+		s.mu.Lock()
+		e.meta = m
+		s.mu.Unlock()
+		return nil
+	}
+	m, _, merr := s.readFileMetaFast(ctx, blobKey)
 	if merr != nil {
 		return merr
 	}
+	if rel == "" {
+		// 无 rel（非索引条目）⇒ 不入缓存（避免空键污染）。
+		s.mu.Lock()
+		e.meta = m
+		s.mu.Unlock()
+		return nil
+	}
+	evicted := s.metaCache.put(rel, m)
 	s.mu.Lock()
 	e.meta = m
+	s.clearEvictedMetaLocked(evicted, e)
 	s.mu.Unlock()
 	return nil
+}
+
+// clearEvictedMetaLocked 把被 L1b 淘汰的条目的 `meta` 置空（**调用方须持 s.mu**）。
+//
+// 为什么必须做：`metaEntry.meta` 是对 meta 实例的**强引用**。若只把它从 LRU 中移除而不清引用，
+// 实例仍活 ⇒ 常驻量随「被读过的文件数」无限增长（L1b 的上限形同虚设）⇒ 回到 OOM。
+// 条目本身仍留在 `s.index`（只是冷结构回到未加载态，下次访问会重新走 L1b/远端）。
+//
+// self 排除：正在挂载的条目不该被自己这一次的 put 清掉（同 rel 重新 put 时会出现）。
+func (s *SecretdataFS) clearEvictedMetaLocked(evicted []string, self *metaEntry) {
+	for _, vrel := range evicted {
+		if old, ok := s.index[vrel]; ok && old != self {
+			old.meta = nil
+		}
+	}
 }

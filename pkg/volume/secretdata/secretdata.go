@@ -234,6 +234,12 @@ type metaEntry struct {
 	// parity 的落盘长度；去重引用条目只计本条目 meta blob，共享内容归 dedupBlob 计数）。
 	// 由写路径/加载路径填充，供 TrueUsage/TrueSize 报告真值（trueusage.go）。
 	phys int64
+
+	// rel 是本条目的逻辑相对路径（= 它在 `s.index` 中的键）。
+	// 为什么要存（P2，2026-11-12）：元数据内存缓存 L1b 按 rel 索引，**淘汰时**需要
+	// 回到 `s.index[rel]` 把 `meta` 置空 —— 否则 `e.meta` 会脱离缓存上限约束而持续累积
+	// （读 100 个大文件就回退到 OOM）。由 `commitLocked`（唯一安装点）与加载路径填充。
+	rel string
 }
 
 // hotOrigSHA256 返回整文件明文 SHA-256：热字段优先，必要时回退到已加载的 meta。
@@ -330,6 +336,12 @@ type SecretdataFS struct {
 	// 无缓存（未装配/预算<=0）时 nil，读路径零回归。写/删后经 invalidatePrefix 失效对应文件
 	// 条目，防陈旧明文被后续读命中。
 	blockCache *blockletCache
+
+	// metaCache 是**元数据内存缓存 L1b**（2026-11-12，P2，见 meta_l1b.go）：按字节预算 LRU，
+	// 键为逻辑 rel。两个作用：①同一文件重复读 ⇒ 零远端 + 零反序列化；
+	// ②给「按需加载后被挂到 `metaEntry.meta` 的常驻量」设**硬上限**（淘汰时须回清 `e.meta`）。
+	// nil = 关闭缓存（各方法对 nil 安全 ⇒ 退化为每次直读，零回归）。
+	metaCache *metaEntryCache
 	// spanCache 是本机**磁盘**块密文跨度缓存（2026-10-22，见 span_disk_cache.go）：staging
 	// 目录 + 字节预算 + 定期清理 + 空间不足自动降级。nil = 未装配（默认关闭零回归）。
 	spanCache *spanDiskCache
@@ -507,6 +519,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		loadGate:   make(chan struct{}, maxParallelLoads(&alg)),
 		dedupPool:  map[string]*dedupBlob{},
 		blockCache: newBlockletCache(opts.BlockletCacheBytes.Bytes()),
+		metaCache:  newMetaEntryCache(0),
 	}
 	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
 	attachSpanDiskCache(fs, opts)
@@ -2116,6 +2129,7 @@ func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEnt
 		preInstall()
 	}
 	prev := s.index[wc.rel]
+	e.rel = wc.rel // 单一安装点：把逻辑路径绑定到条目（L1b 淘汰回查需要）
 	s.index[wc.rel] = e
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)
@@ -4028,7 +4042,7 @@ func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string
 	}
 	s.index[rel] = &metaEntry{
 		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName, meta: mm,
-		dataDir: dataDir, baseVersion: mm.BaseVersion,
+		dataDir: dataDir, baseVersion: mm.BaseVersion, rel: rel,
 		phys: physBytesOf(mm, metaBlobLen, dataDir != ""),
 	}
 	addDirKeysLocked(s.dirs, rel)
