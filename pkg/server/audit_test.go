@@ -210,6 +210,7 @@ func findAudit(t *testing.T, buf *bytes.Buffer, action string) map[string]any {
 // ---- audit.go 单元测试 ----
 
 func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	h := &Handlers{auditLogger: slog.New(slog.NewJSONHandler(&buf, nil))}
 	ts := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
@@ -256,6 +257,7 @@ func TestRecordAudit_OutputsStructuredJSON(t *testing.T) {
 }
 
 func TestRecordAudit_AutoActorMeshFromContext(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	h := &Handlers{auditLogger: slog.New(slog.NewJSONHandler(&buf, nil))}
 	ctx := withActor(withMesh(context.Background(), "mesh-b"), "ak-1")
@@ -273,6 +275,7 @@ func TestRecordAudit_AutoActorMeshFromContext(t *testing.T) {
 }
 
 func TestRecordAudit_DefaultTS(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	h := &Handlers{auditLogger: slog.New(slog.NewJSONHandler(&buf, nil))}
 	h.RecordAudit(context.Background(), AuditEvent{
@@ -441,6 +444,7 @@ func TestAuthMiddleware_NoAuthActorEmpty(t *testing.T) {
 // ---- 敏感 handler 记审计 ----
 
 func TestDeleteHandler_RecordsAuditSuccess(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
 	body := []byte("delete-me")
 	writeUploadFile(t, cfgPtr, "to-delete.txt", body)
@@ -476,6 +480,7 @@ func TestDeleteHandler_RecordsAuditSuccess(t *testing.T) {
 }
 
 func TestDeleteHandler_RecordsAuditError_FileNotFound(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/delete?filename=no-such.txt", nil)
@@ -503,6 +508,7 @@ func TestDeleteHandler_RecordsAuditError_FileNotFound(t *testing.T) {
 }
 
 func TestDeleteHandler_RecordsAuditDenied_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
 	writeUploadFile(t, cfgPtr, "keep.txt", []byte("keep"))
 
@@ -528,6 +534,7 @@ func TestDeleteHandler_RecordsAuditDenied_ChecksumMismatch(t *testing.T) {
 }
 
 func TestRenameHandler_RecordsAuditSuccess(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
 	body := []byte("rename-me")
 	writeUploadFile(t, cfgPtr, "old.txt", body)
@@ -563,6 +570,7 @@ func TestRenameHandler_RecordsAuditSuccess(t *testing.T) {
 }
 
 func TestConfigUpdate_RecordsAudit(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
 	body := []byte(`{"log_level":"debug"}`)
 
@@ -590,6 +598,7 @@ func TestConfigUpdate_RecordsAudit(t *testing.T) {
 }
 
 func TestConfigUpdate_RecordsAuditDenied_InvalidValue(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
 	body := []byte(`{"log_level":"bogus"}`)
 
@@ -614,6 +623,7 @@ func TestConfigUpdate_RecordsAuditDenied_InvalidValue(t *testing.T) {
 }
 
 func TestVersionRestore_RecordsAudit(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, func(cfg *Config) {
 		cfg.Versioning.Enabled = true
 		cfg.Versioning.MaxVersions = 10
@@ -669,6 +679,7 @@ func TestVersionRestore_RecordsAudit(t *testing.T) {
 }
 
 func TestVersionDelete_RecordsAudit(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, func(cfg *Config) {
 		cfg.Versioning.Enabled = true
 		cfg.Versioning.MaxVersions = 10
@@ -722,6 +733,7 @@ func TestVersionDelete_RecordsAudit(t *testing.T) {
 }
 
 func TestCloudCancelTask_RecordsAuditError(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
 
 	req, _ := http.NewRequest("POST", url+"/api/cloud/tasks/no-such-id/cancel", nil)
@@ -748,6 +760,7 @@ func TestCloudCancelTask_RecordsAuditError(t *testing.T) {
 }
 
 func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
+	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
 
 	req, _ := http.NewRequest("DELETE", url+"/api/cloud/tasks/no-such-id", nil)
@@ -776,6 +789,7 @@ func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
 // ---- requestlog 带 actor ----
 
 func TestRequestLog_RecordsActor(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = tmpDir
@@ -841,6 +855,7 @@ func TestRequestLog_RecordsActor(t *testing.T) {
 // rename 目标已存在（409）时只记 denied 审计，**不追加假的 success 审计行**
 // （原 executeRename 的 `return err` 在文件存在时 err 恰为 nil，调用方误判成功）。
 func TestRenameHandler_RecordsAuditDenied_NoFalseSuccess(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, auditBuf := newAuditTestServer(t, nil)
 	body := []byte("rename-me")
 	writeUploadFile(t, cfgPtr, "old.txt", body)

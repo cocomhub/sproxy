@@ -18,6 +18,7 @@ import (
 )
 
 func TestMuxOpenAccept(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -73,6 +74,7 @@ func TestMuxOpenAccept(t *testing.T) {
 }
 
 func TestMuxCloseWrite(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -120,6 +122,7 @@ func TestMuxCloseWrite(t *testing.T) {
 }
 
 func TestMuxBidirectionalWrite(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -165,6 +168,7 @@ func TestMuxBidirectionalWrite(t *testing.T) {
 }
 
 func TestMuxMultipleStreams(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -226,6 +230,7 @@ func verifyMuxMultipleStreams(t *testing.T, muxB *mux.Mux, streamsA []mux.Stream
 }
 
 func TestMuxClose(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -262,6 +267,7 @@ func TestMuxClose(t *testing.T) {
 }
 
 func TestMuxAcceptCancel(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -279,6 +285,7 @@ func TestMuxAcceptCancel(t *testing.T) {
 }
 
 func TestMuxAcceptAfterClose(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxB := mux.New(b, mux.RoleListener)
 	muxB.Close()
@@ -292,6 +299,7 @@ func TestMuxAcceptAfterClose(t *testing.T) {
 }
 
 func TestMuxOpenAfterClose(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxA.Close()
@@ -367,6 +375,7 @@ func muxFramePingPongBody(t *testing.T) {
 }
 
 func TestMuxWriteChClosedStream(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -394,6 +403,7 @@ func TestMuxWriteChClosedStream(t *testing.T) {
 }
 
 func TestMuxMetrics(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -409,6 +419,7 @@ func TestMuxMetrics(t *testing.T) {
 // TestMuxSendReceive 验证 mux 基本发送接收正确性。
 // 完整的流控窗口耗尽测试需要 pipe transport 的 sendWindowUpdateUnsafe 支持，当前 pipe 不支持。
 func TestMuxSendReceive(t *testing.T) {
+	t.Parallel()
 	// NOTE: 完整的窗口耗尽测试需要 pipe transport 支持 sendWindowUpdateUnsafe
 	// 与 mux 内部 writeLoop 的交互，此处仅做窗口基本正确的验证。
 	a, b := xfertest.Pipe()
@@ -453,6 +464,7 @@ func TestMuxSendReceive(t *testing.T) {
 
 // TestMuxAcceptChFull_Reject 验证 acceptCh 满时，dialer 侧的 Read 返回错误而非阻塞。
 func TestMuxAcceptChFull_Reject(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -498,6 +510,7 @@ func TestMuxAcceptChFull_Reject(t *testing.T) {
 
 // TestMuxWithMaxStreams 验证 maxStreams 上限生效。
 func TestMuxWithMaxStreams(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	maxStreams := 5
 	muxA := mux.NewWithOpts(a, mux.RoleDialer, mux.WithMaxStreams(maxStreams))
@@ -540,6 +553,7 @@ func TestMuxWithMaxStreams(t *testing.T) {
 
 // TestMuxWithMaxStreams_Bounded 验证 maxStreams 内正常通信，超出后拒绝不阻塞。
 func TestMuxWithMaxStreams_Bounded(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.NewWithOpts(a, mux.RoleDialer)
 	muxB := mux.NewWithOpts(b, mux.RoleListener)
@@ -582,6 +596,7 @@ func TestMuxWithMaxStreams_Bounded(t *testing.T) {
 // TestRetransmitQueue_Exhausted 验证重传耗尽后 mux 关闭。
 // 先建立流再关闭底层连接，使 Stream.Write 入重传队列，最终耗尽触发 mux.Close。
 func TestRetransmitQueue_Exhausted(t *testing.T) {
+	t.Parallel()
 	c, s := xfertest.Pipe()
 	dm := mux.New(c, mux.RoleDialer)
 	lm := mux.New(s, mux.RoleListener)
@@ -622,6 +637,7 @@ func TestRetransmitQueue_Exhausted(t *testing.T) {
 
 // TestRetransmitQueue_WriteAfterClose 验证 mux 关闭后写入返回错误。
 func TestRetransmitQueue_WriteAfterClose(t *testing.T) {
+	t.Parallel()
 	c, s := xfertest.Pipe()
 	dm := mux.New(c, mux.RoleDialer)
 	lm := mux.New(s, mux.RoleListener)
@@ -642,6 +658,7 @@ func TestRetransmitQueue_WriteAfterClose(t *testing.T) {
 
 // TestRetransmitQueue_Concurrent 验证并发写入与重传队列操作不产生 data race。
 func TestRetransmitQueue_Concurrent(t *testing.T) {
+	t.Parallel()
 	dm, lm := newMuxPair(t)
 	ctx := t.Context()
 

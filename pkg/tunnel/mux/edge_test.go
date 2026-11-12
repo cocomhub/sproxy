@@ -81,6 +81,7 @@ func openStreamWithAccept(t *testing.T, dm, lm *mux.Mux, ctx context.Context) (s
 }
 
 func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
+	t.Parallel()
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
 
@@ -113,6 +114,7 @@ func TestStream_ReadEOFAfterCloseWrite(t *testing.T) {
 }
 
 func TestFlowControl_WriteBlocked(t *testing.T) {
+	t.Parallel()
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, _ := openStreamWithAccept(t, dm, lm, ctx)
 
@@ -129,6 +131,7 @@ func TestFlowControl_WriteBlocked(t *testing.T) {
 
 // TestWithAcceptChSize 验证 WithAcceptChSize 选项
 func TestWithAcceptChSize(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.NewWithOpts(a, mux.RoleDialer)
 	muxB := mux.NewWithOpts(b, mux.RoleListener, mux.WithAcceptChSize(2))
@@ -166,6 +169,7 @@ func TestWithAcceptChSize(t *testing.T) {
 
 // TestStream_Abort_ImmediateAndIdempotent 验证 Abort 立即返回且幂等（I28）。
 func TestStream_Abort_ImmediateAndIdempotent(t *testing.T) {
+	t.Parallel()
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
 	defer accepted.Close()
@@ -191,6 +195,7 @@ func TestStream_Abort_ImmediateAndIdempotent(t *testing.T) {
 // TestStream_Abort_ReadWriteReturnErrClosed 验证 Abort 后 Read/Write 立即返回
 // ErrConnClosed（I28）。
 func TestStream_Abort_ReadWriteReturnErrClosed(t *testing.T) {
+	t.Parallel()
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, accepted := openStreamWithAccept(t, dm, lm, ctx)
 	defer accepted.Close()
@@ -295,6 +300,7 @@ func streamReadDataBeforeCloseBody(t *testing.T) {
 
 // TestHandleFrame_CloseWriteUnknownStream 测试 handleFrame 中 FrameCloseWrite 对未知流的处理
 func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -311,6 +317,7 @@ func TestHandleFrame_CloseWriteUnknownStream(t *testing.T) {
 
 // TestHandleFrame_WindowUpdateUnknownStream …
 func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -329,6 +336,7 @@ func TestHandleFrame_WindowUpdateUnknownStream(t *testing.T) {
 
 // TestHandleFrame_UnknownFrameType …
 func TestHandleFrame_UnknownFrameType(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -345,6 +353,7 @@ func TestHandleFrame_UnknownFrameType(t *testing.T) {
 
 // TestOpenAfterConnClose_Dialer 验证底层连接断开时 Open 返回错误
 func TestOpenAfterConnClose_Dialer(t *testing.T) {
+	t.Parallel()
 	a, _ := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	a.Close()
@@ -361,6 +370,7 @@ func TestOpenAfterConnClose_Dialer(t *testing.T) {
 
 // TestHandleFrame_DuplicateOpen …
 func TestHandleFrame_DuplicateOpen(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	muxB := mux.New(b, mux.RoleListener)
@@ -393,6 +403,7 @@ func TestHandleFrame_DuplicateOpen(t *testing.T) {
 
 // TestHandleFrame_Ping 测试 handleFrame 中 FramePing 的处理（回复 FramePong）
 func TestHandleFrame_Ping(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -409,6 +420,7 @@ func TestHandleFrame_Ping(t *testing.T) {
 
 // TestHandleFrame_Pong 测试 handleFrame 中 FramePong 的处理
 func TestHandleFrame_Pong(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -425,6 +437,7 @@ func TestHandleFrame_Pong(t *testing.T) {
 
 // TestWrite_BiggerThanWindow 测试写超过窗口大小的数据，应触发 writeLen 截断
 func TestWrite_BiggerThanWindow(t *testing.T) {
+	t.Parallel()
 	dm, lm, ctx, _ := newMuxPairWithTimeout(t, 5*time.Second)
 	stream, _ := openStreamWithAccept(t, dm, lm, ctx)
 
@@ -440,6 +453,7 @@ func TestWrite_BiggerThanWindow(t *testing.T) {
 
 // TestHandleFrame_InvalidFrame 测试 handleFrame 对无效帧的处理
 func TestHandleFrame_InvalidFrame(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	muxA := mux.New(a, mux.RoleDialer)
 	defer muxA.Close()
@@ -456,6 +470,7 @@ func TestHandleFrame_InvalidFrame(t *testing.T) {
 
 // TestWriteEmptyPayload 测试写入空数据应直接返回 0, nil
 func TestWriteEmptyPayload(t *testing.T) {
+	t.Parallel()
 	client, server := xfertest.Pipe()
 	t.Cleanup(func() { client.Close(); server.Close() })
 

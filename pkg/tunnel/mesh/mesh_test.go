@@ -152,6 +152,7 @@ func TestDial_FallsBackToRelay(t *testing.T) {
 // TestAutoRegister_GetsSecretAndCleanup：经 mock hub 自动注册拿到 per-node secret，
 // 信令请求携带 X-Node-Secret / X-Node-ID（B2/B3），closer 移除临时节点。
 func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 
@@ -221,6 +222,7 @@ func TestAutoRegister_GetsSecretAndCleanup(t *testing.T) {
 // TestAutoRegister_ExactNode（D1 回归）：exact 模式注册成 nodeID 原样（p2p listen
 // 的被寻址方需稳定 ID 供 --peer 寻址），closer 移除节点。
 func TestAutoRegister_ExactNode(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 	muxHTTP := http.NewServeMux()
@@ -265,6 +267,7 @@ func TestAutoRegister_ExactNode(t *testing.T) {
 // TestAutoRegister_EmptySecretFailsClosed（任务8）：AccessKeySecret 为空时 AutoRegister
 // 直接报错（fail-closed，防止无凭据注册被 hub 静默拒绝后客户端困惑）。
 func TestAutoRegister_EmptySecretFailsClosed(t *testing.T) {
+	t.Parallel()
 	_, err := AutoRegister(t.Context(), AutoRegisterParams{
 		HubURL: "ws://127.0.0.1:1/ws",
 		NodeID: "node-a",
@@ -388,6 +391,7 @@ func (h *miniSignalHub) miniSignalServeSend(w http.ResponseWriter, r *http.Reque
 // TestRunNode_RegistersServicesAndRelays：mesh node 单进程注册 + 服务宣告 +
 // 中继路径（hub 侧 mux Open 流写 dial 帧 → 出口拨号 echo）。EnableWebRTC=false。
 func TestRunNode_RegistersServicesAndRelays(t *testing.T) {
+	t.Parallel()
 	echoAddr := runNodeTestEcho(t)
 	rt, ts, _ := runNodeTestHub(t, false)
 	nodeID := "mesh-node-relay"
@@ -618,6 +622,7 @@ func runNodeTestWebRTCDialEcho(t *testing.T, ts *httptest.Server, nodeID, echoAd
 
 // TestListHubNodes：解析 /api/hub/nodes 返回的节点列表 + Bearer 头 + 401 分支。
 func TestListHubNodes(t *testing.T) {
+	t.Parallel()
 	var gotAuth string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/hub/nodes" {
@@ -659,6 +664,7 @@ func TestListHubNodes(t *testing.T) {
 
 // TestListHubNodes_VirtualIP 校验 /api/hub/nodes 的 virtual_ip 字段被解析为 HubNodeInfo.VIP。
 func TestListHubNodes_VirtualIP(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"node-a","virtual_ip":"100.64.0.2"},{"id":"node-b","virtual_ip":"bad-ip"},{"id":"node-c"}]`))
@@ -735,6 +741,7 @@ func TestRunNode_DiscoveryConnects(t *testing.T) {
 // 链路 = 内存 pipe 上的 mux 对（serve 侧跑 relay.Serve 出口拨 echo，链路池侧由网关
 // 持有）；GatewayConnect 后数据面端到端 echo 回显（拨号帧 → relay.Serve → 出口拨号）。
 func TestGateway_RoutesEstablishedLink(t *testing.T) {
+	t.Parallel()
 	// echo 后端（127.0.0.1 回环）。
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -803,6 +810,7 @@ func TestGateway_RoutesEstablishedLink(t *testing.T) {
 // TestGateway_NoPeerLink：请求一个链路池中没有的 peer → ErrNoPeerLink（调用方回落
 // 常规拨号）。同时覆盖网关对缺参请求（peer/addr 为空）的 bad_request 应答。
 func TestGateway_NoPeerLink(t *testing.T) {
+	t.Parallel()
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	ctx := t.Context()
@@ -819,6 +827,7 @@ func TestGateway_NoPeerLink(t *testing.T) {
 
 // TestGateway_Status：网关拓扑查询返回 node-id + 服务宣告 + 已建直连链路（链路类型）。
 func TestGateway_Status(t *testing.T) {
+	t.Parallel()
 	a, b := xfertest.Pipe()
 	defer a.Close()
 	defer b.Close()
@@ -968,6 +977,7 @@ func runNodeTestWriteEchoTrip(t *testing.T, conn net.Conn, peer, addr string) {
 // TestGateway_RejectsWrongToken：mesh node 配置了信令 token 时，网关拒绝未携带
 // 正确 token 的请求（未授权进程无法复用网关路由）。
 func TestGateway_RejectsWrongToken(t *testing.T) {
+	t.Parallel()
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node", AccessKeySecret: "secret-token"}, nil, nil)
 	ctx := t.Context()
@@ -990,6 +1000,7 @@ func TestGateway_RejectsWrongToken(t *testing.T) {
 // TestGateway_RejectsNonLoopback：网关 fail-closed 拒绝非 loopback 监听地址
 // （杜绝把未认证控制面暴露到 LAN/公网，防被用作开放 mesh 中继）。
 func TestGateway_RejectsNonLoopback(t *testing.T) {
+	t.Parallel()
 	links := newLinkPool()
 	gw := newGateway(links, NodeConfig{NodeID: "local-node"}, nil, nil)
 	ctx := t.Context()
@@ -1008,6 +1019,7 @@ func TestGateway_RejectsNonLoopback(t *testing.T) {
 // TestGateway_BindFailureFallsBackToRandomPort：网关默认端口被占时回落 127.0.0.1:0
 // 随机端口（不终止 mesh node），回落后的网关可用。
 func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
+	t.Parallel()
 	// 占用一个 loopback 端口（模拟默认端口已被同机其他进程/节点占用）。
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1035,6 +1047,7 @@ func TestGateway_BindFailureFallsBackToRandomPort(t *testing.T) {
 // TestGateway_ConcurrentConnectionsOnSameLink：多个连接并发经同一网关复用同一条
 // 已建链路（mux 多路复用），各自 echo 端到端成功。
 func TestGateway_ConcurrentConnectionsOnSameLink(t *testing.T) {
+	t.Parallel()
 	echoAddr := runNodeTestEcho(t)
 	gatewayAddr := runNodeTestGatewayEnv(t, echoAddr)
 
@@ -1111,6 +1124,7 @@ func runNodeTestGatewayEchoOnce(ctx context.Context, gatewayAddr, peer, addr str
 // TestParseDiscoveryPeerID：discovery 拨号临时身份（disc-<base>-<unixnano>）恢复真实
 // node ID；非 disc 前缀 / 无数字尾段 / 空 base 均判非法。
 func TestParseDiscoveryPeerID(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want string
@@ -1140,6 +1154,7 @@ func TestParseDiscoveryPeerID(t *testing.T) {
 // TestLinkPool_RemoveIf：仅当链路池中该 peer 仍指向给定 mux 才移除（防重连竞态
 // 误删新链路——旧链路 serve 返回时若新链路已 set 不误删）。
 func TestLinkPool_RemoveIf(t *testing.T) {
+	t.Parallel()
 	links := newLinkPool()
 	a, b := xfertest.Pipe()
 	m1 := mux.New(a, mux.RoleDialer)
@@ -1220,6 +1235,7 @@ func TestRunNode_FullMeshThreeNodes(t *testing.T) {
 // 拿到 hub 分配的虚拟 IP（供出口 NewVirtualIPDialPolicy 装配 selfVIP）；临时拨号
 // 身份（ExactNode=false）为瞬态，hub 不分配虚拟 IP，reg.VirtualIP 无效。
 func TestAutoRegister_GetsVirtualIP(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	srv := hub.NewHubServer(rt, hub.NewAuthenticator(accesskey.NewRingFromKeyPairs([]accesskey.KeyPair{{Key: testAccessKey, Secret: testSecret}})), nil)
 	muxHTTP := http.NewServeMux()
@@ -1281,6 +1297,7 @@ func TestAutoRegister_GetsVirtualIP(t *testing.T) {
 // req.Peer 为空且 Addr host ∈ 虚拟子网 → 查 vipTable 定位节点 → 复用已建链路写拨号帧
 // → 对端出口 NewVirtualIPDialPolicy 识别 ==selfVIP 且端口 ∈ 白名单 → 改写本机 echo。
 func TestGateway_VirtualIPRoute(t *testing.T) {
+	t.Parallel()
 	// echo 后端（127.0.0.1 回环）。
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1353,6 +1370,7 @@ func TestGateway_VirtualIPRoute(t *testing.T) {
 // TestGateway_VirtualIPUnknownRejected（S-3 回归）校验网关对 vipTable 中不存在的
 // 虚拟 IP 请求拒绝（不猜测 node-id，防地址注入）。
 func TestGateway_VirtualIPUnknownRejected(t *testing.T) {
+	t.Parallel()
 	links := newLinkPool()
 	vipTable := NewVipTable(testVIPSubnet)
 	vipTable.Add(netip.MustParseAddr("100.64.0.5"), "node-b")

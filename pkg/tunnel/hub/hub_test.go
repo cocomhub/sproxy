@@ -15,6 +15,7 @@ import (
 )
 
 func TestRouteTableAddAndRemove(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	a, b := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
@@ -38,6 +39,7 @@ func TestRouteTableAddAndRemove(t *testing.T) {
 // TestRouteTableRemoveIfOwned 验证 ownership 防护：
 // 仅当节点当前绑定到给定 mux 时才移除，防止旧连接误删同名新注册。
 func TestRouteTableRemoveIfOwned(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 
 	// 两个不同的 mux
@@ -76,6 +78,7 @@ func TestRouteTableRemoveIfOwned(t *testing.T) {
 // Remove / RemoveIfOwned 真正移除节点时触发；失败路径（节点不存在 / 所有权
 // 不匹配的 stale identity）不触发；SetRemoveHook(nil) 清除后不再触发。
 func TestRouteTable_RemoveHook(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	newTestMux := func() *mux.Mux {
 		a, _ := xfertest.Pipe()
@@ -141,6 +144,7 @@ func TestRouteTable_RemoveHook(t *testing.T) {
 }
 
 func TestRouteTableConcurrent(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	var wg sync.WaitGroup
 
@@ -164,6 +168,7 @@ func TestRouteTableConcurrent(t *testing.T) {
 }
 
 func TestRouteTableEmptyList(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	nodes := rt.List()
 	if len(nodes) != 0 {
@@ -172,6 +177,7 @@ func TestRouteTableEmptyList(t *testing.T) {
 }
 
 func TestRouteTableAddWithInfo(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	a, b := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
@@ -217,6 +223,7 @@ func TestRouteTableAddWithInfo(t *testing.T) {
 }
 
 func TestRouteTableDuplicateReplace(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	a1, b1 := xfertest.Pipe()
 	m1 := mux.New(a1, mux.RoleDialer)
@@ -236,6 +243,7 @@ func TestRouteTableDuplicateReplace(t *testing.T) {
 }
 
 func TestRouteTableNodeCount(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	if c := rt.NodeCount(); c != 0 {
 		t.Fatalf("expected 0, got %d", c)
@@ -253,6 +261,7 @@ func TestRouteTableNodeCount(t *testing.T) {
 
 // TestRouteTableRemoveReturnsBool 验证 Remove 返回是否真正移除。
 func TestRouteTableRemoveReturnsBool(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	rt.Add("node-1", nil)
 	if !rt.Remove("node-1") {
@@ -265,6 +274,7 @@ func TestRouteTableRemoveReturnsBool(t *testing.T) {
 
 // TestRouteTableLookupInfoAbsent 验证 LookupInfo 对不存在的节点返回 false。
 func TestRouteTableLookupInfoAbsent(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 	if _, ok := rt.LookupInfo("nope"); ok {
 		t.Fatal("expected LookupInfo false for unknown node")
@@ -280,6 +290,7 @@ func TestRouteTableLookupInfoAbsent(t *testing.T) {
 // TestRouteTableAddWithInfoAndServices 验证原子写入节点与服务宣告，
 // 以及空 svcs 清除旧宣告的语义。
 func TestRouteTableAddWithInfoAndServices(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 
 	a, _ := xfertest.Pipe()
@@ -313,6 +324,7 @@ func TestRouteTableAddWithInfoAndServices(t *testing.T) {
 // TestRouteTableListServicesStableOrder 验证 ListServices 按 (node, name)
 // 稳定排序（I3），多节点同名服务保持多候选（failover 不破坏）。
 func TestRouteTableListServicesStableOrder(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewRouteTable()
 
 	a1, _ := xfertest.Pipe()
