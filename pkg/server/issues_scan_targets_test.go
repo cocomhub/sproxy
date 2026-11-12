@@ -10,6 +10,7 @@ import (
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
+	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
 // fakeLister 是卷集最小接口的测试替身。
@@ -76,30 +77,31 @@ func TestScanTargetsFromSet_SkipsMissingBackend(t *testing.T) {
 type cleanerFS struct {
 	syncpkg.FS
 	removed int
+	got     []string
 }
 
-func (f *cleanerFS) CleanupStaleDirMeta(_ context.Context, _ string) (int, error) {
+func (f *cleanerFS) CleanupStaleDirMeta(_ context.Context, container string) (int, error) {
+	f.got = append(f.got, container)
 	return f.removed, nil
 }
 
-// wrappingFS 模拟装饰器链（实现 Inner ⇒ Innermost 会下探到最内层）。
-type wrappingFS struct {
-	syncpkg.FS
-	inner syncpkg.FS
-}
-
-func (w *wrappingFS) Inner() syncpkg.FS { return w.inner }
-
-// TestCleanupTargetResolver_InnermostCapability 锁定：解析器经统一卷视图取 FS 并**穿透装饰链**
-// 到最内层，使 `DirMetaCleaner` 断言命中；卷视图缺失/nil 卷集 ⇒ nil（按“暂时失败”处理）。
-// 变异：不做 `Innermost`（直接断言装饰后 FS）⇒ 能力断言恒 false ⇒ 红。
-func TestCleanupTargetResolver_InnermostCapability(t *testing.T) {
+// TestCleanupTargetResolver_DecoratedViewForwardsCapability 锁定：解析器经统一卷视图取 FS 后
+// **直接断言装饰后的 FS**（不再 `Innermost` 解包），且能力在装饰链上**真的转发**到最内层实现。
+//
+// 为什么能不再解包（2026-11-12 收口）：`syncpkg.DirMetaCleaner` 已下沉 `pkg/sync`，R21 门禁
+// 自动枚举它并要求 11 个装饰器全量转发 ⇒ 装饰链不再吞掉该能力。
+//
+// 变异（两类都必须红）：① 去掉任一装饰器的转发方法/断言行 ⇒ R21 门禁红；
+// ② 解析器退回直连后端视图（或解包取错层）⇒ 本用例的"装饰链转发命中"断言红。
+func TestCleanupTargetResolver_DecoratedViewForwardsCapability(t *testing.T) {
 	t.Parallel()
-	want := &cleanerFS{removed: 2}
+	impl := &cleanerFS{removed: 2}
+	// 生产同形的装饰链：trusted.Guard → trusted.Wrap → PrefixFS（中间层）→ 领域实现。
+	view := trusted.Guard(trusted.Wrap(syncpkg.NewPrefixFS(impl, "pre/"), trusted.Options{}))
 	l := &fakeLister{
 		vols: []volume.Volume{{Name: "sd"}, {Name: "plain"}, {Name: "missing"}},
 		vs: map[string]syncpkg.FS{
-			"sd": &wrappingFS{inner: want}, // 装饰器包一层，能力在最内层
+			"sd": view,
 			// "plain" 视图为 nil（取不到）；"missing" 未装配
 			"plain": nil,
 		},
@@ -107,12 +109,19 @@ func TestCleanupTargetResolver_InnermostCapability(t *testing.T) {
 	resolve := CleanupTargetResolver(l)
 
 	got := resolve("sd")
-	cleaner, ok := got.(DirMetaCleaner)
-	if !ok {
-		t.Fatalf("穿透最内层后应命中 DirMetaCleaner，got %T", got)
+	// 锁死「不再解包」契约：返回的必须是**装饰后的视图本身**，而非最内层实现。
+	if got != any(view) {
+		t.Fatalf("解析器应直接返回装饰后的视图（不再解包），got %T", got)
 	}
-	if n, err := cleaner.CleanupStaleDirMeta(t.Context(), "container"); err != nil || n != 2 {
+	cleaner, ok := syncpkg.AssertDirMetaCleaner(got)
+	if !ok {
+		t.Fatalf("装饰后的 FS 应实现 DirMetaCleaner（装饰器必须全量转发），got %T", got)
+	}
+	if n, err := cleaner.CleanupStaleDirMeta(t.Context(), "OypE/abc/ContainerX"); err != nil || n != 2 {
 		t.Fatalf("CleanupStaleDirMeta = (%d, %v)，want (2, nil)", n, err)
+	}
+	if len(impl.got) != 1 || impl.got[0] != "OypE/abc/ContainerX" {
+		t.Fatalf("容器路径应经装饰链原样转发到领域实现，got %v", impl.got)
 	}
 	if resolve("plain") != nil {
 		t.Fatalf("视图为 nil 的卷应返回 nil，got %T", resolve("plain"))

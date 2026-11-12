@@ -381,7 +381,19 @@ func (g *StagingQuotaGateFS) TraceTree(ctx context.Context, rel string, depth in
 	return nil, ErrUnsupported
 }
 
+// ---- 目录 meta 清理能力转发（2026-11-12 能力下沉 pkg/sync 后必须转发）----
+//
+// 与审查能力同口径：装饰器不实现 ⇒ 上层 `fs.(DirMetaCleaner)` 断言恒 false ⇒ 静默降级；
+// 底层未实现 ⇒ ErrUnsupported（调用方按"未实现"处置，而不是让断言失败）。
+func (g *StagingQuotaGateFS) CleanupStaleDirMeta(ctx context.Context, container string) (int, error) {
+	if c, ok := any(g.inner).(DirMetaCleaner); ok {
+		return c.CleanupStaleDirMeta(ctx, container)
+	}
+	return 0, ErrUnsupported
+}
+
 var (
 	_ StorageInspector = (*StagingQuotaGateFS)(nil)
 	_ TreeInspector    = (*StagingQuotaGateFS)(nil)
+	_ DirMetaCleaner   = (*StagingQuotaGateFS)(nil)
 )

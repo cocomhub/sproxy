@@ -7,10 +7,12 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server/issues"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // fakeCleaner 是 DirMetaCleaner 测试替身（记录被调用的容器、可注入错误/删除数）。
@@ -112,6 +114,26 @@ func TestIssuesExecutors_CleanerErrorPropagates(t *testing.T) {
 	it := center.Manager().List(issues.ListFilter{})[0]
 	if it.LastError == "" || it.Attempts != 1 {
 		t.Fatalf("应保留失败原因并累计次数：%+v", it)
+	}
+}
+
+// TestIssuesExecutors_UnsupportedCapabilityMessage 锁定：装饰链对「底层无此能力」返回的
+// `syncpkg.ErrUnsupported` 必须转成**可读的需要人工**原因——装饰器无条件实现接口后，
+// 断言不再能区分能力，ErrUnsupported 是唯一信号（不得直接扼者给人工）。
+func TestIssuesExecutors_UnsupportedCapabilityMessage(t *testing.T) {
+	t.Parallel()
+	center := NewIssueCenter("")
+	execs := NewIssuesExecutors(ExecutorDeps{
+		Resolve: func(string) any { return &fakeCleaner{err: syncpkg.ErrUnsupported} },
+	})
+	center.ReportStorageIssue("baidu", string(issues.KindDirMetaCleanupFailed), "c1", "d", true)
+
+	if res := center.RunIssuesOnce(context.Background(), time.Now().Add(time.Hour), execs); res.Failed != 1 {
+		t.Fatalf("应记为失败（等待退避重试）：%+v", res)
+	}
+	it := center.Manager().List(issues.ListFilter{})[0]
+	if !strings.Contains(it.LastError, "不支持目录 meta 清理") {
+		t.Fatalf("失败原因应写明卷不支持该能力（供人工接入），got %q", it.LastError)
 	}
 }
 
