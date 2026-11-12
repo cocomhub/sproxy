@@ -15,6 +15,7 @@ import (
 )
 
 func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	plaintext := []byte("hello streaming encryption!")
 
@@ -42,6 +43,7 @@ func TestEncryptStream_DecryptStream_Roundtrip(t *testing.T) {
 
 // AAD mismatch test
 func TestEncryptStream_DecryptStream_AADMismatch(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	var buf bytes.Buffer
 	_, err := EncryptStream(key, strings.NewReader("test data"), &buf, []byte(AADStream))
@@ -56,6 +58,7 @@ func TestEncryptStream_DecryptStream_AADMismatch(t *testing.T) {
 }
 
 func TestEncryptStream_DecryptStream_LargePayload(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	// 大于 1 个 chunk 的大 payload
 	plaintext := make([]byte, DefaultChunkSize*3+1234)
@@ -77,6 +80,7 @@ func TestEncryptStream_DecryptStream_LargePayload(t *testing.T) {
 }
 
 func TestEncryptStream_DecryptStream_Empty(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	var buf bytes.Buffer
 	_, err := EncryptStream(key, bytes.NewReader(nil), &buf, []byte(AADStream))
@@ -92,6 +96,7 @@ func TestEncryptStream_DecryptStream_Empty(t *testing.T) {
 }
 
 func TestEncryptStream_ShortKey(t *testing.T) {
+	t.Parallel()
 	_, err := EncryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard, []byte(AADStream))
 	if err == nil {
 		t.Error("expected error for short key")
@@ -99,6 +104,7 @@ func TestEncryptStream_ShortKey(t *testing.T) {
 }
 
 func TestDecryptStream_ShortKey(t *testing.T) {
+	t.Parallel()
 	_, err := DecryptStream([]byte("short"), bytes.NewReader([]byte("data")), io.Discard, []byte(AADStream))
 	if err == nil {
 		t.Error("expected error for short key")
@@ -110,6 +116,7 @@ func TestDecryptStream_ShortKey(t *testing.T) {
 // 跳过此场景的测试。
 
 func TestGetBuf_PutBuf(t *testing.T) {
+	t.Parallel()
 	buf := getBuf(1024)
 	if len(buf) != 1024 {
 		t.Fatalf("expected len 1024, got %d", len(buf))
@@ -124,6 +131,7 @@ func TestGetBuf_PutBuf(t *testing.T) {
 // TestDecryptStream_ChunkTooLarge 构造一个 chunkLen 远超 maxChunkLen 的帧，
 // 确认 DecryptStream 拒绝而不分配大内存。
 func TestDecryptStream_ChunkTooLarge(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32) // 任意 256-bit key，反正解密会因长度先失败
 	var attack bytes.Buffer
 	lenBuf := make([]byte, 4)
@@ -143,6 +151,7 @@ func TestDecryptStream_ChunkTooLarge(t *testing.T) {
 
 // TestDecryptStream_TruncatedFrame 长度后 body 截断，应返回 error 而非死循环。
 func TestDecryptStream_TruncatedFrame(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	var attack bytes.Buffer
 	lenBuf := make([]byte, 4)
@@ -171,6 +180,7 @@ func (m *mockStream) ID() mux.StreamID            { return 0 }
 // TestStreamBodyEncryptedReadBuffer 验证加密模式下 streamBody 的预读缓冲读取正确性。
 // 预加密 1MB 数据，使用小缓冲区（4096B）分多次读取，验证总字节数正确。
 func TestStreamBodyEncryptedReadBuffer(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)
@@ -221,6 +231,7 @@ func TestStreamBodyEncryptedReadBuffer(t *testing.T) {
 
 // TestStreamBodyEncryptedReadBuffer_SmallData 验证小数据场景下加密模式 streamBody 读取正确性。
 func TestStreamBodyEncryptedReadBuffer_SmallData(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatal(err)

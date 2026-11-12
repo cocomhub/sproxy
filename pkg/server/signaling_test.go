@@ -65,6 +65,7 @@ func newSignalTestBroker(t *testing.T) *SignalBroker {
 // 收件箱——FlushSignal 不能只写 messages 而丢 nodes（否则任何一次信令往来都会
 // 让已持久化的节点注册从文件里消失，重启后节点全丢）。
 func TestSignalBroker_FlushSignalPreservesNodes(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	a, _ := xfertest.Pipe()
 	m := mux.New(a, mux.RoleDialer)
@@ -104,6 +105,7 @@ func TestSignalBroker_FlushSignalPreservesNodes(t *testing.T) {
 }
 
 func TestSignalBroker_PostAndPoll(t *testing.T) {
+	t.Parallel()
 	b := newSignalTestBroker(t)
 	// I63：空 poll 长轮询用短超时，避免默认 25s 阻塞拖慢测试（-race 下翻倍）。
 	b.pollTimeout = 100 * time.Millisecond
@@ -146,6 +148,7 @@ func TestSignalBroker_PostAndPoll(t *testing.T) {
 }
 
 func TestSignalBroker_IdentityBinding(t *testing.T) {
+	t.Parallel()
 	b := newSignalTestBroker(t)
 	mux := signalTestMux(b)
 
@@ -194,6 +197,7 @@ func TestSignalBroker_IdentityBinding(t *testing.T) {
 }
 
 func TestSignalBroker_NodeSecret(t *testing.T) {
+	t.Parallel()
 	b := newSignalTestBroker(t)
 	sm := signalTestMux(b) // 命名 sm 避免遮蔽 mux 包（case 4 需用 mux.New）
 
@@ -242,6 +246,7 @@ func TestSignalBroker_NodeSecret(t *testing.T) {
 }
 
 func TestSignalBroker_BadInput(t *testing.T) {
+	t.Parallel()
 	b := newSignalTestBroker(t)
 	mux := signalTestMux(b)
 	// I64：用已注册节点 + 正确 secret，确保「缺少 to」分支真正被命中

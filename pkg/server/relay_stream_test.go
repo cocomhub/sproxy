@@ -28,6 +28,7 @@ import (
 
 // TestRelayStreamHandler_BadJSON 验证非法请求体被拒绝。
 func TestRelayStreamHandler_BadJSON(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream", strings.NewReader("{bad json"))

@@ -32,6 +32,7 @@ import (
 // volumes）→ Volumes[0].Root 停在占位 defaultStorageRoot——装配必须用 cfg.StorageRoot 作默认卷根，
 // 否则存储根静默漂移到 ./storage（单卷零回归红线）。
 func TestResolveDefaultVolumeRoot_F1Placeholder(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = "/data"
 	// Default() 预合成单默认卷（占位 root=defaultStorageRoot），模拟「未配 volumes」形态。
@@ -42,6 +43,7 @@ func TestResolveDefaultVolumeRoot_F1Placeholder(t *testing.T) {
 
 // TestResolveDefaultVolumeRoot_ExplicitRoot 锁定 F1 反例：首卷显式非占位 root 用其本身。
 func TestResolveDefaultVolumeRoot_ExplicitRoot(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = "/data"
 	cfg.Volumes = []VolumeConfig{{Name: "default", Root: "/mnt/x"}}
@@ -52,6 +54,7 @@ func TestResolveDefaultVolumeRoot_ExplicitRoot(t *testing.T) {
 
 // TestResolveDefaultVolumeRoot_EmptyVolumesDefensive 空列表防御：直接回落 StorageRoot。
 func TestResolveDefaultVolumeRoot_EmptyVolumesDefensive(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = "/data"
 	cfg.Volumes = nil
@@ -64,6 +67,7 @@ func TestResolveDefaultVolumeRoot_EmptyVolumesDefensive(t *testing.T) {
 // 覆写）→ assembleVolumes 产出 1 卷 name=default，默认卷根 = cfg.StorageRoot（F1），LAYOUT_VERSION
 // 就位、池 MaxBytes=0（vol_capacity 缺省不限），ACL 缺省开放。
 func TestAssembleVolumes_SingleVolumeDegrades(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = root // Volumes[0].Root 保持占位 defaultStorageRoot
@@ -98,6 +102,7 @@ func TestAssembleVolumes_SingleVolumeDegrades(t *testing.T) {
 // TestAssembleVolumes_F1UsesStorageRootWhenPlaceholder 回归测试（F1 门禁）：storage_root:/data
 // 无 volumes → 装配出的默认卷根 = /data 目录（不漂移到 ./storage，也不创建 ./storage）。
 func TestAssembleVolumes_F1UsesStorageRootWhenPlaceholder(t *testing.T) {
+	t.Parallel()
 	storageRoot := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = storageRoot
@@ -125,6 +130,7 @@ func TestAssembleVolumes_F1UsesStorageRootWhenPlaceholder(t *testing.T) {
 // TestAssembleVolumes_MultiVolumeRoots 多卷根装配：两卷各 OpenRoot（LAYOUT_VERSION 就位）、
 // 各建卷容量池（disk2 MaxBytes=100）、anonymous 预创建在 main（默认卷）根。
 func TestAssembleVolumes_MultiVolumeRoots(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	cfg := Default()
 	cfg.StorageRoot = dirs[0]
@@ -166,6 +172,7 @@ func TestAssembleVolumes_MultiVolumeRoots(t *testing.T) {
 // TestAssembleVolumes_MultiVolumeWithACL 卷 ACL 解析：allow 白名单 / deny 黑名单经 assemble 后
 // Authorize 判定正确；未配 ACL 默认开放。
 func TestAssembleVolumes_MultiVolumeWithACL(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	cfg := Default()
 	cfg.StorageRoot = dirs[0]
@@ -190,6 +197,7 @@ func TestAssembleVolumes_MultiVolumeWithACL(t *testing.T) {
 
 // TestAssembleVolumes_Close 关闭全部卷根（幂等安全：重复 Close 不 panic）。
 func TestAssembleVolumes_Close(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{
@@ -245,6 +253,7 @@ func buildVolSetHandlers(t *testing.T, cfg *Config) *Handlers {
 //  1. owner 全局 Scope 校准到跨卷合计（alice 两卷 user+cloud = 90）；
 //  2. 每卷容量池各自收敛到该卷磁盘占用（main 60 / disk2 30）。
 func TestReconcileVolumes_MultiVolumeDoubleTarget(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	cfg := Default()
 	cfg.StorageRoot = dirs[0]
@@ -285,6 +294,7 @@ func TestReconcileVolumes_MultiVolumeDoubleTarget(t *testing.T) {
 // TestReconcileVolumePool_SingleVolume 单卷 reconcile（RegisterRoutes 装配形态）：owner Scope +
 // 默认卷池双校准，卷池在途预留时跳过（双计保护）。
 func TestReconcileVolumePool_SingleVolume(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.MaxStorageBytes = 10000
@@ -322,6 +332,7 @@ func TestReconcileVolumePool_SingleVolume(t *testing.T) {
 // 对嵌套 user 文件同时产出功能桶键（user）与子目录键（user/videos），adjustVolumePool 只按功能桶
 // 顶层键求和——嵌套文件不双计，卷池 Usage == 物理字节。
 func TestReconcileVolumePool_NestedDirKeyNoDoubleCount(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.MaxStorageBytes = 10000
@@ -350,6 +361,7 @@ func TestReconcileVolumePool_NestedDirKeyNoDoubleCount(t *testing.T) {
 // TestReconcileVolumes_VolumeTypeSmoke 确保 registry.Set 与 pkg/volume 域类型打通（装配产物可直接
 // 作为 volume.AllowedVolumes / OrderCandidates 输入——T4 路由的输入形状）。
 func TestReconcileVolumes_VolumeTypeSmoke(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{

@@ -23,6 +23,7 @@ import (
 
 // TestAuditHandler_ListAfterDelete 验证审计动作（delete）后经 /api/audit 可查到。
 func TestAuditHandler_ListAfterDelete(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, _ := newAuditTestServer(t, nil)
 	body := []byte("audit-me")
 	writeUploadFile(t, cfgPtr, "audit-del.txt", body)
@@ -65,6 +66,7 @@ func TestAuditHandler_ListAfterDelete(t *testing.T) {
 // 先做真实审计动作（delete + rename），再按 action/actor/mesh 精确过滤查询。
 // 精确相等语义本身由 TestAuditRing_Filter* 覆盖；此处黑盒验证 handler 接线。
 func TestAuditHandler_QueryFilters(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, _ := newAuditTestServer(t, nil)
 	body := []byte("filter-me")
 	writeUploadFile(t, cfgPtr, "f-del.txt", body)
@@ -135,6 +137,7 @@ func TestAuditHandler_QueryFilters(t *testing.T) {
 
 // TestAuditHandler_LimitClamp 验证 limit>500 clamp 到 500（返回条数 <= 500）。
 func TestAuditHandler_LimitClamp(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuditTestServer(t, nil)
 	gresp := requestAudit(t, url, "?limit=100000")
 	got := decodeAuditResponse(t, gresp)
@@ -148,6 +151,7 @@ func TestAuditHandler_LimitClamp(t *testing.T) {
 
 // TestAuditHandler_LimitInvalid 验证 limit 非法（非整数）回落默认（200 + 空/子集）。
 func TestAuditHandler_LimitInvalid(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuditTestServer(t, nil)
 	gresp := requestAudit(t, url, "?limit=abc")
 	if gresp.StatusCode != http.StatusOK {
@@ -158,6 +162,7 @@ func TestAuditHandler_LimitInvalid(t *testing.T) {
 
 // TestAuditHandler_SinceInvalid 验证 since 非法返回 400。
 func TestAuditHandler_SinceInvalid(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuditTestServer(t, nil)
 	gresp := requestAudit(t, url, "?since=not-a-time")
 	defer gresp.Body.Close()
@@ -169,6 +174,7 @@ func TestAuditHandler_SinceInvalid(t *testing.T) {
 // TestAuditHandler_NoAuthUnauthorized 验证主 mux（direct 面）无凭据访问
 // /api/audit 返回 401（authMiddleware 保护仍在——localMux 可达不代表直连面降权）。
 func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuditTestServer(t, nil)
 	req, _ := http.NewRequest(http.MethodGet, url+"/api/audit", nil)
 	resp, err := testHTTPClient(t).Do(req)
@@ -186,6 +192,7 @@ func TestAuditHandler_NoAuthUnauthorized(t *testing.T) {
 // 200（隧道加密即认证，与 /api/shares、/api/stats 同模式）——审计是浏览器隧道
 // 模式下的用户面操作，必须隧道可达。
 func TestAuditHandler_LocalMuxReachable(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	var cfgPtr atomic.Pointer[Config]
@@ -228,6 +235,7 @@ func TestAuditHandler_LocalMuxReachable(t *testing.T) {
 // → 内层 localMux /api/audit 返回 200 且能读到真实审计事件。这是「浏览器隧道
 // 模式下审计 tab 可达」的真链路验证，无桩/mock。
 func TestAuditHandler_TunnelRoundTripReachable(t *testing.T) {
+	t.Parallel()
 	url, _ := newTestServerWithAllRoutesCreds(t, nil)
 	helperAuditTunnelRecordDelete(t, url)
 	helperAuditTunnelQuery(t, url)
@@ -291,6 +299,7 @@ func helperAuditTunnelQuery(t *testing.T, url string) {
 // 同时验证 events 序列化为 [] 而非 null：两条关闭路径（ring nil 显式 []AuditEvent{}
 // 与 ring 空 Recent 返回 []）都不得弹出 null。
 func TestAuditHandler_DisabledRingReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	url, _, _ := newAuditTestServer(t, func(cfg *Config) {
 		cfg.Audit.BufferSize = 0 // 显式关闭 ring
 	})
@@ -328,6 +337,7 @@ func TestAuditHandler_DisabledRingReturnsEmpty(t *testing.T) {
 // 2048（默认启用 ring）；&Config{}+SetDefaults 时 BufferSize 保持 0（不被复活）——
 // 显式 0 = 关闭必须可达（加载链 Default→Unmarshal→SetDefaults 不得把 0 改回 2048）。
 func TestAuditHandler_ConfigBufferSize(t *testing.T) {
+	t.Parallel()
 	// 默认加载路径：Default() 已含 Audit.BufferSize=2048，SetDefaults 不改变它。
 	cfg := Default()
 	cfg.SetDefaults()
@@ -346,6 +356,7 @@ func TestAuditHandler_ConfigBufferSize(t *testing.T) {
 //   - 显式 audit.buffer_size=0 → 解析为 0（0=关闭可达，且 Validate 不报错）；
 //   - 空 map 加载 → 默认 2048。
 func TestAuditHandler_LoadFromProviderBufferSize(t *testing.T) {
+	t.Parallel()
 	// 显式 0 关闭：LoadFromProvider 全链（Default→Unmarshal→SetDefaults→Validate）后
 	// BufferSize 必须保持 0。
 	disabled, err := LoadFromProvider(mapProvider{m: map[string]any{
@@ -384,6 +395,7 @@ func readAuditRawBody(t *testing.T, wantStatus int, url, query string) []byte {
 
 // TestAuditHandler_ConfigValidateNegative 验证 Audit.BufferSize 为负被 Validate 拒绝。
 func TestAuditHandler_ConfigValidateNegative(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.Audit.BufferSize = -1
 	if err := cfg.Validate(); err == nil {
@@ -394,6 +406,7 @@ func TestAuditHandler_ConfigValidateNegative(t *testing.T) {
 // TestAuditHandler_SerializeTS 验证事件 TS 经 JSON 序列化为 RFC3339Nano，
 // 且字段使用下划线 json tag（action/actor/.../ts，与前端 auditTableHtml 契约一致）。
 func TestAuditHandler_SerializeTS(t *testing.T) {
+	t.Parallel()
 	ev := AuditEvent{Action: "delete", TS: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}
 	raw, err := json.Marshal(ev)
 	if err != nil {
