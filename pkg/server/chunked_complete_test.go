@@ -110,6 +110,7 @@ func assertChunkedSessionPreserved(t *testing.T, env *ownerChunkedEnv, uploadID 
 // 全文件校验失败 → 返回 mismatch_chunks [idx]（精确列出坏分片）→ 客户端据此只重传坏
 // 分片 → 再次 complete 成功（bitmap 未被清空、skipped 分片保留）。
 func TestCompleteFullVerifyAndMismatchChunks(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := make([]byte, 0, 10000)
 	for i := range 10000 {
@@ -186,6 +187,7 @@ func TestCompleteFullVerifyAndMismatchChunks(t *testing.T) {
 // 一片（越界写污染无法恢复场景），complete 返回 mismatch_chunks 精确列出该片（而非 400
 // 泛化"校验失败"）。只篡改 CI 片内容且 chunk 边界不合法的情形由 full-file 校验兜底。
 func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := bytes.Repeat([]byte("abc"), 3000) // 9 KiB, 3 chunks
 	fileChecksum := sha256Hex(content)
@@ -232,6 +234,7 @@ func TestCompleteMismatch_OverlapFineGrain(t *testing.T) {
 // `action=overwrite / object_type=file / result=success` 且 **Detail 文案固定**的审计——
 // 该文案在审计接缝合并（RecordOverwriteAudit → RecordFileAudit，F41）前后必须逐字不变。
 func TestCompleteOverwriteReleaseUsage(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 1000}
 	env.h.cfgPtr.Load().Versioning.Enabled = true
@@ -333,6 +336,7 @@ func assertOverwriteAuditLine(t *testing.T, out, wantObject, wantDetail string) 
 // 与 TestCompleteFullVerifyAndMismatchChunks 的区别：断言 complete 失败后正式名不存在、
 // 448 字节界限清晰。
 func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := bytes.Repeat([]byte("Z"), 9000) // 3 chunks
 	fileChecksum := sha256Hex(content)
@@ -384,6 +388,7 @@ func TestCompleteBadContent_RejectedAndCleanupState(t *testing.T) {
 // 返回完整 mismatch（含恢复后仍坏的分片），而非错误落盘错误内容；数据可重传前提下补传
 // 后 complete 成功。
 func TestCompleteAfterRecovery_MismatchConsistent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	filename := "recover-complete.bin"
@@ -529,6 +534,7 @@ func helperMismatchConsistentRetransmit(t *testing.T, h2 *Handlers, dir, uploadI
 // 清理或文件被外部删除），complete → 400 + mismatch_chunks == 全部分片（而非 500 或错误
 // 落盘），会话保留供整文件重传。
 func TestCompleteMismatch_TempFileMissing_AllChunksMismatch(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := bytes.Repeat([]byte("Q"), 9000) // 3 chunks
 	fileChecksum := sha256Hex(content)

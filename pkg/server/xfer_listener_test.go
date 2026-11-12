@@ -20,6 +20,7 @@ import (
 // TestXferListenerConfigFromConfig 验证从 server.Config + 凭据 Ring 提取 xfer
 // listener 配置：证书缺省回落 cfg.TLS.*，access_key 派生参数取 Ring 首个存活条目。
 func TestXferListenerConfigFromConfig(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.TLS.CertFile = "/tmp/cert.pem"
 	cfg.TLS.KeyFile = "/tmp/key.pem"
@@ -61,6 +62,7 @@ func TestXferListenerConfigFromConfig(t *testing.T) {
 // TestBuildXferTLSConfig_CertFiles 验证配置了 cert_file/key_file 时构造 listener 侧
 // *tls.Config：非 nil、MinVersion=TLS1.2、Certificates 长度 1。
 func TestBuildXferTLSConfig_CertFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	certFile := filepath.Join(dir, "cert.pem")
 	keyFile := filepath.Join(dir, "key.pem")
@@ -90,6 +92,7 @@ func TestBuildXferTLSConfig_CertFiles(t *testing.T) {
 
 // TestBuildXferTLSConfig_NoCertFails 验证无任何证书配置时返回 error（fail-closed）。
 func TestBuildXferTLSConfig_NoCertFails(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
@@ -107,6 +110,7 @@ func TestBuildXferTLSConfig_NoCertFails(t *testing.T) {
 // TestHubXferKey_FromFirstAccessKey 验证从凭据 Ring 首个存活条目派生隧道密钥，
 // 且与直接 DeriveTunnelKey(secret, AccessKeyMesh(ak)) 等价（AD-3 一致性）。
 func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
+	t.Parallel()
 	sk := strings.Repeat("a", 64) // 合法 64 hex（32B）
 	ak := "ak-mesh1-" + strings.Repeat("b", 16)
 	mesh := tunnel.AccessKeyMesh(ak)
@@ -139,6 +143,7 @@ func TestHubXferKey_FromFirstAccessKey(t *testing.T) {
 // TestHubXferKey_NoAccessKeysFails 验证 Ring 为空时返回 error（fail-closed，
 // 与规格 DoD 4 一致：无有效凭据 → xfer listener 拒启）。
 func TestHubXferKey_NoAccessKeysFails(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	empty := accesskey.NewRing()
 
@@ -154,6 +159,7 @@ func TestHubXferKey_NoAccessKeysFails(t *testing.T) {
 // 用户配置目录（os.UserConfigDir()/sproxy/server-identity.json）——**绝不放
 // storage_root 下**（审查 C-1：与文件 API 命名空间重叠，防私钥泄露/覆盖）。
 func TestXferIdentityPath(t *testing.T) {
+	t.Parallel()
 	// 1) 显式配置优先。
 	explicit := filepath.Join(t.TempDir(), "ident", "server-identity.json")
 	cfg := Default()
@@ -185,6 +191,7 @@ func TestXferIdentityPath(t *testing.T) {
 
 // TestLoadXferIdentity 验证 LoadOrCreateIdentity 语义：首次生成、再次加载指纹一致。
 func TestLoadXferIdentity(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
@@ -222,6 +229,7 @@ func TestLoadXferIdentity(t *testing.T) {
 // TestLoadXferIdentity_CorruptFails 验证身份文件损坏时 fail-closed 返回错误，
 // 不静默重建覆盖用户文件（LoadOrCreateIdentity 语义）。
 func TestLoadXferIdentity_CorruptFails(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.Hub.XferIdentityFile = filepath.Join(t.TempDir(), "ident", "server-identity.json")
 
@@ -263,6 +271,7 @@ func TestBuildXferTLSConfig_AutoTLS(t *testing.T) {
 // TestBuildXferTLSConfig_CertNoKeyFails 验证 cert_file 有而 key_file 缺失时返回
 // error（fail-closed，审查 M-7-1）。
 func TestBuildXferTLSConfig_CertNoKeyFails(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.TLS.CertFile = filepath.Join(t.TempDir(), "cert.pem")
 	cfg.TLS.KeyFile = "" // 缺失
@@ -276,6 +285,7 @@ func TestBuildXferTLSConfig_CertNoKeyFails(t *testing.T) {
 // TestBuildXferTLSConfig_ACMERejects 验证 ACME 启用时 xfer TLS 拒绝并给出可读错误
 // （审查 I-2：ACME 与 xfer listener 生命周期不兼容，错误信息应明示）。
 func TestBuildXferTLSConfig_ACMERejects(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
@@ -295,6 +305,7 @@ func TestBuildXferTLSConfig_ACMERejects(t *testing.T) {
 // 审查 M-7-2）。Ring 注入非 hex SK 时 AddKey 拒绝（SK 必须 32B），资历由
 // testCredPair 的 64-hex 解析在 ringForTestCreds 跳过——此处验证空/非法 ring 行为。
 func TestHubXferKey_NonHexSecretFails(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	badRing := accesskey.NewRing()
 	// 32 个 'g'（非 hex 无法解码为 32B），ringForTestCreds 会跳过；直接构造非法条目。
@@ -311,6 +322,7 @@ func TestHubXferKey_NonHexSecretFails(t *testing.T) {
 // TestXferListenerConfigFromConfig_NoAccessKeys 验证空 Ring 时 FromConfig 返回零值
 // AccessKey 字段（不 panic，审查 M-7-3）。
 func TestXferListenerConfigFromConfig_NoAccessKeys(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	empty := accesskey.NewRing()
 

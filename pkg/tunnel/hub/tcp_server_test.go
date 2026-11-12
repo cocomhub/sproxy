@@ -78,6 +78,7 @@ func registerLeafTCP(t *testing.T, ctx context.Context, hubAddr, nodeID, ak, sk 
 
 // TestHubTCP_RegisterViaTCP 验证叶子经裸 TCP 注册后进入路由表（无 WS 场景）。
 func TestHubTCP_RegisterViaTCP(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
@@ -97,6 +98,7 @@ func TestHubTCP_RegisterViaTCP(t *testing.T) {
 // TestHubTCP_InvalidAccessKeyRejected 验证错误的 AK/注册证明被拒绝（REG_ERR），
 // 且节点不进入路由表（fail-closed）。
 func TestHubTCP_InvalidAccessKeyRejected(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
@@ -132,6 +134,7 @@ func TestHubTCP_InvalidAccessKeyRejected(t *testing.T) {
 // TestHubTCP_EmptyAccessKeysFailClosed 验证 hub 未配置 access_keys（nil auth）时
 // 拒绝所有注册（fail-closed，防"遗漏传 auth"走向开放注册）。
 func TestHubTCP_EmptyAccessKeysFailClosed(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
@@ -170,6 +173,7 @@ func TestHubTCP_EmptyAccessKeysFailClosed(t *testing.T) {
 
 // TestHubTCP_DisconnectRemovesNode 验证叶子断开 TCP 后节点从路由表移除。
 func TestHubTCP_DisconnectRemovesNode(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
@@ -190,6 +194,7 @@ func TestHubTCP_DisconnectRemovesNode(t *testing.T) {
 
 // TestHubTCP_ConcurrentRegistrations 验证多个叶子并发经 TCP 注册均成功。
 func TestHubTCP_ConcurrentRegistrations(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 

@@ -51,6 +51,7 @@ func newTestSet(t *testing.T, defaultCap, disk2Cap int64) *Set {
 // TestSet_Default_ReturnsFirstVolume 钉住「默认卷 = 声明序首卷」：Default() 与 defaultName
 // 必须指向同一卷（装配层据此把 globalRoot 映射到默认卷根）。
 func TestSet_Default_ReturnsFirstVolume(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 100, 200)
 	if got := set.Default().Name; got != "default" {
 		t.Fatalf("Default().Name = %q, want %q", got, "default")
@@ -62,6 +63,7 @@ func TestSet_Default_ReturnsFirstVolume(t *testing.T) {
 
 // TestSet_All_ReturnsCopy 钉住 All() 返回副本：改写返回切片不得污染 Set 内部底层数组。
 func TestSet_All_ReturnsCopy(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 100, 200)
 	all := set.All()
 	if len(all) != 2 {
@@ -75,6 +77,7 @@ func TestSet_All_ReturnsCopy(t *testing.T) {
 
 // TestSet_ByName 表驱动：命中返回卷描述，未命中返回零值 + false。
 func TestSet_ByName(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 100, 200)
 	cases := []struct {
 		name    string
@@ -105,6 +108,7 @@ func TestSet_ByName(t *testing.T) {
 // TestSet_RootAndDefaultRoot 钉住根句柄查询：DefaultRoot 走 defaultName，Root 按名查，
 // 未知卷名一律 nil。
 func TestSet_RootAndDefaultRoot(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 100, 200)
 	if set.DefaultRoot() == nil {
 		t.Fatal("DefaultRoot() = nil, want 非 nil")
@@ -119,6 +123,7 @@ func TestSet_RootAndDefaultRoot(t *testing.T) {
 
 // TestSet_Pool 钉住容量池查询：已知卷返回池（上限透传），未知卷返回 nil。
 func TestSet_Pool(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 100, 200)
 	p := set.Pool("default")
 	if p == nil {
@@ -135,6 +140,7 @@ func TestSet_Pool(t *testing.T) {
 // TestSet_Tenant_LazyCreateAndCache 钉住租户懒建：首次调用在 <卷根>/<owner> 落目录并建租户，
 // 再次调用返回同一实例（缓存命中，不重复 OpenRoot）。
 func TestSet_Tenant_LazyCreateAndCache(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 0, 0)
 	first := set.Tenant("disk2", "alice", nil)
 	if first == nil {
@@ -188,6 +194,7 @@ func assertVolumeRootUntouched(t *testing.T, set *Set, volName string) {
 // TestSet_Tenant_FailClosed 钉住 fail-closed：未知卷名、非法 owner 一律返回 nil，
 // 且非法 owner 在卷根**零副作用**（同步查盘，见 assertVolumeRootUntouched）。
 func TestSet_Tenant_FailClosed(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 0, 0)
 	if got := set.Tenant("不存在", "alice", nil); got != nil {
 		t.Fatalf("Tenant(未知卷名) = %v, want nil", got)
@@ -206,6 +213,7 @@ func TestSet_Tenant_FailClosed(t *testing.T) {
 // TestSet_Close_ClosesRootsAndIsIdempotent 钉住 Close 语义：关闭后根句柄查询为 nil（map 已清），
 // 且重复调用不 panic（幂等）。
 func TestSet_Close_ClosesRootsAndIsIdempotent(t *testing.T) {
+	t.Parallel()
 	set := newTestSet(t, 0, 0)
 	if set.Tenant("disk2", "bob", nil) == nil {
 		t.Fatal("前置失败：Tenant(disk2, bob) = nil")

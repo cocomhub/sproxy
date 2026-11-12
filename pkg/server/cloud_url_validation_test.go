@@ -16,6 +16,7 @@ import (
 // 用例名与迁移前完全一致（核对 ② 只禁丢失，允许换宿主文件）。
 
 func TestValidateCloudDownloadURL_Valid(t *testing.T) {
+	t.Parallel()
 	url, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/file.zip", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -29,6 +30,7 @@ func TestValidateCloudDownloadURL_Valid(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
+	t.Parallel()
 	url, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/data.bin", "custom.dat", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -42,6 +44,7 @@ func TestValidateCloudDownloadURL_WithFilename(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
+	t.Parallel()
 	_, _, err := cloudtasks.ValidateCloudDownloadURL("", "", false)
 	if err == nil {
 		t.Fatal("expected error for empty URL")
@@ -49,6 +52,7 @@ func TestValidateCloudDownloadURL_EmptyURL(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
+	t.Parallel()
 	_, _, err := cloudtasks.ValidateCloudDownloadURL("ftp://example.com/file.zip", "", false)
 	if err == nil {
 		t.Fatal("expected error for ftp URL")
@@ -56,6 +60,7 @@ func TestValidateCloudDownloadURL_InvalidScheme(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
+	t.Parallel()
 	_, _, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/file.zip", "../../../etc/passwd", false)
 	if err == nil {
 		t.Fatal("expected error for unsafe filename")
@@ -63,6 +68,7 @@ func TestValidateCloudDownloadURL_PathTraversal(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
+	t.Parallel()
 	_, _, err := cloudtasks.ValidateCloudDownloadURL("not-a-url", "", false)
 	if err == nil {
 		t.Fatal("expected error for malformed URL")
@@ -70,6 +76,7 @@ func TestValidateCloudDownloadURL_NoHost(t *testing.T) {
 }
 
 func TestValidateCloudDownloadURL_QueryString(t *testing.T) {
+	t.Parallel()
 	_, filename, err := cloudtasks.ValidateCloudDownloadURL("https://example.com/download?file=test.zip&token=abc", "", false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)

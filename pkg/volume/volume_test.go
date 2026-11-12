@@ -31,6 +31,7 @@ func namesEqual(got []Volume, want ...string) bool {
 }
 
 func TestAuthorize(t *testing.T) {
+	t.Parallel()
 	denyOpen := Volume{Name: "a", ACL: ACL{Mode: ModeDeny, Owners: map[string]struct{}{"guest": {}}}}
 	allowClosed := Volume{Name: "b", ACL: ACL{Mode: ModeAllow, Owners: map[string]struct{}{"alice": {}}}}
 	zeroVal := Volume{Name: "z", ACL: ACL{}} // Mode=="" 零值/未配
@@ -58,6 +59,7 @@ func TestAuthorize(t *testing.T) {
 }
 
 func TestAllowedVolumes(t *testing.T) {
+	t.Parallel()
 	vols := []Volume{
 		{Name: "a", ACL: ACL{Mode: ModeDeny}},                                            // 开放
 		{Name: "b", ACL: ACL{Mode: ModeAllow, Owners: map[string]struct{}{"alice": {}}}}, // 仅 alice
@@ -70,6 +72,7 @@ func TestAllowedVolumes(t *testing.T) {
 }
 
 func TestAllowedVolumes_KeepsDeclarationOrder(t *testing.T) {
+	t.Parallel()
 	vols := []Volume{
 		{Name: "a", ACL: ACL{Mode: ModeDeny}},                                            // 开放
 		{Name: "b", ACL: ACL{Mode: ModeAllow, Owners: map[string]struct{}{"alice": {}}}}, // 仅 alice
@@ -82,6 +85,7 @@ func TestAllowedVolumes_KeepsDeclarationOrder(t *testing.T) {
 }
 
 func TestDefaultVolume(t *testing.T) {
+	t.Parallel()
 	if got := DefaultVolume([]Volume{{Name: "main"}, {Name: "disk2", Capacity: 100}}); got.Name != "main" {
 		t.Fatalf("非空列表应返回首卷, got %+v", got)
 	}
@@ -91,6 +95,7 @@ func TestDefaultVolume(t *testing.T) {
 }
 
 func TestOrderCandidates(t *testing.T) {
+	t.Parallel()
 	// spread 必须扣减 used：disk2 容量(300) 虽大于 disk3(200)，但 used 高（余 10 < disk3 余 200）
 	// → 丢弃 used（退化为按容量排序）的实现会错选 disk2，故锁死「减 used」。main 不限容量余量按
 	// 0 计、排末尾（溢出兜底）。
@@ -109,6 +114,7 @@ func TestOrderCandidates(t *testing.T) {
 }
 
 func TestOrderCandidates_SpreadNilUsed(t *testing.T) {
+	t.Parallel()
 	// used==nil 不 panic，全部视为 0 → 有界卷按 Capacity 降序。
 	vols := []Volume{{Name: "v1", Capacity: 100}, {Name: "v2", Capacity: 300}, {Name: "v3", Capacity: 200}}
 	got := OrderCandidates(vols, ModeSpread, nil)

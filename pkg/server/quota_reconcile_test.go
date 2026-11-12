@@ -26,6 +26,7 @@ import (
 )
 
 func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 
 	// 模拟"重启后"磁盘既有占用（Scope 内存账本为 0）：
@@ -66,6 +67,7 @@ func TestScanAndRecalculate_ReconcilesTenantScopes(t *testing.T) {
 // 它断言的是 **pkg/server 的 reconcileQuotaScopes / quota Scope 装配**（StorageManager 只是驱动器），
 // 且依赖本包装配层测试基座 newOwnerEnv（子包不能反向导入 pkg/server）。
 func TestScanAndRecalculate_MetaReconcilesQuotaScope(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 
 	// 磁盘既有 meta 账本 + 用户文件（重启后 Scope 不回溯）：alice meta/sync 12 + user 60。
@@ -95,6 +97,7 @@ func TestScanAndRecalculate_MetaReconcilesQuotaScope(t *testing.T) {
 }
 
 func TestScanAndRecalculate_SkipsInFlightReservation(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 
 	// 磁盘已有 alice cloud partial 30；Scope 上有在途预留 100（未 Commit，如云任务下载中）。
@@ -127,6 +130,7 @@ func TestScanAndRecalculate_SkipsInFlightReservation(t *testing.T) {
 // 磁盘既有占用（重启前已落盘）按租户桶校准进 per-tenant Scope（重启后 Scope 不回溯），
 // 且 StorageManager 扫描的是 storage_root（而非 storage_root，二者在 storage_root 配置下不同）。
 func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
+	t.Parallel()
 	storageRoot := t.TempDir()
 	// 预置磁盘占用：anonymous/user/a.txt 50 + anonymous/cloud/t1/c.bin 30。
 	mustWriteFile(t, filepath.Join(storageRoot, "anonymous", "user", "a.txt"), 50)
@@ -167,6 +171,7 @@ func TestRegisterRoutes_StartupReconcilesQuotaScopes(t *testing.T) {
 //     （写路径仍按 user 桶聚合，不被 bucket_limits 子 Scope 截断）；
 //  3. 写路径超租户总上限 → 507（owner 兜底仍生效），且 user 桶不泄漏。
 func TestRegisterRoutes_StartupReconcilesQuotaScopes_WithBucketLimits(t *testing.T) {
+	t.Parallel()
 	storageRoot := t.TempDir()
 	cfg := Default()
 	cfg.StorageRoot = storageRoot
@@ -237,6 +242,7 @@ func mustWriteFile(t *testing.T, path string, size int) {
 // 磁盘按段树归集功能桶总量 + 子目录键，先深后浅校准——user 桶收敛到磁盘总量、
 // 子目录收敛到各自磁盘字节，祖先不双计（扫描后 Scope Usage 与磁盘一致）。
 func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100, "user/videos/4k": 100}
@@ -278,6 +284,7 @@ func TestReconcile_Subdir_NoDoubleCount(t *testing.T) {
 // TestReconcile_Subdir_SkipPropagates 验证子层在途预留时父层整体跳过（双计保护）：
 // user/videos/hd 有未 Commit 预留 → 该键及其父链（user）跳过校准，Scope 保持预留前状态。
 func TestReconcile_Subdir_SkipPropagates(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	cfg := env.h.cfgPtr.Load()
 	cfg.BucketLimits = map[string]ByteSize{"user/videos/hd": 100}
