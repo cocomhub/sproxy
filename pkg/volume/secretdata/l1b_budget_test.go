@@ -21,18 +21,18 @@ import (
 // 决定性判据：命中数必须**恰好等于**容量（不多不少），从而证明淘汰是按字节预算精确发生的；
 // 只断"有命中"或"命中率>0"都会被「缓存几乎失效」的实现骗过。
 func TestL1B_BudgetDeterminesBatchHitRate(t *testing.T) {
-	// sproxy:serial: 构造较大的 meta 夹具（每条 ~19 MB），避免并行放大内存
-	const perMetaBlocklets = 100000 // 100000 × 191 B ≈ 19.1 MB
+	// sproxy:serial: 直接断言 LRU 容量语义（小预算即可，避免在并行全包时占用数百 MB）
+	const perMetaBlocklets = 5000 // ≈ 0.95 MB/条
 	one := metaSizeBytes(mkMeta(perMetaBlocklets))
-	budget := int64(defaultMetaCacheBytes) // 256 MiB（默认值）
-	capacity := budget / one               // 预算恰好能容纳的条数
-	if capacity < 2 {
-		t.Fatalf("夹具不合适：单条 %.1f MB，容量仅 %d", float64(one)/(1<<20), capacity)
+	budget := one*20 + 1 // 预算恰好容纳 20 条
+	capacity := budget / one
+	if capacity != 20 {
+		t.Fatalf("夹具应使容量=20，得到 %d", capacity)
 	}
 	n := int(capacity) + 6 // 故意超出预算
 
 	c := newMetaEntryCache(budget)
-	// 第一轮：模拟「批量读 meta」（全部加载 ⇒ 超出预算的部分会被淘汰）。
+	// 第一轮：模拟「批量读 meta」（全部加载 ⇒ 超出预算的部分被淘汰）。
 	for i := range n {
 		c.put(fmt.Sprintf("d/f%d.mp4", i), mkMeta(perMetaBlocklets))
 	}
@@ -43,11 +43,15 @@ func TestL1B_BudgetDeterminesBatchHitRate(t *testing.T) {
 			hit++
 		}
 	}
-	t.Logf("单条≈%.1f MB · 预算=%d MiB · 容量=%d · 批量=%d ⇒ 第二轮命中=%d (%.0f%%)",
-		float64(one)/(1<<20), budget>>20, capacity, n, hit, float64(hit)*100/float64(n))
 	if hit != int(capacity) {
 		t.Fatalf("命中数应恰等于容量 %d（按字节预算精确淘汰），实际 %d", capacity, hit)
 	}
+	// 把「真实预算下的容量」如实报出来（这是给容量决策用的数字，无需真造那么大内存）。
+	realOne := metaSizeBytes(mkMeta(430652)) // 真实大文件实测 430,652 blocklets
+	t.Logf("本用例：单条≈%.2f MB · 预算=%d MB · 容量=%d ⇒ 命中=%d/%d (%.0f%%)",
+		float64(one)/(1<<20), budget>>20, capacity, hit, n, float64(hit)*100/float64(n))
+	t.Logf("真实参考：单条≈%.0f MB（430,652 blocklets）⇒ 默认 256 MiB 只容纳 %d 条",
+		float64(realOne)/(1<<20), int64(defaultMetaCacheBytes)/realOne)
 }
 
 // TestL1B_SingleOversizeEvictsOthers 锁定**危险边界**：单条超过预算时，
