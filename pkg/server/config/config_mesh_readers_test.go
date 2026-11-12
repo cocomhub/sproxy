@@ -32,6 +32,7 @@ func withMeshReader(node, fp, owner string) func(*Config) {
 }
 
 func TestMeshReadersConfig_Validate(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		node    string
@@ -69,6 +70,7 @@ func TestMeshReadersConfig_Validate(t *testing.T) {
 }
 
 func TestMeshReadersConfig_DuplicateFingerprintRejected(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	cfg.StorageRoot = t.TempDir()
 	cfg.Volumes = []VolumeConfig{{
@@ -91,6 +93,7 @@ func TestMeshReadersConfig_DuplicateFingerprintRejected(t *testing.T) {
 // 大小写/首尾空白/可省前缀在**配置归一阶段**即规范化为 "sha256:<64 小写 hex>"；非法指纹
 // 保持原样（绝不静默改写），由 Validate 响亮拒绝——这是畸形指纹的唯一防线。
 func TestMeshReadersConfig_SetDefaultsNormalizesFingerprint(t *testing.T) {
+	t.Parallel()
 	ok := Default()
 	ok.StorageRoot = t.TempDir()
 	withMeshReader("nodeA", "  "+strings.ToUpper(testReaderFP)+"  ", "alice")(ok)
@@ -109,6 +112,7 @@ func TestMeshReadersConfig_SetDefaultsNormalizesFingerprint(t *testing.T) {
 }
 
 func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
+	t.Parallel()
 	acl := ParseVolumeACL(&VolumeACLConfig{
 		Mode:        VolumeACLAllow,
 		Owners:      []string{"alice"},
@@ -136,6 +140,7 @@ func TestMeshReadersConfig_ParseVolumeACL(t *testing.T) {
 // Trim+ToLower、不校验 sha256: 前缀与 64 位 hex，配置写错格式只会**静默永不命中**
 // （授权被拒但无任何报错）。故这条链路值得单独钉住，而非只靠「大写+带前缀」一种输入。
 func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
+	t.Parallel()
 	hexOnly := strings.TrimPrefix(testReaderFP, "sha256:")
 	cases := []struct {
 		name string
@@ -174,6 +179,7 @@ func TestMeshReadersConfig_ParseVolumeACL_NormalizesFingerprint(t *testing.T) {
 // 「整体清空」；④ 恰好 2 条 Warn（3 条中 2 条畸形）且含 mesh_readers/指纹非法关键词 →
 // 既证明留下痕迹，也证明**合法条目不产生噪音告警**。
 func TestMeshReadersConfig_ParseVolumeACL_DropsMalformed(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
@@ -240,6 +246,7 @@ func withMeshReaderScope(node, fp, owner, scope string) func(*Config) {
 // 三值 + 空（= read）放行；未知值必须**响亮拒绝**（否则运行期会 fail-closed 静默拒绝，
 // 配上「我明明配了写权限」的困惑——畸形配置必须在启动时就报错）。
 func TestMeshReadersConfig_ScopeValidate(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		scope   string
@@ -283,6 +290,7 @@ func TestMeshReadersConfig_ScopeValidate(t *testing.T) {
 // **规范小写形**（与指纹归一同一职责）：这样装配层与授权判定拿到的是同一形态，
 // 也让「配置里写 READ」和「写 read」在后续比较中不可能分叉。
 func TestMeshReadersConfig_SetDefaultsCanonicalizesScope(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want string
@@ -310,6 +318,7 @@ func TestMeshReadersConfig_SetDefaultsCanonicalizesScope(t *testing.T) {
 // `volume.MeshReader`——写 listener 的授权判定只认后者的 Scope 字段，透传丢失等于
 // 「配了 write 但永远写不了」（fail-closed 方向的安全，功能全失效）。
 func TestMeshReadersConfig_ParseVolumeACL_CarriesScope(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want string
@@ -350,6 +359,7 @@ func TestMeshReadersConfig_ParseVolumeACL_CarriesScope(t *testing.T) {
 // 丢弃该条目并留告警（与畸形指纹同策略）。生产路径上 Validate 已响亮拒绝，此处仅是纵深防御——
 // 「降级保留一个语义不明的权限范围」是最危险的选项（未来改动可能把它当有权限使用）。
 func TestMeshReadersConfig_ParseVolumeACLDropsInvalidScope(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	acl := ParseVolumeACL(&VolumeACLConfig{
 		Mode: VolumeACLDeny,

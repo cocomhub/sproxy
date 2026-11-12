@@ -44,6 +44,7 @@ func TestRelayStreamHandler_BadJSON(t *testing.T) {
 // 请求体超过上限必须 413 拒绝（MaxBytesReader + *http.MaxBytesError），
 // 而非 io.LimitReader 把 JSON 值截断成不完整的 400/静默截断。
 func TestRelayStreamHandler_OversizedBody_413(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 
@@ -58,6 +59,7 @@ func TestRelayStreamHandler_OversizedBody_413(t *testing.T) {
 }
 
 func TestRelayStreamHandler_MissingFields(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	for _, body := range []string{
@@ -81,6 +83,7 @@ func TestRelayStreamHandler_MissingFields(t *testing.T) {
 //
 //	caller(原始 TCP CONNECT 风格 ⇄ RelayStreamHandler) ⇄ pipe mux ⇄ leaf(relay.Serve) ⇄ TCP echo
 func TestRelayStream_EndToEnd_Echo(t *testing.T) {
+	t.Parallel()
 	// 起一个 TCP echo server（127.0.0.1 回环）
 	echoAddr := startRelayStreamEchoServer(t)
 
@@ -197,6 +200,7 @@ func assertRelayStreamClosedByIdleTimeout(t *testing.T, conn net.Conn) {
 // hub 泵送必须传播半关闭并等待宽限期内的在途响应，而不是在任一方完成后立即
 // conn.Close()+stream.Abort()（旧实现确定性截断 write-then-read 流）。
 func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
+	t.Parallel()
 	// 延迟响应 server：读完整输入（含 EOF）后等 300ms 再回写响应（模拟慢后端；
 	// 若 hub 零宽限截断，客户端将读不到该响应）。
 	backAddr := startRelayStreamDelayedBackend(t)
@@ -222,6 +226,7 @@ func TestRelayStream_ClientHalfClose_KeepsInFlightResponse(t *testing.T) {
 // 中继流 200 后无任何数据流量超过 idleTimeout 即被强制关闭——旧实现无空闲上限，
 // "拿到 200 后不发"的客户端可无限期占用叶子出站 FD 与 mux 流。
 func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
+	t.Parallel()
 	// 静默目标：接受连接但保持沉默（双向空闲）。
 	backAddr := startRelayStreamSilentBackend(t)
 
@@ -243,6 +248,7 @@ func TestRelayStream_IdleTimeout_ClosesIdleConnection(t *testing.T) {
 
 // TestRelayStreamDialRequest_Framing 验证 dial 帧格式与 hub.DialRequest 一致。
 func TestRelayStreamDialRequest_Framing(t *testing.T) {
+	t.Parallel()
 	d := hub.DialRequest{Dial: "127.0.0.1:22"}
 	b, err := json.Marshal(d)
 	if err != nil {
@@ -267,6 +273,7 @@ func TestRelayStreamDialRequest_Framing(t *testing.T) {
 
 // TestRelayStreamHandler_UnknownTarget 验证未知目标节点返回 404（I65）。
 func TestRelayStreamHandler_UnknownTarget(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
@@ -285,6 +292,7 @@ func TestRelayStreamHandler_UnknownTarget(t *testing.T) {
 // 请求中继到 mesh-b 的节点 → 404（跨 mesh 目标对外不可见）。
 // 同 mesh 对照：mesh 校验通过并进入转发（叶子回拨号失败 → 502，而非 404）。
 func TestRelayStreamHandler_CrossMeshTargetNotFound(t *testing.T) {
+	t.Parallel()
 	// 叶子 accept 循环：读 dial 帧后回 error 结果帧（让同 mesh 对照快速返回 502，
 	// 避免 12s 结果帧超时拖慢测试；跨 mesh 请求在 Open 前即被 404 拦截，不占流）。
 	pipeA, pipeB := xfertest.Pipe()
@@ -342,6 +350,7 @@ func TestRelayStreamHandler_CrossMeshTargetNotFound(t *testing.T) {
 
 // TestRelayStreamHandler_NilLogger 验证构造器 logger==nil 兜底为 slog.Default（I65）。
 func TestRelayStreamHandler_NilLogger(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
@@ -355,6 +364,7 @@ func TestRelayStreamHandler_NilLogger(t *testing.T) {
 
 // TestRelayStreamHandler_NilRouteTable 验证 routeTable nil 守卫返回 404 而非 panic（I65/S34）。
 func TestRelayStreamHandler_NilRouteTable(t *testing.T) {
+	t.Parallel()
 	h := NewRelayStreamHandler(nil, testutil.DiscardLogger())
 	req := httptest.NewRequest(http.MethodPost, "/api/relay/stream",
 		strings.NewReader(`{"target":"n","type":"tcp","addr":"1.2.3.4:80"}`))
@@ -367,6 +377,7 @@ func TestRelayStreamHandler_NilRouteTable(t *testing.T) {
 
 // TestRelayStreamHandler_BadAddr 验证 addr 语法校验 fail-fast 返回 400（I26/I65）。
 func TestRelayStreamHandler_BadAddr(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	h := NewRelayStreamHandler(rt, testutil.DiscardLogger())
 	for _, body := range []string{
@@ -389,6 +400,7 @@ func TestRelayStreamHandler_BadAddr(t *testing.T) {
 // TestRelayStreamHandler_NoHijacker 验证 ResponseWriter 无 http.Hijacker 时返回 500（I65）。
 // 需要叶子先回 ok 结果帧（I27：hub 写 200/升级前先读结果帧），再走到 hijack 步骤。
 func TestRelayStreamHandler_NoHijacker(t *testing.T) {
+	t.Parallel()
 	pipeA, pipeB := xfertest.Pipe()
 	callerMux := mux.New(pipeA, mux.RoleDialer)
 	defer callerMux.Close()
@@ -436,6 +448,7 @@ func TestRelayStreamHandler_NoHijacker(t *testing.T) {
 // TestRelayStream_DialFailure_Returns502 验证叶子拨号失败（DialPolicy 拒绝）时
 // hub 读到 error 结果帧返回 502（I27 错误路径端到端）。
 func TestRelayStream_DialFailure_Returns502(t *testing.T) {
+	t.Parallel()
 	pipeA, pipeB := xfertest.Pipe()
 	callerMux := mux.New(pipeA, mux.RoleDialer)
 	defer callerMux.Close()

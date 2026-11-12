@@ -68,6 +68,7 @@ func inflightFilesInUser(t *testing.T, h *Handlers, owner string) []string {
 //  3. TryReserve(TotalSize) 于 owner 的 "user" 桶 Scope；
 //  4. session 记录 TempPath。
 func TestChunkedInit_CreatesTempFileAndReserves(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := []byte(strings.Repeat("a", 6000))
 	fileChecksum := sha256Hex(content)
@@ -115,6 +116,7 @@ func TestChunkedInit_CreatesTempFileAndReserves(t *testing.T) {
 // TestChunkedInit_SameFilenameDifferentChecksum_Conflict 验证同名存活 session 但不同
 // checksum 时 init 直接 409 拒绝（不复用续传、不建新临时名）。
 func TestChunkedInit_SameFilenameDifferentChecksum_Conflict(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	filename := "conflict-session.bin"
 	uploadID := "conflict-session-1"
@@ -139,6 +141,7 @@ func TestChunkedInit_SameFilenameDifferentChecksum_Conflict(t *testing.T) {
 // TestChunkedInit_AlreadyExists_NoTempFile 验证已存在同名文件且 checksum 匹配时
 // init 直接 already_exists 成功，不创建临时名、不预留。
 func TestChunkedInit_AlreadyExists_NoTempFile(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := []byte("already on disk")
 	fileChecksum := sha256Hex(content)
@@ -168,6 +171,7 @@ func TestChunkedInit_AlreadyExists_NoTempFile(t *testing.T) {
 // TestChunkedInit_QuotaExceeded_RejectsAndCleans 验证 TryReserve 超限（507）时：
 // session 被清理、临时名不残留、预留不泄漏。
 func TestChunkedInit_QuotaExceeded_RejectsAndCleans(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	env.h.cfgPtr.Load().OwnerQuotas = map[string]ByteSize{"alice": 50}
 
@@ -194,6 +198,7 @@ func TestChunkedInit_QuotaExceeded_RejectsAndCleans(t *testing.T) {
 // 乱序上传分块后，临时文件内容 == 原文件（seek 固定 offset + BoundWriter 防越界），
 // 且 complete 后落盘 user 桶内容正确。
 func TestChunkedUpload_SeekDirectWrite_OutOfOrder(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := make([]byte, 0, 10000)
 	for i := range 10000 {
@@ -249,6 +254,7 @@ func TestChunkedUpload_SeekDirectWrite_OutOfOrder(t *testing.T) {
 // TestChunkedUpload_SeekDirectWrite_IdempotentRetransmit 验证 covered 单块重复 upload
 // 校验幂等逻辑保留：已接收且 checksum 匹配的分块重传 → skip（不重复写、不报错）。
 func TestChunkedUpload_SeekDirectWrite_IdempotentRetransmit(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := []byte(strings.Repeat("c", 100))
 	fileChecksum := sha256Hex(content)
@@ -274,6 +280,7 @@ func TestChunkedUpload_SeekDirectWrite_IdempotentRetransmit(t *testing.T) {
 // 从临时名逐分片 seek 重算校验比对 checksum 表，匹配的 bitmap 保留、不匹配的分片需重传。
 // 与生产 init 一致：临时名在 user 桶、session.TempPath 持久化、Truncate(TotalSize) 占位。
 func TestChunkedUpload_RestartRecover_TempFileVerifies(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// 第一代 handlers：创建 alice 会话；分片 0 正确落盘并标记；分片 1 的临时名区域
@@ -377,6 +384,7 @@ func sessionFromFilename(h *Handlers, owner, uploadID, filename string) *files.C
 
 // TestUploadStore_DeleteSession_RemovesTempFile 验证 DeleteSession 删除临时名并释放预留。
 func TestUploadStore_DeleteSession_RemovesTempFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	h := newChunkedTestHandlers(t, dir, 4096)
 	t.Cleanup(func() { _ = h.Close() })
@@ -423,6 +431,7 @@ func TestUploadStore_DeleteSession_RemovesTempFile(t *testing.T) {
 // TestChunkedUpload_Completed_RejectsNewChunks 验证 complete 后 session 标记完成，
 // 后续 chunk 上传被拒绝（410 Gone）。
 func TestChunkedUpload_Completed_RejectsNewChunks(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := []byte(strings.Repeat("e", 5000))
 	fileChecksum := sha256Hex(content)
@@ -455,6 +464,7 @@ func TestChunkedUpload_Completed_RejectsNewChunks(t *testing.T) {
 // （.inflight-<16hex>-<upload_id>.part）判定，防止误拦用户可创建的同名前缀普通文件：
 // 普通 <id>.part / 短名 / 非 .inflight- 前缀 / 哈希非 16 hex / 缺 .part 后缀 → 全部 false。
 func TestIsInflightTempName_Negatives(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		want bool

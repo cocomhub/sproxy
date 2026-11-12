@@ -215,6 +215,7 @@ func (e *trustLoginEnv) assertNoAuthHeaders(t *testing.T) {
 // 头（M14）；配置文件回填 access_key / access_key_secret(=session SK hex) /
 // access_key_id(=session skey_id)。
 func TestTrustLogin_HappyPath(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	out, _, err := env.execute(t, totpTestCode+"\n",
 		"--ak", "ak-totp-0123456789abcdef")
@@ -261,6 +262,7 @@ func TestTrustLogin_HappyPath(t *testing.T) {
 // TestTrustRegister_FirstAdminHint（S2）：register 返回 admin=true → 输出含首 admin 提示。
 // register 是独立子命令：只注册打印密钥，不读动态码、不登录、不回填 secret/id。
 func TestTrustRegister_FirstAdminHint(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, true)
 	out, _, err := env.register(t)
 	if err != nil {
@@ -278,6 +280,7 @@ func TestTrustRegister_FirstAdminHint(t *testing.T) {
 // TestTrustRegister_HappyPath：register 打印 ak/base32/otpauth，回填配置
 // access_key 但**不**回填 secret/id（无 session SK），并提示用 login 完成绑定。
 func TestTrustRegister_HappyPath(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	out, _, err := env.register(t, "tenant-x")
 	if err != nil {
@@ -311,6 +314,7 @@ func TestTrustRegister_HappyPath(t *testing.T) {
 // TestTrustLogin_UsernamePositional：位置参数 <username> 直接登录（owner 反查
 // AK，免记 AK）——mock login 端点收到 owner 字段而非 ak。
 func TestTrustLogin_UsernamePositional(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	env.cfg.AccessKey = "ak-old-0123456789abcdef"
 	out, _, err := env.execute(t, totpTestCode+"\n", "tenant-x")
@@ -334,6 +338,7 @@ func TestTrustLogin_UsernamePositional(t *testing.T) {
 // TestTrustLogin_NoCreds_NoRegister：未配置 access_key 且未给用户名/--ak →
 // 报错指引 register（不再静默注册新账号）。红线：regCalls==0 且非零退出。
 func TestTrustLogin_NoCreds_NoRegister(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	_, errOut, err := env.execute(t, totpTestCode+"\n")
 	if err == nil {
@@ -353,6 +358,7 @@ func TestTrustLogin_NoCreds_NoRegister(t *testing.T) {
 // TestTrustLogin_StdinEOF（M4 语义仿 errDeleteAKNotConfirmed）：stdin 立即 EOF（无
 // 输入动态码）→ 非零退出（返回错误），不得把「未输入」当成功。
 func TestTrustLogin_StdinEOF(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	_, _, err := env.execute(t, "", "--ak", "ak-totp-0123456789abcdef")
 	if err == nil {
@@ -377,6 +383,7 @@ func TestTrustLogin_StdinEOF(t *testing.T) {
 // TestTrustLogin_ManualAK（M6）：无配置 access_key 时用 --ak 手动指定 → 走 login
 // 分支（不触发注册）；mock 断言请求体 ak 正确。
 func TestTrustLogin_ManualAK(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	out, _, err := env.execute(t, totpTestCode+"\n",
 		"--ak", "ak-totp-0123456789abcdef")
@@ -418,6 +425,7 @@ func (e *trustLoginEnv) presetUserCreds(t *testing.T, ak, secret, id string) {
 // TestTrustLogin_OverwriteConfirm_No（D4）：预置非空 access_key_secret → 输入 n →
 // 中止非零退出、config 未被覆盖。
 func TestTrustLogin_OverwriteConfirm_No(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
@@ -439,6 +447,7 @@ func TestTrustLogin_OverwriteConfirm_No(t *testing.T) {
 
 // TestTrustLogin_OverwriteConfirm_Yes（D4）：输入 y → 覆盖确认通过 → 回填成功。
 func TestTrustLogin_OverwriteConfirm_Yes(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
@@ -460,6 +469,7 @@ func TestTrustLogin_OverwriteConfirm_Yes(t *testing.T) {
 
 // TestTrustLogin_OverwriteFlag（D4 --overwrite）：跳过覆盖确认直接回填。
 func TestTrustLogin_OverwriteFlag(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	env.presetUserCreds(t, "ak-old-0123456789abcdef", strings.Repeat("ab", 32), "skey-old-aaaaaaaa")
 
@@ -476,6 +486,7 @@ func TestTrustLogin_OverwriteFlag(t *testing.T) {
 
 // TestTrustLogin_ConfigIsolation：只写目标配置文件，不触碰真实用户配置目录。
 func TestTrustLogin_ConfigIsolation(t *testing.T) {
+	t.Parallel()
 	env := newTrustLoginEnv(t, false)
 	cfgDir := filepath.Dir(env.cfgPath)
 	_, _, err := env.execute(t, totpTestCode+"\n", "--ak", "ak-totp-0123456789abcdef")

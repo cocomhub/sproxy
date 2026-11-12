@@ -128,6 +128,7 @@ func carrierTestRunCase(t *testing.T, punch PunchFunc, fallback bool, wantCarry 
 
 // TestRemoteDialer_PunchFirst 钉住打洞优先：成功即返回，**不碰中继**。
 func TestRemoteDialer_PunchFirst(t *testing.T) {
+	t.Parallel()
 	punchConn := pipeConn(t)
 	hub := &fakeHubClient{services: []client.MeshService{svcEntry("nodeB", remote.ServiceNameWrite, "127.0.0.1:19001")}}
 	var punched []string
@@ -159,6 +160,7 @@ func TestRemoteDialer_PunchFirst(t *testing.T) {
 // TestRemoteDialer_NoFallbackForExplicitWebRTC 钉住 `transport: webrtc` 语义：
 // 打洞失败**即报错**，绝不回落中继（否则「显式声明直连」被静默降级，掩盖配置/网络问题）。
 func TestRemoteDialer_NoFallbackForExplicitWebRTC(t *testing.T) {
+	t.Parallel()
 	punchErr := errors.New("stun 不可达")
 	hub := &fakeHubClient{services: []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")}}
 
@@ -184,6 +186,7 @@ func TestRemoteDialer_NoFallbackForExplicitWebRTC(t *testing.T) {
 
 // TestRemoteDialer_FallbackForAuto 钉住 `transport: auto` 语义：打洞失败回落中继。
 func TestRemoteDialer_FallbackForAuto(t *testing.T) {
+	t.Parallel()
 	relayConn := pipeConn(t)
 	hub := &fakeHubClient{
 		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
@@ -213,6 +216,7 @@ func TestRemoteDialer_FallbackForAuto(t *testing.T) {
 //   - 目标节点未宣告该服务名 ⇒ 报错，且**不拨其它节点**（哪怕别的节点宣告了同名服务）；
 //   - 目标节点不存在 ⇒ 报错。
 func TestRemoteDialer_ServiceDiscoveryIsExact(t *testing.T) {
+	t.Parallel()
 	hub := &fakeHubClient{services: []client.MeshService{
 		svcEntry("nodeA", "volread", "127.0.0.1:19000"), // 只读面：不该被写面拨到
 		svcEntry("nodeC", remote.ServiceNameWrite, "127.0.0.1:19001"),
@@ -233,6 +237,7 @@ func TestRemoteDialer_ServiceDiscoveryIsExact(t *testing.T) {
 // TestRemoteDialer_NoSignalerMeansRelayOnly 钉住「未配 WebRTC 信令 ⇒ 纯中继」：
 // 此时 Punch 为 nil（无 signaler 即无打洞），直接走中继（与现状 relay 载体等价）。
 func TestRemoteDialer_NoSignalerMeansRelayOnly(t *testing.T) {
+	t.Parallel()
 	relayConn := pipeConn(t)
 	hub := &fakeHubClient{
 		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
@@ -251,6 +256,7 @@ func TestRemoteDialer_NoSignalerMeansRelayOnly(t *testing.T) {
 // TestRemoteDialer_EmptyServiceDefaultsToReadFace 钉住缺省服务名 = 只读面
 // （调用方漏配时不至于把读当写；写面必须显式声明）。
 func TestRemoteDialer_EmptyServiceDefaultsToReadFace(t *testing.T) {
+	t.Parallel()
 	relayConn := pipeConn(t)
 	hub := &fakeHubClient{
 		services:  []client.MeshService{svcEntry("nodeB", remote.ServiceName, "127.0.0.1:19000")},
@@ -267,6 +273,7 @@ func TestRemoteDialer_EmptyServiceDefaultsToReadFace(t *testing.T) {
 
 // TestRemoteDialer_DiscoveryErrorPropagates 钉住服务发现失败原样上抛（不吞、不改语义）。
 func TestRemoteDialer_DiscoveryErrorPropagates(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("hub 不可达")
 	hub := &fakeHubClient{svcErr: boom}
 	d := NewRemoteDialer(RemoteDialerConfig{Client: hub, Service: "volread"})
@@ -287,6 +294,7 @@ func TestRemoteDialer_DiscoveryErrorPropagates(t *testing.T) {
 // `*hub.HubSignaler`（未配置 = nil 指针）⇒ 传进接口即 typed nil ⇒ 真拨号路径 panic（实测踩到）。
 // 守卫 `signalerUsable` 同时排除 nil 接口与 typed nil。
 func TestRemoteDialer_TypedNilSignalerGoesRelay(t *testing.T) {
+	t.Parallel()
 	relayConn := pipeConn(t)
 	hub := &fakeHubClient{
 		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
@@ -315,6 +323,7 @@ func TestRemoteDialer_TypedNilSignalerGoesRelay(t *testing.T) {
 // 每次**成功**建立链路时上报实际载体（`webrtc` 直连 / `relay` 中继），供上层把「本次走了直连还是
 // 中继」显示给用户；失败（且不回落）时**不上报**（没有可用链路，不应记为任何一种载体）。
 func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		punch     PunchFunc
@@ -336,6 +345,7 @@ func TestRemoteDialer_OnCarrierReportsSelectedCarrier(t *testing.T) {
 
 // TestRemoteDialer_OnCarrierNilIsSafe 钉住未配置回调时不 panic（零回归）。
 func TestRemoteDialer_OnCarrierNilIsSafe(t *testing.T) {
+	t.Parallel()
 	relayConn := pipeConn(t)
 	hub := &fakeHubClient{
 		services:  []client.MeshService{svcEntry("nodeB", "volread", "127.0.0.1:19000")},
