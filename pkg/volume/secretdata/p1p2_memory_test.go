@@ -39,7 +39,7 @@ func TestP1P2_SnapshotLoadKeepsMemoryBounded(t *testing.T) {
 		index: map[string]*metaEntry{}}
 
 	const nEntries, nBlocklets = 20, 200000
-	for i := 0; i < nEntries; i++ {
+	for i := range nEntries {
 		rel := fmt.Sprintf("d%d/f%d.mp4", i%5, i)
 		e := &metaEntry{
 			size: 1 << 30, mtime: 1700000000, dirSeg: fmt.Sprintf("seg%d", i%5),
