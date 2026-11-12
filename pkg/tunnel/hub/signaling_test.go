@@ -29,6 +29,7 @@ func waitWaitersRegistered(t *testing.T, q *SignalQueue, n int) {
 }
 
 func TestSignalQueue_PushPop(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "sdp-1"})
 	_ = q.Push(SignalMsg{Kind: SignalAnswer, From: "b", To: "a", SDP: "sdp-2"})
@@ -47,6 +48,7 @@ func TestSignalQueue_PushPop(t *testing.T) {
 }
 
 func TestSignalQueue_WaitWake(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -73,6 +75,7 @@ func TestSignalQueue_WaitWake(t *testing.T) {
 }
 
 func TestSignalQueue_WaitSuccessCleansWaiter(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -145,6 +148,7 @@ func twoConcurrentWaitersBody(t *testing.T) {
 }
 
 func TestSignalQueue_WaitTimeout(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
@@ -154,6 +158,7 @@ func TestSignalQueue_WaitTimeout(t *testing.T) {
 }
 
 func TestSignalQueue_Overflow(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	// 塞满 + 多塞一条：不应 panic，最旧被丢弃。
 	// 每条用不同 From，避免 per-sender cap（maxSignalPerSender）干扰队列上限测试。
@@ -171,6 +176,7 @@ func TestSignalQueue_Overflow(t *testing.T) {
 
 // TestSignalQueue_PopKind 验证按 kind 消费、不匹配消息保留（I9）。
 func TestSignalQueue_PopKind(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "offer"})
 	_ = q.Push(SignalMsg{Kind: SignalAnswer, From: "b", To: "a", SDP: "answer"})
@@ -195,6 +201,7 @@ func TestSignalQueue_PopKind(t *testing.T) {
 
 // TestSignalQueue_Purge 验证节点下线时清空收件箱与 waiter（I6）。
 func TestSignalQueue_Purge(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "peer", SDP: "s1"})
 	_ = q.Push(SignalMsg{Kind: SignalAnswer, From: "b", To: "peer", SDP: "s2"})
@@ -215,6 +222,7 @@ func TestSignalQueue_Purge(t *testing.T) {
 
 // TestSignalQueue_PushAssignsID 验证 Push 为无 ID 消息赋值去重 ID（I10）。
 func TestSignalQueue_PushAssignsID(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "s"})
 	m := q.Pop("b")
@@ -234,6 +242,7 @@ func TestSignalQueue_PushAssignsID(t *testing.T) {
 
 // TestSignalQueue_PerSenderCap 验证同一 sender 的未消费消息达上限后拒绝（I9）。
 func TestSignalQueue_PerSenderCap(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	for i := range maxSignalPerSender {
 		if err := q.Push(SignalMsg{Kind: SignalOffer, From: "flooder", To: "peer", SDP: "s"}); err != nil {
@@ -252,6 +261,7 @@ func TestSignalQueue_PerSenderCap(t *testing.T) {
 
 // TestSignalQueue_TTLExpired 验证过期消息被惰性清除（I9）。
 func TestSignalQueue_TTLExpired(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	old := time.Now().Add(-signalMsgTTL - time.Second).UnixMilli()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "s", At: old})
@@ -268,6 +278,7 @@ func TestSignalQueue_TTLExpired(t *testing.T) {
 
 // TestSignalQueue_PeekConfirm 验证 Peek 不删除、Confirm 按 ID 消费（I5 原语）。
 func TestSignalQueue_PeekConfirm(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	_ = q.Push(SignalMsg{Kind: SignalOffer, From: "a", To: "b", SDP: "s"})
 
@@ -302,6 +313,7 @@ func TestSignalQueue_PeekConfirm(t *testing.T) {
 // 分散到多个 peer 避免 maxSignalInbox 干扰；每 peer 用不同 sender 避免
 // per-sender cap 干扰。
 func TestSignalQueue_GlobalTotalLimit(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 	const peers = 64
 	const perPeer = maxSignalTotal / peers // 16
@@ -329,6 +341,7 @@ func TestSignalQueue_GlobalTotalLimit(t *testing.T) {
 // TestSignalQueue_WaitersLimit 验证 waiters 表上限 maxSignalWaiters（I52）：
 // 表满后新 peer 的 Wait 不注册 waiter，直接等 ctx 超时返回。
 func TestSignalQueue_WaitersLimit(t *testing.T) {
+	t.Parallel()
 	q := NewSignalQueue()
 
 	var wg sync.WaitGroup

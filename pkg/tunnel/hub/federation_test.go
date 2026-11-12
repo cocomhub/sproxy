@@ -51,6 +51,7 @@ func testFedPeer(t *testing.T, resp []map[string]string, fail *atomic.Int32) *ht
 
 // TestFederationClient_SyncFromPeer：从 mock peer 拉取节点表成功，Candidates 返回节点。
 func TestFederationClient_SyncFromPeer(t *testing.T) {
+	t.Parallel()
 	peer := testFedPeer(t, []map[string]string{
 		{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": "M"},
 		{"id": "node-b2", "addr": "192.168.1.3:9000", "mesh": ""},
@@ -79,6 +80,7 @@ func TestFederationClient_SyncFromPeer(t *testing.T) {
 
 // TestFederationClient_StaleWhileError：拉取失败保留上次成功缓存，不返回错误清空。
 func TestFederationClient_StaleWhileError(t *testing.T) {
+	t.Parallel()
 	var fail atomic.Int32
 	peer := testFedPeer(t, []map[string]string{
 		{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": ""},
@@ -133,6 +135,7 @@ func TestFederationClient_RetriesTransient500(t *testing.T) {
 // TestFederationClient_DefaultLoopbackURL：peer.URL 为空时归一化回落默认 loopback
 // 地址（确定性断言，不发起网络请求——避免依赖本机 18083 端口是否有服务导致的 flaky）。
 func TestFederationClient_DefaultLoopbackURL(t *testing.T) {
+	t.Parallel()
 	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
 	peers := fc.Peers()
@@ -157,6 +160,7 @@ func TestFederationClient_DefaultLoopbackURL(t *testing.T) {
 
 // TestFederationClient_MeshPreserved：peer 返回带 mesh 的节点，Candidates 保留 mesh 供隔离。
 func TestFederationClient_MeshPreserved(t *testing.T) {
+	t.Parallel()
 	peer := testFedPeer(t, []map[string]string{
 		{"id": "node-m1", "addr": "10.0.0.1:9000", "mesh": "meshA"},
 		{"id": "node-m2", "addr": "10.0.0.2:9000", "mesh": "meshB"},
@@ -177,6 +181,7 @@ func TestFederationClient_MeshPreserved(t *testing.T) {
 
 // TestFederationClient_DedupAcrossPeers：多 peer 返回同 (mesh,id) 节点时去重。
 func TestFederationClient_DedupAcrossPeers(t *testing.T) {
+	t.Parallel()
 	body := []map[string]string{{"id": "node-x", "addr": "10.0.0.1:9000", "mesh": "M"}}
 	peerA := testFedPeer(t, body, nil)
 	peerB := testFedPeer(t, body, nil)
@@ -196,6 +201,7 @@ func TestFederationClient_DedupAcrossPeers(t *testing.T) {
 
 // TestFederationClient_ConcurrentSync：并发 SyncAll 稳定（-race 覆盖）。
 func TestFederationClient_ConcurrentSync(t *testing.T) {
+	t.Parallel()
 	peerA := testFedPeer(t, []map[string]string{{"id": "node-a", "addr": "10.0.0.1:9000", "mesh": ""}}, nil)
 	peerB := testFedPeer(t, []map[string]string{{"id": "node-b", "addr": "10.0.0.2:9000", "mesh": ""}}, nil)
 	fc, _ := hub.NewFederationClient([]hub.FederationPeer{
@@ -224,6 +230,7 @@ func TestFederationClient_ConcurrentSync(t *testing.T) {
 
 // TestFederationClient_StartContextCancel：Start 启动后台拉取，ctx 取消后 goroutine 退出。
 func TestFederationClient_StartContextCancel(t *testing.T) {
+	t.Parallel()
 	peer := testFedPeer(t, []map[string]string{{"id": "node-b1", "addr": "192.168.1.2:9000", "mesh": ""}}, nil)
 	fc, _ := hub.NewFederationClient([]hub.FederationPeer{{ID: "peerB", URL: peer.URL}}, 10*time.Millisecond, 5*time.Second, testFedLogger())
 	t.Cleanup(fc.Close)
@@ -281,6 +288,7 @@ func newSelfSignedCert(t *testing.T) *x509.Certificate {
 // TestFederationClient_CAFileStrictVerify：ca_file 指向对端自签证书时**严格校验**
 // 成功（受信 CA 而非跳过校验）——远程自签 hub 的正确配置方式。
 func TestFederationClient_CAFileStrictVerify(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"node-tls","addr":"10.0.0.1:9000","mesh":""}]`))
@@ -304,6 +312,7 @@ func TestFederationClient_CAFileStrictVerify(t *testing.T) {
 // TestFederationClient_CAFileWrongCA：ca_file 指向错误 CA 时校验失败（fail-closed，
 // 不因配置了 ca_file 而绕过校验）。
 func TestFederationClient_CAFileWrongCA(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[]`))
@@ -323,6 +332,7 @@ func TestFederationClient_CAFileWrongCA(t *testing.T) {
 // TestFederationClient_DefaultStrictVerify：默认（无 ca_file、无 insecure）严格校验
 // TLS——自签对端证书不被系统根池信任，拉取失败（fail-closed，不默认跳过）。
 func TestFederationClient_DefaultStrictVerify(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[]`))
@@ -341,6 +351,7 @@ func TestFederationClient_DefaultStrictVerify(t *testing.T) {
 // TestFederationClient_CAFileInvalid：ca_file 文件无有效 PEM 证书时 NewFederationClient
 // 返回 error（fail-fast，不静默回退）。
 func TestFederationClient_CAFileInvalid(t *testing.T) {
+	t.Parallel()
 	badPath := filepath.Join(t.TempDir(), "bad.pem")
 	if err := os.WriteFile(badPath, []byte("not a certificate"), 0644); err != nil {
 		t.Fatalf("write bad.pem: %v", err)
@@ -354,6 +365,7 @@ func TestFederationClient_CAFileInvalid(t *testing.T) {
 // TestFederationClient_LoopbackInsecure：loopback peer + insecure_skip_verify 跳过
 // 校验成功（本机自签开发），远程不在此构造层限制（Config.Validate 已强制 loopback）。
 func TestFederationClient_LoopbackInsecure(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"node-loop","addr":"10.0.0.1:9000","mesh":""}]`))
@@ -372,6 +384,7 @@ func TestFederationClient_LoopbackInsecure(t *testing.T) {
 // TestFederationClient_PeerForNode：跨 hub 转发定位——PeerForNode 返回上报目标节点
 // 的联邦对端（mesh 严格匹配），未知/跨 mesh 返回 false。
 func TestFederationClient_PeerForNode(t *testing.T) {
+	t.Parallel()
 	peerA := testFedPeer(t, []map[string]string{
 		{"id": "node-a1", "addr": "10.0.0.1:9000", "mesh": "M"},
 	}, nil)
@@ -411,6 +424,7 @@ func TestFederationClient_PeerForNode(t *testing.T) {
 // TestFederationClient_PersistSaveRestore：SaveCandidates 落盘后，新 client 从同一
 // 文件恢复候选节点表（重启后不冷启动，DoD）。
 func TestFederationClient_PersistSaveRestore(t *testing.T) {
+	t.Parallel()
 	persistFile := filepath.Join(t.TempDir(), "federation-candidates.json")
 	fc1, err := hub.NewFederationClientWithPersist(
 		[]hub.FederationPeer{{ID: "peerB"}}, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
@@ -476,6 +490,7 @@ func TestFederationClient_PersistCorruptFile(t *testing.T) {
 
 // TestFederationClient_PersistMissingFile：候选文件缺失时按空候选启动，不 panic 不报错。
 func TestFederationClient_PersistMissingFile(t *testing.T) {
+	t.Parallel()
 	persistFile := filepath.Join(t.TempDir(), "does-not-exist.json")
 	fc, err := hub.NewFederationClientWithPersist(
 		nil, 30*time.Second, 5*time.Second, testFedLogger(), persistFile)
@@ -491,6 +506,7 @@ func TestFederationClient_PersistMissingFile(t *testing.T) {
 // TestFederationClient_PersistDisabled：persistFile 为空（默认构造器）时零行为变更——
 // SaveCandidates 为 no-op、不落盘、Close 正常。
 func TestFederationClient_PersistDisabled(t *testing.T) {
+	t.Parallel()
 	fc, err := hub.NewFederationClient(nil, 30*time.Second, 5*time.Second, testFedLogger())
 	if err != nil {
 		t.Fatalf("NewFederationClient: %v", err)
@@ -547,6 +563,7 @@ func TestFederationClient_PersistAutoSaveOnSync(t *testing.T) {
 // TestFederationClient_PersistRestoreIOError：候选文件为不可读目录时（非缺失/损坏）
 // NewFederationClientWithPersist 返回 error（与 Persister.Load 的 I/O 错误上抛一致）。
 func TestFederationClient_PersistRestoreIOError(t *testing.T) {
+	t.Parallel()
 	dirPath := filepath.Join(t.TempDir(), "candidates-dir")
 	if err := os.Mkdir(dirPath, 0700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -563,6 +580,7 @@ func TestFederationClient_PersistRestoreIOError(t *testing.T) {
 // Reset 双触发/游离；flushSave 正常收口）。不精确断言写次数（幂等原子写），
 // 只断言并发安全 + 最终一致。
 func TestFederationClient_PersistConcurrentScheduleClose(t *testing.T) {
+	t.Parallel()
 	persistFile := filepath.Join(t.TempDir(), "cands.json")
 	peers := []hub.FederationPeer{{ID: "p1", URL: "http://127.0.0.1:18083"}}
 	fc, err := hub.NewFederationClientWithPersist(
@@ -641,6 +659,7 @@ func federationAssertFileCandidates(t *testing.T, persistFile string) {
 // TestFederationClient_PersistRemovedPeerNotRestored 验证（审查 Minor 2）：配置中
 // 删除的联邦对端，其旧候选在恢复时被丢弃（不跨重启自我延续）。
 func TestFederationClient_PersistRemovedPeerNotRestored(t *testing.T) {
+	t.Parallel()
 	persistFile := filepath.Join(t.TempDir(), "cands.json")
 
 	// 第一次：配置含 p1 + p2，写入两个对端的候选。

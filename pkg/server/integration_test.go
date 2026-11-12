@@ -149,6 +149,7 @@ func sha256hex(b []byte) string {
 // ---- 上传相关 ----
 
 func TestUpload_HappyPath(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -169,6 +170,7 @@ func TestUpload_HappyPath(t *testing.T) {
 }
 
 func TestUpload_PathTraversal(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -192,6 +194,7 @@ func TestUpload_PathTraversal(t *testing.T) {
 }
 
 func TestUpload_MissingChecksumHeader(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -202,6 +205,7 @@ func TestUpload_MissingChecksumHeader(t *testing.T) {
 }
 
 func TestUpload_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -227,6 +231,7 @@ func TestUpload_ChecksumMismatch(t *testing.T) {
 }
 
 func TestUpload_2MiBFileSucceeds(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -240,6 +245,7 @@ func TestUpload_2MiBFileSucceeds(t *testing.T) {
 }
 
 func TestUpload_Idempotent(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -257,6 +263,7 @@ func TestUpload_Idempotent(t *testing.T) {
 }
 
 func TestUpload_ToSubDirectory(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -294,6 +301,7 @@ func TestUpload_ToSubDirectory(t *testing.T) {
 }
 
 func TestDownload_ChecksumHeader(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -321,6 +329,7 @@ func TestDownload_ChecksumHeader(t *testing.T) {
 }
 
 func TestDownload_PathTraversal(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -337,6 +346,7 @@ func TestDownload_PathTraversal(t *testing.T) {
 // ---- 删除相关 ----
 
 func TestDelete_RequiresChecksum(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -355,6 +365,7 @@ func TestDelete_RequiresChecksum(t *testing.T) {
 }
 
 func TestDelete_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -378,6 +389,7 @@ func TestDelete_ChecksumMismatch(t *testing.T) {
 }
 
 func TestDelete_Success(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -404,6 +416,7 @@ func TestDelete_Success(t *testing.T) {
 // ---- 列表相关 ----
 
 func TestList_StructuredResponse(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -493,6 +506,7 @@ func TestSearchFiles_ByKeyword(t *testing.T) {
 // 用 init 创建真实在途临时名（会 TryReserve + 落盘临时文件），随后 /api/files 与
 // /api/files/search 均不得返回该临时名；normal.txt 正常可见。
 func TestListFiles_FiltersInflightTemp(t *testing.T) {
+	t.Parallel()
 	url, cfgPtr, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -921,6 +935,7 @@ func TestBatchDelete_ContinueOnError(t *testing.T) {
 // ---- 路由相关 ----
 
 func TestRedirectRoot(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServer(t, nil)
 	defer cleanup()
 
@@ -944,6 +959,7 @@ func TestRedirectRoot(t *testing.T) {
 }
 
 func TestAuthMiddleware(t *testing.T) {
+	t.Parallel()
 	url, _, cleanup := newTestServerCreds(t, nil)
 	defer cleanup()
 
@@ -971,6 +987,7 @@ func TestAuthMiddleware(t *testing.T) {
 // ---- ChecksumStore 并发安全 ----
 
 func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
+	t.Parallel()
 	tmpDir := testutil.MkdirTemp(t, "csstore-test-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
@@ -1005,6 +1022,7 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 // ---- ChecksumStore 原子写：确保 .tmp 不残留 ----
 
 func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
+	t.Parallel()
 	tmpDir := testutil.MkdirTemp(t, "csstore-atomic-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
