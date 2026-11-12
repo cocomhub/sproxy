@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
 // TestIndexSnapshot_RoundTrip 快照加解密往返 + 指纹/算法校验（换密钥或换算法必须作废）。
@@ -24,7 +22,7 @@ func TestIndexSnapshot_RoundTrip(t *testing.T) {
 		Version: indexSnapshotVersion, Algorithm: "shardseal/aes-256-gcm",
 		SecretFP: snapshotSecretFP(secret), Containers: []string{"a/b"},
 		Entries: []indexSnapshotEntry{{Rel: "x.mp4", Size: 10, DirSeg: "a/b", MetaName: "zzz",
-			Meta: &shardseal.Meta{Version: 1}}},
+			OrigSHA256: "deadbeef"}},
 	}
 	fs.writeIndexSnapshot(snap)
 	if _, serr := os.Stat(path); serr != nil {
@@ -96,7 +94,7 @@ func TestIndexSnapshot_CachedAcrossCalls(t *testing.T) {
 		Version: indexSnapshotVersion, Algorithm: "shardseal/aes-256-gcm",
 		SecretFP: snapshotSecretFP(secret), Containers: []string{"a/b"},
 		Entries: []indexSnapshotEntry{{Rel: "x.mp4", Size: 10, DirSeg: "a/b", MetaName: "zzz",
-			Meta: &shardseal.Meta{Version: 1}}},
+			OrigSHA256: "deadbeef"}},
 	})
 
 	first, ok := fs.loadIndexSnapshot()

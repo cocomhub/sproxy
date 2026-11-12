@@ -27,7 +27,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -71,15 +70,22 @@ type indexSnapshot struct {
 
 // indexSnapshotEntry 是单文件索引项的序列化形态（metaEntry 的字段一一对应）。
 type indexSnapshotEntry struct {
-	Rel         string          `json:"rel"`
-	Size        int64           `json:"size"`
-	MTime       int64           `json:"mtime"`
-	DirSeg      string          `json:"dir_seg"`
-	MetaName    string          `json:"meta_name"`
-	DataDir     string          `json:"data_dir,omitempty"`
-	BaseVersion int64           `json:"base_version"`
-	Phys        int64           `json:"phys"`
-	Meta        *shardseal.Meta `json:"meta"`
+	Rel         string `json:"rel"`
+	Size        int64  `json:"size"`
+	MTime       int64  `json:"mtime"`
+	DirSeg      string `json:"dir_seg"`
+	MetaName    string `json:"meta_name"`
+	DataDir     string `json:"data_dir,omitempty"`
+	BaseVersion int64  `json:"base_version"`
+	Phys        int64  `json:"phys"`
+	// OrigSHA256 是**热字段**（从 `meta.Original.SHA256` 提升）：`Stat` 要自报整文件
+	// checksum，而它**不应**为此把整个 Meta（含 blocklets）读进内存。
+	//
+	// ⚠️ **快照不得承载 `Meta`**（P1，2026-11-12，OOM 根因修复）：实测单个大文件的
+	// meta 常驻内存达 78 MB（430,652 个 blocklets × 191 B），而热路径（ListDir/Stat/搜索）
+	// **完全不用**它 —— 只有 openRead/OpenRangeRead 需要 ⇒ 改为由 ensureEntryMeta 惰性加载。
+	// 详见 docs/designs/2026-11-12-secretdata-index-lazy-meta-and-cache-layers.md。
+	OrigSHA256 string `json:"orig_sha256,omitempty"`
 }
 
 // snapshotSecretFP 返回卷密钥指纹（用于快照校验，不落明文密钥）。
@@ -236,7 +242,10 @@ func (s *SecretdataFS) applyIndexSnapshot(snap *indexSnapshot) {
 	for _, e := range snap.Entries {
 		s.index[e.Rel] = &metaEntry{
 			size: e.Size, mtime: e.MTime, dirSeg: e.DirSeg, metaName: e.MetaName,
-			meta: e.Meta, dataDir: e.DataDir, baseVersion: e.BaseVersion, phys: e.Phys,
+			// **meta 留空**（P1）：由 ensureEntryMeta 在真正需要时（openRead/OpenRangeRead）
+			// 从 metacache/meta blob 惰性加载 ⇒ 快照不再把冷结构带进内存。
+			origSHA256: e.OrigSHA256,
+			dataDir:    e.DataDir, baseVersion: e.BaseVersion, phys: e.Phys,
 		}
 	}
 	s.dirs = make(map[string]struct{}, len(snap.Dirs))
@@ -284,7 +293,9 @@ func (s *SecretdataFS) buildIndexSnapshot(containers []string) *indexSnapshot {
 	for rel, e := range s.index {
 		snap.Entries = append(snap.Entries, indexSnapshotEntry{
 			Rel: rel, Size: e.size, MTime: e.mtime, DirSeg: e.dirSeg, MetaName: e.metaName,
-			DataDir: e.dataDir, BaseVersion: e.baseVersion, Phys: e.phys, Meta: e.meta,
+			DataDir: e.dataDir, BaseVersion: e.baseVersion, Phys: e.phys,
+			// 热字段优先取扁平值；meta 恰好已在内存时顺便刷新（保持两者一致）。
+			OrigSHA256: e.hotOrigSHA256(),
 		})
 	}
 	return snap
