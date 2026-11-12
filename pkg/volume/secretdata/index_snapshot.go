@@ -13,6 +13,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -151,13 +153,9 @@ func (s *SecretdataFS) loadIndexSnapshotUncached() (*indexSnapshot, bool) {
 		return nil, false
 	}
 	raw = nil // 密文已被明文覆盖（同一底层数组）⇒ 及时断开引用，便于 GC 识别（P0 内存优化）。
-	decoded, dok := decodeSnapshotBody(plain, isGzip)
-	if !dok {
-		return nil, false
-	}
 	var snap indexSnapshot
-	if jerr := json.Unmarshal(decoded, &snap); jerr != nil {
-		slog.Warn("secretdata: 索引快照解析失败（回退全量扫描）", "path", p, "error", jerr)
+	if !decodeSnapshotInto(plain, isGzip, &snap, maxSnapshotDecodedBytes) {
+		slog.Warn("secretdata: 索引快照解析失败（回退全量扫描）", "path", p)
 		return nil, false
 	}
 	if snap.Version != indexSnapshotVersion || snap.SecretFP != snapshotSecretFP(s.secret) ||
@@ -462,23 +460,67 @@ func (s *SecretdataFS) tryLoadIndexSnapshotFast(ctx context.Context, root []sync
 // maxSnapshotDecodedBytes 是快照解压后的上限（防解压炸弹；正常快照 401MB 级，留 8× 余量）。
 const maxSnapshotDecodedBytes = 3 << 30
 
-// decodeSnapshotBody 解出快照明文：gzip 格式解压（限 maxSnapshotDecodedBytes），
-// 旧格式直接返回。任何异常 ⇒ ok=false（调用方回退全量扫描）。
-func decodeSnapshotBody(plain []byte, isGzip bool) ([]byte, bool) {
+// countingReader 统计下游实际消费的字节数（防解压炸弹判据：流式下没有物化 buffer 可量长度）。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// decodeSnapshotInto 把快照明文解码进 snap（gzip 格式**直连解码器**）。
+// 任何异常 ⇒ ok=false（调用方回退全量扫描）。
+//
+// **P0 内存优化（2026-11-12，#2）**：不再把解压结果物化成一份完整 buffer。
+// 快照实测 241.8 MB（gzip），解压后 ~473 MB —— pprof 里 `io.ReadAll` 473MB 就是它；
+// 这份 buffer 与解码峰值叠加，是启动期内存峰值的主要成分（曾致 OOM）。
+//
+// 实测（30 万目录合成夹具，HeapInuse 峰值，200µs 采样；绝对值为单次量级，看**相对关系**）：
+//
+//	现状：解压物化 + v1 Unmarshal             300–400 MB  基准
+//	手写 jsontext token 流式（逐 token）       ~460 MB     比现状**更差**
+//	PeekKind + 逐条 UnmarshalDecode            ~280 MB     仍差
+//	PeekKind + 逐条 + 预分配容量               ~250 MB     仍差
+//	本方案：gzip 直连 + v2 UnmarshalDecode     ~130–170 MB **最低（约为现状的 1/3 左右）**
+//
+// ⚠️ 不要回头走这两条路（均已实测否决）：
+//  1. **手写 token 状态机**（`ReadToken` 逐 token 手工填 map）：比现状更费 ——
+//     每个字符串都要 `strings.Clone`，`Token` 会被后续 `ReadToken`/`ReadValue` 调用
+//     作废（实测 panic `invalid jsontext.Token; it has been voided by a subsequent
+//     json.Decoder call`），逐条 append 又触发 map 几何扩容。
+//  2. **`PeekKind` + 逐条 `UnmarshalDecode`**（心智成本最低的写法，`dec.PeekKind() != ']'`
+//     循环内一次解一个值）：当**必须保留全部条目**时它仍劣于整体解码（+81 MB，即使预分配）
+//     —— v2 整体解码对 slice/map 的分配策略更优。
+//     ⇒ 该写法只适合「**逐条消费、不留存**」的场景（此时内存 O(1)）；本场景要留存全量索引。
+//     附：`SkipValue` 跳过不需要的字段对内存几乎无影响（±2 MB），但省构造/CPU，可用于明确
+//     不需要的字段。
+//
+// 收益的真正来源是「**不物化解压 buffer**」，不是「逐 token / 逐条」。
+//
+// 兼容性：非 gzip（旧格式）路径保留，语义与原先一致；gzip 路径的
+// 字段名匹配从 v1 的「忽略大小写」变为 v2 的「精确匹配」—— 快照由本包 `json.Marshal`
+// 写出（字段名精确），故不影响；异常输入一律 fail-closed 回退全量扫描。
+func decodeSnapshotInto(plain []byte, isGzip bool, snap *indexSnapshot, maxBytes int64) bool {
 	if !isGzip {
-		return plain, true
+		// 旧格式无压缩体可省，仍需防「巨大明文 JSON」：按输入长度预判。
+		if int64(len(plain)) >= maxBytes {
+			return false
+		}
+		return jsonv2.Unmarshal(plain, snap) == nil
 	}
 	zr, zerr := gzip.NewReader(bytes.NewReader(plain))
 	if zerr != nil {
-		return nil, false
+		return false
 	}
-	defer zr.Close()
-	var buf bytes.Buffer
-	if _, rerr := io.Copy(&buf, io.LimitReader(zr, maxSnapshotDecodedBytes)); rerr != nil { //nolint:gosec // 已用 LimitReader 限制解压上限（防解压炸弹）
-		return nil, false
+	defer func() { _ = zr.Close() }()
+	cr := &countingReader{r: zr}
+	if err := jsonv2.UnmarshalDecode(jsontext.NewDecoder(cr), snap); err != nil {
+		return false
 	}
-	if int64(buf.Len()) >= maxSnapshotDecodedBytes {
-		return nil, false
-	}
-	return buf.Bytes(), true
+	// 防解压炸弹：解码**实际消费**的字节数超上限即拒绝（原先对物化 buffer 长度做同样限制）。
+	return cr.n < maxBytes
 }
