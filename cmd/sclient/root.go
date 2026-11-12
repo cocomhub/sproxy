@@ -186,6 +186,8 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdSecret(factory, ios, cfgSvc))
 	root.AddCommand(NewCmdSealfile(ios, cfgSvc))
 	root.AddCommand(NewCmdIdentity(ios))
+	// perf 是**隐藏**命令族（性能排查：pprof profile / metrics），不面向普通用户。
+	root.AddCommand(NewCmdPerf(factory, ios))
 	root.AddCommand(newCmdTrash(factory, ios))
 	root.AddCommand(newCmdQuota(factory, ios))
 	root.AddCommand(NewCmdConfig(factory, ios, &cfgFile, cfgSvc))
