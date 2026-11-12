@@ -2130,6 +2130,12 @@ func (s *SecretdataFS) commitLocked(ctx context.Context, wc writeCtx, e *metaEnt
 	}
 	prev := s.index[wc.rel]
 	e.rel = wc.rel // 单一安装点：把逻辑路径绑定到条目（L1b 淘汰回查需要）
+	// 单一安装点**补齐热字段**（P5，2026-11-13）：写路径构造条目时不会填 `origSHA256`，
+	// 若此处不补，则「写完后 meta 被 L1b 淘汰」时 checksum 会**永久为空**（`hotOrigSHA256()`
+	// 回退不到 meta）；实测由 `TestChecksumAndSize_DoesNotLoadMeta` 捕获。
+	if e.origSHA256 == "" && e.meta != nil {
+		e.origSHA256 = e.meta.Original.SHA256
+	}
 	s.index[wc.rel] = e
 	e.baseVersion = wc.newVer
 	addDirKeysLocked(s.dirs, wc.rel)

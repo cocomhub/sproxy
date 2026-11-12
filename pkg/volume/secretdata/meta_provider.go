@@ -294,3 +294,28 @@ func cloneExtra(m map[string]any) map[string]any {
 	maps.Copy(out, m)
 	return out
 }
+
+// ChecksumAndSize 实现 `meta.ChecksumProvider`（**可选能力**）：只取热字段，
+// **完全不加载冷结构 `meta`**。
+//
+// P5「字段级别路由」（2026-11-13）：实测单个大文件 `Meta` 常驻 **78 MB**、
+// 解密+解析 ≈ **584 ms**；而多处调用方只用 `TotalSHA256`（+ Size），
+// 典型如外部卷 `ExternalStat`（**热路径**，每次 stat 都走到）。
+// 走这条路径即完全避免上述成本。
+//
+// 契约：文件不存在 ⇒ 明确错误；checksum 未知 ⇒ 返回空串（调用方自辨）。
+func (s *SecretdataFS) ChecksumAndSize(_ context.Context, rel string) (string, int64, error) {
+	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
+	e, ok := s.index[key]
+	if !ok {
+		s.mu.RUnlock()
+		return "", 0, fmt.Errorf("secretdata: ChecksumAndSize 文件不存在: %s", rel)
+	}
+	ck, size := e.hotOrigSHA256(), e.size
+	s.mu.RUnlock()
+	return ck, size, nil
+}
+
+// 编译期断言：secretdata 必须满足该可选能力（否则调用方会静默回落重路径）。
+var _ meta.ChecksumProvider = (*SecretdataFS)(nil)

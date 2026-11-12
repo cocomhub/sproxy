@@ -89,6 +89,20 @@ L2  远端 meta blob（权威）                     ← 仅 L1a/L1b 未命中�
 
 ⇒ 很多「看起来需要全量 meta」的运维操作，实际只需热字段 ⇒ **直接消灭远端调用**。
 
+> **实施记录（2026-11-13，P5 第一片）**：新增可选能力接口
+> `meta.ChecksumProvider`（`ChecksumAndSize(ctx, rel) (checksum, size, err)`）+ `meta.AssertChecksumProvider`，
+> `secretdata` 用**热字段**实现（**完全不加载冷结构 `meta`**）。
+> 已切换到轻量路径的调用方（原来会加载完整 meta）：
+> - `files_service.ExternalStat`（**外部卷 stat 热路径**）；
+> - `files_service.ExternalCopy`；
+> - `cloudtasks.recordArchiveBypassState`。
+>
+> 未能切换的（这些**确实需要**冷结构）：`cloud/transfer.go` 的分块级校验（需 `Chunks`）、
+> `files_service` 的 extra 读取（需 `Extra`）⇒ 保持 `FileMeta`。
+>
+> 顺带修掉一个**真实缺陷**（由本片测试捕获）：写路径构造条目时**不填 `origSHA256`**，
+> 导致「写完后 meta 被 L1b 淘汰」时 checksum **永久为空** ⇒ 已在唯一安装点 `commitLocked` 统一补齐。
+
 ### 4.2 批量操作的两阶段（miss 集才走远端）
 1. **全量查 L1b → L1a**（本地，快，可并发无上限）
 2. 得到 **miss 集**，只对 miss 集发起 L2 请求
