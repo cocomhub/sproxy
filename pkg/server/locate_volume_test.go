@@ -224,6 +224,7 @@ func twoTinyVolumes(t *testing.T) ([]VolumeConfig, []string) {
 // TestDownload_LocatesAcrossVolumes 文件在 disk2（非默认卷）也能定位下载：
 // 默认卷先 miss → 视图遍历命中 disk2 → 200 且内容一致。
 func TestDownload_LocatesAcrossVolumes(t *testing.T) {
+	t.Parallel()
 	volumes, dirs := twoTinyVolumes(t)
 	url, _, _ := volumeRWServer(t, "alice", volumes, nil)
 
@@ -253,6 +254,7 @@ func TestDownload_LocatesAcrossVolumes(t *testing.T) {
 
 // TestDownload_MissAllVolumes404 全视图未命中 → 404（与单卷现状一致）。
 func TestDownload_MissAllVolumes404(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, _, _ := volumeRWServer(t, "alice", volumes, nil)
 
@@ -264,6 +266,7 @@ func TestDownload_MissAllVolumes404(t *testing.T) {
 
 // TestDownload_ExplicitVolumeFilter 显式 ?volume=：只在指定卷定位；指向不含该文件的卷 → 404。
 func TestDownload_ExplicitVolumeFilter(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, _, _ := volumeRWServer(t, "alice", volumes, nil)
 
@@ -287,6 +290,7 @@ func TestDownload_ExplicitVolumeFilter(t *testing.T) {
 
 // TestStat_LocatesAcrossVolumes HEAD /api/files/stat 定位跨卷（disk2 文件元信息可读）。
 func TestStat_LocatesAcrossVolumes(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, _, _ := volumeRWServer(t, "alice", volumes, nil)
 
@@ -311,6 +315,7 @@ func TestStat_LocatesAcrossVolumes(t *testing.T) {
 // TestList_AggregatesVolumesAndFilters list 聚合两卷：两卷各一文件 → /api/files 两条、各带
 // volume 字段；?volume=main 只返回 main 那条；?volume=ghost → 404。
 func TestList_AggregatesVolumesAndFilters(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, _, _ := volumeRWServer(t, "alice", volumes, nil)
 
@@ -353,6 +358,7 @@ func TestList_AggregatesVolumesAndFilters(t *testing.T) {
 // TestDeleteRename_LocatesAcrossVolumes 删 disk2 文件 → 200 且 disk2 消失、main 不受影响；
 // rename 同卷（不跨卷）→ 200。
 func TestDeleteRename_LocatesAcrossVolumes(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, h, dirs := volumeRWServer(t, "alice", volumes, nil)
 
@@ -399,6 +405,7 @@ func TestDeleteRename_LocatesAcrossVolumes(t *testing.T) {
 //   - allow 仅 anonymous 的卷 → 200（归一后 anonymous 命中白名单；若 owner="" 会误 404）；
 //   - deny 含 anonymous 的卷 → 404（归一后命中黑名单；若 owner="" 会误 200 放行）。
 func TestList_ACLNormalizesAnonymousOwner(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20},
@@ -433,6 +440,7 @@ func TestList_ACLNormalizesAnonymousOwner(t *testing.T) {
 // 遗留或物理预置）。bob download/stat 该文件 → 404（修复前快路径 stat 命中会 200 读到）；
 // alice 读默认卷自己文件仍 200（快路径放行）。
 func TestLocate_DefaultVolumeACLFastPathEnforced(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 1 << 20,
@@ -484,6 +492,7 @@ func TestLocate_DefaultVolumeACLFastPathEnforced(t *testing.T) {
 // TestDeleteRename_ExplicitVolumeFilter delete/rename 带 ?volume= 只在指定卷定位：
 // b 在 disk2 → ?volume=disk2 删/改成功；指向 main → 404（不在该卷，不泄卷）。
 func TestDeleteRename_ExplicitVolumeFilter(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, _, dirs := volumeRWServer(t, "alice", volumes, nil)
 
@@ -520,6 +529,7 @@ func TestDeleteRename_ExplicitVolumeFilter(t *testing.T) {
 // 落 disk2），默认卷空间恢复（此处放大 main 容量）后 auto 覆盖写必须写回 disk2（home-aware），
 // 不得因默认卷有空间而跨卷双份。disk2 仍 1 份新内容、main 无 x、无双计。
 func TestUpload_OverwriteStayHome_NonDefaultVolume(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, h, dirs := volumeRWServer(t, "alice", volumes, func(c *Config) {
 		c.Versioning.Enabled = true
@@ -568,6 +578,7 @@ func TestUpload_OverwriteStayHome_NonDefaultVolume(t *testing.T) {
 // 关闭 + checksum 不匹配的 auto 重传 → 409 冲突（保护存量文件，不静默覆盖），且不得跨卷双份
 // （定位到 disk2 home 后按单卷同 rel 冲突语义拒绝）。
 func TestUpload_OverwriteHomeNonDefault_VersioningOff_Conflict(t *testing.T) {
+	t.Parallel()
 	volumes, _ := twoTinyVolumes(t)
 	url, h, dirs := volumeRWServer(t, "alice", volumes, nil) // versioning 关闭
 

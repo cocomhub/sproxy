@@ -17,12 +17,14 @@ import (
 )
 
 func TestFactory_Constructor(t *testing.T) {
+	t.Parallel()
 	// New 和 NewMock 返回 Factory 接口 — 编译期检查构造函数签名正确
 	_ = clientfactory.New("", nil)
 	_ = clientfactory.NewMock(nil, nil)
 }
 
 func TestFactoryLazy_GetProvider(t *testing.T) {
+	t.Parallel()
 	// 验证延迟获取：init 时传入 nil provider，PersistentPreRunE 后提供真实值
 	var called bool
 	_ = clientfactory.New("", func() clientfactory.CfgBinder {
@@ -35,6 +37,7 @@ func TestFactoryLazy_GetProvider(t *testing.T) {
 }
 
 func TestMockFactory_NilService(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	factory := clientfactory.NewMock(nil, nil)
 	svc, err := factory.NewClient(cmd)
@@ -47,6 +50,7 @@ func TestMockFactory_NilService(t *testing.T) {
 }
 
 func TestFactory_NewClient_NilProvider(t *testing.T) {
+	t.Parallel()
 	f := factoryFromResolved(t, nil)
 	cmd := &cobra.Command{}
 	svc, err := f.NewClient(cmd)
@@ -59,6 +63,7 @@ func TestFactory_NewClient_NilProvider(t *testing.T) {
 }
 
 func TestFactory_NewClient_WithConfig(t *testing.T) {
+	t.Parallel()
 	f := factoryFromResolvedData(t, map[string]any{"server_url": "http://127.0.0.1:18083"}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
@@ -72,6 +77,7 @@ func TestFactory_NewClient_WithConfig(t *testing.T) {
 }
 
 func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
+	t.Parallel()
 	f := factoryFromResolvedData(t, map[string]any{"server_url": "http://original:8080"}, nil)
 	cmd := &cobra.Command{}
 	cmd.Flags().String("server", "", "")
@@ -98,6 +104,7 @@ func TestFactory_NewClient_FlagOverridesServer(t *testing.T) {
 // 统一 context 后配置是结构化的（env/user 段），不存在「顶层未知键」；本测试改为验证
 // **contextcfg 模型含未使用字段（如 Volume 覆盖）不影响装配**。
 func TestFactory_NewClient_ToleratesUnknownConfigKeys(t *testing.T) {
+	t.Parallel()
 	ccfg := contextcfg.NewDefault()
 	ccfg.CurrentContext = "sg"
 	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "http://127.0.0.1:18083"})
@@ -331,6 +338,7 @@ func TestFactory_NewClient_Xfer_NoKeyNoPin_Succeeds(t *testing.T) {
 // TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed 验证：配置了 peer_fingerprints
 // 但命令不走 xfer 隧道时 fail-closed 报错（而非仅 Warn），防止用户误以为受 pinning 保护。
 func TestFactory_NewClient_PeerFingerprintsNonXfer_FailsClosed(t *testing.T) {
+	t.Parallel()
 	f := factoryFromResolvedData(t, map[string]any{
 		"server_url": "http://127.0.0.1:18083",
 		"peer_fingerprints": []string{

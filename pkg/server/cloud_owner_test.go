@@ -143,6 +143,7 @@ func (e *ownerCloudEnv) createCloudTaskAs(t *testing.T, actor, url string) strin
 
 // TestCloudOwner_CreateWritesOwner 验证认证请求（AK）创建云下载 → 任务 Owner == AK。
 func TestCloudOwner_CreateWritesOwner(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	idA := env.createCloudTaskAs(t, "ak-A", "https://example.com/a.zip")
@@ -160,6 +161,7 @@ func TestCloudOwner_CreateWritesOwner(t *testing.T) {
 
 // TestCloudOwner_ListFiltersByOwner 验证列表按 owner 过滤：A 只见自己的任务；admin 见全部。
 func TestCloudOwner_ListFiltersByOwner(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 	idA := env.createCloudTaskAs(t, "ak-A", "https://example.com/a.zip")
 	idB := env.createCloudTaskAs(t, "ak-B", "https://example.com/b.zip")
@@ -194,6 +196,7 @@ func TestCloudOwner_ListFiltersByOwner(t *testing.T) {
 
 // TestCloudOwner_GetIDOR 验证详情按 owner 过滤：A Get B 的任务 → 404。
 func TestCloudOwner_GetIDOR(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 	idA := env.createCloudTaskAs(t, "ak-A", "https://example.com/a.zip")
 
@@ -226,6 +229,7 @@ func TestCloudOwner_GetIDOR(t *testing.T) {
 
 // TestCloudOwner_CancelDeleteIDOR 验证取消/删除按 owner 过滤：跨 owner → 404 且任务不变。
 func TestCloudOwner_CancelDeleteIDOR(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	// 用本地挂起源（永不响应，直到请求被取消）作下载源：使任务稳定停留在
@@ -274,6 +278,7 @@ func TestCloudOwner_CancelDeleteIDOR(t *testing.T) {
 // TestCloudOwner_DedupScopedByOwner 验证去重按 owner 隔离：
 // 同 URL 且同 owner → 去重；跨 owner 同 URL → 各自新建（不吸收他人任务，防 IDOR 泄露）。
 func TestCloudOwner_DedupScopedByOwner(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	// A 创建 URL same.zip
@@ -309,6 +314,7 @@ func TestCloudOwner_DedupScopedByOwner(t *testing.T) {
 // TestCloudOwner_EmptyOwnerCompat 验证未认证（空 owner）兼容：
 // 空 owner 创建的任务对所有用户可见，且空 owner 请求者可见全部。
 func TestCloudOwner_EmptyOwnerCompat(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	// admin（空 owner）创建 → 任务 Owner 空
@@ -339,6 +345,7 @@ func TestCloudOwner_EmptyOwnerCompat(t *testing.T) {
 
 // TestCloudOwner_BatchCreateWritesOwner 验证批量创建同样写入 owner。
 func TestCloudOwner_BatchCreateWritesOwner(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	code, body := env.do(t, "ak-A", "POST", "/api/cloud/download/batch",
@@ -372,6 +379,7 @@ func TestCloudOwner_BatchCreateWritesOwner(t *testing.T) {
 // TestCloudOwner_OrphanGroupInheritsOwner 验证组记录丢失后重建的孤儿组继承子任务 owner，
 // 避免带 owner 的组被重建为全局可见（组级隔离漏洞，审查 I-1 回归）。
 func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sm := capacity.NewStorageManager(dir, 10*1024*1024*1024, nil, testLogger())
 	cfg := &cloud.CloudDownloadConfig{
@@ -408,6 +416,7 @@ func TestCloudOwner_OrphanGroupInheritsOwner(t *testing.T) {
 
 // TestCloudOwner_CreateGroupWritesOwner 验证组创建把 owner 写入组与子任务。
 func TestCloudOwner_CreateGroupWritesOwner(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	code, body := env.do(t, "ak-A", "POST", "/api/cloud/groups",
@@ -447,6 +456,7 @@ func TestCloudOwner_CreateGroupWritesOwner(t *testing.T) {
 // 相对租户根 cloud/<taskID>/<file> key 写入，与 read/stat/chunk 读取端完全一致——stat 必须
 // 命中 store（而非依赖磁盘兜底重算），删除后 key 被清理。
 func TestCloudOwner_CloudTaskChecksumScoped(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 
 	// 直接构造一个处于 completed 的云任务 + 落盘文件 + 按迁移后的 per-tenant key 写入校验和
@@ -510,6 +520,7 @@ func sha256Hex(b []byte) string {
 // cloudArchiveGroup 的"归档已存在"预检应落在 owner 租户 archive 桶（<root>/ak-A/archive/），
 // 而非误查 uploadsDir 全局根。
 func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
+	t.Parallel()
 	env := newOwnerCloudEnv(t)
 	mgr := env.mgr
 
@@ -568,6 +579,7 @@ func TestCloudOwner_GroupArchivePrecheckOwnerDir(t *testing.T) {
 // （段名校验单一权威，任务 12 取代旧 validUploadID）：裸 id 合法；含路径分隔符 / \、
 // ".."、".__" 前缀、Windows 保留设备名、尾点/尾空格被拒（防 chunk 桶目录穿越）。
 func TestChunkedUploadID_ValidSegmentName(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		id string
 		ok bool

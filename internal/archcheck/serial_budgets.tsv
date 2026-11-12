@@ -9,7 +9,7 @@ cmd/sclient/genkey_test.go	1
 cmd/sclient/helper_test.go	2
 cmd/sclient/hub_preview_test.go	4
 cmd/sclient/identity_test.go	7
-cmd/sclient/internal/clientfactory/factory_test.go	13
+cmd/sclient/internal/clientfactory/factory_test.go	5
 cmd/sclient/internal/clientfactory/factory_tls_integration_test.go	8
 cmd/sclient/internal/i18n/i18n_test.go	1
 cmd/sclient/mesh_acl_format_test.go	2
@@ -65,7 +65,6 @@ pkg/files/version_id_test.go	3
 pkg/httpc/policy_test.go	1
 pkg/server/ai_insight_paths_test.go	1
 pkg/server/archive_test.go	1
-pkg/server/audit_handler_test.go	13
 pkg/server/checksum_test.go	1
 pkg/server/chunked_complete_test.go	6
 pkg/server/chunked_download_test.go	2
@@ -78,7 +77,6 @@ pkg/server/cloud_archive_handler_test.go	13
 pkg/server/cloud_archive_local_test.go	1
 pkg/server/cloud_download_handler_test.go	26
 pkg/server/cloud_newlayout_test.go	1
-pkg/server/cloud_owner_test.go	12
 pkg/server/cloud_url_validation_test.go	7
 pkg/server/config/config_mesh_node_test.go	2
 pkg/server/config/config_mesh_readers_test.go	10
@@ -106,7 +104,6 @@ pkg/server/hub_federation_test.go	9
 pkg/server/hub_services_test.go	3
 pkg/server/hub_tcp_relay_test.go	3
 pkg/server/list_owner_test.go	1
-pkg/server/locate_volume_test.go	11
 pkg/server/mesh_acl_test.go	5
 pkg/server/mesh_status_test.go	3
 pkg/server/metrics_labeled_test.go	4
@@ -134,7 +131,7 @@ pkg/server/self_credential_test.go	2
 pkg/server/server_extra_test.go	1
 pkg/server/server_handler_gaps_test.go	1
 pkg/server/share_test.go	3
-pkg/server/signaling_test.go	13
+pkg/server/signaling_test.go	8
 pkg/server/stats_test.go	2
 pkg/server/store_test.go	4
 pkg/server/tlsgen_test.go	2
@@ -145,7 +142,6 @@ pkg/server/version_crossvolume_test.go	1
 pkg/server/version_test.go	3
 pkg/server/volume_wrapper_delete_test.go	1
 pkg/server/volume_wrapper_review4_test.go	5
-pkg/server/volumes_test.go	12
 pkg/server/xfer_listener_test.go	12
 pkg/storage/seal_alias_test.go	1
 pkg/telemetry/ext/otel/provider_test.go	4
@@ -186,7 +182,6 @@ pkg/tunnel/mesh/quality_feed_test.go	1
 pkg/tunnel/mesh/remote_dialer_punch_test.go	2
 pkg/tunnel/mesh/remote_dialer_test.go	10
 pkg/tunnel/mesh/socks_test.go	2
-pkg/tunnel/mesh/vip_test.go	12
 pkg/tunnel/mux/edge_test.go	3
 pkg/tunnel/mux/frame_payload_limit_test.go	2
 pkg/tunnel/mux/frame_test.go	3
@@ -198,7 +193,6 @@ pkg/tunnel/relay/leaf_udp_test.go	5
 pkg/tunnel/relay/leaf_vip_test.go	9
 pkg/tunnel/remote_key_test.go	3
 pkg/tunnel/stream_shortwrite_test.go	5
-pkg/tunnel/stream_test.go	11
 pkg/tunnel/tunnel_extra_test.go	6
 pkg/tunnel/tunnel_longlived_test.go	1
 pkg/tunnel/tunnel_mux_test.go	5

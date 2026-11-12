@@ -14,6 +14,7 @@ var testVIPSubnet = netip.MustParsePrefix("100.64.0.0/10")
 
 // TestVipTable_AddQuery 校验 vipTable 的 Add/NodeByAddr/AddrByNode 与 Subnet。
 func TestVipTable_AddQuery(t *testing.T) {
+	t.Parallel()
 	vt := NewVipTable(testVIPSubnet)
 	vt.Add(netip.MustParseAddr("100.64.0.2"), "node-a")
 	vt.Add(netip.MustParseAddr("100.64.0.3"), "node-b")
@@ -38,6 +39,7 @@ func TestVipTable_AddQuery(t *testing.T) {
 // TestVipTable_AddConflictRejects 校验同 addr 被不同 nodeID 声明时**拒绝**（保留
 // 既有映射，防 VIP 劫持）；同 nodeID 幂等覆盖；新 addr 正常加入。
 func TestVipTable_AddConflictRejects(t *testing.T) {
+	t.Parallel()
 	vt := NewVipTable(testVIPSubnet)
 	addr := netip.MustParseAddr("100.64.0.2")
 	if !vt.Add(addr, "node-a") {
@@ -63,6 +65,7 @@ func TestVipTable_AddConflictRejects(t *testing.T) {
 // TestDeterministicAllocator_Properties 校验 mDNS 无 hub 回落分配器：
 // 稳定（同输入同输出）、在子网内、非保留地址（偏移 ≥2）、Subnet 正确。
 func TestDeterministicAllocator_Properties(t *testing.T) {
+	t.Parallel()
 	a := newDeterministicAllocator(testVIPSubnet)
 	seen := make(map[netip.Addr]string)
 	for i := range 20 {
@@ -94,6 +97,7 @@ func TestDeterministicAllocator_Properties(t *testing.T) {
 
 // TestDeterministicAllocator_ReleaseNoop 校验 Release 是 no-op（无状态分配器）。
 func TestDeterministicAllocator_ReleaseNoop(t *testing.T) {
+	t.Parallel()
 	a := newDeterministicAllocator(testVIPSubnet)
 	v1, _ := a.Alloc("m", "node-x")
 	a.Release("m", "node-x")
@@ -105,6 +109,7 @@ func TestDeterministicAllocator_ReleaseNoop(t *testing.T) {
 
 // TestDeterministicAllocator_RejectsIPv6 校验 IPv6 子网被拒绝（虚拟 IP 仅支持 IPv4）。
 func TestDeterministicAllocator_RejectsIPv6(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
@@ -115,6 +120,7 @@ func TestDeterministicAllocator_RejectsIPv6(t *testing.T) {
 
 // TestIsVirtualAddr 校验虚拟子网归属判断。
 func TestIsVirtualAddr(t *testing.T) {
+	t.Parallel()
 	if !IsVirtualAddr(netip.MustParseAddr("100.64.0.5"), testVIPSubnet) {
 		t.Fatal("100.64.0.5 应在虚拟子网内")
 	}
@@ -128,6 +134,7 @@ func TestIsVirtualAddr(t *testing.T) {
 
 // TestParseVirtualAddr 校验 host 解析为虚拟 IP。
 func TestParseVirtualAddr(t *testing.T) {
+	t.Parallel()
 	if got, ok := ParseVirtualAddr("100.64.0.5"); !ok || got != netip.MustParseAddr("100.64.0.5") {
 		t.Fatalf("ParseVirtualAddr(100.64.0.5) = %v, %v", got, ok)
 	}
@@ -143,6 +150,7 @@ func TestParseVirtualAddr(t *testing.T) {
 // 确定性分配碰撞时，vipTable 学习侧**拒绝**第二个 nodeID 的映射（保留既有映射，
 // 防 VIP 劫持）。用 /24 子网（253 可用地址）+ 300 样本保证鸽巢碰撞。
 func TestDeterministicAllocator_ConflictRejectedByTable(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/24")
 	a := newDeterministicAllocator(subnet)
 	vt := NewVipTable(subnet)
@@ -176,6 +184,7 @@ func TestDeterministicAllocator_ConflictRejectedByTable(t *testing.T) {
 // TestVipTable_Reconcile（安全审查 MEDIUM 精化）校验 hub 权威模式原子重建：
 // 每次刷新从签名 hub 节点列表清空陈旧条目、重新填入权威映射（不依赖谁先声明）。
 func TestVipTable_Reconcile(t *testing.T) {
+	t.Parallel()
 	vt := NewVipTable(testVIPSubnet)
 	vt.Add(netip.MustParseAddr("100.64.0.2"), "node-a")
 	vt.Add(netip.MustParseAddr("100.64.0.3"), "node-stale") // 陈旧节点
@@ -218,6 +227,7 @@ func TestVipTable_Reconcile(t *testing.T) {
 // TestVipTable_AddVerified（安全审查 MEDIUM 精化）校验 mDNS 模式只接受与确定性分配
 // 结果一致的虚拟 IP——对端自声明任意 VIP 被拒，无法抢占。
 func TestVipTable_AddVerified(t *testing.T) {
+	t.Parallel()
 	vt := NewVipTable(testVIPSubnet)
 	alloc := newDeterministicAllocator(testVIPSubnet)
 
@@ -252,6 +262,7 @@ func TestVipTable_AddVerified(t *testing.T) {
 // TestVipTable_ReconcileConcurrent（S-3 回归）校验并发 Reconcile 重建 + 读表在
 // -race 下稳定（原子换表，读侧不半读）。
 func TestVipTable_ReconcileConcurrent(t *testing.T) {
+	t.Parallel()
 	vt := NewVipTable(testVIPSubnet)
 	vt.Add(netip.MustParseAddr("100.64.0.2"), "node-a")
 
@@ -279,6 +290,7 @@ func TestVipTable_ReconcileConcurrent(t *testing.T) {
 // TestDeterministicAllocator_TinySubnet（S-3 回归）校验 /31、/32 无可分配地址报错，
 // /30 单宿主（偏移 2）正确分配。
 func TestDeterministicAllocator_TinySubnet(t *testing.T) {
+	t.Parallel()
 	for _, cidr := range []string{"100.64.0.0/31", "100.64.0.0/32"} {
 		a := newDeterministicAllocator(netip.MustParsePrefix(cidr))
 		if _, err := a.Alloc("m", "node-a"); err == nil {
