@@ -54,7 +54,7 @@ SPDX-License-Identifier: Apache-2.0
 | 片 | 内容 | 前置 | 验证 |
 | --- | --- | --- | --- |
 | **S1 口径对齐** ✅ 已交付 | `fileInfosFromViewEntries` 优先 `e.Checksum`（未自报时回落台账）；与 search 路径同口径 | 无 | `TestList_ViewChecksumPreferredOverLedger`（构造 `e.Checksum` 与台账不同值 ⇒ 取视图值；变异：仍先查台账 ⇒ 红） |
-| **S2 本地卷自报** | `volumestate` 增注入式 `metaReader`（opts）；`CacheFS.ListDir` 回源后补 checksum 并缓存；装配层经 `*storage.Root` + `files/meta` 提供 reader | S1 | 本地卷 list 的 checksum 不依赖台账（清空台账后 list 仍正确）；缓存命中不重复读 sidecar（计数注入）；变异：不做补全 ⇒ 红 |
+| **S2 本地卷自报** ✅ 已交付 | `volumestate.CacheFS.ListDir` 在 **cache-miss 回源后**用 inner 的 `meta.Provider` 读 sidecar `TotalSHA256` 补齐条目 checksum（**仅本地卷**；已有自报值/目录条目跳过；sidecar 缺失留空）。**无需装配层改动、不新增 R28** | S1 | 单测 `TestCacheFS_ListDir{FillsLocalChecksums,ChecksumCached,SkipsRemoteChecksums,LocalChecksumPersisted}`（含**落盘快照带 checksum**）；变异 2/2 命中（去本地性判定 ⇒ 远端红；填充移到 `Get` 外 ⇒ 落盘用例红） |
 | **S3 台账写路径窄化** | 读路径去掉台账兜底；`Set/Delete/Rename` 停写；`checksum_rebuild` 只保留显式导入 | S2 | 全量 list/stat/search 用例（含多卷同名、加密卷、外部卷）；R46 计数按其真实值下调 |
 | **S4 收口** | 删 `checksums.json` 写路径 + R46 门禁与 TSV（0 行时无意义） | S3 | `go test ./internal/archcheck/` 全绿；回归套件全绿 |
 
@@ -71,3 +71,23 @@ SPDX-License-Identifier: Apache-2.0
 
 - R46（`legacy_state_usage`）的下降应由 S1→S3 **真实消除**驱动，不通过改口径取巧（口径噪音的剔除另见 `docs/archive/gate-ratchet-reduction.md` 的 D3 决策）。
 - 新增的注入式 `metaReader` 属**构造注入**（结构体私有字段 / opts），符合「测试注入纪律」（禁包级 seam 替换）。
+
+## 8. S2 实施记录与**验收口径修正**（2026-11-12）
+
+**实现**（比原计划更小，且更贴合现有架构）：
+- 落点从「装配层注入 `metaReader`」收敛为 **`pkg/volumestate.CacheFS` 内部**：cache-miss 的
+  `fetch` 内，用 `inner.(meta.Provider)` 读 sidecar（`trusted.Wrap` 已实现 `FileMeta`，且 R21 要求
+  装饰器全量转发 ⇒ **本地卷 ViewUser 链本就有该能力**），把 `TotalSHA256` 填进
+  `Entry.Checksum/ChecksumType/Checksums`。
+- **仅本地卷**（`syncpkg.LocalVolume`）：远端卷每文件一次网络往返 = 性能回归。
+- 填充在 **`fetch` 内** ⇒ 随目录快照缓存，**并随快照落盘**（重启后磁盘命中零 sidecar 读）。
+
+**验收口径修正（重要）**：原 S2 验收「清空台账后 list 仍正确」**不具判别力**——台账为空时
+现有自愈路径（§15.1 步骤 ①②：`RebuildChecksums` 从 sidecar 批量回填）已能让 list 给出正确
+checksum；且台账是**内存优先 + debounce 落盘**，进程内删文件不改变内存态。⇒ S2 的可观测收益是
+**「列表 checksum 直接来自 sidecar，无需台账/自愈」**（性能与单一事实源），其正确性由
+`pkg/volumestate` 单测（含落盘快照用例）+ 变异锁定；API 级判别需测试专用 hook，暂不做。
+
+**遗留（S3 前置）**：读路径仍保留台账兜底（`files.checksumGetter`）。S3 去掉兜底 + 窄化写路径前，
+需确认「无 sidecar 的文件」（历史数据/旁路写）的读语义——届时按「现算 `fileChecksumRoot`」或
+「显式 `--repair`」二选一，不得静默返回空。

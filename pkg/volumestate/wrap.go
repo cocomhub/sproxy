@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -42,11 +43,59 @@ func (f *CacheFS) Inner() syncpkg.FS { return f.inner }
 // ---- 基础 7 方法 ----
 
 // ListDir 走缓存：命中且新鲜 ⇒ 快照；否则回源（回源时若有代际能力则记录代际）。
+//
+// 回源后**本地卷**会在 fetch 内补齐条目的 sidecar checksum（R46 S2）——必须在 fetch 内，
+// 填充结果才能随快照一起被缓存，命中路径零 I/O。
 func (f *CacheFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, error) {
 	probe := f.genProbe()
 	return f.cache.Get(ctx, f.vol, path, probe, func(fctx context.Context) ([]syncpkg.Entry, error) {
-		return f.inner.ListDir(fctx, path)
+		entries, err := f.inner.ListDir(fctx, path)
+		if err != nil {
+			return nil, err
+		}
+		f.fillLocalChecksums(fctx, path, entries)
+		return entries, nil
 	})
+}
+
+// fillLocalChecksums 为**本地卷**的列举条目补齐 sidecar 明文 `TotalSHA256`（设计
+// docs/designs/2026-11-11-checksum-ledger-read-path.md §S2；读口径见 §4）。
+//
+// 边界（为什么这样设计）：
+//   - **仅本地卷**：远端卷（s3/baidupcs/…）的 sidecar 读是每文件一次网络往返 ⇒
+//     N 条目 = N 往返，属性能回归；本地卷读本地小文件，且**随目录快照缓存**
+//     （每目录每代际一次）。
+//   - 已有 `Checksum` 的条目（secretdata/s3 自报）与目录条目跳过。
+//   - sidecar 缺失/损坏/解析失败 ⇒ 留空（不报错、不伪造），由消费方 `stat` 兜底。
+func (f *CacheFS) fillLocalChecksums(ctx context.Context, dirPath string, entries []syncpkg.Entry) {
+	if !f.IsLocalVolume() {
+		return
+	}
+	pv, ok := f.inner.(meta.Provider)
+	if !ok {
+		return
+	}
+	dir := strings.Trim(dirPath, "/")
+	for i := range entries {
+		e := &entries[i]
+		if e.IsDir || e.Checksum != "" {
+			continue
+		}
+		rel := e.Name
+		if dir != "" {
+			rel = dir + "/" + e.Name
+		}
+		fm, err := pv.FileMeta(ctx, rel)
+		if err != nil || fm == nil || fm.TotalSHA256 == "" {
+			continue
+		}
+		if e.Checksums == nil {
+			e.Checksums = make(map[string]string, 1)
+		}
+		e.Checksum = fm.TotalSHA256
+		e.ChecksumType = "sha256"
+		e.Checksums["sha256"] = fm.TotalSHA256
+	}
 }
 
 // Stat 恒回源（A 类：尺寸/checksum 的安全判定必须新鲜；单对象成本远低于目录列举）。
