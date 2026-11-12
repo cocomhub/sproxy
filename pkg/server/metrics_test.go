@@ -53,6 +53,7 @@ func metricsHTTPClient() *http.Client {
 }
 
 func TestMetricsHandler_Empty(t *testing.T) {
+	t.Parallel()
 	ts, _ := newTestServerWithMetrics(t)
 	resp, err := metricsHTTPClient().Get(ts.URL + "/metrics")
 	if err != nil {
@@ -69,6 +70,7 @@ func TestMetricsHandler_Empty(t *testing.T) {
 }
 
 func TestMetrics_RecordRequest(t *testing.T) {
+	t.Parallel()
 	m := metrics.NewMetrics()
 	m.RecordRequest(200)
 	m.RecordRequest(201)
@@ -90,6 +92,7 @@ func TestMetrics_RecordRequest(t *testing.T) {
 }
 
 func TestMetrics_RecordUploadDownloadDelete(t *testing.T) {
+	t.Parallel()
 	m := metrics.NewMetrics()
 	m.RecordUpload(1024)
 	m.RecordUpload(2048)
@@ -114,6 +117,7 @@ func TestMetrics_RecordUploadDownloadDelete(t *testing.T) {
 }
 
 func TestMetrics_ActiveConnections(t *testing.T) {
+	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
 
 	// 鍙戜竴涓姹傦紝metricsMiddleware 浼氬湪璇锋眰鏈熼棿浣?active +1锛岃姹傚悗褰?0
@@ -134,6 +138,7 @@ func TestMetrics_ActiveConnections(t *testing.T) {
 }
 
 func TestMetricsMiddleware_CountsRequests(t *testing.T) {
+	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
 
 	for i := range 3 {
@@ -158,6 +163,7 @@ func TestMetricsMiddleware_CountsRequests(t *testing.T) {
 }
 
 func TestMetricsHandler_PrometheusFormat(t *testing.T) {
+	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
 	h.metrics.RecordUpload(100)
 	h.metrics.RecordDownload(200)
@@ -243,6 +249,7 @@ func TestMetricsSnapshot_Nil(t *testing.T) {
 }
 
 func TestMetricsHandler_FullOutput(t *testing.T) {
+	t.Parallel()
 	ts, h := newTestServerWithMetrics(t)
 	h.metrics.RequestsTotal.Add(10)
 	h.metrics.Requests2XX.Add(5)
@@ -295,6 +302,7 @@ func TestMetricsHandler_FullOutput(t *testing.T) {
 }
 
 func TestMetricsHandler_NilMetrics(t *testing.T) {
+	t.Parallel()
 	h := &Handlers{}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/metrics", nil)
@@ -308,5 +316,6 @@ func TestMetricsHandler_NilMetrics(t *testing.T) {
 }
 
 func TestMetricsHandler_WithMuxMetrics(t *testing.T) {
+	t.Parallel()
 	t.Skip("muxMetrics removed — aggregated from RouteTable now")
 }

@@ -47,6 +47,7 @@ func actorChunkedMux(h *Handlers, actor string) *http.ServeMux {
 // 的磁盘断言互补，这里断言配额账本）：init 预留 60 → 取消会话（DeleteSession）→ 临时名
 // 删除 + user 桶 Reserved 归零、无泄漏。
 func TestChunkedInflight_DeleteSessionReleasesQuota(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 	content := bytes.Repeat([]byte("D"), 60)
 	uploadID := "del-session-quota"
@@ -201,6 +202,7 @@ func (e *ownerChunkedEnv) statusAs(t *testing.T, actor, query string) (int, map[
 // upload_id 返回裸 id（无 alice/ 前缀）、会话目录落 <root>/alice/chunk/<id>/、
 // chunk/complete/status 用裸 id 成功、跨租户同裸 id 会话互不可见（404）。
 func TestChunked_NewLayoutNoOwnerPrefix(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 
 	filename := "dir/f.bin"
@@ -272,6 +274,7 @@ func TestChunked_NewLayoutNoOwnerPrefix(t *testing.T) {
 // TestChunkedUploadOwner_BareIDWorkflow 验证带 owner 认证的分块上传全流程（新布局）：
 // init 返回裸 id，chunk/complete/status 沿用裸 id 成功；最终文件落 owner user 桶。
 func TestChunkedUploadOwner_BareIDWorkflow(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 
 	filename := "dir/owner-data.bin"
@@ -335,6 +338,7 @@ func TestChunkedUploadOwner_BareIDWorkflow(t *testing.T) {
 // alice 创建会话后，bob 用同一裸 id chunk/complete/status → 404（租户根隔离，
 // 取代旧"伪造 owner 前缀"防御——新机制下无需前缀）。
 func TestChunkedUploadOwner_CrossTenantBareIDSessionNotFound(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 
 	filename := "dir/bare-reject.bin"
@@ -366,6 +370,7 @@ func TestChunkedUploadOwner_CrossTenantBareIDSessionNotFound(t *testing.T) {
 // per-tenant store 实例天然隔离：同一文件名在不同租户 store 中各命中本租户会话，
 // 互不串扰（取代旧 GetSessionByFilenameOwner 的 owner 精确匹配）。
 func TestChunkedUploadOwner_GetSessionByFilenamePerTenant(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 
 	// 两个租户各自创建同名会话（裸 id）
@@ -394,6 +399,7 @@ func TestChunkedUploadOwner_GetSessionByFilenamePerTenant(t *testing.T) {
 // TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated 验证同裸 id 在不同租户下隔离：
 // alice 与 anonymous 各用同一裸 id 建独立会话，互不影响。
 func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
+	t.Parallel()
 	env := newOwnerChunkedEnv(t)
 
 	filename := "shared.bin"
@@ -444,6 +450,7 @@ func TestChunkedUploadOwner_SameBareIDDifferentOwnerIsolated(t *testing.T) {
 // TestChunkedUploadOwner_RestartRecoversPerTenantSession 验证租户会话在服务重启后恢复：
 // session.json 位于 <root>/<owner>/chunk/<bare>/，恢复后 GetSession 命中、complete 不 404。
 func TestChunkedUploadOwner_RestartRecoversPerTenantSession(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 
 	// 第一代 handlers：创建 alice 会话、建在途临时名（user 桶）并直写分片 0

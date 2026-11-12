@@ -44,6 +44,7 @@ func newFedClient(t *testing.T, body string) *hub.FederationClient {
 // TestHubNodesHandler_MergesFederation：/api/hub/nodes 合并联邦候选节点——
 // 本地路由表权威 + 联邦独有候选，按 node-id 去重（本地优先）。
 func TestHubNodesHandler_MergesFederation(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-a"), Addr: "192.168.1.1:9000"}, nil)
 
@@ -77,6 +78,7 @@ func TestHubNodesHandler_MergesFederation(t *testing.T) {
 // TestHubNodesHandler_FederationMeshIsolation：命名 mesh 请求者不得看到其它 mesh
 // （含默认 mesh cm==""）的联邦候选——merge 按 mesh 严格隔离，防跨 mesh 泄漏。
 func TestHubNodesHandler_FederationMeshIsolation(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("B", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
 
@@ -110,6 +112,7 @@ func TestHubNodesHandler_FederationMeshIsolation(t *testing.T) {
 // TestFederationNodesEndpoint_ByMesh：联邦节点表端点按调用方 mesh 过滤（M-9），
 // 返回带 mesh 字段供对端合并隔离。
 func TestFederationNodesEndpoint_ByMesh(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("B", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-default"), Addr: "192.168.1.3:9000"}, nil)
@@ -137,6 +140,7 @@ func TestFederationNodesEndpoint_ByMesh(t *testing.T) {
 
 // TestFederationNodesEndpoint_NoRouteTable：hub 未启用时联邦端点返回 404。
 func TestFederationNodesEndpoint_NoRouteTable(t *testing.T) {
+	t.Parallel()
 	h := &Handlers{logger: testutil.DiscardLogger()} // routeTable nil
 	w := httptest.NewRecorder()
 	h.federationNodesHandler(w, httptest.NewRequest(http.MethodGet, "/api/hub/federation/nodes", nil))
@@ -148,6 +152,7 @@ func TestFederationNodesEndpoint_NoRouteTable(t *testing.T) {
 // TestFederationEndpoint_AuthRequired：联邦节点表端点在 access_keys 配置后
 // 受 SproxySig 认证保护——无凭据请求 401（fail-closed）。
 func TestFederationEndpoint_AuthRequired(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	cfg := Default()
 	cfg.Addr = "127.0.0.1:0"
@@ -183,6 +188,7 @@ func TestFederationEndpoint_AuthRequired(t *testing.T) {
 // TestFederationSync_AuthSuccessAndFailure（DoD 2 认证两侧）：配置 access_keys 的
 // hub 联邦端点上，正确 AK/SK 拉取成功、错误 SK 拉取返回错误（401，fail-closed）。
 func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
 	cfg := Default()
@@ -238,6 +244,7 @@ func TestFederationSync_AuthSuccessAndFailure(t *testing.T) {
 // 端点按拉取方 AK 的 mesh 过滤——用命名 mesh 的 AK 签名拉取，只返回该 mesh 节点，
 // 默认 mesh 节点不泄漏。
 func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
+	t.Parallel()
 	rt := hub.NewMeshRouteTable()
 	rt.Add("meshM", hub.NodeInfo{ID: hub.NodeID("node-m"), Addr: "192.168.1.2:9000"}, nil)
 	rt.Add("", hub.NodeInfo{ID: hub.NodeID("node-default"), Addr: "192.168.1.3:9000"}, nil)
@@ -294,6 +301,7 @@ func TestFederationNodesEndpoint_MeshFromAccessKey(t *testing.T) {
 // hub-A 的联邦客户端指向 hub-B，同步后 A 的 /api/hub/nodes 应同时看到
 // 本地节点 node-a 与联邦节点 node-b。
 func TestDualHubPeering_NodesVisible(t *testing.T) {
+	t.Parallel()
 	// ---- hub-B（被拉取方）----
 	rtB := hub.NewMeshRouteTable()
 	rtB.Add("", hub.NodeInfo{ID: hub.NodeID("node-b"), Addr: "192.168.1.2:9000"}, nil)
@@ -382,6 +390,7 @@ func TestDualHubPeering_NodesVisible(t *testing.T) {
 // 场景：hub-B 的联邦端点按拉取方 mesh 过滤；hub-A 用默认 mesh（无凭据）拉取，
 // 只能拿到默认 mesh 节点，命名 mesh 节点不进入 A 的候选，/api/hub/nodes 不泄漏。
 func TestDualHubPeering_MeshNotLeaked(t *testing.T) {
+	t.Parallel()
 	// hub-B：默认 mesh + 命名 mesh "private" 节点。
 	rtB := hub.NewMeshRouteTable()
 	rtB.Add("", hub.NodeInfo{ID: hub.NodeID("node-public"), Addr: "192.168.1.2:9000"}, nil)

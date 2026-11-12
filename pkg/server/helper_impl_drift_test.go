@@ -103,6 +103,7 @@ func volSetNormBody(t *testing.T, src, name string) string {
 // （前者的守卫会全绿）。整段比对把这些一并覆盖，代价只是两份代码必须保持同构——
 // 这正是"同一纯函数的两份实现"应有的约束。
 func TestVolumePoolForTenant_ImplParity(t *testing.T) {
+	t.Parallel()
 	domain := volSetNormBody(t, readRepoFile(t, "pkg/files/version_store.go"), "volumePoolForTenant")
 	assembly := volSetNormBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumePoolForTenant")
 
@@ -120,6 +121,7 @@ func TestVolumePoolForTenant_ImplParity(t *testing.T) {
 // **归一化函数体逐字一致**（只归一化卷集合接收者名）。判据与 TestVolumePoolForTenant_ImplParity
 // 相同：整段体比对覆盖比较表达式与实参（只比调用序列会漏掉 `fs.ErrNotExist` 之类的判定细节）。
 func TestVolumeFileExists_ImplParity(t *testing.T) {
+	t.Parallel()
 	domain := volSetNormBody(t, readRepoFile(t, "pkg/files/read.go"), "volumeFileExists")
 	assembly := volSetNormBody(t, readRepoFile(t, "pkg/server/volumes.go"), "volumeFileExists")
 
@@ -196,6 +198,7 @@ var (
 
 // TestDefaultVolumeAllows_ImplParity 断言两份 defaultVolumeAllows 的归一化函数体逐字一致。
 func TestDefaultVolumeAllows_ImplParity(t *testing.T) {
+	t.Parallel()
 	assertImplParity(t, "defaultVolumeAllows", "pkg/files/service.go", "pkg/server/volumes.go", 100, defaultVolProbeRe)
 }
 
@@ -203,6 +206,7 @@ func TestDefaultVolumeAllows_ImplParity(t *testing.T) {
 // 该函数是读/删/改名路径的卷定位统一入口（显式卷的 ACL 门禁 + fail-closed 未命中），
 // 两份分叉会让「经显式 ?volume= 定位」在删/改名与下载之间出现 ACL 判定差异。
 func TestLocateForRead_ImplParity(t *testing.T) {
+	t.Parallel()
 	assertImplParity(t, "locateForRead", "pkg/files/service.go", "pkg/server/volumes.go", 150, locateReadProbeRe)
 }
 
@@ -218,6 +222,7 @@ var uploadingLockMarkerInDomainRe = regexp.MustCompile(`(?m)^\s*(?:const\s+)?upl
 // 三条断言互为纵深：装配侧常量未被改动、领域侧字面量与之相等、该字面量确实被
 // isUploadingLockMarker 放行（最后一条是正探针，确保本守卫不是在比对两个错误值）。
 func TestUploadingLockMarker_NoDrift(t *testing.T) {
+	t.Parallel()
 	if uploadingLockUpload != "upload" {
 		t.Fatalf("pkg/server 侧锁标记契约变更：%q（本测试与 pkg/files 侧副本需同步复核）", uploadingLockUpload)
 	}

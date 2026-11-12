@@ -14,6 +14,7 @@ import (
 //     ==selfVIP 但端口不在白名单 → 拒绝（安全红线 C-1）；!=selfVIP → 拒绝；
 //  3. 虚拟子网外回落 base（公网 + CIDR 白名单）。
 func TestNewVirtualIPDialPolicy(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	// 显式 allowPorts=[22]；serviceAddrs 的端口（2222、8080）自动加入白名单。
@@ -63,6 +64,7 @@ func TestNewVirtualIPDialPolicy(t *testing.T) {
 
 // TestNewVirtualIPDialPolicy_AllowCIDRs 校验虚拟子网外回落 base 时 CIDR 白名单仍生效。
 func TestNewVirtualIPDialPolicy_AllowCIDRs(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, []string{"10.0.0.0/8"}, nil)
@@ -82,6 +84,7 @@ func TestNewVirtualIPDialPolicy_AllowCIDRs(t *testing.T) {
 // TestNewVirtualIPDialPolicy_NoSelfVIP 校验 selfVIP 无效（客户端未拿到虚拟 IP）时
 // 虚拟子网内目标全部拒绝（fail-closed），虚拟子网外回落 base 不变。
 func TestNewVirtualIPDialPolicy_NoSelfVIP(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	policy := NewVirtualIPDialPolicy(subnet, netip.Addr{}, []int{22}, nil, nil)
 
@@ -95,6 +98,7 @@ func TestNewVirtualIPDialPolicy_NoSelfVIP(t *testing.T) {
 
 // TestNewVirtualIPDialPolicy_RejectsIPv6Subnet 校验 IPv6 子网被拒绝（虚拟 IP 仅支持 IPv4）。
 func TestNewVirtualIPDialPolicy_RejectsIPv6Subnet(t *testing.T) {
+	t.Parallel()
 	defer func() {
 		if recover() == nil {
 			t.Fatal("IPv6 子网应 panic（虚拟 IP 分配仅支持 IPv4）")
@@ -106,6 +110,7 @@ func TestNewVirtualIPDialPolicy_RejectsIPv6Subnet(t *testing.T) {
 // TestNewVirtualIPDialPolicy_InvalidAllowPorts 校验显式 allowPorts 中的非法端口
 // （0/65536/负数）被跳过，不进入白名单。
 func TestNewVirtualIPDialPolicy_InvalidAllowPorts(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	policy := NewVirtualIPDialPolicy(subnet, selfVIP, []int{0, 65536, -1, 22}, nil, nil)
@@ -124,6 +129,7 @@ func TestNewVirtualIPDialPolicy_InvalidAllowPorts(t *testing.T) {
 // TestNewVirtualIPDialPolicy_InvalidServiceAddrPort 校验 serviceAddrs 端口提取失败
 // （无端口 / 非数字端口）的条目不进入端口白名单。
 func TestNewVirtualIPDialPolicy_InvalidServiceAddrPort(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, nil, []string{"127.0.0.1", "host:notaport"})
@@ -137,6 +143,7 @@ func TestNewVirtualIPDialPolicy_InvalidServiceAddrPort(t *testing.T) {
 // （host 不是 IP），回落 base——主机名不能因 selfVIP 端口白名单被改写绕过（防 DNS
 // 解析到 loopback/私网后意外放行）。
 func TestNewVirtualIPDialPolicy_HostnameNotRewritten(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	policy := NewVirtualIPDialPolicy(subnet, selfVIP, []int{22}, nil, nil)
@@ -152,6 +159,7 @@ func TestNewVirtualIPDialPolicy_HostnameNotRewritten(t *testing.T) {
 // 否则 mesh connect <selfVIP>:5432 会改写拨到本机 127.0.0.1:5432 意外暴露本机同
 // 端口未宣告服务。需要开放时用显式 --vip-allow-port。
 func TestNewVirtualIPDialPolicy_RemoteServicePortNotWhitelisted(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	policy := NewVirtualIPDialPolicy(subnet, selfVIP, nil, nil, []string{"db:192.168.1.10:5432"})
@@ -168,6 +176,7 @@ func TestNewVirtualIPDialPolicy_RemoteServicePortNotWhitelisted(t *testing.T) {
 // TestNewVirtualIPDialPolicy_LocalhostServicePortWhitelisted 校验 loopback/localhost
 // 宣告的端口自动进入白名单（本机服务，S-2 例外保留）。
 func TestNewVirtualIPDialPolicy_LocalhostServicePortWhitelisted(t *testing.T) {
+	t.Parallel()
 	subnet := netip.MustParsePrefix("100.64.0.0/10")
 	selfVIP := netip.MustParseAddr("100.64.0.5")
 	for _, svc := range []string{"127.0.0.1:22", "localhost:22"} {

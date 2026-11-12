@@ -424,6 +424,7 @@ func TestSaveConfig_ToFile(t *testing.T) {
 }
 
 func TestSaveConfig_ReadOnlyDir(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("read-only dir test not supported on Windows")
 	}
@@ -516,6 +517,7 @@ func compareFieldYAMLMaps(t *testing.T, typ reflect.Type, f reflect.StructField,
 // registration.disable 默认 false（=允许注册）、allow_insecure_loopback 默认 false、
 // credential_ttl 默认 30d；负值 = 显式禁用首启 anonymous（合法，不拒绝）。
 func TestConfig_Registration_Defaults(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	helperConfigRegistrationDefaults_defaults(t, c)
 
@@ -601,6 +603,7 @@ func helperConfigRegistrationDefaults_afterSetDefaults(t *testing.T, zero *Confi
 // TestConfig_VirtualSubnet_Default 校验 hub.virtual_subnet 默认值为 CGNAT 100.64.0.0/10，
 // 空值经 SetDefaults 填充，非空值不被覆盖。
 func TestConfig_VirtualSubnet_Default(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	if c.Hub.VirtualSubnet != hub.DefaultVirtualSubnet {
 		t.Fatalf("Default().Hub.VirtualSubnet = %q, want %q", c.Hub.VirtualSubnet, hub.DefaultVirtualSubnet)
@@ -656,6 +659,7 @@ func TestLoadFromProvider_HubDHTPersistFile(t *testing.T) {
 // TestConfig_StorageRoot 验证 storage_root 回退与 owner_quotas 默认值逻辑（任务 4）。
 // StorageRoot() 字段非空优先，否则回退 StorageRoot（兼容旧配置）；OwnerQuotaFor 显式 owner > "*" > 0。
 func TestConfig_StorageRoot(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	c.StorageRoot = "./storage"
 	if c.StorageRoot != "./storage" {
@@ -677,6 +681,7 @@ func TestConfig_StorageRoot(t *testing.T) {
 // TestLoadFromProvider_StorageRootOwnerQuotas 验证 YAML 解析 storage_root/owner_quotas 配置
 // （owner_quotas 值支持纯数字字节与人类可读大小；"*" 为默认值）。
 func TestLoadFromProvider_StorageRootOwnerQuotas(t *testing.T) {
+	t.Parallel()
 	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
 		"storage_root": "./storage",
 		"owner_quotas": map[string]any{"*": int64(5 << 30), "alice": int64(10 << 30)},
@@ -734,6 +739,7 @@ func TestLoadFromProvider_OwnerQuotas_HumanReadable(t *testing.T) {
 // TestLoadFromProvider_StorageRootFallback 验证仅配置 storage_root 时正确解析，且旧键
 // uploads_dir 被忽略（回退默认 ./storage）——uploads_dir 字段已完全移除，不兼容旧配置键。
 func TestLoadFromProvider_StorageRootFallback(t *testing.T) {
+	t.Parallel()
 	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{"storage_root": "/old/uploads"}})
 	if err != nil {
 		t.Fatalf("LoadFromProvider: %v", err)
@@ -754,6 +760,7 @@ func TestLoadFromProvider_StorageRootFallback(t *testing.T) {
 // TestConfig_VirtualSubnet_Validate 校验 hub.virtual_subnet 校验：非法 CIDR 拒绝、
 // IPv6 拒绝、合法 IPv4 通过。
 func TestConfig_VirtualSubnet_Validate(t *testing.T) {
+	t.Parallel()
 	valid := Default()
 	valid.Hub.VirtualSubnet = "10.0.0.0/8"
 	if err := valid.Validate(); err != nil {
@@ -774,6 +781,7 @@ func TestConfig_VirtualSubnet_Validate(t *testing.T) {
 // TestConfig_BucketLimits_Default 验证 BucketLimits 默认值为非 nil 空 map
 // （满足 len(c.BucketLimits)==0 的判断，round-trip 后不 panic）。
 func TestConfig_BucketLimits_Default(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	if c.BucketLimits == nil {
 		t.Fatal("BucketLimits 默认应为非 nil 空 map（非 nil 可被 map 判断/访问复用）")
@@ -787,6 +795,7 @@ func TestConfig_BucketLimits_Default(t *testing.T) {
 // 任务 8 起：功能桶根键（如 "cloud"）与 quotaBucketNames 重叠被 Validate 显式拒绝（防
 // 覆盖功能桶上限），此处用合法子目录键验证解析 + 拒绝重叠的回归。
 func TestLoadFromProvider_BucketLimits(t *testing.T) {
+	t.Parallel()
 	cfg, err := LoadFromProvider(mapProvider{m: map[string]any{
 		"addr": ":18083",
 		"bucket_limits": map[string]any{
@@ -867,6 +876,7 @@ func TestLoadConfig_VolCapacity_HumanReadable(t *testing.T) {
 // （C 任务 2 放行条件 2）：拒绝 .. / 绝对路径 / 前导或尾部斜杠 / 空段 / 空串 /
 // 非 user 首段（分层配额仅支持 user 桶子目录）；合法 user 子目录键通过；负上限拒绝。
 func TestConfig_Validate_BucketLimits_KeyValidation(t *testing.T) {
+	t.Parallel()
 	badKeys := []string{
 		"", "..", "../escape", "user/../x", "user//x", "/user/x", "user/x/",
 		"user/.", "C:/abs", `user\videos`, "videos/hd", "cloud/x",
@@ -1158,6 +1168,7 @@ func credentialStoreBackendAesgcmMasterKey(t *testing.T) {
 // （S-2）：含 vault.addr/key_name/timeout/cache_ttl（字符串 duration）的 YAML 走 LoadConfig →
 // 断言 Timeout/CacheTTL 正确解码；Mount/TokenEnv 显式空 → SetDefaults 回落默认。
 func TestConfig_Vault_NestedDecode(t *testing.T) {
+	t.Parallel()
 	cfgPath := filepath.Join(t.TempDir(), "cfg.yaml")
 	doc := `
 addr: ":18083"
