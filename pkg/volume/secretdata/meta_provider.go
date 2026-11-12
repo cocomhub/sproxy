@@ -31,21 +31,34 @@ var _ meta.Provider = (*SecretdataFS)(nil)
 //   - ChunkSize 取首块 OrigSize（secretdata 分块不定长——按首块表达；实际校验以
 //     每块自己的 SHA256 为准）；
 //   - 文件不存在 / 目录 → 明确错误（fail-closed）。
+//
+// FileMeta 返回文件的元数据块（供校验/审查消费）。
+//
+// P5（2026-11-12）：P1 后 `metaEntry.meta` 为**常态 nil**（按需加载 + L1b 淘汰），
+// 旧实现直接报「元信息缺失（不可校验）」= **功能失效**。现在先**锁外**确保已加载，
+// 再在短锁内取实例引用使用（不能把 ensure 放在持锁区内 —— ensure 内部要拿写锁）。
 func (s *SecretdataFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
 	e, ok := s.index[key]
+	s.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("secretdata: FileMeta 文件不存在: %s", rel)
 	}
-	if e.meta == nil {
+	if err := s.ensureEntryMeta(ctx, e); err != nil {
+		return nil, fmt.Errorf("secretdata: FileMeta 元信息不可读: %s: %w", rel, err)
+	}
+	s.mu.RLock()
+	m := e.meta
+	s.mu.RUnlock()
+	if m == nil {
+		// 并发淘汰窗口：ensure 后又立即被 L1b 淘汰。
 		return nil, fmt.Errorf("secretdata: FileMeta 元信息缺失（不可校验）: %s", rel)
 	}
-	return shardsealMetaToFileMetaBlocklets(e.meta), nil
+	return shardsealMetaToFileMetaBlocklets(m), nil
 }
 
 // shardsealMetaToFileMeta 把 shardseal.Meta 转换为通用 FileMeta（字段对齐互转）。
@@ -168,21 +181,30 @@ var _ syncpkg.FS = (*SecretdataFS)(nil)
 // BlockletMode 返回 rel 对应文件写路径固化的 blocklet 模式（"video-keyframe"/"fixed"）。
 // 供本地工具（sclient sealfile info）与装配层断言关键帧分块是否生效；
 // 文件不存在 / 目录 → 明确错误（fail-closed）。
+// BlockletMode 返回文件的 blocklet 分块模式。
+//
+// P5（2026-11-12）：同 `FileMeta` —— P1 后 meta 常态为 nil，须**锁外** ensure。
 func (s *SecretdataFS) BlockletMode(ctx context.Context, rel string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
 	e, ok := s.index[key]
+	s.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("secretdata: BlockletMode 文件不存在: %s", rel)
 	}
-	if e.meta == nil {
+	if err := s.ensureEntryMeta(ctx, e); err != nil {
+		return "", fmt.Errorf("secretdata: BlockletMode 元信息不可读: %s: %w", rel, err)
+	}
+	s.mu.RLock()
+	m := e.meta
+	s.mu.RUnlock()
+	if m == nil {
 		return "", fmt.Errorf("secretdata: BlockletMode 元信息缺失: %s", rel)
 	}
-	mode := e.meta.Block.BlockletMode
+	mode := m.Block.BlockletMode
 	if mode == "" {
 		mode = shardseal.BlockletModeFixed
 	}
@@ -197,14 +219,26 @@ func (s *SecretdataFS) UpdateMetaExtra(ctx context.Context, rel string, extra ma
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.RLock()
 	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
 	e, ok := s.index[key]
-	if !ok || e.meta == nil {
-		s.mu.RUnlock()
+	s.mu.RUnlock()
+	if !ok {
 		return fmt.Errorf("secretdata: UpdateMetaExtra 文件不存在: %s", rel)
 	}
-	nm := cloneMeta(e.meta)
+	// P5（2026-11-12）：meta 常态为 nil（P1 按需加载）⇒ 必须**锁外** ensure；
+	// 旧写法在持锁时判 `e.meta == nil` 会直接把**存在的文件**报成「不存在」（功能失效）。
+	if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+		return fmt.Errorf("secretdata: UpdateMetaExtra 元信息不可读: %s: %w", rel, merr)
+	}
+	s.mu.RLock()
+	m := e.meta
+	if m == nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("secretdata: UpdateMetaExtra 元信息缺失: %s", rel)
+	}
+	// 保持读锁直到原有逻辑释放（配对：本 RLock ↔ 后文原有的 RUnlock）。
+	nm := cloneMeta(m)
 	nm.Extra = cloneExtra(nm.Extra)
 	// 合并模式（用户裁定 2026-10-26：默认新增而非覆盖；replace 整表替换；delete 删键）。
 	// 模式经 ctx 承载（syncpkg.MetaUpdateModeFrom）——不扩 UpdateMetaExtra 签名。

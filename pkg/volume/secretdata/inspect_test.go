@@ -181,7 +181,7 @@ func BenchmarkInspect_BuildContainerIndex100k(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		idx := fsys.buildContainerIndex("c1")
+		idx := fsys.buildContainerIndex(b.Context(), "c1")
 		if len(idx.fileOwners) == 0 {
 			b.Fatal("空结果")
 		}
@@ -451,7 +451,7 @@ func TestInspect_ContainerIndexMapsAllBlobs(t *testing.T) {
 	}
 	container := path.Dir(tr.Meta.RealPath)
 
-	idx := fsys.buildContainerIndex(container)
+	idx := fsys.buildContainerIndex(t.Context(), container)
 	if len(idx.fileOwners) != 2 {
 		t.Fatalf("fileOwners = %d, want 2（两个文件）", len(idx.fileOwners))
 	}

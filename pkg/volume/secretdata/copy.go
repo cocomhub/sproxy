@@ -109,12 +109,27 @@ func (s *SecretdataFS) copyPrep(ctx context.Context, from, to string) (copyTarge
 	if f == t {
 		return copyTarget{}, nil, false, 0, nil
 	}
+	// P5（2026-11-12）：复制需要源 meta（Chunks），而 P1 后 `meta` 常态为 nil
+	// ⇒ 先**锁外**确保已加载（不能放在持锁区内：ensure 内部要拿写锁）。
+	s.mu.RLock()
+	se, sok := s.index[f]
+	s.mu.RUnlock()
+	if sok {
+		if merr := s.ensureEntryMeta(ctx, se); merr != nil {
+			return copyTarget{}, nil, false, 0, fmt.Errorf("secretdata: 源文件元信息不可读 %q: %w", f, merr)
+		}
+	}
 	s.mu.Lock()
 
 	src, ok := s.index[f]
-	if !ok || src.meta == nil {
+	if !ok {
 		s.mu.Unlock()
 		return copyTarget{}, nil, false, 0, fmt.Errorf("secretdata: 源文件 %q 不存在", f)
+	}
+	if src.meta == nil {
+		// 并发淘汰窗口（ensure 后又立即被 L1b 推出）：与“不存在”区分开，便于定位。
+		s.mu.Unlock()
+		return copyTarget{}, nil, false, 0, fmt.Errorf("secretdata: 源文件 %q 元信息缺失（不可复制）", f)
 	}
 	if _, exists := s.index[t]; exists {
 		s.mu.Unlock()

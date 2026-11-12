@@ -52,6 +52,15 @@ func (s *SecretdataFS) Trace(ctx context.Context, rel string, mode syncpkg.Inspe
 	if up, ok := s.uploadSnapshot(key); ok {
 		return s.traceUploading(up), nil
 	}
+	// P5（2026-11-12）：P1 后 `metaEntry.meta` 为**常态 nil**（按需加载 + L1b 淘汰），
+	// 而审查（traceFile/dedupRefCountLocked）需要真实落点与去重引用 ⇒ 先**锁外**确保已加载。
+	// 失败不在此处报错：保持 `traceFile` 既有的 `AnomalyMetaUnreadable` 语义（异常上报）。
+	s.mu.RLock()
+	te := s.index[key]
+	s.mu.RUnlock()
+	if te != nil {
+		_ = s.ensureEntryMeta(ctx, te)
+	}
 	snap := s.snapshotTrace(key)
 	switch {
 	case snap.isFile:
@@ -526,7 +535,7 @@ func (s *SecretdataFS) explainContainer(ctx context.Context, ex *syncpkg.RealExp
 	if dirMetaName != "" {
 		ex.Container, ex.Evidence = s.resolveContainer(ctx, realPath, dirMetaName, ex)
 	}
-	idx := s.buildContainerIndex(realPath)
+	idx := s.buildContainerIndex(ctx, realPath)
 	seen := make(map[string]struct{}, len(entries))
 	out := make([]syncpkg.RealEntry, len(entries))
 	// 子容器解析要读其 dir-meta（每子容器 1 次 ListDir + 1 次读），串行会在宽目录下退化为
@@ -926,7 +935,23 @@ type containerIndex struct {
 }
 
 // buildContainerIndex 遍历一次索引，收集与 container 相关的全部映射。
-func (s *SecretdataFS) buildContainerIndex(container string) containerIndex {
+// buildContainerIndex 构建容器视图（哪些索引条目属于本容器）。
+//
+// P5（2026-11-12）：`addEntry`/`chunkOwnerOfEntry` 需要 `Chunks`/`Parity`，而 P1 后
+// `metaEntry.meta` 常态为 nil ⇒ 先在**锁外**确保**本容器内**条目的 meta 已加载
+// （只取 `dirSeg == container` 的条目，避免不必要的全量加载）。
+func (s *SecretdataFS) buildContainerIndex(ctx context.Context, container string) containerIndex {
+	s.mu.RLock()
+	cands := make([]*metaEntry, 0, 8)
+	for _, e := range s.index {
+		if e.dirSeg == container {
+			cands = append(cands, e)
+		}
+	}
+	s.mu.RUnlock()
+	for _, e := range cands {
+		_ = s.ensureEntryMeta(ctx, e)
+	}
 	idx := containerIndex{
 		fileOwners:  make(map[string]*syncpkg.LogicalRef),
 		chunkOwners: make(map[string]*syncpkg.LogicalRef),
