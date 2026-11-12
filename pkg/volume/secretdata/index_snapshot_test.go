@@ -74,3 +74,67 @@ func TestIndexSnapshot_InvalidatedByWrite(t *testing.T) {
 		t.Fatalf("写后快照应被删除，stat err=%v", serr)
 	}
 }
+
+// TestIndexSnapshot_CachedAcrossCalls 锁定**进程内快照缓存**（P0 内存优化，2026-11-12）。
+//
+// 回归背景：快照实测 241.8 MB，`loadIndexSnapshot` 每次要 ReadFile(242MB) +
+// gcm.Open(242MB) + Unmarshal(放大 2-3×)，pprof 实测占 inuse_space 的 **56.9%**
+// （790MB/1388MB）；而 `tryLoadIndexSnapshotFast` 与 `tryLoadIndexSnapshot`
+// **各自独立调用** ⇒ 两条快速路径都走到就重复展开两次（RSS 冲 15.3GB 被 OOM）。
+//
+// 判据（决定性）：第一次加载成功后**删掉快照文件**，第二次仍必须成功返回同一结果
+// —— 只有"真的缓存了"才可能通过（未缓存则第二次数不到文件 ⇒ ok=false）。
+// 变异：去掉 snapDone 短路 ⇒ 本用例红。
+func TestIndexSnapshot_CachedAcrossCalls(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vol.idx")
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	fs := &SecretdataFS{secret: secret, opts: Options{
+		Secret: secret, Algorithm: "shardseal/aes-256-gcm", IndexSnapshotPath: path}}
+	fs.writeIndexSnapshot(&indexSnapshot{
+		Version: indexSnapshotVersion, Algorithm: "shardseal/aes-256-gcm",
+		SecretFP: snapshotSecretFP(secret), Containers: []string{"a/b"},
+		Entries: []indexSnapshotEntry{{Rel: "x.mp4", Size: 10, DirSeg: "a/b", MetaName: "zzz",
+			Meta: &shardseal.Meta{Version: 1}}},
+	})
+
+	first, ok := fs.loadIndexSnapshot()
+	if !ok || first == nil {
+		t.Fatalf("首次加载应成功: ok=%v", ok)
+	}
+	// 删掉磁盘快照：第二次若还去读盘 ⇒ 必失败（证明未缓存）。
+	if rerr := os.Remove(path); rerr != nil {
+		t.Fatalf("删除快照失败: %v", rerr)
+	}
+	second, ok2 := fs.loadIndexSnapshot()
+	if !ok2 || second == nil {
+		t.Fatal("缓存未生效：第二次不应再读盘（现已删除文件）")
+	}
+	if second != first {
+		t.Fatal("第二次应返回缓存的同一快照实例，而不是重新解析")
+	}
+	if len(second.Entries) != 1 || second.Entries[0].Rel != "x.mp4" {
+		t.Fatalf("缓存内容不符: %#v", second.Entries)
+	}
+}
+
+// TestIndexSnapshot_CachesFailure 失败结果也缓存（避免反复读 242MB 磁盘 + 解密失败）。
+func TestIndexSnapshot_CachesFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vol.idx")
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	fs := &SecretdataFS{secret: secret, opts: Options{
+		Secret: secret, Algorithm: "shardseal/aes-256-gcm", IndexSnapshotPath: path}}
+	// 文件不存在 ⇒ 首次 false；随后**写入**一个合法快照，第二次仍应 false（已缓存失败）。
+	if _, ok := fs.loadIndexSnapshot(); ok {
+		t.Fatal("快照不存在时应 false")
+	}
+	fs.writeIndexSnapshot(&indexSnapshot{
+		Version: indexSnapshotVersion, Algorithm: "shardseal/aes-256-gcm",
+		SecretFP: snapshotSecretFP(secret), Containers: []string{"a"}})
+	if _, ok := fs.loadIndexSnapshot(); ok {
+		t.Fatal("失败结果应被缓存（不重试）；如需重试应由调用方新建 FS")
+	}
+}

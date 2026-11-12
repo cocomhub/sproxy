@@ -92,7 +92,23 @@ func snapshotKey(secret []byte) [32]byte {
 }
 
 // loadIndexSnapshot 读取并解密快照（失败一律返回 ok=false，由调用方回退全量扫描）。
+//
+// **带进程内缓存**（P0 内存优化，2026-11-12）：快照 241.8 MB，解密+反序列化占 inuse_space
+// 的 56.9%（pprof 实测），而两条快速路径各自调用本函数 ⇒ 一文一读会重复展开两次。
+// 缓存后同进程只展开一次；失败也缓存（避免反复读 242MB 磁盘 + 解密失败）。
 func (s *SecretdataFS) loadIndexSnapshot() (*indexSnapshot, bool) {
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+	if s.snapDone {
+		return s.snapCache, s.snapOK
+	}
+	snap, ok := s.loadIndexSnapshotUncached()
+	s.snapCache, s.snapOK, s.snapDone = snap, ok, true
+	return snap, ok
+}
+
+// loadIndexSnapshotUncached 是未缓存的真实实现（仅由 loadIndexSnapshot 调用）。
+func (s *SecretdataFS) loadIndexSnapshotUncached() (*indexSnapshot, bool) {
 	p := s.opts.IndexSnapshotPath
 	if p == "" {
 		return nil, false

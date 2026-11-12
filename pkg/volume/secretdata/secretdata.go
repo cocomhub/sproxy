@@ -322,6 +322,18 @@ type SecretdataFS struct {
 	index   map[string]*metaEntry
 	dirs    map[string]struct{} // 已知逻辑目录（子目录发现/进入用）
 	dirSegs map[string]string   // 逻辑目录 → 容器目录名
+	// snapCache 是**解密后的索引快照缓存**（P0 内存优化，2026-11-12）。
+	// 为什么必须缓存：快照文件实测 241.8 MB，`loadIndexSnapshot` 每次都要
+	// ReadFile(242MB) + gcm.Open(242MB) + json.Unmarshal(放大 2-3×) ——
+	// pprof 实测它占 inuse_space 的 **56.9%**（790MB/1388MB）。
+	// 而 `tryLoadIndexSnapshotFast`（不列举容器树）与 `tryLoadIndexSnapshot`
+	// （容器集合一致）**各自独立调用 loadIndexSnapshot()** ⇒ 两条快速路径都走到时
+	// 会**重复加载两次**（峰值翻倍，实测 RSS 冲到 15.3GB 被打 OOM）。
+	// 加缓存后：同一进程只解密/解析一次，后续调用零成本。
+	snapMu    sync.Mutex
+	snapCache *indexSnapshot
+	snapOK    bool // 缓存有效性（区分"尚未加载"与"加载失败"）
+	snapDone  bool
 	// dupGroups 是装配期发现的**重复容器组**（同一逻辑路径多容器；落选者数据保留、未加载）。
 	// 供审计（有无争议内容）与容器名规范化（有争议则跳过，等人工确认）使用。
 	dupGroups []dupContainerGroup
