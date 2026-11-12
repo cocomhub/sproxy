@@ -197,7 +197,7 @@ func runPerfMetrics(cmd *cobra.Command, factory clientfactory.Factory, ios cli.I
 // printHeapMetricLines 打印与内存排查相关的指标行，返回是否打印了至少一行。
 func printHeapMetricLines(w io.Writer, body string) bool {
 	shown := false
-	for _, l := range strings.Split(body, "\n") {
+	for l := range strings.SplitSeq(body, "\n") {
 		if isHeapMetricLine(l) {
 			fmt.Fprintln(w, l)
 			shown = true
