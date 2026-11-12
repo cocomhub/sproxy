@@ -353,7 +353,21 @@ func (p *PrefixFS) TraceTree(ctx context.Context, rel string, depth int, mode In
 	return nil, ErrUnsupported
 }
 
+// ---- 目录 meta 清理能力转发（2026-11-12 能力下沉 pkg/sync 后必须转发）----
+//
+// 与审查能力同口径（见上）：装饰器不实现 ⇒ 上层 `fs.(DirMetaCleaner)` 断言恒 false ⇒
+// **静默降级**（把"底层能清理残留"误判为"不支持"）。底层未实现 ⇒ ErrUnsupported。
+// 容器路径**原样**下探（与同层 Trace/Explain 同口径）：入参由领域实现按自身键空间给出，
+// 装饰层不重写。
+func (p *PrefixFS) CleanupStaleDirMeta(ctx context.Context, container string) (int, error) {
+	if c, ok := any(p.FS).(DirMetaCleaner); ok {
+		return c.CleanupStaleDirMeta(ctx, container)
+	}
+	return 0, ErrUnsupported
+}
+
 var (
 	_ StorageInspector = (*PrefixFS)(nil)
 	_ TreeInspector    = (*PrefixFS)(nil)
+	_ DirMetaCleaner   = (*PrefixFS)(nil)
 )

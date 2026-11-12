@@ -13,13 +13,15 @@ package server
 //
 // 设计约定：
 //   - 依赖经 `ExecutorDeps` **显式注入**（不读全局），便于测试与装配顺序解耦；
-//   - 领域包能力用**最小接口**（`DirMetaCleaner`）表达，`pkg/server` 不必依赖具体卷实现类型；
-//     取卷统一走 `CleanupTargetResolver`（`VolumeView` + `sync.Innermost`，与 `ScanTargetsFromSet`
-//     同一穿透做法）——不再经 `External(vol)` 的后端 FS 视图直连（R27）。
+//   - 领域包能力用**能力接口**（`syncpkg.DirMetaCleaner`）表达，`pkg/server` 不必依赖具体卷
+//     实现类型；取卷统一走 `CleanupTargetResolver`（`VolumeView` + **直接断言装饰后的 FS**，
+//     与 `ScanTargetsFromSet` 同一收口做法）——不再经 `External(vol)` 的后端 FS 视图直连（R27），
+//     也不再 `Innermost` 解包（能力已由 R21 保证在 11 个装饰器上全量转发）。
 //   - 执行器**必须幂等**（重试可能重复执行）：领域能力本身已保证（0 个残留也算成功）。
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -28,21 +30,15 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
-// DirMetaCleaner 是「清理非权威目录 meta」的最小能力接口
-// （`pkg/volume/secretdata` 的 `SecretdataFS` 已满足；用最小接口保持解耦）。
-//
-// 约定：**幂等** —— 无残留（0/1 个目录 meta）时返回 `(0, nil)`，因此可安全重复执行。
-type DirMetaCleaner interface {
-	CleanupStaleDirMeta(ctx context.Context, container string) (int, error)
-}
-
 // CleanupTargetResolver 返回「事项修复目标解析器」：按卷名取**统一卷视图**（`VolumeView`）
-// 并穿透装饰链到**最内层领域 FS**（与 `ScanTargetsFromSet` 的 `sync.Innermost` 同一做法）。
+// 并**直接返回装饰后的 FS**（不再穿透装饰链，与 `ScanTargetsFromSet` 的收口做法一致）。
 //
-// 为什么这样取（而不是直接对后端 FS 视图断言）：
-//   - `VolumeView` 是唯一取卷入口（装配期已套封印/容量/状态缓存，键空间经 `ResolveUserLocation`）；
-//   - 能力断言必须**穿透装饰链**——装饰器不转发 `DirMetaCleaner` 这类消费包自定义能力，
-//     直接断言装饰后的 FS 会恒 false（静默失效）；`Innermost` 是仓内受认可的穿透方式（R22 门禁守）。
+// 为什么直接断言装饰后的 FS 即可（2026-11-12 收口；根治见
+// docs/decorator-capability-forwarding.md）：`syncpkg.DirMetaCleaner` 已下沉 `pkg/sync`
+// 且 R21 门禁要求 11 个装饰器全部转发它 ⇒ 装饰链不再吞掉该能力，`Innermost` 解包随之消除
+// （能力留在消费包时装饰器无法引用 ⇒ 断言恒 false ⇒ 只能解包；下沉后无需解包）。
+// 能力断言仍按「可选能力」口径处置：底层未实现时转发层返回 `ErrUnsupported`，
+// 由调用方按"未实现"处理（而不是让断言失败静默跳过）。
 //
 // 返回 nil ⇒ 卷不可用/不存在（调用方按“暂时失败”重试，达上限转人工）。
 func CleanupTargetResolver(l VolumeLister) func(volume string) any {
@@ -54,7 +50,7 @@ func CleanupTargetResolver(l VolumeLister) func(volume string) any {
 		if !ok || fsys == nil {
 			return nil
 		}
-		return syncpkg.Innermost(fsys)
+		return fsys
 	}
 }
 
@@ -105,12 +101,17 @@ func runDirMetaCleanup(ctx context.Context, d ExecutorDeps, it issues.Item) erro
 	if target == nil {
 		return fmt.Errorf("卷 %q 当前不可用（可能未装配/已移除）", it.Volume)
 	}
-	cleaner, ok := target.(DirMetaCleaner)
+	cleaner, ok := syncpkg.AssertDirMetaCleaner(target)
 	if !ok {
 		return fmt.Errorf("卷 %q 不支持目录 meta 清理（该类型无此能力），需人工介入", it.Volume)
 	}
 	removed, err := cleaner.CleanupStaleDirMeta(ctx, it.Path)
 	if err != nil {
+		// 转发层对「底层无此能力」返回 ErrUnsupported（装饰链无条件实现该接口，故断言不再
+		// 能区分）；此时必须给出可读原因（运维按「详细原因」接入人工），而不是裸 ErrUnsupported。
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return fmt.Errorf("卷 %q 的底层存储不支持目录 meta 清理（装饰链未转发/该卷类型无此能力），需人工介入", it.Volume)
+		}
 		return err
 	}
 	// 幂等成功：removed 可能为 0（前一次已清干净，或本就无残留）——两者都算"已解决"。

@@ -153,7 +153,12 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 
 已交付（批次 1）：`serial_budgets.tsv` 修正 10 行陈旧路径；`external_fs_calls.tsv` 预算 60→51（删 3 条陈旧+收紧）；`set_root_calls.tsv` 预算 16→14；R25 白名单删 2 条陈旧+加防腐化自检；R57 归零（`pkg/netutil.InsecureTransport()`）；R51 246→209 行（删 34 条零引用别名）。
 
-后续批次：R35-b pending 42→36（#1095）；R18 串行 1825→1631（#1097/#1099）；R46 S1（list 采用卷自报 checksum，#1098）；**R27 预算 60→48**（#1093 删陈旧 + #1100 清理 + 事项修复目标改经 `VolumeView`+`Innermost`，消除 `cmd/sproxy/root.go` 最后一条 `be.FS()` 直连）。
+后续批次：R35-b pending 42→36（#1095）；R18 串行 1825→1631（#1097/#1099）；R46 S1（list 采用卷自报 checksum，#1098）；**R27 预算 60→48**（#1093 删陈旧 + #1100 清理 + 事项修复目标改经 `VolumeView`，消除 `cmd/sproxy/root.go` 最后一条 `be.FS()` 直连）。
+
+收口（2026-11-11/12）：审查能力（#1096）与 `DirMetaCleaner`（2026-11-12）先后下沉 `pkg/sync`
+并由 11 个装饰器全量转发 ⇒ 消费侧改为**直接断言装饰后的视图**（#1101：启动审查 + 卷审查 API；
+2026-11-12：事项修复目标解析器）——`CleanupTargetResolver` 的 `Innermost` 解包已消除（R27 预算不变：
+该路径本来就走 `VolumeView`，不产生 `be.FS()` 直连点）。
 
 **纪律提醒**：给棘轮刷新基线的 PR 必须在提交信息里说明「为什么不是做假工作」；登记项须有双向自检（`R26`/`R42` 是范本），否则会出现「文件已删/已迁移但登记残留」的静默放宽。
 

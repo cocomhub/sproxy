@@ -162,7 +162,18 @@ func (q *quotaLocalFS) TraceTree(ctx context.Context, rel string, depth int, mod
 	return nil, syncpkg.ErrUnsupported
 }
 
+// CleanupStaleDirMeta 转发目录 meta 残留清理（2026-11-12 能力下沉 pkg/sync 后必须转发）。
+//
+// 与审查能力同口径：不转发 ⇒ 上层 `fs.(syncpkg.DirMetaCleaner)` 断言恒 false ⇒ 静默降级。
+func (q *quotaLocalFS) CleanupStaleDirMeta(ctx context.Context, container string) (int, error) {
+	if c, ok := any(q.inner).(syncpkg.DirMetaCleaner); ok {
+		return c.CleanupStaleDirMeta(ctx, container)
+	}
+	return 0, syncpkg.ErrUnsupported
+}
+
 var (
 	_ syncpkg.StorageInspector = (*quotaLocalFS)(nil)
 	_ syncpkg.TreeInspector    = (*quotaLocalFS)(nil)
+	_ syncpkg.DirMetaCleaner   = (*quotaLocalFS)(nil)
 )

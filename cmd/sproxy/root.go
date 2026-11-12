@@ -1239,7 +1239,7 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 执行器把领域侧修复能力（当前：清理非权威目录 meta）按事项类型分流；未覆盖的类型由
 	// Manager 转 needs_human（绝不静默跳过）。调度器未装配时注册为 no-op（零回归）。
 	issuesExecs := server.NewIssuesExecutors(server.ExecutorDeps{
-		// 取修复目标经统一卷视图 + 装饰链穿透（不再直连后端 FS 视图，见 R27）。
+		// 取修复目标经统一卷视图直接断言装饰后的 FS（不再直连后端 FS 视图，也不再解包，见 R27）。
 		Resolve: server.CleanupTargetResolver(h.Volumes()),
 		Log:     logger,
 	})
