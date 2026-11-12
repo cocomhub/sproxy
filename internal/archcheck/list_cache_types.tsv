@@ -15,3 +15,4 @@ pkg/volume/secretdata/span_disk_cache.go	spanDiskCache	密文 span 布局缓存�
 pkg/volume/secretdata/window_blob_cache.go	windowBlobCache	密文窗口缓存：读路径局部加速，非列表语义既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/volumestate/cache.go	Cache	唯一提供方（list 级缓存的 MVP，R40 只允许在这里新增）既有实现；本次登记为基线（新增请优先复用 pkg/volumestate）
 pkg/volume/secretdata/inspect.go	containerIndex	**单次请求内的派生视图**（不是跨请求缓存、不持有状态）：为消除「每条 blob 各扫一遍全索引」的 O(条目数×全卷) 复杂度，Explain 时遍历一遍索引就地建映射，请求结束即释放 ⇒ 不属于 list 级缓存，不应复用 pkg/volumestate（2026-11-05 审查修复）
+pkg/volume/secretdata/meta_l1b.go	metaEntryCache	单个文件的 shardseal.Meta 冷结构内存缓存（含 blocklets/parity/windows）——语义只有 secretdata 卷能解释（体积加密/纠删恢复/parity 复算），且**必须与 metaEntry.meta 生命周期绑定**（淘汰时须回清条目引用，否则常驻量脱离字节预算约束 ⇒ 回到 OOM）；它不是「目录列举结果」缓存，无法外包给 pkg/volumestate。新增（P2，2026-11-12）

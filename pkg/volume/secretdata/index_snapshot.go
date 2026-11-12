@@ -245,7 +245,7 @@ func (s *SecretdataFS) applyIndexSnapshot(snap *indexSnapshot) {
 			// **meta 留空**（P1）：由 ensureEntryMeta 在真正需要时（openRead/OpenRangeRead）
 			// 从 metacache/meta blob 惰性加载 ⇒ 快照不再把冷结构带进内存。
 			origSHA256: e.OrigSHA256,
-			dataDir:    e.DataDir, baseVersion: e.BaseVersion, phys: e.Phys,
+			dataDir:    e.DataDir, baseVersion: e.BaseVersion, phys: e.Phys, rel: e.Rel,
 		}
 	}
 	s.dirs = make(map[string]struct{}, len(snap.Dirs))
