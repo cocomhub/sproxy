@@ -91,3 +91,20 @@ checksum；且台账是**内存优先 + debounce 落盘**，进程内删文件�
 **遗留（S3 前置）**：读路径仍保留台账兜底（`files.checksumGetter`）。S3 去掉兜底 + 窄化写路径前，
 需确认「无 sidecar 的文件」（历史数据/旁路写）的读语义——届时按「现算 `fileChecksumRoot`」或
 「显式 `--repair`」二选一，不得静默返回空。
+
+## 9. S3 侦察结论：**暂不具备安全增量条件**（2026-11-12）
+
+停写台账（S3）会同时影响两条**尚无替代来源**的读路径，必须先裁定语义：
+
+| 读路径 | 现状来源 | 停写后的后果 | 需裁定 |
+| --- | --- | --- | --- |
+| 本地 **search** 结果 checksum | 台账（`pkg/files/search_index.go:724` 的 `cs(e.volume, e.name)`） | 搜索结果 checksum 变空（搜索不像 list 那样走卷视图/ S2） | 让 search 也走「视图/侧车」还是接受空值（由客户端 `stat` 兜底） |
+| **远端卷**（pikpak/webdav/sftp/ftp）**列表** checksum | 台账（这些 FS 的 `ListDir` **不自报** sha256；`ListDirView` 只透传 sha256） | 远端列表 checksum 变空 | 远端是否接受「空 + 按需 `stat`」（会改变现有 UX） |
+
+其余路径已有替代或可接受：
+- 本地 **list** → S2（侧车，本 PR 已交付）；
+- 本地 **stat** → 台账 miss 时**现算** `fileChecksumRoot`（`read_ops.go:461`，既有行为）；
+- **s3/baidupcs** `ListDir` 自报（取各自原生哈希；`ListDirView` 只透传 `sha256`，需确认其类型是否为 sha256）。
+
+**结论**：S3 不是「窄化写路径」的小改，而是要求「本地 search 与 list 统一数据源」+「远端卷列表 checksum 语义裁定」
+两项前置；在裁定前**保持写台账**（当前无正确性缺陷）。S4（删门禁）随之推迟。
