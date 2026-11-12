@@ -92,7 +92,23 @@ func snapshotKey(secret []byte) [32]byte {
 }
 
 // loadIndexSnapshot 读取并解密快照（失败一律返回 ok=false，由调用方回退全量扫描）。
+//
+// **带进程内缓存**（P0 内存优化，2026-11-12）：快照 241.8 MB，解密+反序列化占 inuse_space
+// 的 56.9%（pprof 实测），而两条快速路径各自调用本函数 ⇒ 一文一读会重复展开两次。
+// 缓存后同进程只展开一次；失败也缓存（避免反复读 242MB 磁盘 + 解密失败）。
 func (s *SecretdataFS) loadIndexSnapshot() (*indexSnapshot, bool) {
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
+	if s.snapDone {
+		return s.snapCache, s.snapOK
+	}
+	snap, ok := s.loadIndexSnapshotUncached()
+	s.snapCache, s.snapOK, s.snapDone = snap, ok, true
+	return snap, ok
+}
+
+// loadIndexSnapshotUncached 是未缓存的真实实现（仅由 loadIndexSnapshot 调用）。
+func (s *SecretdataFS) loadIndexSnapshotUncached() (*indexSnapshot, bool) {
 	p := s.opts.IndexSnapshotPath
 	if p == "" {
 		return nil, false
@@ -121,11 +137,20 @@ func (s *SecretdataFS) loadIndexSnapshot() (*indexSnapshot, bool) {
 	if len(raw) <= gcm.NonceSize() {
 		return nil, false
 	}
-	plain, derr := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	// **原地解密**（P0 内存优化，2026-11-12）：以 `raw[:0]` 作为 dst 让 GCM 把明文写回**密文所在的同一底层数组**
+	// （crypto/cipher 文档明确支持 `ciphertext[:0]` 作为 dst）。
+	// 为什么值得：快照实测 241.8 MB，原实现 `gcm.Open(nil, ...)` 会在密文之外**再分配一份等长明文**
+	// （即 242MB 常驻共存，pprof 里体现为 io.ReadAll 473MB 的一项）；原地解密后密文被明文覆盖，
+	// 峰值直接省下 242 MB。nonce 会被覆盖，但它在解密前已作为参数取走，无需保留。
+	// dst 必须是 **ciphertext[:0]**（即 `raw[nonceSize:][:0]`），不是 `raw[:0]`：
+	// `ciphertext[:0]` 指向密文起点；若用 `raw[:0]` 会偏移 nonce 长度，导致重叠写错位（实测测试红）。
+	ct := raw[gcm.NonceSize():]
+	plain, derr := gcm.Open(ct[:0], raw[:gcm.NonceSize()], ct, nil)
 	if derr != nil {
 		slog.Warn("secretdata: 索引快照解密失败（密钥变化/文件损坏，回退全量扫描）", "path", p)
 		return nil, false
 	}
+	raw = nil // 密文已被明文覆盖（同一底层数组）⇒ 及时断开引用，便于 GC 识别（P0 内存优化）。
 	decoded, dok := decodeSnapshotBody(plain, isGzip)
 	if !dok {
 		return nil, false
