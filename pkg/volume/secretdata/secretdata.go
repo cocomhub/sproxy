@@ -4040,11 +4040,20 @@ func (s *SecretdataFS) registerLoadedEntryLocked(rel, container, metaName string
 	if dataDir != "" {
 		s.registerPoolEntryLocked(mm)
 	}
-	s.index[rel] = &metaEntry{
-		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName, meta: mm,
+	e := &metaEntry{
+		size: mm.Original.Size, mtime: mt, dirSeg: container, metaName: metaName,
+		// 保留 `meta`（不破坏既有「扫描后即可直接读到 meta」的假设），但它的**存活由 L1b 决定**：
+		// 下面的 put 把它交给字节预算 LRU，超预算时淘汰并回清引用（见 clearEvictedMetaLocked）
+		// ⇒ 扫描结束后只保留最近用过的 256 MiB，而不是「每个文件的完整 Meta」全量常驻。
+		meta: mm, origSHA256: mm.Original.SHA256,
 		dataDir: dataDir, baseVersion: mm.BaseVersion, rel: rel,
 		phys: physBytesOf(mm, metaBlobLen, dataDir != ""),
 	}
+	s.index[rel] = e
+	// 交给 L1b（解密后的内容 = 最快缓存）；因预算被淘汰的条目回清其 meta 引用。
+	// 调用方已持 s.mu，且 L1b 的 put 内部**不回调外部** ⇒ 不存在「L1b 锁 → s.mu」
+	// 的反向获取，锁顺序单向安全。
+	s.clearEvictedMetaLocked(s.metaCache.put(rel, mm), e)
 	addDirKeysLocked(s.dirs, rel)
 	s.usage += mm.Original.Size
 	if prev != nil {
