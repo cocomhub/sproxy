@@ -195,3 +195,7 @@ git push --force-with-lease       # 重写 head SHA ⇒ 触发 pull_request: syn
    - 创建 PR 时 **`--base master` 必须显式指定**（`gh pr create --base master` 或建 PR 后核对 `baseRefName`）；
    - 已恢复 `*.md` / `docs/**` 到 `ci.yml` 的 **`pull_request.paths-ignore`**（纯文档 PR 重新可秒合并）；
      但 **`push:`（master）段故意不含它们** —— 混合 PR 合并后的那次 push 必须跑全量（最后一道防线）。
+
+### 验证记录（2026-11-13）
+恢复 `*.md`/`docs/**` 后（#1124 合并，master `24c43a295`），本 PR **只改 docs/** ⇒ 用于实测：
+应只有 `CI (docs-only)` + `PR title check`（**无 `CI` run**）⇒ 即「纯文档 PR 秒合并」恢复。
