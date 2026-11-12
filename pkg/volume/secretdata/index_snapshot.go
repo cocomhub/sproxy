@@ -479,13 +479,27 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // 快照实测 241.8 MB（gzip），解压后 ~473 MB —— pprof 里 `io.ReadAll` 473MB 就是它；
 // 这份 buffer 与解码峰值叠加，是启动期内存峰值的主要成分（曾致 OOM）。
 //
-// 实测（30 万目录合成夹具，HeapInuse 峰值）：
+// 实测（30 万目录合成夹具，HeapInuse 峰值，200µs 采样；绝对值为单次量级，看**相对关系**）：
 //
-//	现状：解压物化 + v1 Unmarshal          371 MB
-//	手写 jsontext token 流式（逐 token）      463 MB  ← **更差，已否决：`strings.Clone` + map 扩容反超**
-//	本方案：gzip 直连 + v2 UnmarshalDecode   128 MB  ← **−65%**
+//	现状：解压物化 + v1 Unmarshal             300–400 MB  基准
+//	手写 jsontext token 流式（逐 token）       ~460 MB     比现状**更差**
+//	PeekKind + 逐条 UnmarshalDecode            ~280 MB     仍差
+//	PeekKind + 逐条 + 预分配容量               ~250 MB     仍差
+//	本方案：gzip 直连 + v2 UnmarshalDecode     ~130–170 MB **最低（约为现状的 1/3 左右）**
 //
-// ⚠️ 不要回头走「手写 token 状态机」那条路：实测比现状更费内存。
+// ⚠️ 不要回头走这两条路（均已实测否决）：
+//  1. **手写 token 状态机**（`ReadToken` 逐 token 手工填 map）：比现状更费 ——
+//     每个字符串都要 `strings.Clone`，`Token` 会被后续 `ReadToken`/`ReadValue` 调用
+//     作废（实测 panic `invalid jsontext.Token; it has been voided by a subsequent
+//     json.Decoder call`），逐条 append 又触发 map 几何扩容。
+//  2. **`PeekKind` + 逐条 `UnmarshalDecode`**（心智成本最低的写法，`dec.PeekKind() != ']'`
+//     循环内一次解一个值）：当**必须保留全部条目**时它仍劣于整体解码（+81 MB，即使预分配）
+//     —— v2 整体解码对 slice/map 的分配策略更优。
+//     ⇒ 该写法只适合「**逐条消费、不留存**」的场景（此时内存 O(1)）；本场景要留存全量索引。
+//     附：`SkipValue` 跳过不需要的字段对内存几乎无影响（±2 MB），但省构造/CPU，可用于明确
+//     不需要的字段。
+//
+// 收益的真正来源是「**不物化解压 buffer**」，不是「逐 token / 逐条」。
 //
 // 兼容性：非 gzip（旧格式）路径保留，语义与原先一致；gzip 路径的
 // 字段名匹配从 v1 的「忽略大小写」变为 v2 的「精确匹配」—— 快照由本包 `json.Marshal`
