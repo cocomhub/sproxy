@@ -3,7 +3,11 @@
 
 package sync
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // batchverify.go —— **批量延迟校验**（2026-11-04，用户设计）。
 //
@@ -96,4 +100,36 @@ type RapidRefresher interface {
 func AssertRapidRefresher(fs FS) (RapidRefresher, bool) {
 	v, ok := fs.(RapidRefresher)
 	return v, ok
+}
+
+// AllVerified 判定**批量校验结果是否全部通过**（用户裁定 2026-11-12）。
+//
+// 为什么必须有它：`VerifyMany` 只逐条表达结果、**不做聚合判定**。若调用方忘了判断，就会出现
+// 「批量里有一条不一致却整体返回成功」⇒ 使用方拿到"成功"却带着不一致的 md5 —— 这是**绝不允许**
+// 的形态（用户原话：「必须由使用方检查所有一致才返回成功，绝不能出现不一致的 md5」）。
+// 统一用本函数判定，把"全绿才算成功"变成**显式、无法遗忘**的一步：
+//   - `len(results) != want`（后端漏返回）⇒ 失败（视为未校验，不得放过）；
+//   - **白名单判定**：只认 `VerifyOK`，其余（Mismatch/Invisible/未知新态）一律失败；
+//   - 全部 OK ⇒ 返回 nil。
+//
+// 失败时错误信息带**具体项的 key 与状态/原因**，便于定位与重传。
+func AllVerified(results []VerifyResult, want int) error {
+	if len(results) != want {
+		return fmt.Errorf("批量校验结果条数不匹配: got %d, want %d（后端漏返回 ⇒ 视为未校验）", len(results), want)
+	}
+	bad := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.State == VerifyOK {
+			continue
+		}
+		if r.Reason != "" {
+			bad = append(bad, fmt.Sprintf("%s(state=%s: %s)", r.Item.Key, r.State, r.Reason))
+		} else {
+			bad = append(bad, fmt.Sprintf("%s(state=%s)", r.Item.Key, r.State))
+		}
+	}
+	if len(bad) > 0 {
+		return fmt.Errorf("批量校验未全部通过（%d/%d 项未通过）: %s", len(bad), want, strings.Join(bad, "; "))
+	}
+	return nil
 }
