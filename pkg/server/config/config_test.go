@@ -428,7 +428,6 @@ func TestSaveConfig_ReadOnlyDir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("read-only dir test not supported on Windows")
 	}
-	t.Parallel()
 
 	roDir, cleanup := testutil.MakeReadOnlyDir(t)
 	defer cleanup()
