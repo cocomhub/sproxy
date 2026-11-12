@@ -266,8 +266,15 @@ func (s *SecretdataFS) ensureEntryMeta(ctx context.Context, e *metaEntry) error 
 // self 排除：正在挂载的条目不该被自己这一次的 put 清掉（同 rel 重新 put 时会出现）。
 func (s *SecretdataFS) clearEvictedMetaLocked(evicted []string, self *metaEntry) {
 	for _, vrel := range evicted {
-		if old, ok := s.index[vrel]; ok && old != self {
-			old.meta = nil
+		old, ok := s.index[vrel]
+		if !ok || old == self {
+			continue
 		}
+		// **淘汰前先保住热字段**：checksum 是热路径（list/stat）要用的，而 `origSHA256` 是它
+		// 在 meta 释放后的**唯一来源** —— 不回填就会永久退化成空（调用方只能再 stat 兜底）。
+		if old.origSHA256 == "" && old.meta != nil {
+			old.origSHA256 = old.meta.Original.SHA256
+		}
+		old.meta = nil
 	}
 }
