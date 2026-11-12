@@ -438,7 +438,13 @@ func (s *Service) recordArchiveBypassState(t ArchiveVolumeTransfer, fs syncpkg.F
 		return
 	}
 	cs := ""
-	if pv, ok := fs.(meta.Provider); ok {
+	// P5（2026-11-13）：优先轻量路径（只取 checksum）——避免为拿 TotalSHA256 而加载冷结构 meta
+	// （实测单文件常驻 78 MB / 解析 ≈584 ms）。失败才回退原 FileMeta。
+	if cp, ok := meta.AssertChecksumProvider(fs); ok {
+		if got, _, cerr := cp.ChecksumAndSize(context.Background(), rel); cerr == nil {
+			cs = got
+		}
+	} else if pv, ok := fs.(meta.Provider); ok {
 		if fm, ferr := pv.FileMeta(context.Background(), rel); ferr == nil && fm != nil {
 			cs = fm.TotalSHA256
 		}
