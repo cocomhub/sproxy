@@ -142,3 +142,39 @@ Release 页只有 release-please 正文、无制品。
 - 新建分支前先 `git fetch && git checkout master && git reset --hard origin/master`
   （曾因本地基座落后导致 add/add 冲突、且 **CI 未触发**）。
 - Windows 下 `python` 看到的 `/tmp` 与 git-bash 的 `/tmp` **不是同一目录**；跨工具传递文件用仓库内相对路径。
+
+## CI 完全不触发：先查「合并关系 / 三方 diff」
+
+> 实测沉淀（2026-11-12，sproxy #1119/#1120）：**PR 存在但 CI 一个 run 都不出现**时，
+> 根因往往不是 workflow 配置，而是 **head 与 base 的合并关系异常**。
+
+### 机制
+`ci.yml` 的 `pull_request.paths-ignore` 判定依赖**三方合并后的变更文件集合**（需 merge-base）。
+分支落后 / 存在冲突 / 该计算退化时，GitHub 拿不到可靠的变更集合 ⇒ **整个 workflow 被跳过**
+⇒ 表现为「PR 在，CI 却完全不存在」。
+
+### 判别（关键信号）
+**PR 的 `changed files` 混入「base 已包含」的文件** → 高度可疑。
+（本次实测：PR 实际只含 4 个文件，GitHub 却列出 11 个，多出的正是 base 已合并的文件。）
+
+### 无效 vs 有效手段（逐项实测）
+| 手段 | 结果 |
+| --- | --- |
+| `gh pr close` → `reopen` | ✗ 无效 |
+| 空提交（`--allow-empty`）push | ✗ 无效 |
+| 换新分支 + 新 PR | ✗ 无效（diff 同样异常）|
+| **`git fetch && git rebase origin/master` + `git push --force-with-lease`** | ✅ **立即触发** |
+
+⇒ 前三者都**没有改变 head 相对 base 的合并关系**；**只有重算合并 diff 才有效**。
+force push 后 `changed files` 也会一并刷新为正确值（本次从 11 → 4）。
+
+### 硬规则：**每次 push 前先 `git rebase origin/master`**
+```bash
+git fetch origin
+git rebase origin/master          # 有冲突则解决（分析 master 差异，勿破坏本分支功能目的）
+git push --force-with-lease       # 重写 head SHA ⇒ 触发 pull_request: synchronize
+```
+同一根因还解释另外两类失败：**必检项莫名失败**（落后导致缺 master 侧修复）、
+**PR diff 失真**（混入上游文件）。⇒ 先 rebase 再判断是否真 flake。
+
+排查顺序：① 看 `changed files` 是否混入 base 文件 → ② rebase 最新 base → ③ force push → ④ 复查 `gh run list -b <branch>`。
