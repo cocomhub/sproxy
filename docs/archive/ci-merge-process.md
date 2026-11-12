@@ -178,3 +178,20 @@ git push --force-with-lease       # 重写 head SHA ⇒ 触发 pull_request: syn
 **PR diff 失真**（混入上游文件）。⇒ 先 rebase 再判断是否真 flake。
 
 排查顺序：① 看 `changed files` 是否混入 base 文件 → ② rebase 最新 base → ③ force push → ④ 复查 `gh run list -b <branch>`。
+
+### 勘误与补充（2026-11-13）：根因是 **base 分支**，不是 `paths-ignore` 语义
+
+上节把「PR 的 `changed files` 混入 base 已有文件」列为**信号**是对的，但**机制归因**曾出错，特此修正：
+
+1. **`paths-ignore` 的语义是「全部改动文件都匹配才跳过」**（与 GitHub 文档措辞 "all" 一致），
+   **不是**「任一匹配即跳过」。证据（`gh run list -b <branch>`）：
+   - #1070 / #1041（**纯文档**，各 1 个 `docs/*.md`）⇒ **无 `CI` run** ⇒ 跳过 ✓
+   - #1077（`docs/*.md` **+** `pkg/.../*_test.go`，**混合**）⇒ **有 `CI success`** ⇒ **不跳过** ✓
+   ⇒ 所以"文档搭在代码 PR 里"**不会**让 CI 漏跑 ⇒ `*.md` / `docs/**` **可以**安全放进 `paths-ignore`。
+2. **`branches: [master]` 是真凶**：PR 的 **base 指向功能分支**时，
+   `pull_request.branches: [master]` **不匹配** ⇒ 整个 workflow **不派发**（CI 一个 run 都没有）。
+   #1092（含 1 个 docs 的 33 文件 PR）当时"CI 完全不触发"即属此类，与 `paths-ignore` 无关。
+3. **处置**：
+   - 创建 PR 时 **`--base master` 必须显式指定**（`gh pr create --base master` 或建 PR 后核对 `baseRefName`）；
+   - 已恢复 `*.md` / `docs/**` 到 `ci.yml` 的 **`pull_request.paths-ignore`**（纯文档 PR 重新可秒合并）；
+     但 **`push:`（master）段故意不含它们** —— 混合 PR 合并后的那次 push 必须跑全量（最后一道防线）。
