@@ -10,6 +10,7 @@ import (
 )
 
 func TestDhtRegisterAndLookup(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -41,6 +42,7 @@ func TestDhtRegisterAndLookup(t *testing.T) {
 }
 
 func TestDhtRegisterOverwrite(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -60,6 +62,7 @@ func TestDhtRegisterOverwrite(t *testing.T) {
 }
 
 func TestDhtGetClosestNodes(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -112,6 +115,7 @@ func TestDhtGetClosestNodes(t *testing.T) {
 }
 
 func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -135,6 +139,7 @@ func TestDhtGetClosestNodesSelfExcluded(t *testing.T) {
 }
 
 func TestDhtConcurrent(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -184,6 +189,7 @@ func TestDhtConcurrent(t *testing.T) {
 }
 
 func TestDhtBootstrapNoop(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	err := dht.Bootstrap(t.Context(), nil)
 	if err != nil {
@@ -192,6 +198,7 @@ func TestDhtBootstrapNoop(t *testing.T) {
 }
 
 func TestDhtLookupWithMeta(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -218,6 +225,7 @@ func TestDhtLookupWithMeta(t *testing.T) {
 }
 
 func TestDhtRegisterNilMeta(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	ctx := t.Context()
 
@@ -236,6 +244,7 @@ func TestDhtRegisterNilMeta(t *testing.T) {
 }
 
 func TestMemoryDHT_Close(t *testing.T) {
+	t.Parallel()
 	dht := newMemoryDHT()
 	if err := dht.Close(); err != nil {
 		t.Fatal(err)
@@ -243,6 +252,7 @@ func TestMemoryDHT_Close(t *testing.T) {
 }
 
 func TestNewDHT(t *testing.T) {
+	t.Parallel()
 	dht := NewDHT()
 	if dht == nil {
 		t.Fatal("NewDHT() returned nil")

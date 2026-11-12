@@ -31,6 +31,7 @@ func doRemote(t *testing.T, h http.Handler, method, target string) *httptest.Res
 }
 
 func TestRemoteRead_AuthorizedListAndDownload(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
 
 	rec := doRemote(t, h, http.MethodGet, "/remote/list?volume=main&path=/docs")
@@ -71,6 +72,7 @@ func TestRemoteRead_AuthorizedListAndDownload(t *testing.T) {
 // TrimPrefix 后 //docs 仍 200，只有 ///docs 变红；download 侧无此掩盖，// 前缀直接
 // 变红。两处一起断言，避免整条归一化约束被某一侧的掩盖行为放行。
 func TestRemoteRead_PathNormalizationSymmetric(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
 
 	for _, p := range []string{"//docs", "///docs"} {
@@ -97,6 +99,7 @@ func TestRemoteRead_PathNormalizationSymmetric(t *testing.T) {
 }
 
 func TestRemoteRead_AuthorizationMatrix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name     string
 		peerFP   string
@@ -124,6 +127,7 @@ func TestRemoteRead_AuthorizationMatrix(t *testing.T) {
 // 审计仍记 result=error。RegisterRoutes 装配失败会 panic，故此处手工构造零值 Handlers
 // （该分支生产不可达，是防御性拒绝）。
 func TestRemoteRead_UnassembledVolSetIs500(t *testing.T) {
+	t.Parallel()
 	// 卷集合未装配：Deps.Volumes 为 nil（装配失败会 panic，此为防御性拒绝）。
 	audit := newAuditRecorder()
 	rh := NewReadHandler(Deps{Audit: audit}, fakePeerFingerprint{fp: testReaderFP}, nil)
@@ -142,6 +146,7 @@ func TestRemoteRead_UnassembledVolSetIs500(t *testing.T) {
 //
 // 本用例先确立前提（MeshReaderFor 确实命中该非法绑定），再断言双重约束拦下它。
 func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
+	t.Parallel()
 	cfg := config.Default()
 	cfg.StorageRoot = filepath.Join(t.TempDir(), "vol-main")
 	cfg.LogLevel = "error"
@@ -196,6 +201,7 @@ func TestRemoteRead_MeshReaderForAloneIsInsufficient(t *testing.T) {
 }
 
 func TestRemoteRead_WriteMethodsRejected(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
 		if rec := doRemote(t, h, m, "/remote/list?volume=main&path=/docs"); rec.Code != http.StatusMethodNotAllowed {
@@ -210,6 +216,7 @@ func TestRemoteRead_WriteMethodsRejected(t *testing.T) {
 }
 
 func TestRemoteRead_PathTraversalRejected(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
 	// 末两项专钉「路径归一化没有吃掉 ..」：TrimLeft 只剥前导斜杠，`..` 仍须被拒。
 	// **评审 C1 修复**：authorize 现对 relPath 先 ValidateFilePath 统一清洗（授权路径==
@@ -235,6 +242,7 @@ const testBobBody = "bob-secret"
 // 「读不到 bob-secret」在任何实现下都成立，断言恒真。故此处显式把 bob 列入白名单，
 // 使「owner 只能来自配置」成为**唯一**的阻止条件，并断言 404 + body 不含密文。
 func TestRemoteRead_OwnerFromConfigNotRequest(t *testing.T) {
+	t.Parallel()
 	cfg := remoteReadTestConfigACL(t, &config.VolumeACLConfig{
 		Mode:   config.VolumeACLAllow,
 		Owners: []string{testReaderOwner, testBobOwner},
@@ -274,6 +282,7 @@ func TestRemoteRead_OwnerFromConfigNotRequest(t *testing.T) {
 // 「未把文件整体读入内存」——它钉住的是端到端的字节保真度；真正的流式行为由 T5/T6
 // 的隧道链路验证。
 func TestRemoteRead_LargeFileStreamsWithoutBuffering(t *testing.T) {
+	t.Parallel()
 	h, cfg, _ := newRemoteReadFixture(t, testReaderFP)
 	const size = 6 << 20 // 6 MiB > chunk 帧 64 KiB
 	big := bytes.Repeat([]byte("x"), size)
@@ -294,6 +303,7 @@ func TestRemoteRead_LargeFileStreamsWithoutBuffering(t *testing.T) {
 }
 
 func TestRemoteRead_RangeSupported(t *testing.T) {
+	t.Parallel()
 	h, _, _ := newRemoteReadFixture(t, testReaderFP)
 	req := httptest.NewRequest(http.MethodGet, "/remote/download?volume=main&path=/"+testReaderRel, nil)
 	req.Header.Set("Range", "bytes=0-4")
@@ -308,6 +318,7 @@ func TestRemoteRead_RangeSupported(t *testing.T) {
 }
 
 func TestRemoteRead_AuditRecordsAllowAndDeny(t *testing.T) {
+	t.Parallel()
 	h, _, auditBuf := newRemoteReadFixture(t, testReaderFP)
 	doRemote(t, h, http.MethodGet, "/remote/list?volume=main&path=/docs")
 	lines := auditBuf.String()

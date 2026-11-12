@@ -136,6 +136,7 @@ func assertUploadVolume(t *testing.T, url string, filename string, body []byte, 
 // TestUpload_RoutesToDefaultThenNext 双卷（main 容量小、disk2 大），prefer-default：
 // main 未满落 main；main 满换 disk2。X-Volume 分别断言 main/disk2，磁盘布局 1+1。
 func TestUpload_RoutesToDefaultThenNext(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -182,6 +183,7 @@ func TestUpload_RoutesToDefaultThenNext(t *testing.T) {
 // TestUpload_ExplicitVolume 显式 volume：指定 disk2 生效（main 未满也落 disk2）；
 // 不在视图（ghost）→ 403；目标 rel 已在 main → 409（唯一性，AD-4）。
 func TestUpload_ExplicitVolume(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -220,6 +222,7 @@ func TestUpload_ExplicitVolume(t *testing.T) {
 // TestUpload_OwnerGlobalQuotaCrossVolume owner 全局配额（15B）跨卷封顶：
 // 两次 7B 分别落 main/disk2，第三次 7B → 507（owner 全局满，不因有第二卷放行）。
 func TestUpload_OwnerGlobalQuotaCrossVolume(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -253,6 +256,7 @@ func TestUpload_OwnerGlobalQuotaCrossVolume(t *testing.T) {
 // 同 checksum 重传已有文件 → 幂等 200（不重新预留）；不同 checksum → 409 冲突（versioning 关闭），
 // 均不因卷满返回 507。
 func TestUpload_IdempotentReuploadVolumeFull(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -282,6 +286,7 @@ func TestUpload_IdempotentReuploadVolumeFull(t *testing.T) {
 // 已有文件，新尺寸整额 TryReserve 超默认卷容量 → 507（stay-home，不换卷），disk2 不得产生
 // 第二份、卷池无双计；幂等重传同尺寸仍 200 落默认卷。
 func TestUpload_OverwriteStayHome_DefaultVolumeFull(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -321,6 +326,7 @@ func TestUpload_OverwriteStayHome_DefaultVolumeFull(t *testing.T) {
 // 撞同一卷容量上限（main 容量恰够 1 个 8B 文件）→ 恰 1 个成功落 main、其余换 disk2 成功或
 // 507，main/disk2 卷池 Usage 无超计（-race 下验证 Pool.TryReserve 原子性）。
 func TestUpload_ConcurrentContentionVolumeCapacity(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10},
@@ -391,6 +397,7 @@ func TestUpload_ConcurrentContentionVolumeCapacity(t *testing.T) {
 // TestUpload_AutoSkipsACLDeniedVolume ACL×auto：排他卷（allow 白名单不含 alice）+ 默认卷容量
 // 耗尽 → auto 绝不到排他卷（容量再缺也只 507，不落 ACL 外卷）。
 func TestUpload_AutoSkipsACLDeniedVolume(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	volumes := []VolumeConfig{
 		{Name: "main", Root: dirs[0], VolCapacity: 10}, // 默认卷容量小，很快耗尽
@@ -430,6 +437,7 @@ func seedVolumeFile(t *testing.T, volRoot, owner, rel string, content []byte) {
 //     版本**不得泄漏写默认卷 version/**，默认卷遗留不触发版本化。
 //   - Part C（versioning off）：bob 同 rel 异 checksum → 200 新文件落 disk2（非假 409）。
 func TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes(t *testing.T) {
+	t.Parallel()
 	build := func(t *testing.T, versioning bool) (*Handlers, []string, string, string) {
 		t.Helper()
 		dirs := []string{t.TempDir(), t.TempDir()}
@@ -495,6 +503,7 @@ func TestUpload_AutoDupCheckHomeAware_DefaultACLExcludes(t *testing.T) {
 // TestUpload_SingleVolumeXVolumeHeader 单卷零回归：真实 HTTP 装配（RegisterRoutes，
 // volSet 生效）下普通上传落默认卷，响应头带 X-Volume: default（向后兼容，多卷客户端可见）。
 func TestUpload_SingleVolumeXVolumeHeader(t *testing.T) {
+	t.Parallel()
 	url, _ := newTestServerWithAllRoutes(t, nil)
 
 	body := []byte("single volume content")
@@ -510,6 +519,7 @@ func TestUpload_SingleVolumeXVolumeHeader(t *testing.T) {
 // TestVolumeOrderPreferDefault 直接验证 pkg/volume 排序与装配卷集合的输入形状打通
 // （main 恒前；used 按池 Usage 生效）。
 func TestVolumeOrderPreferDefault(t *testing.T) {
+	t.Parallel()
 	dirs := []string{t.TempDir(), t.TempDir()}
 	cfg := Default()
 	cfg.StorageRoot = dirs[0]

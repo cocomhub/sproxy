@@ -30,6 +30,7 @@ func (m *mockCfgProvider) LoadConfig() (*client.Config, error) {
 // TestP2PFlags_ApplyConfigFallback（P2-配置3）：
 // 未显式指定的 hub/node-id 从配置回落；显式指定的不被覆盖。
 func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
+	t.Parallel()
 	provider := &mockCfgProvider{cfg: &client.Config{
 		HubURL: "wss://hub.example.com/ws", AccessKey: "ak", AccessKeySecret: "at", NodeID: "node-x",
 	}}
@@ -56,6 +57,7 @@ func TestP2PFlags_ApplyConfigFallback(t *testing.T) {
 }
 
 func TestNewCmdP2P_Subcommands(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	if cmd.Use != "p2p" {
 		t.Fatalf("expected Use 'p2p', got %q", cmd.Use)
@@ -74,6 +76,7 @@ func TestNewCmdP2P_Subcommands(t *testing.T) {
 }
 
 func TestNewCmdP2PConnect_Flags(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	connect := cmd.Commands()[0]
 	for _, name := range []string{"peer", "tcp", "listen", "hub", "node-id"} {
@@ -84,6 +87,7 @@ func TestNewCmdP2PConnect_Flags(t *testing.T) {
 }
 
 func TestNewCmdP2PListen_Flags(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[1]
 	for _, name := range []string{"service", "dial-allow-cidr", "hub", "node-id", "renew-interval"} {
@@ -96,6 +100,7 @@ func TestNewCmdP2PListen_Flags(t *testing.T) {
 // TestNewCmdP2PConnect_EmptyHubError 验证非 manual 模式 --hub 为空时前置报错（S64），
 // 不再把晦涩的 unsupported protocol scheme 留到信令 post/poll 阶段。
 func TestNewCmdP2PConnect_EmptyHubError(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"connect", "--peer", "peerA", "--tcp", "127.0.0.1:22"})
 	err := cmd.Execute()
@@ -110,6 +115,7 @@ func TestNewCmdP2PConnect_EmptyHubError(t *testing.T) {
 // TestNewCmdP2PConnect_ManualSameOfferAnswer 验证 manual 文件模式 --offer 与 --answer
 // 同路径时前置拒绝（S67）。
 func TestNewCmdP2PConnect_ManualSameOfferAnswer(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"connect", "--peer", "peerA", "--tcp", "127.0.0.1:22",
 		"--manual", "--offer", "same.sdp", "--answer", "same.sdp"})
@@ -124,6 +130,7 @@ func TestNewCmdP2PConnect_ManualSameOfferAnswer(t *testing.T) {
 
 // TestNewCmdP2PListen_ManualSameOfferAnswer 验证 listen 侧同样前置拒绝同路径（S67）。
 func TestNewCmdP2PListen_ManualSameOfferAnswer(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	cmd.SetArgs([]string{"listen", "--manual", "--offer", "same.sdp", "--answer", "same.sdp"})
 	err := cmd.Execute()
@@ -138,6 +145,7 @@ func TestNewCmdP2PListen_ManualSameOfferAnswer(t *testing.T) {
 // TestBuildP2PServeOpts_EmptyNil 验证无放行配置（或全部无效）时返回 nil，
 // Serve 回落默认 DialAllowed（仅公网）。
 func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
+	t.Parallel()
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	if opts := buildP2PServeOpts(nil, nil, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios); opts != nil {
 		t.Fatalf("无配置应返回 nil: %v", opts)
@@ -150,6 +158,7 @@ func TestBuildP2PServeOpts_EmptyNil(t *testing.T) {
 // TestBuildP2PServeOpts_ServiceAllowsExact 验证 --service 宣告地址精确放行、
 // 未宣告的 loopback 拒绝、公网目标回落放行（I45）。
 func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
+	t.Parallel()
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	opts := buildP2PServeOpts([]string{"ssh:127.0.0.1:22"}, nil, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
@@ -170,6 +179,7 @@ func TestBuildP2PServeOpts_ServiceAllowsExact(t *testing.T) {
 // TestBuildP2PServeOpts_CIDRAllowsPrivate 验证 --dial-allow-cidr 放行命中网段的
 // 私网地址、未命中网段仍拒绝（I45）。
 func TestBuildP2PServeOpts_CIDRAllowsPrivate(t *testing.T) {
+	t.Parallel()
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	opts := buildP2PServeOpts(nil, []string{"192.168.0.0/16"}, netip.Addr{}, netip.MustParsePrefix("100.64.0.0/10"), ios)
 	if len(opts) != 1 || opts[0].DialPolicy == nil {
@@ -186,6 +196,7 @@ func TestBuildP2PServeOpts_CIDRAllowsPrivate(t *testing.T) {
 // TestParseVIPSubnetFlag（S-1 回归）校验 --virtual-subnet 解析：默认 CGNAT、自定义
 // 合法 IPv4、非法/非 IPv4 回落默认。
 func TestParseVIPSubnetFlag(t *testing.T) {
+	t.Parallel()
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
 	newCmd := func() *cobra.Command {
 		cmd := &cobra.Command{}
@@ -213,6 +224,7 @@ func TestParseVIPSubnetFlag(t *testing.T) {
 // TestNewCmdP2PListen_VirtualSubnetFlag 校验 p2p listen 提供 --virtual-subnet flag
 // （默认 CGNAT），供自定义 hub.virtual_subnet 出口装配（S-1 回归）。
 func TestNewCmdP2PListen_VirtualSubnetFlag(t *testing.T) {
+	t.Parallel()
 	cmd := NewCmdP2P(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard})
 	listen := cmd.Commands()[0] // p2p connect
 	_ = listen

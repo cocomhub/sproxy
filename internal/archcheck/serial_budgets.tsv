@@ -17,7 +17,6 @@ cmd/sclient/mesh_status_format_test.go	1
 cmd/sclient/mesh_test.go	8
 cmd/sclient/mesh_vip_test.go	4
 cmd/sclient/meta_test.go	5
-cmd/sclient/p2p_test.go	12
 cmd/sclient/relay_dial_test.go	6
 cmd/sclient/relay_quic_test.go	1
 cmd/sclient/relay_tcp_test.go	1
@@ -29,7 +28,6 @@ cmd/sclient/socks_test.go	2
 cmd/sclient/stat_test.go	3
 cmd/sclient/tlsutil_test.go	2
 cmd/sclient/trash_test.go	1
-cmd/sclient/trust_login_test.go	11
 cmd/sclient/trust_register_context_test.go	6
 cmd/sclient/tunnel_xfer_pinning_test.go	1
 cmd/sclient/turn_rest_test.go	3
@@ -68,18 +66,15 @@ pkg/server/archive_test.go	1
 pkg/server/checksum_test.go	1
 pkg/server/chunked_complete_test.go	6
 pkg/server/chunked_download_test.go	2
-pkg/server/chunked_inflight_test.go	10
 pkg/server/chunked_owner_test.go	7
 pkg/server/chunked_quota_review_test.go	6
 pkg/server/chunked_upload_sessions_test.go	1
 pkg/server/chunked_wire_drift_test.go	4
-pkg/server/cloud_archive_handler_test.go	13
 pkg/server/cloud_archive_local_test.go	1
 pkg/server/cloud_download_handler_test.go	26
 pkg/server/cloud_newlayout_test.go	1
 pkg/server/cloud_url_validation_test.go	7
 pkg/server/config/config_mesh_node_test.go	2
-pkg/server/config/config_mesh_readers_test.go	10
 pkg/server/config/config_mesh_test.go	2
 pkg/server/config/config_remote_read_test.go	4
 pkg/server/config/config_remote_write_test.go	2
@@ -113,13 +108,11 @@ pkg/server/quota_reconcile_test.go	7
 pkg/server/ratelimit/ratelimit_test.go	1
 pkg/server/reconcile_scan_test.go	2
 pkg/server/relay_stream_largebody_test.go	2
-pkg/server/relay_stream_test.go	13
 pkg/server/remote_write_lock_test.go	1
 pkg/server/remote_write_metrics_test.go	2
 pkg/server/remotefs/accept_retry_test.go	5
 pkg/server/remotefs/remote_read_listener_shutdown_test.go	1
 pkg/server/remotefs/remote_read_listener_test.go	5
-pkg/server/remotefs/remote_read_test.go	11
 pkg/server/remotefs/remote_write_listener_test.go	3
 pkg/server/remotefs/remote_write_test.go	6
 pkg/server/requestlog_test.go	6
@@ -136,7 +129,6 @@ pkg/server/stats_test.go	2
 pkg/server/store_test.go	4
 pkg/server/tlsgen_test.go	2
 pkg/server/upload_owner_test.go	1
-pkg/server/upload_volume_test.go	10
 pkg/server/uploading_lock_test.go	5
 pkg/server/version_crossvolume_test.go	1
 pkg/server/version_test.go	3
@@ -158,7 +150,6 @@ pkg/tunnel/ecdh_test.go	3
 pkg/tunnel/hub/auth_test.go	5
 pkg/tunnel/hub/dht_feed_test.go	4
 pkg/tunnel/hub/dht_stress_test.go	1
-pkg/tunnel/hub/dht_test.go	10
 pkg/tunnel/hub/endpoints_test.go	1
 pkg/tunnel/hub/ext/kad/kad_stress_test.go	2
 pkg/tunnel/hub/ext/kad/kad_test.go	26
@@ -180,7 +171,6 @@ pkg/tunnel/mesh/mesh_test.go	6
 pkg/tunnel/mesh/mesh_udp_test.go	1
 pkg/tunnel/mesh/quality_feed_test.go	1
 pkg/tunnel/mesh/remote_dialer_punch_test.go	2
-pkg/tunnel/mesh/remote_dialer_test.go	10
 pkg/tunnel/mesh/socks_test.go	2
 pkg/tunnel/mux/edge_test.go	3
 pkg/tunnel/mux/frame_payload_limit_test.go	2

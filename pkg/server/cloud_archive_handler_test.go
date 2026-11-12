@@ -89,6 +89,7 @@ func createCompletedTask(t *testing.T, mgr *cloud.CloudDownloadManager, filename
 }
 
 func TestCloudArchive_SingleTask(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -126,6 +127,7 @@ func TestCloudArchive_SingleTask(t *testing.T) {
 }
 
 func TestCloudArchive_TaskNotFound(t *testing.T) {
+	t.Parallel()
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -152,6 +154,7 @@ func TestCloudArchive_TaskNotFound(t *testing.T) {
 }
 
 func TestCloudArchive_TaskNotCompleted(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -184,6 +187,7 @@ func TestCloudArchive_TaskNotCompleted(t *testing.T) {
 }
 
 func TestCloudArchive_BatchTasks(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -223,6 +227,7 @@ func TestCloudArchive_BatchTasks(t *testing.T) {
 }
 
 func TestCloudArchive_BatchEmptyTaskIDs(t *testing.T) {
+	t.Parallel()
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -249,6 +254,7 @@ func TestCloudArchive_BatchEmptyTaskIDs(t *testing.T) {
 }
 
 func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -285,6 +291,7 @@ func TestCloudArchive_BatchTaskNotFound(t *testing.T) {
 }
 
 func TestCloudArchive_BatchAllTasksSkipped(t *testing.T) {
+	t.Parallel()
 	ts, _, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -315,6 +322,7 @@ func TestCloudArchive_BatchAllTasksSkipped(t *testing.T) {
 }
 
 func TestCloudArchive_DefaultArchiveName(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -393,6 +401,7 @@ func TestCloudArchive_PreservesMTime(t *testing.T) {
 
 // TestCloudArchive_SameNameConflict 验证同名归档已存在时返回 409（O_EXCL 防覆盖）。
 func TestCloudArchive_SameNameConflict(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTest(t)
 	defer ts.Close()
 
@@ -423,6 +432,7 @@ func TestCloudArchive_SameNameConflict(t *testing.T) {
 
 // TestCloudArchive_SizeLimit 验证超过 cloud_archive_max_bytes 时返回 400。
 func TestCloudArchive_SizeLimit(t *testing.T) {
+	t.Parallel()
 	ts, mgr, _ := setupCloudArchiveTestWithCfg(t, func(c *Config) {
 		c.CloudArchiveMaxBytes = 5 // 极小额限制，任何文件都超限
 	})
@@ -453,6 +463,7 @@ func TestCloudArchive_SizeLimit(t *testing.T) {
 // TestCloudArchive_QuotaRejected 验证存储配额不足时返回 507 且不泄漏预留。
 // P5 收敛后归档配额走租户 archive 桶 Scope（storageMgr 仅回退），故用租户上限触发 507。
 func TestCloudArchive_QuotaRejected(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	// 租户上限 1100：CreateTask 已预留 100（cloud 桶），归档预占（源 + 100MB 占位）必然超限。
 	env.setOwnerQuota("alice", 1100)
@@ -511,6 +522,7 @@ func TestCloudArchive_QuotaRejected(t *testing.T) {
 // size<=0 分支），归档桶不虚高。若删除只按磁盘 stat 释放，文件已消失时 stat 为 0
 // 将跳过 ReleaseUsage → archive 桶 committed 残留（虚高），下次周期扫描前一直失守。
 func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t)
 	env.setOwnerQuota("alice", 1<<30)
 	sm := capacity.NewStorageManager(env.root, 10*1024*1024*1024, nil, testLogger())
@@ -596,6 +608,7 @@ func TestCloudArchive_Delete_FileAlreadyGoneReleasesFromRegistry(t *testing.T) {
 //   - 同名预置在 alice/archive/ → 409（冲突检查落 archive 桶，O_EXCL 语义保留）
 //   - kind=cloud_archive 下载 filename=<name> → 200（FeatureRel("archive", name) 解析）
 func TestCloudArchive_NewLayout(t *testing.T) {
+	t.Parallel()
 	env := newOwnerEnv(t) // alice 下载环境（含 <root>/alice/... 布局与 GET /download）
 	root := env.root
 
