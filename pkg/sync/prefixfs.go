@@ -226,6 +226,15 @@ func (p *PrefixFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, er
 	return pv.FileMeta(ctx, p.Key(rel))
 }
 
+// ChecksumAndSize 转发**可选能力**（R21：装饰器必须转发全部可选能力，否则调用方静默回落重路径）。
+func (p *PrefixFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	cp, ok := p.FS.(meta.ChecksumProvider)
+	if !ok {
+		return "", 0, fmt.Errorf("PrefixFS: 底层未实现 ChecksumAndSize: %w", ErrUnsupported)
+	}
+	return cp.ChecksumAndSize(ctx, p.Key(rel))
+}
+
 // IsLocalVolume 转发本地性自述（不涉及路径）；底层未实现 = 外部卷（全仓「未实现默认外部」）。
 func (p *PrefixFS) IsLocalVolume() bool {
 	lv, ok := p.FS.(LocalVolume)

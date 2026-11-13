@@ -141,6 +141,18 @@ func (s *SealFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, erro
 	return pv.FileMeta(ctx, rel)
 }
 
+// ChecksumAndSize 转发可选能力（R21）；同样先过封印读门。
+func (s *SealFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if err := s.readErr(rel); err != nil {
+		return "", 0, err
+	}
+	cp, ok := s.FS.(meta.ChecksumProvider)
+	if !ok {
+		return "", 0, fmt.Errorf("SealFS: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+	}
+	return cp.ChecksumAndSize(ctx, rel)
+}
+
 // DirectURL 直链：命中封印 ⇒ **抑制**（ok=false，与封装视图默认策略同口径）；未命中转发。
 func (s *SealFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
 	if storage.SealAt(s.rules, relPath) != nil {

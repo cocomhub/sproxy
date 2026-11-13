@@ -286,6 +286,17 @@ func (g *MetaBucketGuard) FileMeta(ctx context.Context, rel string) (*meta.FileM
 	return nil, fmt.Errorf("trusted: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
 }
 
+// ChecksumAndSize 转发可选能力（R21）；同样先过保留桶防护。
+func (g *MetaBucketGuard) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if err := g.guardPath(rel); err != nil {
+		return "", 0, err
+	}
+	if cp, ok := g.inner.(meta.ChecksumProvider); ok {
+		return cp.ChecksumAndSize(ctx, rel)
+	}
+	return "", 0, fmt.Errorf("trusted: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+}
+
 // UpdateMetaExtra 委托 inner（damaged 源完整性标记写入 meta.Extra）。
 func (g *MetaBucketGuard) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	if err := g.guardPath(rel); err != nil {

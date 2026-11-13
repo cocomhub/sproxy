@@ -353,6 +353,15 @@ func (d *davMetaFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, e
 	return pv.FileMeta(ctx, rel)
 }
 
+// ChecksumAndSize 转发可选能力（R21）。
+func (d *davMetaFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	cp, ok := d.FS.(meta.ChecksumProvider)
+	if !ok {
+		return "", 0, fmt.Errorf("dav: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+	}
+	return cp.ChecksumAndSize(ctx, rel)
+}
+
 // ---- 能力平权断言（R21）----
 var (
 	_ syncpkg.FS                  = (*davMetaFS)(nil)

@@ -278,6 +278,19 @@ func (o *ownerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, err
 	return pv.FileMeta(ctx, src)
 }
 
+// ChecksumAndSize 转发可选能力（R21）；同样先做逻辑→物理路径映射。
+func (o *ownerFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	src, err := o.key(rel)
+	if err != nil {
+		return "", 0, err
+	}
+	cp, ok := o.FS.(meta.ChecksumProvider)
+	if !ok {
+		return "", 0, fmt.Errorf("ownerFS: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+	}
+	return cp.ChecksumAndSize(ctx, src)
+}
+
 func (o *ownerFS) WriteIfAbsent(ctx context.Context, p string, r io.Reader, size, mtime int64) (bool, error) {
 	src, err := o.key(p)
 	if err != nil {

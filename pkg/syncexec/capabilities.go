@@ -94,6 +94,15 @@ func (q *quotaLocalFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta
 	return pv.FileMeta(ctx, rel)
 }
 
+// ChecksumAndSize 转发可选能力（R21）。
+func (q *quotaLocalFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	cp, ok := q.inner.(meta.ChecksumProvider)
+	if !ok {
+		return "", 0, fmt.Errorf("syncexec: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+	}
+	return cp.ChecksumAndSize(ctx, rel)
+}
+
 func (q *quotaLocalFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := q.inner.(syncpkg.MetaExtraUpdater)
 	if !ok {
