@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/server/issues"
@@ -122,9 +123,7 @@ func (w *blobReconcileWiring) scanAndReport() (reported, skipped int) {
 	}
 	w.mu.Lock()
 	caps := make(map[string]baidupcs.ReconcileCapable, len(w.caps))
-	for k, v := range w.caps {
-		caps[k] = v
-	}
+	maps.Copy(caps, w.caps)
 	w.mu.Unlock()
 
 	for volume, cap := range caps {

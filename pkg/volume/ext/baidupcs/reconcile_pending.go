@@ -195,7 +195,7 @@ func (s *Storage) RetryBlobMD5Reconcile(ctx context.Context, key, localCopy stri
 		// 副本已不在（被清理/进程重启丢失）⇒ 无源可传，交人工。
 		return fmt.Errorf("保留的本地副本不存在（%s），无法重传（需人工处理）: %w", localCopy, statErr)
 	}
-	for i := 0; i < retryUploadTimes; i++ {
+	for i := range retryUploadTimes {
 		f, oErr := os.Open(localCopy)
 		if oErr != nil {
 			return fmt.Errorf("打开本地副本: %w", oErr)
