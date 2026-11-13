@@ -81,6 +81,11 @@ type ObjectMeta struct {
 	// 服务端对分片上传的 md5 可能为片组合/标注不可信）。上传后 ETag 复核须据此跳过
 	// 相等断言（否则 binary-only 模式 ≥4MiB 上传必然 3 轮全量重传后失败，EXT-2）。
 	MD5Unreliable bool
+	// BlockList 是远端对象的**分块 md5 列表**（按 4 MiB 分块；仅库 `FilesDirectoriesMeta`
+	// 路径可取，父目录列举与 binary `ls -l` **均不含**该信息 ⇒ 通常为空）。
+	// 用途：上传后用 `reconcileBlockList` 与本地 `stagedUpload.blockMD5s` **逐块对账**
+	// （`docs/external-dependencies.md` §7.8.5 实测：与本地 4 MiB 分块同构、**T+0 可用**）。
+	BlockList []string
 }
 
 // Storage 是百度网盘存储后端。
@@ -673,7 +678,7 @@ func (s *Storage) putCheckExisting(ctx context.Context, key, localMD5 string, at
 		return nil, true, mapPCSError(err) // 调用方已取消 ⇒ 如实上报
 	}
 	if meta, ok := s.metaByExactList(ctx, key); ok && meta != nil {
-		if meta.ETag == localMD5 {
+		if md5Authoritative(meta.ETag, localMD5) {
 			s.log.Info("put: 目标已存在且 ETag 与本地 md5 一致（列举判据），直接返回",
 				"key", key, "attempt", attempt)
 			return meta, false, nil // 秒传命中：内容一致，无需上传
@@ -716,6 +721,40 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 
 // verifyAfterUpload 是上传后的 **md5/ETag 复核**（语义与原 putCheckAfterUpload 完全一致；
 // 抽出以便"列举命中"与"可见性等待命中"两条入口共用——**校验强度保持不变**）。
+// afterUploadByBlockList 用远端 `block_list` 与本地分块 md5 **逐块对账**（§7.8.5）。
+//
+// 返回 (done, decided)：
+//   - decided=true & done=true   ⇒ 内容已确认在云端（视为上传成功）；
+//   - decided=true & done=false  ⇒ **已判定不一致** ⇒ 调用方应重传，不得再做弱判据兜底；
+//   - decided=false              ⇒ **不可判定**（无 block_list / 长度不符 / 含非法值）
+//     ⇒ 必须回落既有弱判据 —— **绝不可把“不可判定”当成通过**。
+//
+// 注意：`meta.BlockList` 仅库 `FilesDirectoriesMeta` 路径有值（binary/列举路径为空）
+// ⇒ 空列表时恒返回 (false,false)，**行为与接入前完全一致**（零回归）。
+func (s *Storage) afterUploadByBlockList(ctx context.Context, key string, meta *ObjectMeta, st *stagedUpload) (done, decided bool) {
+	if meta == nil || st == nil {
+		return false, false
+	}
+	remoteBlocks := meta.BlockList
+	if len(remoteBlocks) == 0 {
+		// 生产为 binary 优先，而 CLI `meta` **不含 block_list** ⇒ 此处按需从**库**取一次
+		// （`blockListOf` 会沿 binary→库兜底下探）。仅出现在退化分支，不增加快路径开销。
+		remoteBlocks = s.fetchBlockList(ctx, key)
+	}
+	equal, decidable := reconcileBlockList(remoteBlocks, st.blockMD5s)
+	if !decidable {
+		return false, false
+	}
+	if equal {
+		s.log.Info("上传后 block_list 逐块一致（内容已在云端）",
+			"key", key, "blocks", len(remoteBlocks))
+		return true, true
+	}
+	s.log.Warn("上传后 block_list 逐块不一致（重传）",
+		"key", key, "remote_blocks", len(remoteBlocks), "local_blocks", len(st.blockMD5s))
+	return false, true
+}
+
 func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 	meta *ObjectMeta, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
 	if meta.MD5Unreliable {
@@ -726,6 +765,13 @@ func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 	// 「无校验能力 ≠ 接受任意内容」，且 secretdata 的块名含内容哈希 + AES-GCM tag 在读取时
 	// 仍会 fail-closed，上传后复核是额外防线而非唯一防线。ETag 一旦可用仍走严格相等。
 	if meta.ETag == "" {
+		// ★ 先用**远端 block_list 逐块对账**（§7.8.5 实测：与本地 4 MiB 分块同构、**T+0 可用**）
+		// 替代“size 容差”这一弱判据；仅当**不可判定**（无 block_list/长度不符/非法值）才回落。
+		// 性能：快路径（ETag 相等）不受影响；本分支原本在多轮失败后会走**整文件重传**
+		// ⇒ 对账命中反而**减少重传**。
+		if done, decided := s.afterUploadByBlockList(ctx, key, meta, st); decided {
+			return meta, done, nil
+		}
 		// 列举（`ls`）返回的 size 对大文件是**近似值**（实测 87.3MiB 文件差 312B：want=91593425
 		// got=91593113）⇒ 不能要求精确相等，改用**相对容差**（max(4KiB, 0.1%)）判定「同一个
 		// 对象且大小量级一致」。内容完整性仍由 secretdata 的块名（内容哈希）+ AES-GCM tag 在
@@ -739,7 +785,7 @@ func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 			"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
 		return meta, false, nil
 	}
-	if meta.ETag == localMD5 {
+	if md5Authoritative(meta.ETag, localMD5) {
 		return meta, true, nil
 	}
 	s.log.Warn("上传后 ETag 与本地 md5 不一致（重传刷新 meta）",
@@ -756,8 +802,14 @@ func (s *Storage) checkAfterUploadUnreliableMD5(ctx context.Context, key string,
 	if renewed, rok := s.renewAuthoritativeMD5(ctx, key, st, attempt); rok {
 		meta = renewed
 	}
+	// ★ 主判据：**远端 block_list 逐块对账**（§7.8.5：与本地 4 MiB 分块同构、**T+0 可用**），
+	// **不依赖**远端 md5 字段是否权威。已判定即返回；**不可判定**（binary/列举路径 BlockList 恒空）
+	// ⇒ 回落下方既有逻辑 ⇒ **零回归**。
+	if done, decided := s.afterUploadByBlockList(ctx, key, meta, st); decided {
+		return meta, done, nil
+	}
 	if !meta.MD5Unreliable {
-		if meta.ETag == st.md5 {
+		if md5Authoritative(meta.ETag, st.md5) {
 			return meta, true, nil
 		}
 		s.log.Warn("上传后 ETag 与本地 md5 不一致（rapidupload 刷新后仍不同，重传刷新 meta）",

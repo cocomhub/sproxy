@@ -119,9 +119,16 @@ func countTestSleeps(root string) (map[string]int, error) {
 		if rel == sleepRatchetSelfPath {
 			return nil
 		}
+		// **跳过 `//go:build e2e` 的文件**（2026-11-13）：它们**不在常规 CI 路径**
+		// （须显式 `-tags=e2e` 才编译），且其 `time.Sleep` 多为**对真实外部系统（网盘 API 等）的
+		// 节流**——正属本门禁注释所述「有意占位」第 2 类（正当用法，不该改成条件轮询：
+		// `testutil.WaitFor` 的密集轮询会**打爆外部系统**）。
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
 			return readErr
+		}
+		if strings.Contains(string(data), "//go:build e2e") {
+			return nil
 		}
 		if n := strings.Count(string(data), "time.Sleep("); n > 0 {
 			counts[rel] = n
