@@ -5,7 +5,7 @@ package archcheck
 
 // flock_gate_test.go 是「直接 flock 调用不得用于代码」的门禁（R23）。
 //
-// 背景（roadmap 11.11 / docs/designs/2026-09-24-leader-elector.md §5.4）：
+// 背景（roadmap 11.11 / docs/archive/2026-09-24-leader-elector.md §5.4）：
 // 多节点共享存储需要**写面唯一**，选主统一经 LeaderElector 抽象
 // （pkg/leader）——LocalLeaderElector 内部用排他文件锁（Unix flock /
 // Windows LockFileEx），其它代码若绕过抽象直接 flock 自造「文件锁选主」，
