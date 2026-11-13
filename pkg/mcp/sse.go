@@ -5,7 +5,7 @@
 // 协议层 + 会话状态机 + 工具分派（FileClient 薄封装），供 AI CLI
 // （Claude Code / Codex 等）通过 stdio / SSE 传输暴露 sproxy 文件能力。
 //
-// 设计约束（见 docs/designs/2026-09-24-mcp-server.md 片 4）：
+// 设计约束（见 docs/archive/2026-09-24-mcp-server.md 片 4）：
 //   - 不引入第三方 MCP SDK，纯标准库实现；
 //   - stdio 传输：单行 JSON + '\n' 分隔（Claude/Codex 兼容）；
 //   - SSE 传输（远程 HTTP）：GET /sse 事件流（endpoint 下发）+ POST /messages
