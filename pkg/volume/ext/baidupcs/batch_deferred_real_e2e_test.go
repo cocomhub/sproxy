@@ -50,7 +50,7 @@ func TestE2E_BatchDeferredUploadAndVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := NewStorage(StorageConfig{
-		Root: "/来自：本地电脑", TempDir: tmpRoot, BDUSS: bduss, BinaryPath: binPath,
+		Root: e2eDriveRoot(t), TempDir: tmpRoot, BDUSS: bduss, BinaryPath: binPath,
 		Logger: testLogger(),
 	})
 	if err != nil {

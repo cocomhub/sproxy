@@ -40,6 +40,21 @@ import (
 
 // e2eBDUSSFromConfig 从 BaiduPCS-Go 配置读取 BDUSS（运行时，不经转录/环境变量）。
 // 路径经 os.UserHomeDir() 动态解析（不硬编码用户名，防敏感信息落库）。
+// e2eDriveRoot 返回真实网盘的**根路径**（运行期经 env 传入，AGENTS 21b：仓库内不得硬编码
+// 真实路径/目录名）。
+//
+// 与 `probeRootBase`（隔离测试根 `BAIDUPCS_E2E_ROOT`）区分：本助手给的是**盘根**，
+// 供需要在根下自建/比对路径的 e2e 用例（如 /compare/... 、sproxy-e2e-secretdata）。
+// 未设置 ⇒ **跳过**（不猜、不回落硬编码）。
+func e2eDriveRoot(t *testing.T) string {
+	t.Helper()
+	root := strings.TrimSpace(os.Getenv("BAIDUPCS_E2E_DRIVE_ROOT"))
+	if root == "" {
+		t.Skip("未设置 BAIDUPCS_E2E_DRIVE_ROOT（真实网盘根路径）⇒ 跳过 e2e 用例")
+	}
+	return strings.TrimSuffix(root, "/")
+}
+
 func e2eBDUSSFromConfig(t *testing.T) string {
 	t.Helper()
 	home, err := os.UserHomeDir()
@@ -156,7 +171,7 @@ func TestE2E_CompareUploadPaths(t *testing.T) {
 	keyCore := "compare/" + uniq + "/core.bin"
 	keyLib := "compare/" + uniq + "/lib.bin"
 	keyAuto := "compare/" + uniq + "/auto.bin"
-	cleanup := exec.Command(binPath, "rm", "-f", "/来自：本地电脑/compare/"+uniq)
+	cleanup := exec.Command(binPath, "rm", "-f", e2eDriveRoot(t)+"/compare/"+uniq)
 	_ = cleanup.Run()
 
 	// 两条路径各自独立 Storage 实例（独立临时目录/远端路径防互相影响）。
@@ -282,7 +297,7 @@ func runUploadPath(t *testing.T, name string, sp uploadPathSpec) uploadPathResul
 		ad = newBinaryAdapter(AdapterConfig{BinaryPath: sp.binPath, Logger: testLogger(), Fallback: lib})
 	}
 	_ = os.MkdirAll(sp.tmpRoot, 0o755)
-	s, err := NewStorage(StorageConfig{Root: "/来自：本地电脑", TempDir: sp.tmpRoot, Adapter: ad,
+	s, err := NewStorage(StorageConfig{Root: e2eDriveRoot(t), TempDir: sp.tmpRoot, Adapter: ad,
 		Logger: testLogger(), UploadCore: sp.coreMode})
 	if err != nil {
 		return uploadPathResult{name: name, err: fmt.Errorf("NewStorage: %w", err)}

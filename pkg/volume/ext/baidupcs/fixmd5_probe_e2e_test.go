@@ -51,7 +51,7 @@ func TestE2E_FixMD5Probe(t *testing.T) {
 		t.Fatalf("NewClient: %v", cerr)
 	}
 	st, err := NewStorage(StorageConfig{
-		Root: "/来自：本地电脑", TempDir: tmpRoot, BDUSS: bduss, BinaryPath: binPath,
+		Root: e2eDriveRoot(t), TempDir: tmpRoot, BDUSS: bduss, BinaryPath: binPath,
 		Logger: testLogger(), UploadCore: "nucleus",
 	})
 	if err != nil {
@@ -94,7 +94,7 @@ func TestE2E_FixMD5Probe(t *testing.T) {
 		etagBefore, localMD5, etagBefore == localMD5)
 
 	// ③ 调用库的「修复文件md5」API（BaiduPCS-Go fixmd5 命令的同一实现）。
-	fixErr := pcs.PCS().FixMD5("/来自：本地电脑/" + key)
+	fixErr := pcs.PCS().FixMD5(e2eDriveRoot(t) + "/" + key)
 	t.Logf("③ FixMD5 调用：err=%v", fixErr)
 
 	// ④ 再看 ETag（修复后需短暂等待服务器刷新——库自身错误文案即「可能服务器未刷新」）。
@@ -172,7 +172,7 @@ func TestE2E_FileMetaCompare_CLIvsCore(t *testing.T) {
 			return newBinaryAdapter(AdapterConfig{BinaryPath: binPath, Logger: testLogger(),
 				Fallback: newLibraryAdapter(pcs, testLogger())})
 		}()
-		st, serr := NewStorage(StorageConfig{Root: "/来自：本地电脑", TempDir: tmpRoot, Adapter: ad,
+		st, serr := NewStorage(StorageConfig{Root: e2eDriveRoot(t), TempDir: tmpRoot, Adapter: ad,
 			Logger: testLogger(), UploadCore: coreMode})
 		if serr != nil {
 			t.Fatalf("%s NewStorage: %v", name, serr)
@@ -188,7 +188,7 @@ func TestE2E_FileMetaCompare_CLIvsCore(t *testing.T) {
 		}
 		_, putErr := st.Put(ctx, key, f)
 		_ = f.Close()
-		fi, ferr := pcs.PCS().FilesDirectoriesMeta("/来自：本地电脑/" + key)
+		fi, ferr := pcs.PCS().FilesDirectoriesMeta(e2eDriveRoot(t) + "/" + key)
 		if ferr != nil {
 			t.Logf("[%s] Put err=%v；取 meta 失败: %v", name, putErr, ferr)
 			return
@@ -241,7 +241,7 @@ func TestE2E_DlinkRangeSizeBoundary(t *testing.T) {
 	key := fmt.Sprintf("e2edlink/%d/big.bin", time.Now().UnixNano())
 	tmpRoot := filepath.Join(t.TempDir(), "tmp")
 	_ = os.MkdirAll(tmpRoot, 0o755)
-	st, err := NewStorage(StorageConfig{Root: "/来自：本地电脑", TempDir: tmpRoot, BDUSS: bduss,
+	st, err := NewStorage(StorageConfig{Root: e2eDriveRoot(t), TempDir: tmpRoot, BDUSS: bduss,
 		BinaryPath: binPath, Logger: testLogger(), UploadCore: "nucleus"})
 	if err != nil {
 		t.Fatalf("NewStorage: %v", err)
@@ -263,7 +263,7 @@ func TestE2E_DlinkRangeSizeBoundary(t *testing.T) {
 		t.Fatalf("上传失败：%v", putErr)
 	}
 
-	urlInfo, pcsErr := pcs.PCS().LocateDownload("/来自：本地电脑/" + key)
+	urlInfo, pcsErr := pcs.PCS().LocateDownload(e2eDriveRoot(t) + "/" + key)
 	if pcsErr != nil {
 		t.Fatalf("LocateDownload: %v", pcsErr)
 	}
