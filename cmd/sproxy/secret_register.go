@@ -184,6 +184,10 @@ func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReport
 		SpanCacheBytes:     vcExtraByteSize(v, "span_cache_bytes"),
 		IndexSnapshotPath:  vcExtraStr(v, "index_snapshot_path"),
 		MetaCacheDir:       vcExtraStr(v, "meta_cache_dir"),
+		// meta_cache_bytes：L1b（**内存**缓存）字节上限（零值 ⇒ 默认 256 MiB；负值 ⇒ 关闭缓存）。
+		MetaCacheBytes: vcExtraByteSize(v, "meta_cache_bytes"),
+		// meta_cache_quota_bytes：L1a（**磁盘**精简缓存）配额（零值 ⇒ 默认 2 GiB；负值 ⇒ 不限制）。
+		MetaCacheQuotaBytes: vcExtraByteSize(v, "meta_cache_quota_bytes"),
 		// normalize_names：""/"audit"/"apply"（默认空 = 不动；见 Options 注释）
 		NormalizeNames:        vcExtraStr(v, "normalize_names"),
 		NormalizeExportDir:    vcExtraStr(v, "normalize_export_dir"),
