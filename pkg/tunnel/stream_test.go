@@ -118,14 +118,23 @@ func TestDecryptStream_ShortKey(t *testing.T) {
 func TestGetBuf_PutBuf(t *testing.T) {
 	t.Parallel()
 	buf := getBuf(1024)
-	if len(buf) != 1024 {
-		t.Fatalf("expected len 1024, got %d", len(buf))
+	if len(buf) != 1024 || cap(buf) < 1024 {
+		t.Fatalf("getBuf(1024) 应返回 len=1024 且 cap>=1024，得到 len=%d cap=%d", len(buf), cap(buf))
 	}
+	// 本 goroutine 独占期间写入是安全的（模拟真实使用）。
 	buf[0] = 0x42
-	putBuf(buf, 1024)
-	if buf[0] != 0 {
-		t.Fatal("expected first byte cleared after PutBuf")
+	putBuf(buf, 1024) // 归还池；不应 panic
+
+	// ⚠️ **不得在 putBuf 之后读取 buf**：buffer 已归还 `sync.Pool`，可能**立即被其它 goroutine
+	// 复用** ⇒ 读取即构成数据竞争。CI 实测过该竞争（`-race`：本测试 vs `(*mockStream).Read`）：
+	// 原先断言「PutBuf 后首字节被清零」正是读了归还后的内存 ⇒ 与并发的使用者冲突。
+	// 「清零」是 putBuf 的**内部防御行为**（避免敏感数据残留），在池语义下**无法安全断言**；
+	// 而 getBuf 的**契约**（返回指定长度、可再次取用）才是本测试该锁定的。
+	b2 := getBuf(2048)
+	if len(b2) != 2048 {
+		t.Fatalf("再次 getBuf(2048) 应返回 len=2048，得到 %d", len(b2))
 	}
+	putBuf(b2, 0)
 }
 
 // TestDecryptStream_ChunkTooLarge 构造一个 chunkLen 远超 maxChunkLen 的帧，
