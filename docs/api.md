@@ -1945,6 +1945,31 @@ S3 兼容网关（SigV4 验签）：bucket = 已装配卷名（映射该卷 user
   **用户可见（明文）长度**；不支持 CreateBucket / DeleteBucket
 - 错误：`400` key 为空 / 卷不可用；`403` 验签失败；`500` 列目录/读写失败
 
+### S3 分块上传语义（Multipart）
+
+`POST ?uploads`（init）→ `PUT ?partNumber=&uploadId=`（part）→ `POST ?uploadId=`（complete）→
+`DELETE ?uploadId=`（abort）；编码与响应 XML 遵循 S3 协议，下面只列额外语义。
+
+- **part**：`partNumber` ∈ `[1, 10000]`，非法 → `400`；part 落 chunk 桶；响应 `ETag` 为该 part
+  内容的 MD5（带引号）。**在途 part 当场入双账本**（owner 配额 Scope + 卷容量池：写前 `TryReserve`、
+  写成功 `Commit`、失败回滚；同 partNumber 重传按差分释放）——额度/容量不足时 **`507`
+  `s3: 配额不足`**（不落盘）。
+- **complete**：
+  - body 有界（超限 `413`）；XML 解析失败 / 无 `<Part>` / `PartNumber` 越界或重复 → `400`；
+  - **会话归属校验**：会话 meta 缺失、或 meta 记录的 key 与本次请求 key 不一致 → **`409`
+    `s3: 会话无效或 key 不匹配`**（防「借自己的上传会话写别人的 key」）；
+  - **逐 part ETag 校验**：客户端回传 ETag（去引号后）必须等于**落盘 part 内容的 MD5**，
+    不匹配 → `400`（防伪造/篡改 ETag）；引用的 part 不存在 → `400`；
+  - 成功 → 按 `PartNumber` 升序拼接为目标对象，响应 XML 含 `<Key>` 与**复合 ETag**
+    （`hex(md5(concat(md5(p1), …)))-N`，S3 分块标准形态）；
+  - **失败不变量**：任何 `400`/`500` 返回前清理「半截目标对象 + 其旧 sidecar」（不残留部分内容），
+    **parts 保留**（可重试 complete）；成功删除的 part 逐个释放其记账。
+- **abort**：删 parts + 会话 meta（删除成功的 part 逐个释放记账）；孤儿会话超 24h TTL 由清扫任务回收。
+- **配额是「转移」不是「再预留」**：这批字节在 **part 上传时**已预留+提交（上传期即强制额度），
+  complete 只把账从 parts 转到目标对象——覆盖写按 `prev → 落盘真值` 差分（`Adjust`），新文件按
+  `0 → 落盘真值`；若在 complete 再预留会**双计**（使「配额刚好等于文件大小」的上传恒被 507 拒绝）。
+  未装配配额/卷池时跳过记账（旧行为零回归）。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |
@@ -1957,6 +1982,7 @@ S3 兼容网关（SigV4 验签）：bucket = 已装配卷名（映射该卷 user
 | 413 | 请求体超过限制 |
 | 416 | Range 越界 |
 | 500 | 服务端写文件、目录失败 |
+| 507 | 配额/卷容量不足（S3 `InsufficientStorage`；`s3: 配额不足`） |
 
 ## 配额与等待（`GET /api/quota`）
 
