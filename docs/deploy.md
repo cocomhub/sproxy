@@ -31,7 +31,7 @@ helm install sproxy ./deploy/sproxy-helm --set image.tag=v0.21.0
 
 - **只读面可水平扩展**：读请求（GET/list/stat/download 等）经 Service/Ingress 落到任意副本。
 - **写面只认一个写主**：建议以 `replicaCount=1` 作为当前默认（唯一副本即写主，行为与单机一致）；
-  若必须多副本，则**本片不做运行时强制**——写请求误发到读副本的后果不被保证（取决于本地存储状态），
+  若必须多副本，则**当前不做运行时强制**——写请求误发到读副本的后果不被保证（取决于本地存储状态），
   需部署方自行保证写请求只落到写主（`Deployment` 序号不稳定，需用 `StatefulSet` 等让「副本 0」
   稳定，再把写流量定向过去）。
 - **PVC 限制**：chart 默认 `accessMode: ReadWriteOnce` ⇒ 多副本**不能同时挂同一卷**；多副本的前提是
