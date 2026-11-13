@@ -136,6 +136,13 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 		// URL 解析扩展（/api/resolve）：分享 URL → 文件清单（含 hash，供 GCID 校验）。
 		// 漏注册会使 /api/resolve 对分享 URL 回落 generic（2026-10-26 实测缺陷）。
 		registerPikpakResolver(downloader.DefaultRegistry, cfg.Pikpak.InsecureTLS)
+		// 可选媒体探测：解析结果里**尽力**补 width/height/resolution（外部 ffprobe）。
+		// 未安装 ffprobe / 探测失败 ⇒ 字段留空，**不影响**解析本身（见 downloader.FFProbe 注释）。
+		// 可用 disable_resolve_probe: true 显式关闭（默认 false = 启用）。
+		if !cfg.DisableResolveProbe {
+			downloader.DefaultRegistry.SetMediaProber(downloader.NewFFProbe(cfg.ResolveFFProbePath))
+		}
+		slog.Info("resolve media prober wired", "ffprobe", cfg.ResolveFFProbePath, "enabled", !cfg.DisableResolveProbe)
 	})
 }
 
