@@ -948,12 +948,12 @@ func crossCheckExternalChecksum(ctx context.Context, fsys syncpkg.FS, key, expec
 	if expectedChecksum == "" {
 		return nil
 	}
-	pv, ok := fsys.(meta.Provider)
-	if !ok {
-		return nil
-	}
-	fm, ferr := pv.FileMeta(ctx, key)
-	if ferr != nil || fm == nil || fm.TotalSHA256 == "" || fm.TotalSHA256 == expectedChecksum {
+	// P5（2026-11-13，第二片）：本判据**只需整文件 checksum** ⇒ 走**轻量路径**
+	// （免加载冷结构 meta —— 实测单文件常驻 78 MB、解密+解析 ≈584 ms）。
+	// `checksumAndSize` 在「轻量能力不可用/失败/为空」时**回退**完整 `FileMeta`；
+	// 若两者皆不可用（无 meta 载体）⇒ 返回空串 ⇒ 与原逻辑一致地**跳过该判据**。
+	ck, _ := checksumAndSize(ctx, fsys, key)
+	if ck == "" || ck == expectedChecksum {
 		return nil
 	}
 	return &files.HTTPError{Status: http.StatusConflict, Message: "文件已变更（校验和不一致），请刷新后重试"}
