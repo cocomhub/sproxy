@@ -495,3 +495,20 @@ func (r *AuditRecorder) MarkDone(ctx) error
 
 **验证**：单测 2 例（一致/不一致/取不到/未装配四分支 + 接线"不一致 ⇒ 判重传"）；
 **变异命中 2 处**（去掉接线调用 / `blockMD5Matches` 恒真）；全包回归 289.6 s 全绿；gofmt/goimports/vet(双 tag) 干净。
+
+### 7.12 配额覆盖面的最终核实（2026-11-13）：**三条路径都已覆盖，无需额外改动**
+
+延续 §7.10 的订正（先核实装配形状、不凭推测下"缺口"结论），本轮把**分块上传**也核实完毕：
+
+| 上传形态 | 记账位置 | 磁盘满时行为 |
+| --- | --- | --- |
+| **普通上传** | FS 层 `syncpkg.ApplyStagingQuota`（`pkg/server/volumes.go:765`，per-owner 预留） | 各 handler 映射 **507**（`chunked_upload.go:547`、`write_ops.go:1293/1542`、`options.go:464`、`dir_charge.go:67/76`、`version.go:368/386`） |
+| **分块上传（在途）** | **会话/handler 层**：现代路径 `route.ScopeRes`；回退路径 `storageManager().WaitReserveChunked(ctx, session.TotalSize)`（`pkg/files/chunked_upload.go`，`p5FallbackReserve`） | **507 +「存储空间不足」**（且 `createInitTempFile` 以 `Truncate(TotalSize)` **预先占位**） |
+| **待复查副本（本设计新增）** | **方案 A**：专用作用域（保留 owner 名 `pending-reconcile`）+ `ReserveUsage/ReleaseUsage`（#1146） | **不保留**（上传仍成功；内容已在云端） |
+
+⇒ 结论：**`stage-*` 与 `chunked_store` 的"裸写"都不构成配额缺口** —— 记账分别在 FS 层与会话层完成，
+且两者都已返回 **507「空间不足」**。本设计**只需**为"保留期副本"补账（#1146 已完成）。
+
+**教训（本轮重复出现两次，值得固化）**：
+> 汇报"配额/能力缺口"**前必须先核实该路径的装配形状与既有覆盖**（本例两次都发现"缺口"已被既有机制覆盖）。
+> 判断动作：问「这条路径的**字节是在哪一层被预留的**？」，而不是「这里有没有 `os.` 裸写？」。
