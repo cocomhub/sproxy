@@ -17,6 +17,9 @@ type Registry struct {
 	// resolvers 是 URL 解析扩展注册表（与下载器独立命名空间）：通用 /api/resolve 接口
 	// 按 Supports 依次查找；未匹配时回落通用结果（见 ResolveURL）。
 	resolvers *plugin.Registry[URLResolver]
+	// mediaProber 是可选媒体探测器（装配期注入，之后只读 ⇒ 并发安全）。
+	// nil = 未装配 ⇒ 解析结果不含 width/height/resolution（行为与旧版一致）。
+	mediaProber MediaProber
 }
 
 // NewRegistry 创建下载器注册表。
@@ -126,3 +129,7 @@ func (r *Registry) NewFromConfig(name string) Downloader {
 func (r *Registry) DefaultDownloader() Downloader {
 	return r.Active()
 }
+
+// SetMediaProber 注入可选媒体探测器（装配期调用一次；之后只读）。
+// p 为 nil 等价于不探测（解析结果不含 width/height/resolution）。
+func (r *Registry) SetMediaProber(p MediaProber) { r.mediaProber = p }

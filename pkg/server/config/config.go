@@ -926,6 +926,13 @@ type Config struct {
 	// 旧实现把上限硬编码在 internal/size.UploadBodyLimit 并删除配置键；roadmap P0 恢复
 	// 可配：<=0 时回落 internal/size.UploadBodyLimit（1 GiB 默认零回归）。
 	MaxUploadBytes ByteSize `yaml:"max_upload_bytes" mapstructure:"max_upload_bytes"`
+	// ResolveFFProbePath 是 /api/resolve 媒体探测所用的 ffprobe 可执行文件路径。
+	// 空 = 走 PATH 查找 "ffprobe"。探测失败只会让 width/height/resolution 留空，**不影响**解析。
+	ResolveFFProbePath string `yaml:"resolve_ffprobe_path" mapstructure:"resolve_ffprobe_path"`
+	// DisableResolveProbe 显式关闭解析时的媒体探测（默认 false = 启用）。
+	// 用「disable_」反向语义而非 enable：保证**零值（false）即默认开启**，
+	// 且能区分「用户显式关闭」与「未配置」（见仓库配置默认值纪律）。
+	DisableResolveProbe bool `yaml:"disable_resolve_probe" mapstructure:"disable_resolve_probe"`
 	// MaxFileMetaBytes 是文件自定义元数据（FileMeta.Extra）完整 JSON 序列化后的上限。
 	// 用户裁定（2026-11-10）：自定义扩展支持嵌套结构，只限制大小；默认 10 MiB。
 	// <=0 时由 SetDefaults 回落默认值。

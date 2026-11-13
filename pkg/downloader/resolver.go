@@ -22,6 +22,56 @@ type ResolvedFile struct {
 	Type       string `json:"type,omitempty"`        // 内容类型（video/mp4 等）
 	Hash       string `json:"hash,omitempty"`        // 内容哈希（提供方自报，可能为空）
 	DirectLink string `json:"direct_link,omitempty"` // 可直连下载的 URL（可能为空/受限）
+
+	// 媒体探测结果（可选；未探测/探测失败时全部为零值/空串）。
+	// 由 MediaProber 可选能力在解析时尽力填充，消费方**必须**能接受空值。
+	Width      int    `json:"width,omitempty"`      // 视频宽度（像素）
+	Height     int    `json:"height,omitempty"`     // 视频高度（像素）
+	Resolution string `json:"resolution,omitempty"` // 分辨率档位（如 720p/1080p）
+}
+
+// MediaProber 是「媒体探测」可选能力接口：对可访问的媒体 URL 探测分辨率。
+//
+// 设计取舍：
+//   - 探测**不是**解析的必需环节（解析结果里的 width/height 允许为空）；
+//   - 实现应**尽力而为**：任何失败都不得让解析整体失败（返回零值即可）；
+//   - 由装配层按需注入（未装配 ⇒ 解析结果不含探测字段，行为与旧版一致）。
+type MediaProber interface {
+	// Probe 返回媒体文件的宽高；无法探测时返回零值与错误（调用方应忽略并留空）。
+	Probe(ctx context.Context, url string) (ProbeResult, error)
+}
+
+// ProbeResult 是探测结果（零值 = 未知）。
+type ProbeResult struct {
+	Width  int
+	Height int
+}
+
+// ResolutionLabel 把宽高映射为常用档位标签（720p/1080p/…）。
+// 判据：优先用**高度**（视频档位惯例），高度未知时回落到宽度。
+func ResolutionLabel(w, h int) string {
+	base := h
+	if base <= 0 {
+		base = w
+	}
+	switch {
+	case base >= 2000:
+		return "2160p"
+	case base >= 1400:
+		return "1440p"
+	case base >= 1000:
+		return "1080p"
+	case base >= 700:
+		return "720p"
+	case base >= 450:
+		return "480p"
+	case base >= 300:
+		return "360p"
+	case base > 0:
+		return "low"
+	default:
+		return ""
+	}
 }
 
 // ResolveInfo 是 URL 解析结果（通用组织：单文件用 Filename/Size，多文件用 Files）。
@@ -80,12 +130,70 @@ func (r *Registry) ResolverFor(rawURL string) (URLResolver, bool) {
 // ResolveURL 按注册顺序查找第一个 Supports 的解析扩展并执行解析；
 // 无扩展匹配时返回通用回落结果（文件名由 URL 推导、大小未知）。
 func (r *Registry) ResolveURL(ctx context.Context, rawURL string) (*ResolveInfo, error) {
+	info, err := r.resolveURLInner(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	r.probeResolved(ctx, info)
+	return info, nil
+}
+
+func (r *Registry) resolveURLInner(ctx context.Context, rawURL string) (*ResolveInfo, error) {
 	if info, ok, err := r.resolveWithExtensions(ctx, rawURL); err != nil {
 		return nil, err
 	} else if ok {
 		return info, nil
 	}
 	return genericResolve(rawURL), nil
+}
+
+// maxProbeFilesPerResolve 限制单次解析最多探测几个文件。
+// 理由：探测是**外部进程调用**（ffprobe），一次分享可能有上百个文件；
+// 不限制会让解析延迟不可控。只取前 N 个视频（分享清单一般正片在前）。
+const maxProbeFilesPerResolve = 8
+
+// probeResolved 对解析结果里的视频条目**尽力**填充分辨率（可选能力）。
+//
+// 不变量：
+//   - 未装配 prober ⇒ 完全不变（与旧版行为一致）；
+//   - 单个文件探测失败 ⇒ **忽略**，不影响其它文件与整体解析结果；
+//   - 只探测看起来是视频、且有 DirectLink 的条目（无直链无法探测）。
+func (r *Registry) probeResolved(ctx context.Context, info *ResolveInfo) {
+	if r.mediaProber == nil || info == nil || len(info.Files) == 0 {
+		return
+	}
+	n := 0
+	for i := range info.Files {
+		f := &info.Files[i]
+		if n >= maxProbeFilesPerResolve {
+			break
+		}
+		if f.DirectLink == "" || !looksLikeVideo(*f) {
+			continue
+		}
+		n++
+		res, err := r.mediaProber.Probe(ctx, f.DirectLink)
+		if err != nil {
+			continue // 尽力而为：失败留空
+		}
+		f.Width, f.Height = res.Width, res.Height
+		f.Resolution = ResolutionLabel(res.Width, res.Height)
+	}
+}
+
+// looksLikeVideo 判定条目是否像视频（看类型或扩展名）。
+func looksLikeVideo(f ResolvedFile) bool {
+	t := strings.ToLower(f.Type)
+	if strings.HasPrefix(t, "video/") {
+		return true
+	}
+	name := strings.ToLower(f.Name)
+	for _, ext := range []string{".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".flv", ".webm", ".mpg", ".mpeg", ".iso", ".rmvb"} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveWithExtensions 遍历已注册解析扩展：返回 (result, matched, err)。
