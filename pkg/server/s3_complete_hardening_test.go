@@ -5,9 +5,9 @@ package server
 
 // s3_complete_hardening_test.go 验证 S3 CompleteMultipartUpload 正确性加固
 // （roadmap 11.2 审查待办，设计文档：
-//   - docs/designs/2026-09-24-s3-complete-etag.md（meta 一致性 / ETag 校验 / PartNumber 校验 /
+//   - docs/archive/2026-09-24-s3-complete-etag.md（meta 一致性 / ETag 校验 / PartNumber 校验 /
 //     body 有界 / 失败清理不变量）
-//   - docs/designs/2026-09-24-s3-complete-quota.md（双账本 TryReserve / Commit / 失败 Release）
+//   - docs/archive/2026-09-24-s3-complete-quota.md（双账本 TryReserve / Commit / 失败 Release）
 //
 // 装配复用既有 S3 测试基建（newTestServerCreds + SigV4 签名 + 真实 init→upload-part→complete 序列），
 // 全部 127.0.0.1 回环、每测试独立 client（禁共享 Transport）、纯标准库断言。

@@ -722,7 +722,7 @@ func (h *Handlers) buildTunnelHandlers(localMux *http.ServeMux, cfg *Config, log
 	apiHandler = GzipMiddleware(log.With("component", "gzip"))(apiHandler)
 	if cfg.RateLimit.Enabled {
 		rl := ratelimit.NewRateLimiter(cfg.RateLimit.Requests, cfg.RateLimit.Window, log.With("component", "rate_limiter"))
-		// per-IP 桶键升级（设计文档 ip-whitelist §5）：装配了 trusted_proxies 时按真实
+		// per-IP 桶键升级（设计文档 docs/archive/2026-09-24-ip-whitelist.md §5）：装配了 trusted_proxies 时按真实
 		// 客户端 IP 计量（resolveClientIP）；未配置时 SetClientIPFn 不设 → ratelimit.NormalizeRemoteIP
 		// 等价（零回归）。
 		if len(cfg.Auth.TrustedProxies) > 0 {
