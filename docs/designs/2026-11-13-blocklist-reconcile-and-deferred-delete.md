@@ -380,3 +380,35 @@ func (r *AuditRecorder) MarkDone(ctx) error
    → 一致 ⇒ 返回 nil（`RunDue` 会 `markResolved`）；不一致 ⇒ 返回错误（走退避，达上限转 `needs_human`）；
 3. 上传路径在「`md5` 未对账一致」时 `Report` 该事项（**不影响**返回给客户端的成功）；
 4. （可选）复用 `POST /api/issues/resolve` / `/scan` 实现人工"立即触发重新检查并重传"。
+
+### 7.8 ④「副本条件保留」的精确实施方案（code-anchored，2026-11-13 复核）
+
+> 面向 PR #1143 的下一片；已按源码复核，**不是推断**。
+
+**现状（源码事实）**：
+- `pkg/volume/ext/baidupcs/storage.go:946` `stageUpload(ctx, r, key) (*stagedUpload, error)`：
+  创建 `sub := os.MkdirTemp(s.temp, "stage-*")`，定义 `cleanup := func(){ tmp.Close(); os.RemoveAll(sub) }`，
+  **但该 closure 只在错误路径被调用，成功路径不返回给调用方**
+  ⇒ **副本目录实际留在 `s.temp`（TempDir）下**，当前由 **`pkg/tempclean` 按 mtime 老化清理**。
+- `*stagedUpload` 只携带 `tmpPath`（= `<TempDir>/stage-*/<base>`）。
+
+**⇒ ④ 的形态是「登记 + 保护期」，而不是「改成不删」**：
+
+| 步骤 | 落点 | 要点 |
+| --- | --- | --- |
+| 1. 产出"待复查"结论 | `putCheckAfterUpload` / `verifyAfterUpload` / `checkAfterUploadUnreliableMD5` | 现返回 `(meta, done, err)`；需**显式表达**「`block_list` 一致 **且** md5 未权威」（建议新增结果枚举或 sentinel，**不要**用布尔拼装） |
+| 2. 上报事项 | `Storage` 侧注入 `issues` 上报口（窄接口，避免 `baidupcs` 反向依赖 `pkg/server`） | `Kind=blob_md5_unconverged`；`Path`=**副本路径**；`Detail`=rel；`Volume`=卷名 |
+| 3. **保护期** | `pkg/tempclean` 与登记路径的协作 | 副本若留在 `TempDir` 会被按龄清掉 ⇒ 二选一：① 登记时把副本**移动到稳定目录**（如 `<TempDir>/reconcile-pending/<hash>`）并让 tempclean 跳过该子目录；② 让 tempclean 接受"已登记路径集合"（需注入）。**必须显式选择并测试** |
+| 4. 仅 baidu 后端启用 | 装配层（卷后端判据） | 非 baidu 卷不上报、不保护（无此可见性语义） |
+| 5. 启动兜底 | 启动时扫描 `reconcile-pending/` | 孤儿副本补登记（**不依赖** issues 持久化是否成功） |
+
+**必须覆盖的测试（TDD + 变异）**：
+1. 「`block_list` 一致 && md5 未权威」⇒ ①上报事项（断言 `Path`/`Detail`/`Volume`）②副本**在保护期内不被清理**
+   ——变异：去掉登记 ⇒ 红；去掉保护 ⇒ 红（用 tempclean 老化后断言副本仍存在）
+2. md5 权威 ⇒ 副本**被清理**，且**不上报** ——变异：反转判据 ⇒ 红
+3. `RetryFunc` 收敛 ⇒ `resolved` 且副本清理；连续不一致 ⇒ 退避至 `needs_human` ——变异：无退避 ⇒ 红
+4. 非 baidu 后端 ⇒ **不上报/不保护** ——变异：删后端判据 ⇒ 红
+5. 启动兜底扫描补登记 ——变异：去掉扫描 ⇒ 红
+
+**风险**：③ 若把副本移到稳定目录，需确认**不落在卷内**（否则会走 `pkg/files` 用户内容路径/占配额语义），
+并确保与 `StagingQuotaTracker` 记账的资源**同一盘**（否则"记账了但占的是另一块盘"）。
