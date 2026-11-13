@@ -84,7 +84,7 @@ func TestE2E_SecretdataOverBaidupcs(t *testing.T) {
 	// （`loadIndex` → `walkContainers`），而 binaryAdapter.List 走 CLI **逐目录**列举 ⇒ 指向
 	// 网盘根会遍历整个网盘（WSL 实测 35min 未完成 ✗）。生产装配同样总是用**卷根子目录**
 	// （卷的 `extra.root`）⇒ 这里对齐生产语义。目录经一次 upload 创建（Adapter 无 Mkdir）。
-	root := "/来自：本地电脑/sproxy-e2e-secretdata"
+	root := e2eDriveRoot(t) + "/sproxy-e2e-secretdata"
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	keep := filepath.Join(tmpRoot, "keep.txt")
 	if werr := os.WriteFile(keep, []byte("keep"), 0o600); werr != nil {
