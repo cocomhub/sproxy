@@ -34,6 +34,19 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
+| `auth.allow_ips` | []string | (空) | 来源 IP 白名单（CIDR 列表；纯 IP 归一 `/32`、`/128`）。非空 = **认证前 IP 门**：真实客户端 IP 不在任一网段 → `403 forbidden: ip not allowed`（Warn 日志，不落审计）。空 = 不启用（零回归）。生效范围见下方说明 |
+| `auth.trusted_proxies` | []string | (空) | 信任的反向代理来源 IP/CIDR（同支持纯 IP）。**仅**命中时才解析 `X-Forwarded-For`（从右向左取首个非信任项）供 IP 门与 per-IP 限流桶键共用；空 = 一律忽略 XFF（防伪造）；畸形/超长/全信任链 → 回落 `RemoteAddr`（fail-closed） |
+
+> **认证前 IP 门生效范围**（`auth.allow_ips` 非空时）：
+> - **覆盖**：所有经 `authMiddleware` 的路由（文件组、cloud/audit/config/hub/凭据管理/`/tunnel`、`/dav/` 等）
+>   在**认证链最前**先判 IP（未授权来源含合法签名/Bearer 也直接 403，不泄露认证面）；
+>   公开凭据端点 `POST /api/credentials/{register,nonce,login}` 与 OIDC/LDAP 登录面同样挂门。
+> - **不覆盖**：`/livez`、`/readyz`、`/healthz`、`/version`、`/metrics`、`/ui/`（探活与静态资源须可达）
+>   与 `/s3/`（自带 SigV4 验签、不经 `authMiddleware`，打到 `/s3/` 的请求不受本门约束）。
+> - **回环不自动放行**：白名单必须显式包含 `127.0.0.1`/`::1`，否则运维本机来源恒 403；
+>   启动时对「已启用但未含回环」打印响亮警告（区分于 `allow_insecure_loopback` 语义）。
+> - 非法 CIDR → **启动校验拒绝**（fail-closed，不静默忽略）；反向代理部署必须同时配 `auth.trusted_proxies`，
+>   否则白名单按直连 IP 判定（代理来源恒 403）。
 | `credential_ttl` | duration | `720h` (30d) | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
 | `credentials.rotation.interval` | duration | `0`（关闭） | 凭据定期自动轮换调度周期：`> 0` 时启用（如 `24h`），`0`/缺省 = 关闭（零回归）。变更需重启进程生效（与 SIGHUP 硬配置同语义） |
 | `credentials.rotation.notify_before` | duration | `168h` (7d) | 到期前提前轮换的提前量：SK 到期时间 ≤ now+此值即触发 renew（避免到期当天才换的断链窗口） |
