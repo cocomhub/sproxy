@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 )
 
@@ -102,4 +103,60 @@ func TestBlobReconcileWiring_未登记对象被忽略(t *testing.T) {
 	if err := w.retry(context.Background(), "volX", "r"); err == nil {
 		t.Fatal("非能力对象注册后不得获得重试路由")
 	}
+}
+
+// fakeQuotaSettable 记录注入的配额（实现 baidupcs.StagingQuotaSettable）。
+type fakeQuotaSettable struct{ got syncpkg.StagingQuotaTracker }
+
+func (f *fakeQuotaSettable) SetStagingQuota(t syncpkg.StagingQuotaTracker) { f.got = t }
+
+// fakeQuotaTracker 是空实现（仅用于断言注入对象一致）。
+type fakeQuotaTracker struct{}
+
+func (fakeQuotaTracker) ReserveUsage(context.Context, int64) error { return nil }
+func (fakeQuotaTracker) ReleaseUsage(int64)                        {}
+
+// TestBlobReconcileWiring_注入专用配额作用域 锁定方案 A 的装配契约：
+// 注册时收集"可注入配额"的卷能力，`setStagingQuota` 把所有已注册卷统一注入**同一个**
+// 专用作用域 tracker（否则保留副本的占用不受配额约束）。
+// 变异：register 不收集 settable / setStagingQuota 不遍历 ⇒ 本用例红。
+func TestBlobReconcileWiring_注入专用配额作用域(t *testing.T) {
+	t.Parallel()
+	w := newBlobReconcileWiring(nil)
+	capA := &fakeReconcileCap{}
+	sqA := &fakeQuotaSettable{}
+	sqB := &fakeQuotaSettable{}
+	// 复用同一个 mock 结构承载两种能力（ReconcileCapable + StagingQuotaSettable）
+	w.register("volA", struct {
+		*capHolder
+		*fakeQuotaSettable
+	}{&capHolder{capA}, sqA})
+	w.register("volB", struct {
+		*capHolder
+		*fakeQuotaSettable
+	}{&capHolder{&fakeReconcileCap{}}, sqB})
+
+	tr := fakeQuotaTracker{}
+	w.setStagingQuota(tr)
+	if sqA.got == nil || sqB.got == nil {
+		t.Fatalf("两个卷都应被注入配额：A=%v B=%v", sqA.got, sqB.got)
+	}
+	if sqA.got != sqB.got {
+		t.Fatal("各卷应注入**同一个**专用作用域 tracker（否则配额分片、无法整体约束）")
+	}
+	// nil ⇒ 跳过（不 panic、不改动既有）
+	w.setStagingQuota(nil)
+}
+
+// capHolder 让 mock 同时满足 ReconcileCapable（复用既有 fakeReconcileCap）。
+type capHolder struct{ *fakeReconcileCap }
+
+func (c *capHolder) RetryBlobMD5Reconcile(ctx context.Context, k, p string) error {
+	return c.fakeReconcileCap.RetryBlobMD5Reconcile(ctx, k, p)
+}
+func (c *capHolder) PendingReconcile() []baidupcs.PendingReconcile {
+	return c.fakeReconcileCap.PendingReconcile()
+}
+func (c *capHolder) RemovePendingReconcile(p string) error {
+	return c.fakeReconcileCap.RemovePendingReconcile(p)
 }

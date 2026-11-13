@@ -20,6 +20,7 @@ import (
 	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/server/issues"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume/ext/baidupcs"
 )
 
@@ -43,6 +44,13 @@ func setupBaidupcsReconcileWiring(ic issueReporter) *blobReconcileWiring {
 	return reconcileWiring
 }
 
+// pendingReconcileQuotaOwner 是「待复查副本」专用配额作用域的**保留 owner 名**。
+//
+// 为什么用保留名（方案 A，用户裁定 2026-11-13）：staging tracker 是**按 owner** 构造的，
+// 而待复查副本是**系统级**（跨请求、跨重启）占用，不应记到某个用户账上；用保留名得到
+// **独立 Scope**（`staging/<该名>`）⇒ 与"用户上传在途"分账，口径清晰且不动跨层契约。
+const pendingReconcileQuotaOwner = "pending-reconcile"
+
 // blobReconcileWiring 是装配期的「blob md5 待复查」接线器（按卷名路由）。
 //
 // 为什么按卷名存（而不是拿卷的 FS 下探）：重传动作是 baidupcs 后端特化的（需要
@@ -52,6 +60,8 @@ func setupBaidupcsReconcileWiring(ic issueReporter) *blobReconcileWiring {
 type blobReconcileWiring struct {
 	mu   sync.Mutex
 	caps map[string]baidupcs.ReconcileCapable
+	// setters 收集「可注入配额」的卷能力（装配后统一注入专用作用域）。
+	setters []baidupcs.StagingQuotaSettable
 	// report 把待复查项登记到事项中心（装配根注入；nil ⇒ 只保留副本不登记，由后端侧告警）。
 	// 参数：(卷名, 卷内 rel, 本地副本路径)。**事项以 rel 作为 Path**（稳定 ID、重复上报合并），
 	// 副本路径仅用于人类可读的 Detail/排查。
@@ -84,6 +94,23 @@ func (w *blobReconcileWiring) register(volume string, v any) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.caps[volume] = cap
+	if sq, ok := baidupcs.AssertStagingQuotaSettable(v); ok {
+		w.setters = append(w.setters, sq)
+	}
+}
+
+// setStagingQuota 把「待复查副本」专用配额作用域注入**所有已注册卷**（装配后调用一次）。
+// t 为 nil ⇒ 跳过（不记账，仅保留副本；与未注入行为一致）。
+func (w *blobReconcileWiring) setStagingQuota(t syncpkg.StagingQuotaTracker) {
+	if w == nil || t == nil {
+		return
+	}
+	w.mu.Lock()
+	setters := append([]baidupcs.StagingQuotaSettable(nil), w.setters...)
+	w.mu.Unlock()
+	for _, sq := range setters {
+		sq.SetStagingQuota(t)
+	}
 }
 
 // retry 执行一次重试（issues 执行器入口）。
