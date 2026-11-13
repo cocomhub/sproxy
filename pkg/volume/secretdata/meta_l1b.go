@@ -4,6 +4,8 @@
 package secretdata
 
 import (
+	"context"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 )
 
@@ -47,4 +49,48 @@ func newMetaEntryCache(budget int64) *metaEntryCache {
 		return nil
 	}
 	return &metaEntryCache{budgetLRU: inner}
+}
+
+// metaLoadConcurrency 返回「同时加载 meta」的安全并发上限。
+//
+// 依据（实测 2026-11-13，见 docs/designs/2026-11-12-...lazy-meta-and-cache-layers.md §4.3）：
+//   - 单条大文件 meta 的**加载瞬时峰值**可达 **~350 MB**（常驻 ~82 MB，含 JSON 中间物）；
+//   - 并发吞吐在 **4 之后严重饱和**（8→16 只增 7%，却多花 1.5 GB）。
+//
+// ⇒ 上限取 `min(4, 预算 / 单条常驻)`，且**至少 1**。
+// 为什么用「常驻」而非「峰值」做分母：L1b 的 `metaSizeBytes` 是**容量语义**（缓存能装多少条），
+// 不宜按峰值放大（否则缓存会小到无用）；峰值风险改由**本闸**限制"同时在加载的条数"来兜。
+func metaLoadConcurrency(budget int64) int {
+	const typicalMetaBytes = 82 << 20 // 实测大文件 meta 的常驻规模
+	n := max(int(budget/typicalMetaBytes), 1)
+	if n > 4 {
+		n = 4 // 硬性封顶：吞吐已饱和，再多只会与 OOM 抢空间
+	}
+	return n
+}
+
+// metaLoadGate 是「meta 加载」的有界并发闸（nil = 不限制）。
+//
+// 为什么需要：`ensureEntryMeta` 会被**并发请求**各自触发；若 N 个请求同时加载 N 个大 meta，
+// 瞬时峰值 ≈ N × 350 MB ⇒ **直接 OOM**。L1b 的字节预算只约束"**已加载**的常驻量"，
+// 约束不了"**正在加载**的峰值"，故需要本闸单独兜住。
+type metaLoadGate chan struct{}
+
+// acquire 取一个名额（ctx 取消即退出，不无限等待）。
+func (g metaLoadGate) acquire(ctx context.Context) error {
+	if g == nil {
+		return nil
+	}
+	select {
+	case g <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g metaLoadGate) release() {
+	if g != nil {
+		<-g
+	}
 }
