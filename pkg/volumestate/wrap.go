@@ -319,6 +319,14 @@ func (f *CacheFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, err
 	return nil, fmt.Errorf("volumestate: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
 }
 
+// ChecksumAndSize 转发可选能力（R21）。
+func (f *CacheFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if cp, ok := f.inner.(meta.ChecksumProvider); ok {
+		return cp.ChecksumAndSize(ctx, rel)
+	}
+	return "", 0, fmt.Errorf("volumestate: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+}
+
 // UpdateMetaExtra 委托 inner（旁路标记；**不失效内容视图**——extra 不改变结构/内容）。
 func (f *CacheFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := f.inner.(syncpkg.MetaExtraUpdater)

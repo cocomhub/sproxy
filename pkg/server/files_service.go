@@ -552,18 +552,9 @@ func (o externalVolumeOps) ExternalStat(ctx context.Context, owner, volName, rem
 	if serr != nil || e == nil || e.IsDir {
 		return -1, "", nil
 	}
-	cs := ""
-	// P5（2026-11-13）：优先**轻量路径**（只取 checksum/size）—— 本函数是外部卷 **stat 热路径**，
-	// 而完整 `meta` 常驻实测可达 78 MB、解密+解析 ≈584 ms。失败才回退原 `FileMeta`。
-	if cp, ok := meta.AssertChecksumProvider(fsys); ok {
-		if got, _, cerr := cp.ChecksumAndSize(ctx, key); cerr == nil {
-			cs = got
-		}
-	} else if pv, ok := fsys.(meta.Provider); ok {
-		if fm, ferr := pv.FileMeta(ctx, key); ferr == nil && fm != nil {
-			cs = fm.TotalSHA256
-		}
-	}
+	// P5（2026-11-13）：优先**轻量路径**（只取 checksum）—— 本函数是外部卷 **stat 热路径**，
+	// 而完整 `meta` 常驻实测可达 78 MB、解密+解析 ≈584 ms；不可用则 helper 内回退 `FileMeta`。
+	cs, _ := checksumAndSize(ctx, fsys, key)
 	return e.Size, cs, nil
 }
 
@@ -581,15 +572,7 @@ func (o externalVolumeOps) ExternalCopy(ctx context.Context, owner, volName, fro
 	}
 	res := files.ExternalCopyResult{Supported: true}
 	// P5（2026-11-13）：同样优先轻量路径（只需 checksum/size，不问分块）。
-	if cp, ok := meta.AssertChecksumProvider(fsys); ok {
-		if got, sz, cerr := cp.ChecksumAndSize(ctx, srcKey); cerr == nil {
-			res.Checksum, res.Size = got, sz
-		}
-	} else if pv, ok := fsys.(meta.Provider); ok {
-		if fm, ferr := pv.FileMeta(ctx, srcKey); ferr == nil && fm != nil {
-			res.Checksum, res.Size = fm.TotalSHA256, fm.Size
-		}
-	}
+	res.Checksum, res.Size = checksumAndSize(ctx, fsys, srcKey)
 	if cerr := h.copyWithinVolumeFS(ctx, volName, fromRemote, toRemote, fsys, srcKey, dstKey); cerr != nil {
 		return res, cerr
 	}
@@ -1545,4 +1528,23 @@ func applyMetaExtra(fm *meta.FileMeta, extra map[string]any) {
 		fm.Extra = make(map[string]any, len(extra))
 	}
 	maps.Copy(fm.Extra, extra)
+}
+
+// checksumAndSize 取「整文件 checksum + 大小」：**优先轻量能力**
+// （`meta.ChecksumProvider`，免加载冷结构 meta —— 实测单文件常驻 78 MB / 解析 ≈584 ms），
+// **不可用/失败/为空则回退**完整 `FileMeta`（装饰链内层可能未实现该能力 ⇒ 真零回归）。
+//
+// 抽成 helper：既收敛了「能力探测 + 回退」的重复，也避免调用点认知复杂度超门禁。
+func checksumAndSize(ctx context.Context, fsys syncpkg.FS, key string) (string, int64) {
+	if cp, ok := meta.AssertChecksumProvider(fsys); ok {
+		if got, sz, cerr := cp.ChecksumAndSize(ctx, key); cerr == nil && got != "" {
+			return got, sz
+		}
+	}
+	if pv, ok := fsys.(meta.Provider); ok {
+		if fm, ferr := pv.FileMeta(ctx, key); ferr == nil && fm != nil {
+			return fm.TotalSHA256, fm.Size
+		}
+	}
+	return "", 0
 }

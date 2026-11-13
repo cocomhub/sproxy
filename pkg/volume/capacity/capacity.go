@@ -705,6 +705,14 @@ func (f *CapacityFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, 
 	return nil, fmt.Errorf("capacity: 底层未实现 FileMeta: %w", syncpkg.ErrUnsupported)
 }
 
+// ChecksumAndSize 转发可选能力（R21）。
+func (f *CapacityFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if cp, ok := f.inner.(meta.ChecksumProvider); ok {
+		return cp.ChecksumAndSize(ctx, rel)
+	}
+	return "", 0, fmt.Errorf("capacity: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
+}
+
 // UpdateMetaExtra 委托 inner（damaged/transfer_verified 旁路标记）。
 func (f *CapacityFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := f.inner.(interface {

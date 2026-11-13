@@ -115,6 +115,19 @@ func (t *TrustedVolumeFS) FileMeta(ctx context.Context, rel string) (*meta.FileM
 	return fm, nil
 }
 
+// ChecksumAndSize 转发**可选能力**（R21）：内层有则直接用（免 sidecar IO）；
+// 否则回落读自己的 sidecar，但**只取 checksum/size**（免上层构造完整 FileMeta）。
+func (t *TrustedVolumeFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if cp, ok := t.inner.(meta.ChecksumProvider); ok {
+		return cp.ChecksumAndSize(ctx, rel)
+	}
+	fm, err := t.FileMeta(ctx, rel)
+	if err != nil {
+		return "", 0, err
+	}
+	return fm.TotalSHA256, fm.Size, nil
+}
+
 // maxMetaSidecarBytes 已去重：统一用 meta.MaxMetaSidecarBytes()（P3 修复——
 // 防两处 64MiB 字面量漂移）。
 

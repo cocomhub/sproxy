@@ -270,6 +270,14 @@ func (g *StagingQuotaGateFS) FileMeta(ctx context.Context, rel string) (*meta.Fi
 	return nil, fmt.Errorf("sync: 底层未实现 FileMeta: %w", ErrUnsupported)
 }
 
+// ChecksumAndSize 转发可选能力（R21）。
+func (g *StagingQuotaGateFS) ChecksumAndSize(ctx context.Context, rel string) (string, int64, error) {
+	if cp, ok := g.inner.(meta.ChecksumProvider); ok {
+		return cp.ChecksumAndSize(ctx, rel)
+	}
+	return "", 0, fmt.Errorf("sync: 底层未实现 ChecksumAndSize: %w", ErrUnsupported)
+}
+
 // UpdateMetaExtra 委托 inner（damaged 源完整性 / transfer_verified 旁路标记）。
 func (g *StagingQuotaGateFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := g.inner.(interface {

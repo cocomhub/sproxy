@@ -444,9 +444,13 @@ func (s *Service) recordArchiveBypassState(t ArchiveVolumeTransfer, fs syncpkg.F
 		if got, _, cerr := cp.ChecksumAndSize(context.Background(), rel); cerr == nil {
 			cs = got
 		}
-	} else if pv, ok := fs.(meta.Provider); ok {
-		if fm, ferr := pv.FileMeta(context.Background(), rel); ferr == nil && fm != nil {
-			cs = fm.TotalSHA256
+	}
+	// 轻量路径不可用/失败/为空 ⇒ **回退**（零回归）。
+	if cs == "" {
+		if pv, ok := fs.(meta.Provider); ok {
+			if fm, ferr := pv.FileMeta(context.Background(), rel); ferr == nil && fm != nil {
+				cs = fm.TotalSHA256
+			}
 		}
 	}
 	// 本地卷：索引已由 Root 事件（结构 + 内容写）维护 ⇒ 只补 checksum（避免重复 upsert）。
