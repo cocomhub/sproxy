@@ -7,7 +7,7 @@
 // 配额双账本、dedup 引用计数在跨进程下没有写面仲裁。LeaderElector 让写面唯一化——
 // 仅主节点可写，从节点可读但拒绝写请求。
 //
-// 本期实现（F1，见 docs/designs/2026-09-24-leader-elector.md）：
+// 本期实现（F1，见 docs/archive/2026-09-24-leader-elector.md）：
 //   - LeaderElector 接口：TryAcquire / Renew / Release；
 //   - LocalLeaderElector：<root>/state/leader.lock 排他锁（Unix flock / Windows LockFileEx
 //     双平台，**非回落恒主**）——单节点恒主零回归（无竞争者时 TryAcquire 恒 true）；

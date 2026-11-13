@@ -4,7 +4,7 @@
 package server
 
 // verify_test.go 覆盖全仓 checksum 巡检（roadmap 11.3-⑩，设计文档
-// docs/designs/2026-09-24-checksum-verify.md）：
+// docs/archive/2026-09-24-checksum-verify.md）：
 //  1. POST /api/verify 全一致 → {ok=N, mismatched=[]}（变异：比较逻辑反/不重算 → 红）；
 //  2. 篡改一文件 → 进 mismatched 且被隔离到 <tenant meta>/quarantine/（变异：不隔离/漏报告 → 红）；
 //  3. 删文件 → 进 missing（变异：missing 统计缺失 → 红）；

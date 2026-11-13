@@ -4,7 +4,7 @@
 package ai
 
 // ai_events.go 是 AI 事件流水线（roadmap 12.2-4，设计文档
-// docs/designs/2026-09-24-ai-event-pipeline.md）：AIEventConsumer 订阅 EventBus
+// docs/archive/2026-09-24-ai-event-pipeline.md）：AIEventConsumer 订阅 EventBus
 // 文件变更事件 → 去重入队 → worker 调用 enqueue 回调（向量化/摘要/打标任务）。
 //
 // 消费语义（设计 §2.2）：
