@@ -26,7 +26,7 @@
 | A | `cmd/sclient` `NewRootCmd` 包级 pflag | **A 真实数据竞争** | ✅ **已修**（#1130） | CI 复发 ≥2 次；根因＝包级变量被并行写；**强制并发**测试可确定性复现（master 报 `DATA RACE`、修复后无） |
 | B | `pkg/telemetry` `TestTracerDoubleEndProducesWarning` | — | ✅ **非问题** | 该测试需接管全局 slog ⇒ 已登记 `// sproxy:serial:`，不并行即无竞争 |
 | H | `setup-go` 模块缓存 `BlobNotFound` 404 | — | ✗ **已更正误判** | 见下节：它**从不导致失败**，**不要动缓存** |
-| C | `pkg/tunnel` 3 例同时失败（#1115 的 `Test (windows)`） | B? | 🔍 **待复现** | 本地全绿；同日 rerun 通过。下次复现时先取失败 step 名 |
+| C | `pkg/tunnel` 3 例同时失败（#1115 的 `Test (windows)`；#1138 的 `Test (ubuntu, +Vault)` **复现**） | **A 真实数据竞争** | ✅ **已修** | 根因：`TestGetBuf_PutBuf` 在 `putBuf` **归还池之后**仍读 `buf[0]`（断言"清零"）⇒ 池可**立即**把该 buffer 交给并行使用者（CI 实测 `mockStream.Read`）⇒ race。修法：**不再读归还后的内存**，改为锁定 `getBuf` 的契约（长度/可再次取用）。**对照**：master 整包 `-race` 复现 1/3 次、修复后 `-count=20` 通过 |
 | D | `pkg/server/s3` `TestListObjectsV2_NamedBucket` / `TestBucketRouting` | B? | 🔍 **待复现** | 曾本地复现一次、其后多次不复现 |
 | E | `TestStageDL_TamperedFallsBackToRemote` | B? | 🔍 **待复现** | 在一次全量 `./pkg/...` 中失败、重跑即过 |
 | F | `pkg/cloud` `TestCloudDownloadManager_SubmitAndStart_Async` | B? | 🔍 **待复现** | 文案 `timeout waiting for async download to complete`；疑**等待语义**（非纯超时） |
