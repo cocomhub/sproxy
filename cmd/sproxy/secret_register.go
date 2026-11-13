@@ -188,6 +188,8 @@ func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReport
 		MetaCacheBytes: vcExtraByteSize(v, "meta_cache_bytes"),
 		// meta_cache_quota_bytes：L1a（**磁盘**精简缓存）配额（零值 ⇒ 默认 2 GiB；负值 ⇒ 不限制）。
 		MetaCacheQuotaBytes: vcExtraByteSize(v, "meta_cache_quota_bytes"),
+		// disable_meta_prewarm：关闭「后台限速预热 L1a」（**默认 false = 默认开启**）。
+		DisableMetaPrewarm: vcExtraBool(v, "disable_meta_prewarm"),
 		// normalize_names：""/"audit"/"apply"（默认空 = 不动；见 Options 注释）
 		NormalizeNames:        vcExtraStr(v, "normalize_names"),
 		NormalizeExportDir:    vcExtraStr(v, "normalize_export_dir"),
@@ -805,5 +807,12 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)
 	}
 	log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
+	// P4（2026-11-13）：启动后台**限速**预热 L1a（**只写磁盘，不常驻内存**）。
+	// 复用 `readFileMetaFast` ⇒ 自动复用并发闸与限速；`disable_meta_prewarm` 可关闭。
+	if be := set.External(v.Name); be != nil {
+		if pw, ok := secretdata.AssertMetaPrewarmer(be.FS()); ok {
+			pw.StartMetaPrewarm(ctx)
+		}
+	}
 	return nil
 }
