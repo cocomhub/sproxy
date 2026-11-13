@@ -61,6 +61,15 @@ type ExecutorDeps struct {
 	Resolve func(volume string) any
 	// Log 可选（nil ⇒ 不记日志）。
 	Log *slog.Logger
+	// ReconcileBlobMD5 执行一次「内容一致但 md5 未权威」的重试：**连续上传 2 次**（第 2 次几近必为
+	// 秒传命中 ⇒ 触发 md5 刷新）并**重新逐块对账**。
+	//
+	// 参数：volume=卷名，rel=卷内相对路径，localCopy=上传时**保留的本地副本路径**（重传源）。
+	// 返回 nil ⇒ 已收敛（`RunDue` 会 markResolved）；返回错误 ⇒ 退避重试，达上限转人工。
+	//
+	// ⚠️ **前置**：该项生效要求上传路径在「`block_list` 一致但 md5 未权威」时**保留本地副本**
+	// （否则本动作无源可传，只会退避到 needs_human）。未注入（nil）⇒ 该类型不注册（转人工）。
+	ReconcileBlobMD5 func(ctx context.Context, volume, rel, localCopy string) error
 }
 
 func (d ExecutorDeps) log() *slog.Logger {
@@ -83,7 +92,30 @@ func NewIssuesExecutors(d ExecutorDeps) map[issues.Kind]issues.RetryFunc {
 		issues.KindDirMetaCleanupFailed: func(ctx context.Context, it issues.Item) error {
 			return runDirMetaCleanup(ctx, d, it)
 		},
+		issues.KindBlobMD5Unconverged: func(ctx context.Context, it issues.Item) error {
+			return runBlobMD5Reconcile(ctx, d, it)
+		},
 	}
+}
+
+// runBlobMD5Reconcile 执行一次「blob md5 未收敛」重试（连续上传 2 次 + 重新对账）。
+//
+// 登记约定（见 `issues.KindBlobMD5Unconverged`）：`Volume`=卷名、`Path`=**本地副本路径**、
+// `Detail`=卷内 rel。三者缺一即**返回错误转人工**（不静默成功，避免“看起来在重试”）。
+func runBlobMD5Reconcile(ctx context.Context, d ExecutorDeps, it issues.Item) error {
+	if it.Volume == "" {
+		return fmt.Errorf("事项缺少卷名，无法定位卷（需人工处理）")
+	}
+	if it.Path == "" {
+		return fmt.Errorf("事项缺少本地副本路径（上传时未保留副本？），无法重传（需人工处理）")
+	}
+	if it.Detail == "" {
+		return fmt.Errorf("事项缺少卷内路径 rel，无法定位目标（需人工处理）")
+	}
+	if d.ReconcileBlobMD5 == nil {
+		return fmt.Errorf("未注入 blob md5 重试执行器（ReconcileBlobMD5 为空），无法执行")
+	}
+	return d.ReconcileBlobMD5(ctx, it.Volume, it.Detail, it.Path)
 }
 
 // runDirMetaCleanup 执行一次「清理非权威目录 meta」重试。

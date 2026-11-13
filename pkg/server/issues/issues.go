@@ -43,6 +43,13 @@ const (
 	KindContainerNotIndexed Kind = "container_not_indexed"
 	// KindUploadFailed 上传/转存失败——**可自动重试**。
 	KindUploadFailed Kind = "upload_failed"
+	// KindBlobMD5Unconverged 内容已确认在云端（`block_list` 逐块对账通过）但远端 md5 尚未权威
+	// ——**可自动重试**：连续上传 2 次（命中秒传触发刷新）→ 退避（默认 5min）后再对账；
+	// 达上限转人工。
+	//
+	// 登记约定：`Volume` = 卷名；`Path` = **上传时保留的本地副本路径**（重传的源）；
+	// `Detail` = 卷内相对路径（rel）。三者缺一即无法执行 ⇒ 执行器返回错误转人工（不静默成功）。
+	KindBlobMD5Unconverged Kind = "blob_md5_unconverged"
 	// KindOther 其它（兜底，登记时必须写明确 Detail）。
 	KindOther Kind = "other"
 )
