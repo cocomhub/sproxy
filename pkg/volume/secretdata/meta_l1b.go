@@ -62,10 +62,9 @@ func newMetaEntryCache(budget int64) *metaEntryCache {
 // 不宜按峰值放大（否则缓存会小到无用）；峰值风险改由**本闸**限制"同时在加载的条数"来兜。
 func metaLoadConcurrency(budget int64) int {
 	const typicalMetaBytes = 82 << 20 // 实测大文件 meta 的常驻规模
-	n := max(int(budget/typicalMetaBytes), 1)
-	if n > 4 {
-		n = 4 // 硬性封顶：吞吐已饱和，再多只会与 OOM 抢空间
-	}
+	n := min(max(int(budget/typicalMetaBytes), 1),
+		// 硬性封顶：吞吐已饱和，再多只会与 OOM 抢空间
+		4)
 	return n
 }
 
