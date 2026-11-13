@@ -1,3 +1,9 @@
+> **原位置**：`docs/superpowers/specs/`（**已移除**；实现细节查 git 历史）。
+>
+> **归档说明（2026-11-13，用户口径）**：本文件为**精简后的背景知识**——保留**设计意图 / 经验 /
+> 原则 / 依赖与约束**，**移除具体实现**（代码块、逐行文件/函数引用、任务拆解步骤、验收清单）。
+> 实现细节以**代码与 git 历史**为准（多轮迭代后可能已不一致，故不在此固化）。
+
 <!--
 Copyright 2026 The Cocomhub Authors. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
@@ -37,13 +43,6 @@ hub 中继请求体（`RelayStreamRequest`）携带 E2E 标记与 Path，hub 据
    `RelayStreamE2E(ctx, target, addr string, e2e bool, path string) (net.Conn, error)`
    （复用 RelayStreamWithHeaders 内部，序列化带 E2E/Path）
 2. **pkg/server/relay_stream.go**：解码请求后：
-   ```go
-   frame := hub.DialRequest{Dial: req.Addr, AwaitResult: true, Path: "via-relay"}
-   if req.E2E {
-       frame.E2E = true
-       frame.Path = req.Path // 空 = 直连 T
-   }
-   ```
 3. **pkg/tunnel/mesh/mesh.go** 中继回落 E2E：`RelayStreamE2E(ctx, node, addr, true, "")`
 4. **pkg/tunnel/mesh/via_node.go** via-relay E2E：`RelayStreamE2E(ctx, xID, addr, true, "via-relay")`
 5. **pkg/tunnel/mesh/smart.go**：若 smart 候选经 RelayStream 且 E2E，同步适配

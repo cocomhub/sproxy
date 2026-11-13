@@ -1,3 +1,9 @@
+> **原位置**：`docs/superpowers/specs/`（**已移除**；实现细节查 git 历史）。
+>
+> **归档说明（2026-11-13，用户口径）**：本文件为**精简后的背景知识**——保留**设计意图 / 经验 /
+> 原则 / 依赖与约束**，**移除具体实现**（代码块、逐行文件/函数引用、任务拆解步骤、验收清单）。
+> 实现细节以**代码与 git 历史**为准（多轮迭代后可能已不一致，故不在此固化）。
+
 # 云端下载完整性校验 设计规格
 
 > 状态：**草稿待审查** | 日期：2026-10-06 | 分支：feat/integrity-check
@@ -17,13 +23,6 @@
 ## 2. 完整性模型（三态 + 可信度分层）
 
 ### 完整性判定（checksum 阶段，职责分离）
-```
-下载完成 (Result{Checksum, Size, ETag, IntegrityMode})
-  │
-  ▼ ① 权威匹配：本地算 sha256/GCID == 服务端带外值（ETag/官方 hash）→ 文件一定完整 → ✅ 跳过语义校验
-  ▼ ② 仅本地自洽：本地算 checksum + size（无权威可比）→ 低可信 → 语义校验兜底（确认可用）
-  ▼ ③ 下载器确认完整（Content-Length 匹配/自算）→ 需本地计算验证（不替代）
-```
 
 ### 下载器可信度审计（agent 实测 2026-10-06）
 
@@ -34,43 +33,10 @@
 | PikPak GCID（官方 hash） | `get --raw` hash = **GCID**（sha1(concat(sha1(分块)))，非整文件哈希） | **权威带外源**（弱权威） | `ModeAuthority`（需 GCID 复算） |
 
 ### IntegrityMode 接口（下载器自声明完整确认方式）
-```go
-// pkg/downloader
-type IntegrityMode int
-const (
-    ModeUnknown      IntegrityMode = iota // 无信息
-    ModeLocalOnly                         // 仅本地 checksum+size（② 态）
-    ModeSelfVerified                      // 下载器自算 checksum（② 态，无权威可比）
-    ModeAuthority                         // 权威匹配：本地 == 服务端带外值（① 态）
-)
-// Result 扩展
-type Result struct {
-    Size     int64
-    Checksum string        // SHA-256 十六进制（本地计算）
-    ETag     string
-    ModTime  time.Time
-    Integrity IntegrityMode // 本下载器完整性模式
-    AuthorityHash string     // 服务端带外权威 hash（如 pikpak GCID；可空）
-}
-// 下载器能力接口（可选）
-type IntegrityProvider interface { IntegrityMode() IntegrityMode }
-```
 
 ## 3. 校验管道（pkg/cloud 整合）
 
 ### 流程（checksum 后语义校验）
-```
-runRetryLoop（下载尝试）
-  → runDownloadAttempt 成功 → 完整性判定：
-      ① 权威匹配 → result 可信 → 跳过语义校验 → 返回
-      ② 仅本地自洽 → 语义校验（CheckByType）：
-          ├─ 通过 → 返回
-          └─ 异常 → 重下（同次循环 retry；两次本地 checksum 一致仍异常）
-                → 原始文件问题 → 按任务配置：
-                    ├─ 默认：允许继续 + IntegrityStatus="damaged"（人工审计）
-                    └─ integrity_must_pass=true：阻断（failTask）
-  → 语义校验通过/权威匹配 → 转存（读回校验已有）→ 取用
-```
 
 ### 校验嵌入 runRetryLoop
 - `runDownloadAttempt` 成功分支**加语义校验点**：校验失败 → `shouldRetryDownload` 语义（重下复用退避/超时/取消）
@@ -80,17 +46,6 @@ runRetryLoop（下载尝试）
 ## 4. pkg/integrity（零外部依赖，根模块）
 
 ### 注册表（shardseal 模式）
-```go
-// pkg/integrity
-type Checker interface {
-    Kind() string                                   // "image/png" / "video/mp4" / "archive/tar"
-    Matches(name string) bool                       // 按扩展名匹配
-    Check(ctx context.Context, path string, size int64) (*Report, error)
-}
-type Report struct { OK bool; Reason string }       // OK=false → 语义异常（可继续/阻断）
-func Register(kind string, f CheckerFactory)        // 全局注册 + Kind 唯一性 panic
-func Lookup(name string) Checker                    // 按类型分发（nil = 无校验器 → 仅字节级）
-```
 
 ### 校验器（标准库，零外部依赖）
 | Kind | 实现 | 判据 |
@@ -100,20 +55,11 @@ func Lookup(name string) Checker                    // 按类型分发（nil = �
 | 未知类型 | nil（仅字节级校验） | 不阻断 |
 
 ### 插件扩展（ext/ + 独立 go.mod，plugin 模式）
-```
-pkg/integrity/ext/video/  独立 go.mod：ffprobe 校验器（复用 pkg/media/ffprobe）——唯一需外部依赖
-cmd/sproxy/               装配 ext 插件（空白导入注册）
-```
 - 新类型校验器 → `pkg/integrity/ext/<kind>/`（独立 go.mod），cmd/sproxy 空白导入装配
 - 机制化：使用方只查注册表，不硬编码类型
 
 ## 5. 任务参数 + 状态
 
-```go
-// CloudTask 新增
-IntegrityStatus string `json:"integrity_status,omitempty"` // "" | verified | damaged
-IntegrityMustPass  bool   `json:"integrity_must_pass,omitempty"`  // true = 校验失败阻断（默认 false 放行标记）
-```
 - 客户端 flag：`--integrity-must-pass`（默认 false 零回归）
 - API 暴露 + WebUI 展示 IntegrityStatus（审计）
 - 创建时校验参数合法性（force 需校验器存在？——否，未知类型 force 时按 ② 语义校验，无校验器 → 视为通过）

@@ -1,3 +1,9 @@
+> **原位置**：`docs/superpowers/specs/`（**已移除**；实现细节查 git 历史）。
+>
+> **归档说明（2026-11-13，用户口径）**：本文件为**精简后的背景知识**——保留**设计意图 / 经验 /
+> 原则 / 依赖与约束**，**移除具体实现**（代码块、逐行文件/函数引用、任务拆解步骤、验收清单）。
+> 实现细节以**代码与 git 历史**为准（多轮迭代后可能已不一致，故不在此固化）。
+
 <!--
 Copyright 2026 The Cocomhub Authors. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
@@ -39,48 +45,12 @@ sproxy 是开源项目，二进制内包含大量可识别的品牌信息（CLI 
 
 ## 3. 架构总览
 
-```
-主仓 tag（如 v0.17.0）
-    │  git archive --remote / 本地 clone + checkout tag
-    ▼
-临时源码树 /tmp/stealth-src-<hash>
-    │  stealth-build obfuscate（源码改写层，见 §5）
-    ▼
-改写后的源码树（品牌串已替换、版本/命令声明已剔除、buildinfo 已断）
-    │  stealth-build build（构建层，见 §6）
-    ▼
-garble 混淆构建（-literals -tiny -seed 可配）
-    ▼
-隐藏二进制 prismd / bridge
-```
-
 两个阶段可以分开调用：`obfuscate` 输出改写后的源码树（供检查/调试），
 `build` 一次性完成 改写 → 构建 → 冒烟验证。
 
 ## 4. 用户配置（隐藏清单）
 
 隐藏仓库内置 `stealth.yaml` 作为默认配置，支持覆盖：
-
-```yaml
-# stealth-build.yaml（示例）
-source:
-  repo: https://github.com/cocomhub/sproxy
-  tag: v0.17.0            # 构建时拉取该 tag
-target:
-  server_binary: prismd    # 服务端二进制名
-  client_binary: bridge    # 固定操作客户端二进制名
-  brand: prism             # 品牌代号（Web 标题/描述/日志前缀的显示名）
-garble:
-  literals: true
-  tiny: true
-  seed: random             # random | fixed:<hex>
-bridge:
-  enabled: true            # 单操作固定配置
-  action: download
-  server_url: https://10.0.0.8:18083
-  filename: snapshot.tar.gz
-  output: /var/backup/snapshot.tar.gz
-```
 
 ## 5. 源码改写层（obfuscate）
 
