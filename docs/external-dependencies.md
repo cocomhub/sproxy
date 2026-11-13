@@ -403,53 +403,71 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 > `TestE2E_CompareUploadPaths`（`E2E_UPLOAD_MB`/`E2E_ARMS`/`E2E_RANDOM` 旋钮）；
 > 单测锁定见 `l2_contract_test.go` 的 `TestUCAdapter_Repair_PassesSessionUploadID`。
 
-#### 7.8.4 负面结论：`httptest` 直驱 fork 库**不可行**（2026-11-09 两次实测，避免重复探索）
+#### 7.8.4 百度两个接口面：`pan.baidu.com` vs `pcs.baidu.com`（2026-11-13 实测 + 官方原文）
 
-**目标**：用 `httptest` 假百度 + 自定义 `RoundTripper` 重写 host，在 CI 里锁定「库的 HTTP 行为 +
-我们的应对」（错误码、请求形状）。
+**背景**：曾把「上传后 `ls -l` 长时间看不到/md5 长时间不刷新」归因为"跨节点复制延迟"，进而怀疑
+"列举走了 pcs 接口面"。**经本仓库重复实测，可见性/md5 的差异不成立**；**唯一被确证的实质差异是分页**。
+设计全文（含证据与已排除项）：`docs/designs/2026-11-13-baidupcs-list-pan-vs-pcs.md`。
 
-**实测（两种注入方式都失败）**：
-1. `NewPCSWithClient(266719, hc)` + `hc.Client.Transport = rewriteTransport`，并注入 cookie jar 的
-   `BDUSS`/`STOKEN` ⇒ **一个请求都没发出**，库本地报 `31045 user not exists`；
-2. 改用**库实际持有的** client（`pcs.GetClient()`）替换其 `Transport` ⇒ `CacheUK()` 仍报错，
-   `rewriteTransport` **记录为空**（请求未经过我们注入的 Transport）。
+| 维度 | `pan.baidu.com`（首页/Web + xpan） | `pcs.baidu.com`（legacy PCS） |
+| --- | --- | --- |
+| 列举路径 | `pan.baidu.com/api/list`（Web）／`/rest/2.0/xpan/file?method=list`（开放平台） | `pcs.baidu.com/rest/2.0/pcs/file?method=list` |
+| **分页** | **`num`/`page` 生效**（实测 page1→f1,f2；page2→f3,f4） | **`num`/`page` 被忽略**（实测返回全量）；`limit`/`start` ⇒ `{"error_code":31023,"error_msg":"param error"}` |
+| **每目录上限** | 分页累积 | **1000 条硬上限**（⇒ 大目录**静默丢条目**，数据正确性风险） |
+| **新写入可见性** | **实测 T+0** | **实测 T+0**（**无差异**） |
+| **md5 权威性** | 实测 90s 内仍为**分片 ETag**（≠ 整文件 md5） | **同一个值**（**无差异**） |
+| 凭据 | 与 pcs **相同**（同一 BDUSS + cookie jar；UA 由库按请求设） | 同左 |
+| 官方文档 | ✅ 有 | ❌ 官方新文档 **0 匹配** |
 
-**结论**：障碍在**库的内部 client 管理**（`GetClient()` 返回的实例未必是请求实际使用的那个），
-**不值得为测试反向适配生产代码**。⇒ 本仓的「库 + HTTP 协议」层锁定改走 **窄接口注入**
-（`ucPCS`：`CacheUK`/`RapidUpload`/`FakeRapidUpload`/`UploadTmpFile`/`CreateSuperFile`），
-见 `pkg/volume/ext/baidupcs/l2_contract_test.go` —— 无网络、更稳。
+**证据**：
+1. 库源码 `baidupcs/baidupcs.go:107-115`（`PCSBaiduCom`/`PanBaiduCom`/`PanAppID`）；
+   `baidupcs/prepare.go` 的 `PrepareFilesDirectoriesList` 走 `generatePanURL("list")` + `reqTypePan`；
+   `sendReqReturnResp`（`prepare.go:50-84`）显示两类型**仅 UA 与错误包装不同** ⇒ pan **零额外依赖**。
+2. 上游 **PR #531**（merged 2026-08-20）正文："The PCS file/list endpoint **cannot paginate** …
+   **capped at 1000 entries per folder**. Switch FilesDirectoriesList to pan.baidu.com/api/list"（Fixes #511）。
+3. 百度官方「获取文件列表」：HTTP URL = `https://pan.baidu.com/rest/2.0/xpan/file?method=list`，支持 `num`/`page`。
+4. **本仓库实测**（`pan_first_proof_e2e_test.go`，多轮**全新随机内容 + 唯一文件名**，断言非秒传）：
+   可见性三通道（库/`ls`/`ls -l`）**全部 T+0**；md5 三通道**同一分片 ETag**、90s 未权威；
+   秒传刷新 `RapidUpload` 命中=true 但 30s 内 md5 **仍未**权威（与 §7.8.3 的"立即收敛"不符，**待复查**）。
+5. 本机 binary **`BaiduPCS-Go v4.0.1`（2026-03-26）**：`strings` 含 `rest/2.0/pcs/file`、不含
+   `pan.baidu.com/api/list` ⇒ 早于 PR #531；`BAIDUPCS_GO_VERBOSE=1` 直接印证其 `ls` 打到 pcs。
 
-> 订正记录：早前曾把现象记为「库在发 HTTP 前做会话/uk 前置检查」；实测表明请求**确实发生**，
-> 但**未走我们注入的 Transport**。勿再据旧结论设计 httptest 方案。
+**已排除的其它解释**（受控对照，均与可见性无关）：连接复用（`DisableKeepAlives`）、命中的服务端 IP
+（`DialContext` 强制固定单个 A 记录）、参数（`nil` vs `DefaultOrderOptions`）、本地列表缓存、IPv6。
 
-#### 7.8.3.1 可观测：内核"在不在跑、为何没跑"（2026-11-08 落地）
+**维护指引（对本仓库的约束）**：
+- **列举的目标是"完整性"而非"可见性"**：`pcs`（CLI `ls`）**无法取到第 1000 条之后** ⇒ 大目录会**静默丢条目**。
+  当前 `binaryAdapter.list` 以 `runBinaryOutput(ctx, "ls", …)` 为**首选** ⇒ **建议改为库（pan）优先、CLI 兜底**。
+- **不要**用"上传后可见性/md5 收敛"作为切换接口面的理由（**已证伪**）；md5 权威化是**独立问题**，另行定位。
+- 验证工具：`pkg/volume/ext/baidupcs/pan_first_proof_e2e_test.go`、`md5_conv_probe_e2e_test.go`（均 `//go:build e2e`）；
+  脚本 `sproxy/build/run_panfirst.sh`、`verify_paging2.sh`。
+  ⚠️ WSL 需 `GOTOOLCHAIN=go1.27.1`；git-bash 传中文路径需 `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`。
 
-> 注：`skipped_oversize`（废弃口径，原尺寸护栏已随 §7.8.3.2 的修复移除、恒 0）**已于 2026-11-09 删除**
-> （含 `UploadCoreStats` 字段、`UploadCoreStatsCounts` 签名与 `/metrics` 的 `mode` 枚举，1 处一起改完，
-> 避免误导运维。
+### 7.8.5 ★ **`block_list` 是上传后立即可用的权威内容标识**（2026-11-13 实测，解决 md5 收敛问题）
 
-**领域层计数**（`pkg/volume/ext/baidupcs`，原子计数，随时可读）：
+**问题**：上传后远端 `md5` 字段长时间不等于整文件 md5（§7.8.3/§7.8.4），导致"上传后校验"必须等窗口。
+**答案**：**改用 `block_list`（分块 md5 列表）** —— 实测**上传后 T+0 即权威**。
 
-| API | 含义 |
-|---|---|
-| `Storage.UploadCoreStats()` | `UploadCoreStats{Used, Degraded, Failed, LegacyMode, NoDeps}` |
-| `Storage.CoreDisabled()` | 本进程是否已因内核失败降级（auto） |
+**取数路径**：库 `FilesDirectoriesMeta(path)`（= `pcs/file?method=meta`）→ `FileDirectory.BlockList`。
+⚠️ **父目录列举（`FilesDirectoriesList` / CLI `ls`）不返回 `block_list`**（实测恒为空）⇒ **必须走 meta 接口**。
 
-**日志**（结构化字段，便于日志检索/告警）：
-- 首次跳过（超尺寸护栏）：`msg="上传内核跳过（超过尺寸护栏）——本次起该尺寸走既有路径" key=… size=… limit=…`（每进程仅一次，避免逐文件刷屏）；
-- 内核失败降级：`msg="上传内核失败，本进程降级为既有路径（auto）" key=… err=…`（WARN）。
+**实测（`blocklist_authority_e2e_test.go`，全新随机内容 + 唯一文件名 + 断言非秒传；2/2 复现）**：
 
-**已接入 `/metrics`（抓取时探测，快照语义）**：
+| 文件大小 | 本地计算 | 远端 `meta.md5` | 远端 `meta.block_list` | 结论 |
+| --- | --- | --- | --- | --- |
+| **8 MiB**（2×4MiB） | 整文件 `944f2c79…`；4MiB 块 `[23742be4…, d57881f6…]` | `a6804cf3…`（32hex 但**≠整文件 md5**） | **`[23742be4…, d57881f6…]`** | **逐块完全相等** ✅ |
+| **1 MiB**（单块） | 整文件 `547d104a…`；块 `[547d104a…]` | `547d104a…`（**== 整文件 md5**） | `[547d104a…]` | **相等** ✅ |
+| 另一次 8 MiB | — | `23c82fb9…` 形态**非法**（33 位含 `j`） | 有效 32hex | `block_list` **仍权威** |
 
-```
-sproxy_volume_upload_core_total{volume="<卷>",mode="used|degraded|failed|legacy_mode|no_deps"} N
-```
+**结论（可直接落地）**：
+1. **`block_list` = 按 4 MiB 分块的真实内容 md5 列表**，与本地同块大小计算**逐块相等**，**上传后立即可用**（无需等待、无需秒传刷新）。
+2. **`md5` 字段不可信**：多块（>4MiB）时是**分片组合值**（可能形态非法）；仅**单块（≤4MiB）**时才等于整文件 md5。
+3. **sproxy 天然同构**：上传时已计算 `stagedUpload.blockMD5s`（`uploadBlockSize = 4 MiB`，`storage.go:868`）
+   ⇒ 上传后取 `FilesDirectoriesMeta` 的 `BlockList` 与之**逐块比对**即可**立即、可靠**确认内容一致。
+4. **据此可替代**「等 md5 收敛 / 秒传刷新自愈」这条不可靠路径（原 `healByRapidRefresh` 只对 ≤256KiB 有效，
+   且实测 `RapidUpload` 命中后 30s 内 md5 仍未权威）。
+5. **API 不返回 `gcid`**：`pan /api/list`、`pcs file?method=list`、`pcs file?method=meta` 三处均无 `gcid` 字段
+   （此前"看到 gcid"应是 **PikPak 分享侧**的 hash 或 sproxy/其它组件**本地计算**的 GCID）。
 
-链路：`/metrics` 渲染时的卷遍历（`renderVolumeWatermarks`）→ `volSet.External(name)` **能力探测**
-（`pkg/server` 的 `uploadCoreCountsProvider`，只收原始整数 ⇒ 指标层不依赖具体后端类型）→
-`cmd/sproxy` 的 backend 包装器**转发**（`UploadCoreStatsCounts()`，把 `baidupcs.Storage.UploadCoreStats()`
-的结构体适配成 6 元组；nil 来源返回全 0）→ `metrics.SetVolumeUploadCore`（**覆盖式**写入，避免每次抓取重复累加）。
-
-注意：**透明装饰器必须转发能力**（R21 同族）——包装器漏转发 ⇒ 探测恒 false ⇒ 生产看不到"内核在不在跑"，
-故 `cmd/sproxy` 侧有专门用例锁定该转发与新式接口形状。
-
+**验证工具**：`pkg/volume/ext/baidupcs/blocklist_authority_e2e_test.go`（`//go:build e2e`）；
+原始响应抓取脚本 `sproxy/build/probe_gcid{,2,3}.sh`、分页实测 `verify_paging2.sh`。

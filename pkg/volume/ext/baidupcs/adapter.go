@@ -492,6 +492,11 @@ func (a *libraryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMe
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
 	}
 	m := fileDirectoryMeta(fd)
+	// 分块 md5 列表（仅 `meta` 接口返回；父目录列举恒为空）——供上传后逐块对账（§7.8.5）。
+	// 防御性拷贝：库对象可能在内部被复用。
+	if len(fd.BlockList) > 0 {
+		m.BlockList = append([]string(nil), fd.BlockList...)
+	}
 	return &m, nil
 }
 
