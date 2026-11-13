@@ -69,6 +69,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
 
@@ -152,6 +153,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
 
@@ -202,6 +204,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
 
@@ -248,6 +251,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
       - name: prepare (buildmeta embed)
@@ -280,6 +284,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
       - name: Ensure make (Windows)
@@ -308,6 +313,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
       - name: prepare (buildmeta embed)
@@ -343,6 +349,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
           check-latest: true
 
@@ -412,6 +419,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v6
         with:
+          cache: false  # 禁用 setup-go 内置模块缓存：Azure blob 偶发 BlobNotFound 404 会让 job 假失败（flake H）
           go-version: "1.27"
       - name: Lint web/e2e module
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
