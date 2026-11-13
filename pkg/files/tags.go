@@ -3,7 +3,7 @@
 
 package files
 
-// tags.go 是文件标签系统（roadmap 11.10-④ / docs/designs/2026-09-24-file-tags.md）
+// tags.go 是文件标签系统（roadmap 11.10-④ / docs/archive/2026-09-24-file-tags.md）
 // 的领域实现：
 //
 //   - tagsStore：per-owner 持久化（meta 桶 <owner>/meta/tags/<sha256(rel)>.json，

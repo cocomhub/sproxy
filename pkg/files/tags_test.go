@@ -3,7 +3,7 @@
 
 package files
 
-// tags_test.go 是文件标签系统（roadmap 11.10-④ / docs/designs/2026-09-24-file-tags.md）
+// tags_test.go 是文件标签系统（roadmap 11.10-④ / docs/archive/2026-09-24-file-tags.md）
 // 的领域级测试：
 //
 //  1. 打标 → search?tag= 精确命中；未打标文件不命中；tag 与 q 可组合；

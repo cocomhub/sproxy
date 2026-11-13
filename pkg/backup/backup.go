@@ -4,7 +4,7 @@
 // Package backup 提供通用备份引擎（源任意 sync.FS → 目标任意 sync.FS）：
 // 全量/增量（manifest 比较 size+mtime）+ 每文件可选校验 + 单文件错误隔离与重试 + 报告。
 // P1 只做纯函数引擎层，不涉及路由/CLI/装配（见
-// docs/designs/2026-09-24-backup-remote-volume.md 的片划分）。
+// docs/archive/2026-09-24-backup-remote-volume.md 的片划分）。
 package backup
 
 import (
