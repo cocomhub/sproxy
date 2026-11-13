@@ -848,11 +848,18 @@ Hub 统计。
 
 ### POST /api/credentials
 
-新增 AK 条目。
+新增 AK 条目（admin-only，403 否则）。
+
+- 请求体：`{ak, owner?, secret?, role?}`；`secret` 为 64-hex（32B），缺省由服务端生成并**单次回传**。
+- `role` 取值：`user`（缺省）/ `node`；**`admin` 拒绝 400**（只能由首次注册原子授予）；
+  `reader` 目前也拒绝 400（详见下方「账号角色」）。
 
 ### DELETE /api/credentials/{ak}
 
 删除 AK 条目（幂等）。
+
+- admin-only；需 `{confirm: "<目标 AK>", force?: bool}` 二次确认；**`admin` 角色 AK 不可删除**（防唯一
+  admin 自删导致接管竞态）；有活跃 SK 且未 `force=true` → 400。
 
 ### POST /api/credentials/{ak}/renew
 
@@ -869,6 +876,30 @@ Hub 统计。
 ### POST /api/credentials/{ak}/sk/{skID}/expire
 
 使 SK 条目过期。
+
+### 账号角色（role）
+
+账号级角色持久化在凭据条目（`credentials.json` 的 `role` 字段；缺字段的旧条目载入时归一为
+`user`），共**四档**：
+
+| role | 文件组（读） | 文件组（写） | mesh/hub 组 | 管理端点 |
+|------|-------------|-------------|-------------|----------|
+| `reader` | ✅ | ❌ 403 | ❌ | ❌ |
+| `user`（缺省） | ✅ | ✅ | ❌ | ❌ |
+| `node` | ❌ | ❌ | ✅ | ❌ |
+| `admin` | ✅ | ✅ | ✅ | ✅ |
+
+- 层级：`reader < user < node < admin`（admin 全组放行）；未知角色门限**fail-closed 403**。
+- 只读面（`reader` 可读）由**路由表分类**单一事实源给出（`ClassReader` → `requireRole(reader)`）：
+  `GET /download`、`GET /download/chunk`、`GET /api/files`、`HEAD /api/files/stat`、
+  `GET /api/files/search`、`GET /api/files/meta`、`GET /api/versions`、`GET /api/archive-dir`、
+  `GET /api/volumes*`、`GET /api/quota`、`GET /api/backends`、`GET /api/secrets*` 等读端点在列；
+  其余文件组端点（upload/delete/rename/mkdir/rmdir/batch*/archive/versions-restore/共享创建/trash 写等）
+  需 `user`；隧道内层（`/tunnel` 外解密后的 localMux）同一份分类，reader 写面同样 403。
+- **创建入口现状（以代码为准）**：`POST /api/credentials` 只接受 `user`/`node`；TOTP 注册恒产
+  `user`（首次注册原子授予 `admin`）。即 `reader` 档位可被**认证/路由层执行**，但**当前没有
+  公开创建入口**（直接改凭据 store / Ring 快照属非公开运维面）。`api_keys`（Bearer 多用户）是
+  独立特性，恒 `user` 语义，不并入 reader。
 
 ## 外部认证登录面（OIDC / LDAP）
 
