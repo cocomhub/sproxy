@@ -106,6 +106,21 @@
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能；
   **每个子代理必须独占一个 worktree**（`subagent({workflow:"parallel"})` 的 `worktree:true`，
   或显式 `cwd` 指向其专属 worktree），**不得共享工作区**。
+### 工作区知识库（`cocomhub/knowledge/`，**三仓库通用**）
+
+> 权威维护指南（结构 / 维护约定 / 为何不保留 archive / git 用法）：**`cocomhub/knowledge/README.md`**；
+> 工作区级 `cocomhub/AGENTS.md` + `CLAUDE.md` 亦已载明该约定（三子项目同时生效）。**本节只作指针。**
+
+1. **先读后探**：需要环境信息时**先查 `knowledge/`**；已有 ⇒ 直接采用，**不重复探测**。
+2. **探到即维护**：得到**新的/修正的**事实 ⇒ 更新 `knowledge/local/{env,data}`；结论性经验写 `knowledge/local/notes/`，
+   并在**该独立仓库**内提交（**不要**写进任何子项目仓库）。
+3. **只写事实与指针**：路径/端口/开关/行为/版本/**结论**；实现细节用「文件:行」或函数名**指针**，
+   **不复制代码**；**不写**操作日志 / 任务拆解 / 验收清单。
+4. **凭据只记位置**（如 `~/.config/BaiduPCS-Go/pcs_config.json`）；**绝不**写入 token / 密钥 / 分享 URL（硬规则 21/21b）。
+5. **过期即订正**：与现状不符直接改；旧值由 **git 历史**保留（`git log --oneline -- local/`）；
+   **不再维护 `archive/<name>.<时间戳>` 副本**（与 git 重复 ⇒ 实测 53% 噪声）；
+   仅需脱离 git 携带时用 `bash <cocomhub>/knowledge/export.sh`。
+6. **路径用绝对路径** `<cocomhub>/knowledge/` ⇒ **任何 worktree** 读到同一份（各自另建会产生分叉）。
 - **使用中文思考**
 - **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
 - **文档产出/合并前先加载项目 skill**：`.pi/skills/sproxy-docs-lifecycle/SKILL.md`（文档生命周期纪律）——凡涉及设计/计划/规格文档产出、PR 合并前文档完整性审核、docs/ 结构变动、文档清理/归档的任务，按需加载该 skill 后执行。**核心约束：每次 PR 合并前将已完成的设计文档合并到权威文档（docs/*.md）；squash 合并前审核文档完整性正确性；多阶段任务允许跨 PR 但最终必须收敛成权威文档或归档精华（docs/archive/），过程产物不留 master。**
