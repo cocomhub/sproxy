@@ -79,6 +79,11 @@ func (s *SecretdataFS) putBlobCache(rel string, b []byte) {
 	if rerr := os.Rename(tmp, cp); rerr != nil {
 		_ = os.Remove(tmp)
 	}
+	// **低频配额检查**（每 64 次写入一次）：全扫目录开销不小，不宜每次写都做；
+	// 超配额时按最旧优先淘汰（缓存可重建 ⇒ 时间淘汰足够，无需维护访问序）。
+	if n := s.metaCacheWrites.Add(1); n%64 == 0 {
+		s.enforceMetaCacheQuota()
+	}
 }
 
 // dropBlobCache 删除某 blob 的本地缓存（解密失败时调用，实现自愈）。
