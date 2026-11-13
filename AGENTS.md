@@ -1,8 +1,11 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+本文件是 sproxy 子项目的 **AI 上下文权威源**（面向所有编码代理：Codex / Claude Code / 其它）。
 
-> 上级目录 `../AGENTS.md` 与 `../AGENTS.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
+> **权威源约定**：`AGENTS.md` 是唯一权威；`CLAUDE.md` 是其**同步副本**（仅因工具约定文件名而存在）。
+> **修改本文件后必须同步 `CLAUDE.md`**（两者内容应保持一致，避免分叉后代理读到不同规则）。
+
+> 上级目录 `../AGENTS.md` 与 `../CLAUDE.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
 
 ## 依赖策略
 
@@ -99,6 +102,32 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - **roadmap 规划/批量设计先加载项目 skill**：`.pi/skills/roadmap-feature-planning/SKILL.md`（roadmap 规划与批量设计）——凡涉及基于已有功能规划下一阶段路线图、为规划项批量产出设计文档（子代理并行）、汇总设计决策、合并 roadmap PR 的任务，按需加载该 skill 后执行。核心：每项规划必须有设计文件依据；子代理简报精确路径+禁 web_search；决策统一汇总；docs-only 走分支合并绝不直接提交 master。
 - **并行批次实施先加载项目 skill**：`.pi/skills/parallel-batch-implementation/SKILL.md`（并行批次实施）——凡涉及 roadmap 分批并行实施、多条独立 PR 同时推进、worker 子代理分派（worktree 隔离）、子代理超时/401/失败 resume 重试、任务拆分粒度、PR 创建前 rebase、squash 合并 body 功能维度、CI flake 记录待办+rerun+积累单 PR、主 agent 只调配不亲做的任务，按需加载该 skill 后执行。核心：单任务粒度（4+ 项必拆分）；每批只启 2-3 个子代理防 401 超配额；rebase 冲突直接处理；设计文档为权威。
 - **功能对抗审查先加载项目 skill**：`.pi/skills/feature-adversarial-review/SKILL.md`（功能对抗审查）——凡涉及对已合入 master 的新实现做四维度代码审核（正确性/可用性/安全性/可维护性）、按批次逐功能核验、P0-P3 分级定位缺陷并开修复 PR 的任务，按需加载该 skill 后执行。核心：修复必须 TDD + 变异命中；审查报告落盘 docs/feature-review/；审查档案 PR 永远 OPEN 不合并。
+
+## 门禁铁律（用户明示 2026-11-13，最高优先级）
+
+### 铁律
+**门禁只能减少，不能新增。绝对禁止无声静默增加门禁。**
+
+### 新功能"违反门禁"时的决策流程（按序判断，不得跳过）
+1. **先考虑实现成本**；
+2. **成本不高 ⇒ 立刻实现**（把功能做成不违反门禁的形态）⇒ **避免门禁增加** ✓；
+3. **成本高 ⇒ 分析功能是否紧急**：
+   - **不紧急** ⇒ **先开独立 PR 设计基础架构、提供能力并合并**；
+     然后**当前功能 rebase 到最新 master，基于该新能力实现**；
+   - **非常紧急** ⇒ **必须经人工确认**后，才允许增加门禁；
+4. ⇒ **绝对禁止**：不声不响地把门禁基线/登记表往上调（那属「静默增加门禁」）。
+
+### 正确姿势：把能力上移到合适的层（而非给门禁加一行）
+- 需要 FS 之外的能力时，**不要直连 `FS()`**（`be.FS()` / `volume.FS()`）——那会产生 R27 直连点；
+- 应**设计能力接口**并让该层实现者提供，消费方经**该层句柄**断言：
+  - **后端级**：`pkg/volume/registry/backend.go` 的 `ExternalBackend` 可选能力
+    （先例：`Presigner` / `URLResolver` / `MetaPrewarmer`）；
+  - **卷级**：`pkg/volume/storage_volume.go` 的能力接口
+    （先例：`Footprinter` / `PhysBound` / `CapacityOwner` / `StatsProvider` / `StateGeneration`）；
+  - **FS 级**：`pkg/sync` 的可选能力（先例：`WriteIfAbsent` / `RangeReader` / `StorageInspector`），
+    且**所有透明装饰器必须转发**（R21/R24，聚合接口 `sync.DecoratorCapabilities` 编译期强制）；
+- **实例**：#1142 用 `be.FS()` + 登记 `external_fs_calls.tsv` ⇒ 违规；
+  #1144 改为 `registry.MetaPrewarmer` 后端能力 ⇒ 合规（装配层 `.FS()` 计数 = 0）。
 
 ## 协作与流程硬规则（pi agent 必读）
 

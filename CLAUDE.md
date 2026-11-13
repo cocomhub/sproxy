@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> ⚠️ **本文件是 `AGENTS.md` 的同步副本**（仅为 Claude Code 的约定文件名而存在）。
+> **权威源 = `AGENTS.md`** —— 若两者不一致，**以 `AGENTS.md` 为准**；
+> 修改规则请改 `AGENTS.md` 并同步到本文件（避免代理间读到分叉的规则）。
 
 > 上级目录 `../CLAUDE.md` 与 `../AGENTS.md` 为工作区通用指南（中文回复、UTF-8 无 BOM、SPDX 许可证头、最小改动等），全部适用于本子项目；以下内容仅补充 sproxy 专属要点，与上级冲突时以本文件为准。
 
@@ -38,6 +40,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 云下载/转存内核 | `pkg/transfer` + `pkg/cloud` | `Execute` / `writeUnique` / 预处理器选型 | 归档=转存+预处理，复用同一内核 |
 | HTTP 传输隔离 | `pkg/netutil` | `IsolatedTransport()` | 禁裸 `&http.Transport{}`（R19） |
 
+
+
+
+
+
+
+
+
+
+
+| 归档打包（tar 助手） | `pkg/server/archive` | `archive.AddFileToTar` / `DefaultMaxArchiveSize` | **server 作用域**；纯函数无装配状态，HTTP 面留在装配层 |
+| 跨 hub 中继转发（联邦数据面） | `pkg/server/federation` | `FederationForwarder` / `NewFederationForwarder` / `StatusError` / `DefaultRelayMaxHops` | **server 作用域**；只负责「向一个联邦对端转发一条拨号」+ 防环头；HTTP 解析/故障转移/回写留在装配层 `RelayStreamHandler` |
+| 跨进程文件锁原语 | `pkg/server/filelock` | `filelock.Lock` / `filelock.Unlock` | **server 作用域**；多进程 read-modify-write 同一共享文件的互斥（Unix flock），**非选主语义**（选主走 `pkg/leader`）；进程内互斥由调用方承担（flock 同进程可重入）；Windows 降级为空操作 |
+| JSON 响应写出（**唯一实现**） | `internal/httpjson` | `Send` / `SendOpt` / `SendErr` / `SendError` / `WriteBody` / `SetLogger` | **L0 横切**；装配根 `sendJSONResponse`、`pkg/files.Service.sendJSON`、`cloudtasks.writeJSON`、ratelimit 429、remotefs helper 均委托它；字节契约（成功无尾随换行 / 失败体带尾随换行）不得改；`SendErr` 用于「写失败必须被调用方感知」（信令 I5），`WriteBody` 用于预序列化字节（缓存命中）；裸写由 **R54 硬禁止**（`json_response_gate_test.go`，无基线表） |
+| 路由表数据化 + 双 mux 注册 | `pkg/server/router` | `router.Route[H]` / `router.Register` / `Class` | **server 作用域（L0）**；子包用 `Routes()` 声明自己的 URL 子路径（相对前缀）+ 两端分类，装配层经 `router.Register` 一次注册到 srvMux/localMux，并注入「分类 → 包装器」映射（`h.routeWrapper`）；**分类是装配层决定**，子包不能自选 wrapper；R38 静态解析字面量表。已下放：`cloudtasks` / `share` / `notify` / `ai` / `verify` |
+| 限流（滑动窗口 / per-IP 令牌桶 / 端点维度 / 并发闸 / 跨实例协调） | `pkg/server/ratelimit` | `RateLimiter` / `NewRateLimiter` / `Coordinator` / `NewCoordinator` / `NormalizeRemoteIP` | **server 作用域**；装配根经 `SetMetrics`/`SetClientIPFn`/`SetCoordinator` 注入依赖，路由挂载与 429 回包在装配层；协调计数文件 key 归一走 `internal/coordkey` |
+| 跨节点读写面（只读/写协议 + loopback listener） | `pkg/server/remotefs` | `Deps` / `NewReadHandler` / `NewWriteHandler` / `StartReadListener` / `StartWriteListener` | **server 作用域**；`Deps` 恒 8 字段（装配态经窄接口注入，不反向依赖装配根）；写面只做授权 + 调 `pkg/files` 域方法（checksum/改名/版本/配额/文件锁/卷路由留在领域层）；`StartRemote*Listener` 与 listener 类型别名留在装配层（`cmd/sproxy` 是独立 module） |
+| 封装卷（nested enclosure）翻译与运行期装配 | `pkg/server/enclosure` | `TranslateNestedVolume` / `TranslateNestedDecl` / `ParseNestedTarget` / `AttachEnclosureVolume` / `DetachEnclosureVolume` / `SealedAt` | **server 作用域**；**唯一职责是「用户面 `type: <wrapper>` + `extra.target: "<卷>/<子路径>"` → 装配词汇 `extra.source`」的翻译与装配编排**——翻译语义是用户面兼容面，**不改 schema**（持久化/回显保持原形态，翻译只在内存）；只接收显式参数（`*registry.Set`/logger/storage root），不持有 `*Handlers`，不反向 import `pkg/server`（R6）；封印注入/容量池继承/后端构造复用 `pkg/volume/enclosure` 单一实现 |
+| 阈值告警引擎（规则/状态机/水位） | `pkg/server/alerts` | `alerts.NewFromConfig` / `Engine.On*` / `AdoptNotifyChannels` | **server 作用域**；分发复用 `pkg/server/notify`；AI 建议挂点经 `pkg/server/ai` |
+| 用量统计（du / 存储分类） | `pkg/server/ops` | `WalkRoot` / `WalkFS` / `WalkUploadStats*` / `CategoriesFromBuckets` | **server 作用域**；纯遍历无装配状态，HTTP 面留在装配层 |
+| checksum 巡检（全仓一致性审计） | `pkg/server/verify` | `verify.New(Deps)` / `VerifyOnce` / `Report` | **server 作用域**；依赖经 `verify.Deps` 注入；摘要统一走 `checksum.File` |
+| 运行时指标注册表/渲染 | `pkg/server/metrics` | `Metrics` / `WriteMetric` / `WriteHistogram` / `RebalanceProgress` | **server 作用域**；`/metrics` HTTP 面与装配态渲染段留在装配层 |
+| 分享存储（进程内/StateStore） | `pkg/server/share` | `Store` / `StateBackedStore` / `StoreIface` | **server 作用域**；HTTP 面在装配层，经别名调用 |
+| AI 洞察/建议/配额/隐私 | `pkg/server/ai` | `AIInsight` / `AIAdvisor` / `AIQuota` / `AIPrivacy` / `AIEventConsumer` | **server 作用域**；事件源经 `ai.EventSource` 注入（不反向依赖装配层） |
+| 服务端 WebDAV 挂载面 | `pkg/server/dav` | `dav.New(Deps)` / `Service.Handler` | **server 作用域**；`MetaPolicy` 窄接口（sidecar 联动），不反向依赖装配层 |
+| S3 兼容网关（SigV4/对象/multipart） | `pkg/server/s3` | `s3.New(Deps)` / `Service.Handler` | **server 作用域**；依赖经 `s3.Deps` 注入（`MetaPolicy` 窄接口），不反向依赖装配层 |
+| 周期任务调度 | `pkg/server/scheduler` | `Scheduler.Register/Start/Stop`、`Task` | **server 作用域**（零 pkg/* 依赖，L0）；任务注册内容留在装配层 |
+| 通知中心（规则路由/去抖/重试/渠道/feed 渲染） | `pkg/server/notify` | `NotifyCenter.Dispatch` / `NewFromConfig` / `History` | **server 作用域**；只接受 `notify.Event`（装配层在 RecordAudit 做字段映射） |
+| 真实存储审查（逻辑 ↔ 物理落点） | `pkg/volume` + 各卷实现 | `StorageInspector`（`Trace` / `Explain`）+ `TreeInspector`（`TraceTree` 递归树）+ `AssertStorageInspector` | **布局事实只由卷提供**；只解 meta 不读内容、只读不修复；未实现 ⇒ 501/明确报错（**禁止空结果**） |
+| 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |
+| 凭据存储与主密钥解析 | `pkg/server/credentials` | `BootstrapServerCredentials` / `ResolveCredentialMasterKey` / `BestCredential` / `BestFirstCredential` | **server 作用域**；边界＝**快照 store（StateStore 后端/双读单写/静态加密包装）+ 主密钥与 Vault token 来源解析 + Ring 凭据选取**。启动编排（`bootstrapCredentials`/`SelfCredential`/凭据轮换循环）仍留装配层；不反向依赖 `pkg/server`（R6） |
+
 ### 收敛原则（必须遵守）
 
 1. **先查表**：动手前确认能力矩阵里是否已有同类实现；有则复用（含"少写一个适配层"）。
@@ -54,70 +88,187 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 7. **门禁兜底**：新增直连点会被 R19（Transport）/R25（用户内容经 Root）/R26（`NewLocalFS` 白名单）
    /R34/R36（配额/等待）/R37（恢复）/R38（路由）拦住 ⇒ 先想"扩展能力"，而不是加白名单 ✗；
    确需例外时必须写明「为什么可以不经既有能力」。
-
-## 协作与流程硬规则
-
-> **以 `AGENTS.md` 的「协作与流程硬规则」（第 1–17 条）为单一事实源**，本文不重复维护副本。
-> 其中与本项目测试基建直接相关的三条（2026-09 新增，均带门禁）：
-> - **R18 测试并发注册门禁**：新增测试默认必须 `t.Parallel()`；无法并发者须显式登记
->   （`t.Setenv/t.Chdir` 自动豁免、或函数体标注 `// sproxy:serial: <理由>`、或计入
->   `internal/archcheck/serial_budgets.tsv` 白名单棘轮，只减不增）；门禁**扫描全仓**并带覆盖探针。
-> - **全局能力可测试化策略（2026-10-05 用户明示）**：测试不得依赖全局可变状态凑并行——凡全局能力
->   （注册表/共享 provider 等），生产代码提供三件套使其可测试化：内部类型 opt（参数化全局行为，
->   如 `*downloader.Registry`）+ 内部全局变量（真实全局留生产）+ 可导出全局方法（`NewRegistry()`
->   本地实例构造、`RegisterXxx(reg, cfg)` 按参注册入口，包内结构内部方法直接接收内部类型变量控制
->   全局行为）；测试传本地实例不触碰全局 → 可 `t.Parallel()`。**新测试先问「能否并行」，不得默认
->   登记串行**（教训 #734：30+ 一次性串行登记吃光棘轮 slack，CI merge 树红灯）。详见 `AGENTS.md` R18。
-> - **测试注入纪律（2026-10-07 用户明示，加强版）**：**绝对禁止测试依赖全局可变函数/变量做 seam
->   替换**（`var removeX = os.Remove` 包级 seam + 测试 t.Cleanup 恢复，运行期替换/并发恢复即 data
->   race，且影响其它读该 seam 的用例）。一切测试注入一律走**结构体内部私有变量，只能在创建时经
->   构造函数/opts 注入**（`VideoChecker.indexer`、`CloudDownloadManager.removeFile`、
->   `NewLocalOrExitDial(...localDial)`、`Handlers.removeMovedSource`）：运行期不可变 → 并发安全 →
->   测试可 `t.Parallel()`。判断标准：测试里出现「替换包级 var + t.Cleanup 恢复」即违规，须改为构造
->   注入实例字段（参考本分支 removeTaskFile/localDialFunc/removeMovedSource 改造）。
-> - **配置默认值纪律（2026-10-07 用户明示，加强版）**：**绝对禁止特化的默认配置行为**——bool
->   配置字段**必须默认 false**、string 配置字段**必须默认空字符串**；一切配置必须有**安全可靠的
->   默认行为**。需要「默认开启某能力」时**禁止 bool 默认 true**（默认 true 使「显式 false 关闭」
->   与「未配置」语义混淆）——**直接反转语义**：flag 表达「关闭某能力」（`disable_xxx`/`no_xxx`，
->   默认 false = 能力默认开启），或默认值本身即安全路径（如 `cloud_check_mem_bytes` 默认 512MiB
->   非零保证配额治理默认生效——用户裁定 2026-10-07：0 处理成默认大小）。判断标准：新增 bool 默认
->   true / string 默认非空 → 违反本条（参考本分支 `--integrity-must-pass` 默认 false：校验默认
->   嵌入主链，must-pass 仅反转 damaged 阻断语义）。
-> - **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为必须逐项
->   测试锁定；新增外部依赖先在 `docs/external-dependencies.md` 分类登记 + 补测试锁定；测试红先对照
->   该文档判「依赖变化 vs 实现回归」，禁止静默改实现适配未登记的变化。详见 `AGENTS.md` 硬规则 19。
-> - **测试网络客户端隔离**：禁止 `http.DefaultClient`/共享 `http.DefaultTransport`
->   （并行用例的 `httptest.Server.Close()` 会打断其它用例在途 idle 连接）。
-> - **本地先过后触发 CI**：lint / test / e2e / 各门禁本地全绿后才 push。
-> - **绝对禁止跳过检查直接 commit / push**（2026-10-02 用户明示）：严禁 `--no-verify`；pre-commit（增量轻量）
->   与 pre-push（全量：fmt-all → lint-all → check-ci）必须真实跑通，日志落盘 `build/hooks/*.log`；
->   **出现环境问题或脚本故障时直接修复环境/脚本，不得以「CI 会兜底」为由绕过**（绕过只是把失败推迟到 CI）。
-> - **PR 绝对禁止泄露真实数据（2026-10-05 用户明示）**：代码/配置/文档/commit 信息/PR body 一律
->   禁止携带真实外部数据（真实分享 URL 含子路径 token、凭据/token、密钥/指纹、日志片段）；
->   需真实数据验证时用**环境变量或 CLI flag 运行期传入**（默认留空/占位），禁止硬编码入库；
->   合并前 `git grep` 扫描。详见 `AGENTS.md` 硬规则 21。
-> - **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
->   代码/测试/注释/文档**绝对禁止**真实分享 URL/容器 id/分享 id/网盘文件 id、
->   真实文件名/标题、真实 IP/域名/端口、凭据；一律 `EXAMPLE-*`/`REALSHAREID001`/`p5containerid`/
->   纯占位中文/`example.com` 等通用假数据；提交前 `git grep` 扫描（`keepshare.org/p<id>`、
->   `mypikpak.com/s/<id>`、真实标题/IP）。详见 `AGENTS.md` 硬规则 21b。
+8. **命名必须编码作用域**：`pkg/<x>` = 通用能力（server/client/tools 均可消费）；只在服务端有意义的进 `pkg/server/<x>`；只服务单个二进制的进 `cmd/<bin>/internal/<x>`。判据可执行：被 `cmd/sclient`/`cmd/sproxy-mcp` 可达才可留 `pkg/`（详见 `docs/architecture.md` §作用域分层，门禁 R6）。
+9. **装配层依赖必须分域**：`Handlers` 只允许嵌入 `deps.go` 里的 `*Deps` 分组（R7 门禁，直接字段 ≤ 12）；新增依赖加到对应分组，禁止再往 `Handlers` 本体加扁平字段。
 
 ## 执行偏好
 
 - **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
 - **worktree**：除非用户明确要求，不使用 git worktree。
-- **文档维护与归档纪律（2026-10-06 用户明示，与根 AGENTS.md 对齐）**：功能完成后把实现/决策提炼更新到**权威文档**（现行事实源：`docs/` 根级文档、CLAUDE.md、代码本身）；有价值的探索/决策精简归档到 `docs/archive/`（按功能维度：做了什么/踩过什么坑/哪些判断仍有效），**不保留操作步骤等无效过时信息**（判断标准：归档应作「背景知识」复用，而非操作日志）。**历史规划文档（`docs/superpowers/plans/`）有价值内容提炼到权威文档后即移除，不保留**。
+- **使用中文思考**
+- **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
+- **文档产出/合并前先加载项目 skill**：`.pi/skills/sproxy-docs-lifecycle/SKILL.md`（文档生命周期纪律）——凡涉及设计/计划/规格文档产出、PR 合并前文档完整性审核、docs/ 结构变动、文档清理/归档的任务，按需加载该 skill 后执行。**核心约束：每次 PR 合并前将已完成的设计文档合并到权威文档（docs/*.md）；squash 合并前审核文档完整性正确性；多阶段任务允许跨 PR 但最终必须收敛成权威文档或归档精华（docs/archive/），过程产物不留 master。**
+- **roadmap 规划/批量设计先加载项目 skill**：`.pi/skills/roadmap-feature-planning/SKILL.md`（roadmap 规划与批量设计）——凡涉及基于已有功能规划下一阶段路线图、为规划项批量产出设计文档（子代理并行）、汇总设计决策、合并 roadmap PR 的任务，按需加载该 skill 后执行。核心：每项规划必须有设计文件依据；子代理简报精确路径+禁 web_search；决策统一汇总；docs-only 走分支合并绝不直接提交 master。
+- **并行批次实施先加载项目 skill**：`.pi/skills/parallel-batch-implementation/SKILL.md`（并行批次实施）——凡涉及 roadmap 分批并行实施、多条独立 PR 同时推进、worker 子代理分派（worktree 隔离）、子代理超时/401/失败 resume 重试、任务拆分粒度、PR 创建前 rebase、squash 合并 body 功能维度、CI flake 记录待办+rerun+积累单 PR、主 agent 只调配不亲做的任务，按需加载该 skill 后执行。核心：单任务粒度（4+ 项必拆分）；每批只启 2-3 个子代理防 401 超配额；rebase 冲突直接处理；设计文档为权威。
+- **功能对抗审查先加载项目 skill**：`.pi/skills/feature-adversarial-review/SKILL.md`（功能对抗审查）——凡涉及对已合入 master 的新实现做四维度代码审核（正确性/可用性/安全性/可维护性）、按批次逐功能核验、P0-P3 分级定位缺陷并开修复 PR 的任务，按需加载该 skill 后执行。核心：修复必须 TDD + 变异命中；审查报告落盘 docs/feature-review/；审查档案 PR 永远 OPEN 不合并。
 
-## 工程原则（必须遵守）
+## 门禁铁律（用户明示 2026-11-13，最高优先级）
 
-1. **永不允许 lint 错误**：只要发现 lint 问题（任何模块，含改动前已存在的历史遗留），就必须修复，不得以"改动前就有"为由跳过。提交前全模块 lint（主 go.mod + 每个子 go.mod）必须 0 issues。
-2. **cmd 避免复杂逻辑**：cobra 命令处理保持薄（flag 解析 + 调用 + IO 展示）。非命令行纯逻辑，若值得复用→抽独立 pkg；若不值得抽 pkg→放 cmd 内的 `internal/` 内部包，不留在 `package main`。
-3. **抽象先薄包装委托保障一致**：逻辑下沉 pkg 时，先让 cmd 用**薄包装委托**新抽象并通过全量测试验证功能一致性/可靠性；随后**最终直接用新抽象，不保留薄包装委托**（薄包装是过渡，不是最终形态）。
-3b. **禁止无意义的标准库/内部函数薄封装（2026-10-05 用户明示）**：导出函数**不得**直接 `return` 不可导出的内部函数结果（`func HashX(b []byte) (string, error) { return hashX(b) }` 即为薄封装）——为改签名保留两个同名相近函数是重复实现，伤可维护性。每种能力只保留**一个导出真身**：同名内部函数直接改名导出（去掉恒 nil 的 error），变体收敛为单一实现（如 `Hash48Pair(blob, offA, offB)` 一次哈希取双窗口，供 chunk/meta/dir 命名复用）并删除内部同名。判断标准：导出函数体只有 `return internalFn(...)`（或 `..., nil`）→ 合并。注意与第 3 条区分：第 3 条指**跨包抽象过渡**（cmd→pkg 的委托包装），本条指**同包内**为签名改动保留双函数，两者都不允许「最终保留薄包装」。
-4. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段（如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config/config.go` 的 `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循上述约定。
-5. **有价值测试场景在抽象中仍覆盖**：抽象后，原 cmd 测试中有价值的场景必须在抽象包里有等价测试（不能因"逻辑搬走了"而丢失覆盖）；抽象包测试是功能一致性的最终保障。
-5. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**（`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；② subject 写成**用户可读的能力描述**（它会直接成为 changelog 条目）。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**（release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在 **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（统一落在 `### Changed` 段；`release-please-config.json` 已移除这几类的 `hidden`，即 Conventional 类型全枚举）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
-6. **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；③ 多个语义独立的改动拆多条 commit；④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），不要只罗列 commit 标题；⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，别指望 PR body 能救回；⑥ 合并后**不补 amend**（见 AGENTS.md 硬规则 16）；⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（用户 2026-09-15 反馈：最近几批 PR 的合并信息过于单薄）；⑧ **squash 合并信息格式（2026-10-02 用户明示，强制）**：title **必须包含 `(#PR号)`**；body **必须按功能修改维度总结**（能力 → 背景 → 改动要点 → 验证证据），**禁止**直接把所有 commit 的 subject/body 逐条拼接成 body。
+### 铁律
+**门禁只能减少，不能新增。绝对禁止无声静默增加门禁。**
+
+### 新功能"违反门禁"时的决策流程（按序判断，不得跳过）
+1. **先考虑实现成本**；
+2. **成本不高 ⇒ 立刻实现**（把功能做成不违反门禁的形态）⇒ **避免门禁增加** ✓；
+3. **成本高 ⇒ 分析功能是否紧急**：
+   - **不紧急** ⇒ **先开独立 PR 设计基础架构、提供能力并合并**；
+     然后**当前功能 rebase 到最新 master，基于该新能力实现**；
+   - **非常紧急** ⇒ **必须经人工确认**后，才允许增加门禁；
+4. ⇒ **绝对禁止**：不声不响地把门禁基线/登记表往上调（那属「静默增加门禁」）。
+
+### 正确姿势：把能力上移到合适的层（而非给门禁加一行）
+- 需要 FS 之外的能力时，**不要直连 `FS()`**（`be.FS()` / `volume.FS()`）——那会产生 R27 直连点；
+- 应**设计能力接口**并让该层实现者提供，消费方经**该层句柄**断言：
+  - **后端级**：`pkg/volume/registry/backend.go` 的 `ExternalBackend` 可选能力
+    （先例：`Presigner` / `URLResolver` / `MetaPrewarmer`）；
+  - **卷级**：`pkg/volume/storage_volume.go` 的能力接口
+    （先例：`Footprinter` / `PhysBound` / `CapacityOwner` / `StatsProvider` / `StateGeneration`）；
+  - **FS 级**：`pkg/sync` 的可选能力（先例：`WriteIfAbsent` / `RangeReader` / `StorageInspector`），
+    且**所有透明装饰器必须转发**（R21/R24，聚合接口 `sync.DecoratorCapabilities` 编译期强制）；
+- **实例**：#1142 用 `be.FS()` + 登记 `external_fs_calls.tsv` ⇒ 违规；
+  #1144 改为 `registry.MetaPrewarmer` 后端能力 ⇒ 合规（装配层 `.FS()` 计数 = 0）。
+
+## 协作与流程硬规则（pi agent 必读）
+
+> 完整版（含用户已确认的设计决策与全部踩坑记录）：`docs/archive/agent-operating-rules.md`；
+> CI/合并细节：`docs/archive/ci-merge-process.md`。以下是必须无条件遵守的硬规则：
+
+1. **等 CI 全绿再合并**：本仓 `master` 有 ruleset 必检 7 项（`Test`×2 / `E2E`×2 / `Test Sub-Modules` / `UI E2E` / `SonarQube`；判定以 `gh pr checks` 全绿为准）
+   ⇒ 轮询 `gh pr checks` 到 `total≥14 且 pending=0`，**不用 `--auto`**；**合并后删分支**（远端 + 本地）。
+2. **Benchmark 手动触发后超时即取消重试**：Benchmark 已从 PR 检查拆出为**手动触发** workflow
+   （`.github/workflows/benchmark-manual.yml`，web 页面 Actions → Benchmark (manual) → Run workflow）；
+   PR 不再自动跑 Benchmark ⇒ 不再因此失败阻塞。手动 run 的 job 设 `timeout-minutes: 15`（GitHub 兜底，
+   超时即 cancelled），卡死由 tools/benchwatch（进程外看门狗）~2 分钟以非零码失败给出诊断；
+   需要重试时对失败/取消的 job：`gh run rerun <run-id> --failed`（rerun 产生**新 job id**，必须动态取）。
+3. **纯文档 PR 走 docs-only 占位通道，可秒合并**：`*.md`/`docs/**`/`CHANGELOG.md` 等在 `ci.yml` 的 `paths-ignore` 内 ⇒ `ci.yml` 不触发；但 **`ci-docs-only.yml`**（`paths` 恰好为反向）会触发并用**与 ruleset 必检 8 项同名**的秒级占位检查报 success ⇒ 必检被满足、**无需跑完整 CI**、直接 squash 合并（2026-09-17 落地并实测：README 单行改动只触发 `CI (docs-only)`，8 项占位检查全 pass，`gh pr merge --squash` 成功）。**不再需要**「文档搭在代码 PR 里」的旧手法（历史原因：此前 `bypass_actors=[]` 且 `--admin` 也绕不过必检；见 `ci-docs-only.yml` 头注释）。若改动**混有代码**（含 workflow 本身），`ci.yml` 照常触发、仍须全绿。
+4. **CI 等待期并行做下一片**；上片合并后 `git rebase --onto origin/master <已合并提交>` 再开 PR（PR 里不得夹带已合并提交），推自有分支用 `--force`。
+5. **TDD + 变异验证**：先写红灯测试（要有失败输出）；声称测试能抓 bug 前先**断言变异已命中**（否则「无输出」= 假绿）。
+6. **提交与推送**：只 `git add` 本任务文件；多重 `-m`；**不加署名行**；推送走 https 或 SSH（本机 SSH 已验证可用：`ssh -T git@github.com` 需返回成功）；提交前
+   `export PATH="$PATH:$(go env GOPATH)/bin"`（pre-commit 需 `golangci-lint`/`addlicense`）。
+   **绝对禁止跳过检查直接 commit / push**（用户明示硬规则，2026-09-18 起、2026-10-02 扩展）：
+   - 严禁 `git commit --no-verify` 与 `git push --no-verify`：pre-commit 为增量轻量门禁（gofmt / SPDX /
+     go vet / golangci-lint / check-loopback，仅本次 commit 涉及文件），pre-push 为全量门禁
+     （fmt-all → lint-all → check-ci）；两者检查结果必须真实跑通，日志落盘 `build/hooks/*.log`
+     （失败后直接查看该日志定位，无需重跑）。
+   - **出现环境问题或脚本故障时直接修复环境/脚本，不得以「绕过后 CI 会兜底」为由跳过**——绕过只是把
+     失败推迟到 CI，并会在 master 留下未格式化/未 lint 残留（历史教训：10 文件 go fix 残留，
+     见 `docs/archive/gofix-before-pr.md`）。
+7. **禁用 `git stash`**（本仓有他人遗留 stash，会弹错 WIP）；不要用 sed/python 多行改 Makefile（用 Edit 工具）。
+8. **子 module 改动**：新增跨 module 依赖要补 `require`+`replace`，并在 **`GOWORK=off`** 下独立构建/测试通过。
+9. **接口字段用接口类型**（避免 typed-nil 陷阱）；领域包不得 import 装配层（`pkg/server`）。
+10. **Web UI 改动必须带自动化测试 + 过真实浏览器 e2e**（用户明示）：纯函数补 `node --test` 单测、交互/渲染补
+    Playwright e2e（`web/e2e`，必检项 `UI E2E Tests`）、新 JS 登记进 Makefile `web-test`（门禁 R10 守）。
+    `make web-test` 现已挂进 ui-e2e job。
+11. **交付自检**：`gofmt -l` **与 `goimports -l`** 均无输出（CI 的 golangci-lint 启用 goimports，`gofmt` 覆盖不到 import 分组）、
+    `go build ./...`+`make build-all`、`make lint`+`make lint-all` 0 issues、`go test ./pkg/... ./internal/...`、
+    `make test-all`、`-race`；门禁类自测必跑 `make deadcode-check`、`go test ./internal/archcheck/`（含 R14 睡眠棘轮、
+    R18 并发注册门禁等）；收尾片还要 `make check-ci`（含 70% 覆盖率门禁）+ `make test-e2e`。
+    **本地全绿后才 push 触发 CI**（见第 14 条）。
+12. **CHANGELOG 由 release-please 生成，不再手工维护**：`CHANGELOG.md` 与版本号是 release-please 的**单一事实源**
+    （`release-please-config.json` + `.github/workflows/release-please.yml`）。硬要求落在**提交信息**上：
+    ① 类型正确（`feat`→Added、`fix`→Fixed、`perf`/`refactor`/`deps`→Changed；破坏性变更加 `!` 或 `BREAKING CHANGE:`）；
+    ② subject 写成**用户可读的能力描述**——它会直接成为 changelog 条目。**`CHANGELOG.md` 不得保留 `## [Unreleased]` 段**
+    （release-please 以第一个版本标题为插入锚点，该段因 `[` 命中正则 ⇒ 新版本段被插到它上面，且它从不被消费）；
+    删除对外 API 用 `remove(<scope>): ...` 提交类型（已映射 `### Removed`），其余无法用类型表达的条目在
+    **release PR** 里一次性补进该版本段。`chore`/`docs`/`ci`/`test`/`build`/`style` **也会**进 changelog（`release-please-config.json` 已移除 `hidden`，
+    统一落在 `### Changed` 段；即 Conventional 类型全枚举 ⇒「未匹配类型」为空集，任何提交都不会从 CHANGELOG 消失）
+    （内容重要时改用 `feat`/`fix`）。发布流程见 `RELEASING.md`；门禁 **R12** 守配置与规则的一致性。
+
+    **提交信息与 PR 描述原则（2026-09-15 用户明示，长期有效）**：
+    ① subject 一句话说清**「做了什么」（能力/行为）**，不要只写实现细节；
+    ② commit 正文回答**「怎么做 + 为什么」**（背景/根因 → 改动要点 → 验证证据）；
+    ③ 多个语义独立的改动拆多条 commit（每个功能/修复一条）；
+    ④ **PR body 以功能维度为主**（交付了什么能力 → 背景 → 改动要点 → 验证证据），
+       不要只罗列 commit 标题（好例子：#250/#255/#266/#273）；
+    ⑤ **分支最后一个 commit 的 subject/正文会成为 squash 合并进 master 的信息** ⇒ 合并前把它的正文写成功能总结，
+       别指望 PR body 能救回它（squash 合并后 GitHub 只把 PR 标题带进提交，正文是分支 commit 的）；
+    ⑥ 合并后**不补 amend**（见硬规则 16）；
+    ⑦ **不认可「squash 信息仅含 PR 标题 + commit 列表」为完成态**（2026-09-15 用户反馈：最近几批 PR 的合并信息过于单薄）。
+    ⑧ **squash 合并信息格式（2026-10-02 用户明示，强制）**：
+       - **title 必须包含 `(#PR号)`**（如 `feat(secret): secret 加密卷（#723）`）；
+       - **body 必须按功能修改维度总结**（能力 → 背景 → 改动要点 → 验证证据），
+       - **禁止**直接把所有 commit 的 subject/body 逐条拼接成 body（那是「commit 列表」，不是「功能总结」）。
+13. **测试并发注册门禁（R18）**：新增测试**直接满足设计**——顶层 `func TestX(t *testing.T)` 默认必须 `t.Parallel()`；
+    无法并发的测试必须**显式记录**（`internal/archcheck` 的 `TestSerialRatchet` 会**扫描全仓**并拦截），豁免条件（任一即可）:① 用例体内含 `t.Setenv/t.Chdir/os.Chdir`； ② 函数体内含标记注释 `// sproxy:serial: <短理由>`；
+    ③ `internal/archcheck/serial_budgets.tsv` 白名单棘轮（**两层**：逐文件计数 + 全仓总数，**只减不增**； 上行须同步
+    `docs/testing/virtual-time-conversions.md` 登记理由）。另设覆盖探针：扫描面被改窄（扫到的文件数/串行数低于下限）即红。
+    历史教训：一次 +975 处 t.Parallel 的批量修补花费一个完整周期——**不要让下一次出现同类二次返工**。
+    全局能力可测试化策略（2026-10-05 用户明示，长期有效）：测试**不得依赖全局可变状态**
+    （包级全局注册表/共享 provider 等）来凑并行——凡全局能力，生产代码提供三件套使其可测试化：
+      - **内部类型 opt**：把全局行为参数化（如 `*downloader.Registry` 等内部类型）；
+      - **内部全局变量**：真实全局（如 `downloader.DefaultRegistry`）保留给生产路径；
+      - **可导出全局方法**：提供取**本地实例**的构造器（`NewRegistry()`）与**按参注册**的入口
+        （`RegisterXxx(reg, cfg)`——注册目标经参数注入，生产传全局、测试传本地）；包内结构提供
+        内部方法直接接收内部类型变量控制全局行为。
+    效果：测试用本地实例注入，不触碰全局 → 可 `t.Parallel()`。**新测试默认先问「能否并行」，
+    不得默认登记串行**——只有真写共享全局/真实端口/进程外资源的才放弃 `t.Parallel()` 并登记
+    `serial_budgets.tsv`。教训（#734）：一次性登记 30+ 串行把棘轮基线顶到 1810，CI merge 树
+    （pull_request 合并 master 侧新增串行）因 master 侧未显式登记、slack 被吃光而红灯——
+    并行化 + 同步 master + 补登记后归位到 1781。
+14. **本地先过后触发 CI**：CI 里所有可本地执行的 job（lint / test / test-cover / e2e / web-test /
+    notest / deadcode-check / check-loopback / 棘轮与并发门禁 )**必须在本地全绿后才 push 触发 GitHub CI**；
+    逐 job 失败根因从 `gh api repos/{owner}/{repo}/actions/jobs/<id>/logs` 精确取证后修复，禁止靠猜。
+15. **PR 复用纪律**：简单项直接复用**当前最新的 OPEN PR**（追加 commit）；需要特殊设计的内容
+    （如一个新的测试基建门禁、一次性大改)另开后续 PR，避免历史 PR 无限膨胀。
+16. **禁止 amend 已合并到远端 master 的 squash 提交**：`git commit --amend` 一旦作用在
+    已 push 且合并的 squash 上，会造成历史改写且与远端 diverge ——
+    修复内容必须走**新分支 + 新 PR**。本教训来自 PR #273 事故（改写已合并 squash 导致 PR diff 混入上一 PR 全部 179 文件）。
+17. **测试网络客户端必须隔离（硬规则）**：测试里**禁止**使用 `http.DefaultClient` / 共享的
+    `http.DefaultTransport`——并行用例的 `httptest.Server.Close()` 会打断其它用例在途的 idle 连接，表现为
+    `transport connection broken: http: CloseIdleConnections called`（本仓已在 `pkg/client`(FileClient)、
+    `pkg/testutil/syncmock`、`cmd/sclient` 多次实证）。做法：每测试自建 `&http.Client{Transport: &http.Transport{}}`
+    （生产侧库默认也应为每实例独立连接池）。
+18. **双引擎排除纪律（lint + Sonar，用户明示 2026-10-02）**：golangci-lint 与 Sonar 是两套独立引擎，
+    「一处豁免、另一处误报/漏报」的漂移是质量债。规则：
+    ① **优先设计修复，禁止自动排除**：新告警（复杂度 S3776/gocognit=15、结构体 ctx S8242/containedctx 等）
+       先通过拆分/收编参数/状态机方法化等**设计手段**消除；只有**人工确认**「设计特意保留」（如长期驻留循环持有 ctx、
+       webdav.File 接口无 ctx 参数的存储请求 ctx、状态机编排）的场景才允许加排除标记。
+    ② **双标记格式（必须同时被两引擎认）**：golangci 的 `//nolint` 必须位于**注释开头**（同一注释内
+       `// NOSONAR //nolint:gosec` 无效——nolint 被忽略）；正确写法是**上一行 `//nolint:linter // 理由` + 被标记行行尾 `code // NOSONAR: Sxxx — 理由`**，
+       或同行 `code /*nolint:linter*/ // NOSONAR: Sxxx — 理由`（块注释 nolint 也认）。
+       理由与 NOSONAR 规则号必须成对（如 `//nolint:containedctx` + `// NOSONAR: S8242`），缺一即为漂移。
+    ③ **仅允许同类双排除**：排除必须同时覆盖 Sonar 规则号与 golangci linter 名，禁止只写一侧。
+    ④ **复杂度红线**：认知复杂度阈值 = 15（gocognit min-complexity 15，与 Sonar S3776 一致）；
+       新函数超限前必须拆 helper/早返回，禁止直接 nolint。
+    ⑤ 门禁对齐：`_test.go` 与 `tools/` 已在两引擎同时豁免（sonar.test.inclusions / sonar.exclusions ↔ .golangci exclusions），
+       这些目录不适用本规则。
+19. **字节大小配置一律用 `pkg/units/sizex.ByteSize`（2026-10-03 用户裁决，强制）**：字节大小配置字段
+    （如 `vol_capacity`、`max_upload_bytes`、`owner_quotas`、secretdata 的 `meta_pad_bytes`/`max_file_bytes`）
+    必须使用 `pkg/units/sizex.ByteSize`（"1GiB" 人类可读或纯数字字节；支持 YAML/viper UnmarshalText、
+    JSON 字符串/数字 UnmarshalJSON、CLI flag Set/Type、String()、Bytes()），**禁止在 config/Options 结构
+    裸写 `int64` 字节字段**。单位类抽象统一放 `pkg/units` 下（子包按单位类型：`pkg/units/sizex` 为字节；
+    时长/速率等后续单位类型按需新增子包，父包仅承载方向文档、不提前造接口）。`pkg/server/config/config.go` 的
+    `ByteSize` 是 `pkg/units/sizex.ByteSize` 的 alias（保持既有引用零回归）。新增字节/单位类字段须遵循。
+20. **外部行为依赖必须测试锁定（2026-10-05 用户明示）**：一切依赖外部系统/协议/服务的行为
+    （第三方 CLI/REST/直链/CDN、网络边界、外部服务语义等）必须**逐项测试锁定**——每项外部契约
+    行为在对应测试中显式断言（fake/mock 或真实链路）。维护时：
+    - 新增外部依赖 → 先在 `docs/external-dependencies.md` 按分类登记条目 + 补测试锁定
+      （TDD 红灯 → 实现 → 绿）；绝不允许「外部行为无锁、改了也不红」；
+    - 测试红时**先对照该文档**判断「外部行为变化（依赖变更）」还是「实现回归」，禁止静默改
+      实现适配未登记的依赖变化；
+    - 外部行为确实变化 → 更新 `docs/external-dependencies.md` + 适配实现（测试继续锁）；
+      实现回归 → 修实现，文档不动。
+    目标：**外部行为变化可见、可追踪、有锁，绝不让其静默改变行为**（教训：PikPak 分享直链
+    416 边界/expire 签名/keepshare 301 等若无锁，实现漂移会静默损坏下载）。
+21. **PR 绝对禁止泄露真实数据（2026-10-05 用户明示，强制）**：创建 PR 时，代码、配置、文档、
+    commit 信息与 **PR body** 一律禁止携带真实外部数据——真实分享 URL/链接（含子路径 token）、
+    账号凭据/token、密钥/指纹、真实日志片段等。需要真实数据验证的场景：**用环境变量或 CLI flag
+    在运行期传入**（默认值留空/占位），禁止硬编码入库。合并前用 `git grep` 扫描真实 URL/凭据
+    模式；CI/Sonar 不豁免，泄露即数据事故。教训（#734）：tool/pikpak-hybrid 三个诊断工具曾
+    硬编码真实分享 URL（含子路径 token）；URL 类真实数据按常见规范用 **CLI flag 运行期传入**
+    （`-share`，默认留空 + 强制校验），凭据/密钥类用环境变量。
+
+21b. **sproxy 全仓禁止真实/敏感数据，测试一律通用假数据（2026-10-28 用户明示，强制）**：
+    **绝对禁止**在 sproxy 代码/测试/注释/文档中出现任何真实信息——真实分享 URL/容器 id/
+    分享 id/网盘文件 id、真实番号（任何站点实际 code）、真实文件名/标题（含中文/日文真实内容）、
+    真实 IP/域名/端口、凭据/token/密钥。一律使用**通用假数据**：`EXAMPLE-*` 占位番号、
+    `REALSHAREID001`/`p5containerid` 占位分享 id、纯占位中文（无真实语义）、`example.com`/
+    `127.0.0.1` 等通用地址。提交前 `git grep` 扫描：
+    `keepshare.org/p<id>`、`mypikpak.com/s/<id>`、真实文件名/标题、真实 IP（凭据/分享 URL 模式见硬规则 21）；
+    命中即改假数据再提交（教训 2026-10-28：normalize/restore/urlresolver 测试曾留真实番号
+    与真实分享 id，全仓扫描后逐一占位化）。
+
+
 
 ## 常用命令
 
@@ -130,7 +281,6 @@ make test            # 快速单元测试（已取消 vet/check-loopback 依赖�
 make test-cover      # 测试 + 覆盖率收集
 make test-packages   # 分组运行测试，快速定位失败包
 make test-all        # 测试所有子 module（含 ext/ws、ext/quic、ext/grpc 等）
-make test-e2e        # 真二进制端到端（./test/... 递归，含 CLI + 隧道/mesh/relay/quota），CI e2e job 调用
 make build-all       # 构建所有子 module
 make cover-check     # 覆盖率门禁检查（默认 70%）
 make cover-html      # 覆盖率 HTML 报告到 build/coverage/cover.html
@@ -193,8 +343,6 @@ go test -coverprofile=cover.out ./internal/... ./pkg/... ./cmd/...
 | `./pkg/tunnel/xfer/ext/grpc` | gRPC 传输层子模块 |
 | `./pkg/tunnel/xfer/ext/webrtc` | WebRTC 传输层子模块 |
 | `./pkg/tunnel/hub/ext/kad` | Kademlia DHT 路由表扩展子模块 |
-| `./pkg/volume/ext/s3` | S3 存储卷扩展子模块 |
-| `./pkg/volume/ext/pikpak` | PikPak 网盘中转后端子模块 |
 
 构建/测试所有模块：`make build-all` / `make test-all`。单模块操作需 cd 进入目录。
 
@@ -289,19 +437,18 @@ type Conn interface {
 - `GET /version` — 文本 `Version: x\nBuildAt: y`
 - `GET /metrics` — Prometheus 风格的 metrics
 
-### 文件操作（需 `X-File-Checksum` 头；多卷下可选 `volume` 参数）
-- `POST /upload` — multipart 字段名 `file`，文件名通过 `ValidateFilePath` 校验，支持子目录路径；
-  可选 multipart 字段 `volume`（显式目标卷，缺省 auto 自动路由）；成功响应头 `X-Volume` 标识落盘卷
-- `GET /download?filename=<name>` — `ValidateFilePath` 校验防穿越；支持 `Range` header；可选 `volume` query（只在指定卷定位）
-- `POST /delete?filename=<name>` — 匹配 checksum后才删；可选 `volume` query
-- `POST /rename?from=<old>&to=<new>` — 重命名/移动文件；可选 `volume` query（只在该卷定位源；跨卷用 `/api/volumes/move`）
+### 文件操作（需 `X-File-Checksum` 头）
+- `POST /upload` — multipart 字段名 `file`，文件名通过 `ValidateFilePath` 校验，支持子目录路径
+- `GET /download?filename=<name>` — `ValidateFilePath` 校验防穿越；支持 `Range` header
+- `POST /delete?filename=<name>` — 匹配 checksum后才删
+- `POST /rename?from=<old>&to=<new>` — 重命名/移动文件
 
 ### 目录操作
 - `POST /mkdir?dirname=<name>` — 创建空目录
 - `POST /rmdir?dirname=<name>` — 删除空目录
 
 ### API
-- `GET /api/files?subdir=path` — JSON `{files: [{name, size, checksum, mod_time, is_dir, volume}]}`（文件条目带 `volume` 卷名；目录条目无卷；可选 `volume` query 只列指定卷）
+- `GET /api/files?subdir=path` — JSON `{files: [{name, size, checksum, mod_time, is_dir}]}`
 - `HEAD /api/files/stat?filename=<name>` — 单文件元信息（响应头）
 - `GET /api/files/search?q=<query>&subdir=<subdir>` — 文件名搜索（子字符串匹配）
 - `POST /api/batch/delete` — 批量删除（JSON body: `{files: [...]}`）
@@ -322,6 +469,7 @@ type Conn interface {
 ### 文件分享
 - `POST /api/share` — 创建分享链接（JSON body: `{filename, password?, expire_in?}`）
 - `GET /s/{token}` — 通过分享 token 访问文件
+- **持久化**：分享链接落 `<默认卷根>/anonymous/meta/share/<token>.json`（原子写，重启恢复未过期链接；一次性/计数/撤销/过期同步删文件；纯内存形态 = 未装配持久化目录时）
 
 ### 云端下载
 - `POST /api/cloud/download` — 创建云端下载任务
@@ -339,11 +487,6 @@ type Conn interface {
 - `GET /api/stats` — 服务端统计信息
 - `PUT /api/config` — 更新运行时配置（含 `max_storage_bytes` 动态调整）
 
-### 卷（多卷存储，需配置 `volumes`；不配 = 单卷零回归）
-- `GET /api/volumes` — owner 可见卷列表（auth + per-owner）：`{volumes: [{name, mode, capacity, usage, allowed}]}`（ACL 收紧卷绝不列出）
-- `POST /api/volumes/move?from_volume=<v>&to_volume=<v>&filename=<rel>` — 同 owner 同相对路径跨卷迁移（目标唯一性查重 409 / ACL 403 / 配额不足 507）
-- 客户端：FileClient 卷上下文（`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`、`MoveVolume()`、`VolumeOf()`；sclient `volumes` / `upload --volume` / `list --volume` / `download`/`delete`/`meta` `--volume` / `mv --to-volume`；WebUI 文件行卷 badge + 监控弹窗「卷」仪表 + 上传「卷」下拉
-
 ### Hub 中继管理（需配置 `hub.enabled: true` + `RouteTable`）
 - `GET /api/hub/nodes` — 列出已注册节点
 - `DELETE /api/hub/nodes/{id}` — 移除节点
@@ -352,7 +495,7 @@ type Conn interface {
 ### 隧道
 - `POST /tunnel` — `tunnel.NewLocalHandler(nil, localMux)`，AES-256-GCM 加密的请求转发
 
-## 配置（`pkg/server/config.go`）
+## 配置（`pkg/server/config/`）
 
 ### 加载方式（viper，来自 `cmd/sproxy/root.go`）
 
@@ -373,9 +516,7 @@ type Conn interface {
 |------|------|------|------|
 | `addr` | string | `:18083` | 监听地址 |
 | `storage_root` | string | `./storage` | 多租户存储根（`<tenant>/{user,cloud,archive,chunk,version,meta}/` 桶布局） |
-| `owner_quotas` | map[string]int64 | 空 | 按 owner 配额上限（显式 owner > `"*"` 默认 > 0 不限制） |
-| `tunnel_key` | string | 已废除（忽略） | **已废除**：隧道密钥由凭据 Ring 中条目的 SK 经 HKDF 自动派生；配置该键仅历史兼容 | 
-| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户） |
+| `tunnel_key` | string | 已废除（忽略） | **已废除**：隧道密钥由凭据 Ring 中条目的 SK 经 HKDF 自动派生；配置该键仅历史兼容 |
 | `log_level` | string | `info` | debug/info/warn/error |
 | `log_format` | string | `text` | text/json |
 | `max_header_bytes` | int | 1048576 | 最大 HTTP 头字节数 |
@@ -389,9 +530,6 @@ type Conn interface {
 | `tls.cert_file` / `tls.key_file` | string | | |
 | `tls.auto_tls` | bool | true | 自动生成 ECDSA P-256 自签证书 |
 | `tls.client_ca` | string | | mTLS CA 证书路径 |
-| `registration.disable` | bool | false | 注册开关：false=允许注册（默认）；true=禁止注册（仅存量用户） |
-| `allow_insecure_loopback` | bool | false | 无任何凭据（ring 空）时放行 loopback 来源 GET/HEAD（仅本地调试，生产勿开） |
-| `credential_ttl` | duration | 720h | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
 | `access_keys` | []AccessKey | 已废除（忽略） | **已废除**：SproxySig 凭据改由服务端凭据 Ring 承担（`<storage_root>/<owner>/meta/credentials.json` store 化）；yaml 该键被忽略，登记/轮换走 `sclient trust` / `POST /api/credentials/register` |
 | `api_keys.enabled` / `.keys` | | 关闭 | 多用户 API 密钥（独立 Bearer 特性，与 store 凭据互斥，优先） |
 | `rate_limit.enabled` / `.requests` / `.window` | | 关闭 | tunnel handler 限流 |
@@ -399,40 +537,19 @@ type Conn interface {
 | `max_chunk_size` | int | 64 MB | 客户端最大分块大小 |
 | `max_chunk_upload_bytes` | int | 8 MB | 服务端单块请求体上限 |
 | `upload_session_ttl` | duration | 24h | 未完成上传会话过期时间 |
-| `versioning.enabled` / `.max_versions` | | 关闭 | 文件版本管理 |
+| `versioning.enabled` / `.max_versions` / `.retention` / `.gc_interval` | | 关闭 | 文件版本管理（`.retention` 保留期 0=关闭，`.gc_interval` 周期 GC 间隔 0=关闭） |
 | `hub.enabled` / `.node_id` | | 关闭 | 中继 Hub 配置（`relay_token` 已废除：注册准入由凭据 Ring 的 SproxySig AK+HMAC proof 提供） |
-| `hub.transports.ws.enabled` / `.listen`（预留，未消费）/ `.path`（已废弃，固定 `/ws`，非默认值仅告警忽略） | | 关闭 | WebSocket 传输 |
+| `hub.transports.ws.enabled` / `.listen` | | 关闭 | WebSocket 传输 |
 | `cors.allowed_origins` | []string | | CORS 配置 |
-| `cloud_max_concurrent` | int | 3 | 云端下载并发数 |
-| `cloud_transfer_concurrency` | int | 3 | 转存并发上限（独立于下载槽；0/缺省 = 与 cloud_max_concurrent 相同） |
-| `cloud_sync_threshold` | size | 20MiB | 同步阈值（handler 提交时大小未知恒异步，字段保留供未来按大小同步） |
-| `cloud_max_batch_urls` | int | 100 | 批量/组下载单次最大 URL 数；超过服务端返回 400 使创建失败 |
-| `cloud_download_timeout` / `cloud_download_idle_timeout` | duration | 30m / 1m | 单次下载整体/空闲超时 |
-| `cloud_max_retries` / `cloud_retry_delay` | int / duration | 10 / 10s | 瞬时失败重试 |
-| `cloud_archive_max_bytes` | int64 | 0（不限） | 单次云归档原始文件大小总和上限；归档走 O_EXCL 防覆盖 + TryReserve 配额 |
+| `cloud_download.concurrent` | int | 3 | 云端下载并发数 |
+| `cloud_download.sync_threshold` | size | 100MB | 同步阈值 |
 | `provider.default` | string | | 云端下载提供者 |
 | `provider.timeout` / `.retry` | | | 提供者超时/重试 |
 | `max_storage_bytes` | int64 | 0（不限） | 存储上限 |
 
-所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 已废除（配置忽略，见 `docs/config.md`）；隧道密钥由凭据 SK 经 HKDF 自动派生。生成 SproxySig AccessKey/AccessKeySecret：`sclient trust ak add [--mesh <name>]`（不指定 ak 时本地生成；SK 由服务端或本端生成，`trust renew` 轮换 SK——统一由 `pkg/accesskey` 单一事实源生成，AK=`ak[-<mesh>]-<32hex>`、SK=64hex(32B)）。
+所有超时字段使用 Go duration 语法（`"30s"`、`"5m"`）。`tunnel_key` 已废除（配置忽略，见 `docs/config.md`）；隧道密钥由凭据 SK 经 HKDF 自动派生。
 
 SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效；`addr`/`storage_root`/`owner_quotas`/`rate_limit`/`server_timeouts`/`max_header_bytes`/`tls.enabled` 需要重启进程（`tunnel_key`/`access_keys` 已随凭据 store 化移除——凭据管理与轮换走 `sclient trust`/`/api/credentials`，与 SIGHUP 无关）。
-
-## 认证：SproxySig 请求签名（`pkg/sproxysig`）
-
-服务端**U3 零凭据启动**：store 为空时不再生成首启 anonymous 凭据，系统以零凭据等待注册——首个 admin 经本机回环 `POST /api/credentials/register` 注册（唯一用户入口，原子授 admin；仅回环可达，U2 门禁）。凭据由 `<storage_root>/<owner>/meta/credentials.json` store 持久化，取代旧 `access_keys`。Ring 非空后除
-`/healthz`、`/version`、`/ui/`、`POST /tunnel` 外的全部 HTTP 面（文件/信令/节点列表/
-服务发现/网关/云端下载）走 **SproxySig v2 请求签名**，替代旧 `auth_token` 明文 Bearer 与 v1。
-`api_keys`（多用户 Bearer）与 store 凭据互斥，api_keys 优先。
-
-- **协议头**：`Authorization: SproxySig v=2 ak=<AK> [sk=<entryID>] ts=<unix_ms> exp=<unix_ms> nonce=<16B hex> body_sha256=<hex|UNSIGNED> sig=<hex>`（可选 `sk=<entryID>` 段 = SK 条目 ID `sk-<12hex>`，多 SK 并存时精确锁定被验条目）
-- **签名**：`sig = HMAC-SHA256(SK, "sproxy-sig/v2\n" + ak + "\n" + [entryID] + "\n" + ts + "\n" + exp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + query + "\n" + body_sha256)`（canonical 为换行拼接，v2 在 AK 段后插入 entryID 段，空 entryID 输出空行共 10 段；path 用 `EscapedPath()`，query 用 `RawQuery`）
-- **服务端校验**：按 `ak`+`sk`（无 entryID 时对全部存活条目试签）取 Ring 中条目 SK、重算 sig 恒时比较、`now≤exp`、`exp−ts≤max_ttl(15min)`、nonce 防重放池；带 body 请求客户端**发送前预计算哈希**，服务端流式累加、EOF 比对（防篡改）。**v1 已废弃**：`v=1` 头校验时直接 `ErrVersion` 拒绝
-- **无 body 请求** `body_sha256 = sha256("")`（`sproxysig.EmptyBodyHash()`）
-- **AK/SK 格式（`pkg/accesskey` 唯一事实源）**：AK=`ak[-<mesh>]-<32hex>`（16B 标准；解析层兼容 legacy `ak[-<mesh>]-<16hex>` 8B）；SK=64hex(32B)。**2026-09-05 破坏性变更（alpha）**：旧 `sk-` 前缀 AK 一律不再识别
-- 客户端（sclient/FileClient/mesh/relay/信令）统一 `--access-key`/`--access-key-secret`（或配置 `access_key`/`access_key_secret`，多 SK 时可选 `access_key_id`），Secret 只存本端计算签名、永不上线
-- Web UI 用 **WebCrypto** 计算 HMAC（`crypto.subtle`），AK/SK 存 `sessionStorage`（关页即清）；未配置 AK/SK 时不发签名头（无认证兼容）
-- 生成/轮换 AK/SK：`sclient trust ak add [--mesh <name>] [--role user|node]`（不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；`--role node` 创建 mesh 节点账号——不可访问文件组，默认 `user`）；`sclient trust renew` 轮换 SK（服务端控 TTL，默认 30d）；`sclient trust sk list/delete/expire` 管理 SK 条目（管理员可 `trust ak list/add/delete`）
 
 ## sclient CLI（`cmd/sclient/`）
 
@@ -440,128 +557,26 @@ SIGHUP 重载范围有限：仅 `log_level`/`log_format` 等"软配置"会生效
 
 | 命令 | 用途 |
 |------|------|
-| `upload <file>...` | 上传文件，路径保留目录结构（可选 `--volume` 限定目标卷） |
-| `download <filename> [output]` | 下载文件（可选 `--volume`） |
-| `delete <filename>` | 删除文件（可选 `--volume`） |
-| `batch-delete <file1> [file2...]` | 批量删除多个文件（一次提交避免逐文件 RTT） |
-| `batch-rename <from1> <to1> [from2 to2...]` | 批量重命名（参数成对传入 from/to） |
-| `list` | 列出文件（支持 `--subdir`，可选 `--volume`，受 `cd` 影响） |
-| `volumes` | 列出当前凭据可见的存储卷（name/mode/capacity/usage/allowed；缺省单卷列 default） |
-| `stat [server]` | 显示本地 client 状态或远端服务统计（`stat server`）；文件元信息查询见 `meta` |
-| `meta <filename>` | 查询单文件元信息（含版本历史摘要；子命令 `meta version list/restore/delete` 管理版本） |
-| `search <keyword>` | 搜索文件名 |
-| `mv <from> <to>` | 重命名/移动文件（`--volume` 限定源卷；`--to-volume` 跨卷迁移） |
-| `mkdir <dirname>` / `rmdir <dirname>` | 创建 / 删除空目录 |
-| `preview <filename>` | 预览服务端文件（下载到临时目录并调用本地打开） |
-| `archive <file>...` / `archive-dir <dirname>` | 将服务端文件/目录打包下载为 tar.gz |
-| `cloud-download <url>...` | 云端下载（链式：提交→等待→打包→下载→清理） |
-| `cloud-download-group` | 云端下载到组（链式，支持组管理） |
-| `sync <push\|pull>` | 节点间文件同步 |
-| `share create/list/revoke` | 文件分享管理 |
-| `stats` | 显示服务器统计信息 |
-| `identity generate/show/fingerprint` | 节点长时身份密钥与指纹管理（供对端 pinning） |
+| `upload <file>...` | 上传文件，路径保留目录结构 |
+| `download <filename> [output]` | 下载文件 |
+| `delete <filename>` | 删除文件 |
+| `batch <file>` | 从文件逐行读取命令批量执行 |
+| `batch-delete <file>` | 批量删除（从文件读取文件名列表） |
+| `batch-rename <file>` | 批量重命名（从文件读取 from/to 对） |
+| `list` | 列出文件（支持 `--subdir`，受 `cd` 影响） |
+| `stat <filename>` | 查询单文件元信息 |
+| `search <query>` | 搜索文件名 |
+| `mv <from> <to>` | 重命名/移动文件 |
+| `archive <name> <path>...` | 创建归档 |
+| `cloud-download <url>...` | 创建云端下载任务 |
 | `tunnel [flags] <url>` | 隧道请求 |
-| `relay start/status/...` | 中继节点（连接 Hub）：`relay start --hub wss://.../ws --access-key <AK> --access-key-secret <SK> --node-id N [--service name:addr] [--dial-allow] [--dial-allow-cidr CIDR]` |
-| `relay dial --node <id> --tcp <addr> [-l :port]` | 经 hub 中继拨号到目标节点出口（任意 TCP） |
-| `p2p connect --peer <id> --tcp <addr> [-l :port]` | WebRTC 打洞直连对端（数据面不经 hub） |
-| `p2p listen [--node-id N]` | 作为对端监听 WebRTC 直连（信令经 hub） |
-| `mesh connect <service> [-l :port]` | 连接 mesh 服务（webrtc 直连优先，hub 中继回落；`--gateway <addr>` 经本地 mesh node 网关复用已建直连链路） |
-| `mesh status` | 列出 hub 上的 mesh 服务（`--gateway <addr>` 改查本地 mesh node 直连拓扑/链路类型） |
-| `mesh node [flags]` | 单进程常驻 mesh 节点（注册+中继+webrtc 直连+自动对等发现+本地网关）：`--hub` `--node-id` `--access-key` `--access-key-secret` `--service` `--dial-allow` `--discover` `--discover-interval` `--gateway-addr` |
-| `trust renew` | 调 `POST /api/credentials/{ak}/renew` 轮换 SK（服务端控 TTL，客户端不可传 ttl）；新 SK 自动回填 `access_key_secret`/`access_key_id` |
-| `trust login` | 注册 / 登录获取 AK/SK（首个 admin 经本机回环注册） |
-| `trust sk list` / `trust sk delete <skID>` / `trust sk expire <skID> [--until RFC3339]` | 管理本 AK 的 SK 条目（list 只展示本端能解开的 secret，其余 masked） |
-| `trust ak list` / `trust ak add [--mesh M]` / `trust ak delete <ak> [--force]` | AccessKey 管理（admin-only；ak add 不指定 ak 时本地生成一对并注册，服务端单次回传初始 Secret；ak delete 需交互输入 AK 名二次确认） |
-| `genkey` | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
-| `config [show\|set <k> <v>\|remote]` | 配置管理 |
+| `relay [flags]` | 中继节点模式（连接 Hub） |
+| `genkey` | 生成 64 hex 密钥 |
+| `config [show\|set <k> <v>]` | 配置管理 |
 | `diag` | 诊断连接问题 |
-| `socks -l :port --exit <node>` | 启动 SOCKS5 代理（CONNECT 经 mesh 到指定出口节点） |
-| `udp map -l :udp --exit <node> --remote <host:port>` | UDP 隧道（端口映射） |
-| `version` / `version dirty-info` | 版本 + 配置信息 |
-| `cd [path]` / `pwd` | 切换当前目录 / 打印当前目录 |
-| `completion` / `help` | cobra 内置补全与帮助 |
-
-### mesh 内网穿透（双重 NAT 场景）
-
-任意节点经 hub 注册后可互相寻址；数据面优先 webrtc 打洞直连、失败回落 hub 中继。
-
-**服务宣告 + 访问**：
-```bash
-# 节点 A（被访问方）宣告本地服务，作为出口节点（--dial-allow 允许出站拨号）
-sclient relay start --hub wss://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id nodeA \
-  --service ssh:127.0.0.1:22 --dial-allow
-
-# 节点 B（访问方）连接服务：连接前自动注册自身（webrtc 信令用）；
-# webrtc 直连优先，但需对端同时运行 p2p listen 且信令通过校验，否则默认回落 hub 中继
-sclient mesh connect ssh -l :2222   # 然后 ssh -p 2222 user@127.0.0.1
-```
-
-**云端主动推数据到本地**（方向对称）：
-```bash
-# 本地端（被访问方）先跑：注册 + 宣告本地 2090 服务 + 允许出站拨号（B9 精确放行宣告地址）
-sclient relay start --hub wss://hub:18083/ws --node-id local \
-  --access-key <AK> --access-key-secret <SK> --insecure --dial-allow --service app:127.0.0.1:2090
-
-# 云端节点：经 hub 中继拨本地端 2090 服务（SproxySig 需 --access-key/--access-key-secret，
-# 与服务端凭据 Ring 登记的 AK/SK 一致；自签 TLS hub 需 --insecure）
-sclient relay dial --node local --tcp 127.0.0.1:2090 \
-  -s https://hub:18083 --access-key <AK> --access-key-secret <SK> --insecure
-# 云端即可向该连接写入数据，数据经 hub 中继到达本地端服务
-```
-说明：`relay dial` 双向可用——任意节点可作 caller 拨向另一节点，实现云端→本地主动推送
-（无需本地端先发起数据流）。本地端 `--service app:127.0.0.1:2090` 兼作 mesh 服务宣告与
-出口拨号精确放行（`NewServiceDialPolicy`）；`--insecure` 仅用于自签证书开发/测试，生产用真实证书。
-
-> 注意：`relay start --hub` 默认指向 `ws://127.0.0.1:18084/ws`，与 sproxy 默认监听端口
-> `:18083` **不同**；请始终显式 `--hub` 指定实际 hub 地址（`ws://host:port/ws`）。
-> 另：`relay start --hub` 传 WS 端点（`ws(s)://host/ws`）；`p2p` / `mesh connect --hub`
-> 传 HTTP 基址（`http(s)://host`）即可，也接受 `ws(s)` 自动归一（S123）。
-
-### mesh node 常驻 + 自动对等发现 + 完全服务互访
-
-`mesh node` 取代 `relay start` 作为常驻出口节点（单进程单注册，稳定 node-id + 服务宣告 +
-per-node secret + 断线指数退避重连），并叠加两层能力：
-
-**自动对等发现（全节点互联）**：`--discover`（默认开）周期经 hub 节点列表发现其他 mesh
-node，并行 webrtc 自动直连并保持（半拨号去重：低 ID 拨高 ID，每对一条链接），形成
-full-mesh 拓扑。`--discover-interval` 控制发现周期（默认 10s）。
-
-**本地网关 + 完全服务互访**：mesh node 恒监听 loopback 网关（`--gateway-addr`，默认
-`127.0.0.1:18085`）。`mesh connect --gateway <addr>` 先经本地 mesh node 网关**复用已建立
-的直连链路**路由到目标服务（零重新打洞），本地节点无到目标的已建链路时回落常规拨号
-（webrtc 打洞 / hub 中继，不回归既有路径）。`mesh status --gateway <addr>` 查询本地节点
-直连拓扑（node-id + 服务宣告 + 已建链路及链路类型 `webrtc-direct`）。
-
-```bash
-# 节点 node-svc（服务宿主）：宣告 echo 服务，自动对等发现开
-sclient mesh node --hub ws://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id node-svc \
-  --service echo:127.0.0.1:2222 --dial-allow
-
-# 节点 node-ap（访问方，低 ID）：自动拨号 node-svc，本地网关 127.0.0.1:18085
-sclient mesh node --hub ws://hub:18083/ws --access-key <AK> --access-key-secret <SK> --node-id node-ap \
-  --discover --discover-interval 10s --gateway-addr 127.0.0.1:18085
-
-# 任一机器上：经 node-ap 网关复用已建直连链路访问 node-svc 的 echo
-sclient mesh connect echo -l :2222 --gateway 127.0.0.1:18085
-sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
-```
-
-> 说明：每条已建直连链路**两侧都注册进各自链路池**——拨号侧 `dialPeer` set + accept 侧
-> （discovery 拨号临时身份 `disc-<base>-<unixnano>` 经 `parseDiscoveryPeerID` 恢复真实
-> node ID 后注册，`removeIf` 防重连竞态），故**任意节点的网关都能双向路由**到任意已建
-> 链路对端的服务（完全服务互访，半拨号去重仍保持每对一条链接）。拨号侧链路上同时跑
-> `relay.Serve`（接受对端网关回拨）。
->
-> **disc- 身份防冒充**：discovery 临时注册（`disc-<base>-<unixnano>`）由 hub 注册时强制
-> 校验——base 必须等于 `real_node_id` 且持有该真实节点 per-node secret 的 HMAC 证明
-> （fail-closed 拒绝，`hub.ParseDiscNodeID` 单一实现供注册校验与 accept 侧解析共用），
-> 故 accept 侧解析的 base 即 hub 已验证、不可伪造；accept 侧另有半拨号序校验
-> （`peerID<nodeID`）作纵深，根除冒充他人污染链路池的投毒/MITM。
->
-> **网关安全边界**：网关仅监听 loopback（`--gateway-addr` 传非 loopback 地址会被
-> fail-closed 拒绝——远程访问应经 mesh 本身而非网关，防被用作开放 mesh 中继）；mesh
-> node 配置了 `access_key`/`access_key_secret`（SproxySig）时，网关对 connect/status
-> 请求校验相同凭据（mesh connect/status 自动签名），未授权本地进程无法复用网关路由。
+| `version` | 版本 + 配置信息 |
+| `cd [path]` | 切换当前目录 |
+| `pwd` | 打印当前目录 |
 
 ### sclient 当前目录（`cd`/`pwd`）
 
@@ -582,19 +597,6 @@ sclient mesh status --gateway 127.0.0.1:18085   # 直连拓扑 / 链路类型
 旧路径 `~/.sclient.yaml` 读取并提示迁移。`--config` flag 可完全覆盖默认路径。
 
 环境变量前缀 `SCLIENT_`（如 `SCLIENT_SERVER_URL`）。
-
-**多环境**：`SCLIENT_ENV=prod` 时默认加载 `sclient.prod.yaml`（同一目录下），便于维护
-prod/staging/dev 多套配置。**通用 mesh 配置键**（`sclient config set` 支持）：
-- `server_url` — 服务器地址
-- `access_key` / `access_key_secret` — SproxySig 认证 AK/SK（与服务端凭据 Ring 登记的 AK/SK 一致；Secret 只本端计算签名，永不上线）。多 SK 时可配 `access_key_id`（SK 条目 ID，`trust renew` 自动回填）
-- `hub_url` — mesh/relay/p2p 共用 hub 地址（http(s)/ws(s)，可带 /ws 路径）
-- `relay_token` — **已废除**（不再有该配置键）：hub 注册准入由服务端凭据 Ring 的 SproxySig AK+HMAC proof 提供；配置该键不生效
-- `node_id` — 本节点默认 ID（为空回落主机名）
-
-mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
-`--access-key`/`--access-key-secret`/`--access-key-id` 未显式指定时按 `CLI flag > 配置文件 >
-默认值` 回落（relay start 的 `--hub` 默认值已改为空，本地默认 `ws://127.0.0.1:18084/ws`
-在 runRelayStart 内解析）。
 
 ## 多层级目录支持
 
@@ -639,15 +641,6 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
 - **`pkg/server/integration_test.go`** — `newTestServer` + `newTestServerWithAllRoutes` 等变体
 - **`pkg/client/client_test.go`** — `newMockServer`（sproxy 兼容的 mock 服务端）
 - **`test/e2e_test.go`** — `startSPROXY`（构建真实二进制并启动的端到端测试辅助）
-- **`test/e2e_cli_harness_test.go`** — **CLI 真服务 e2e harness**（`//go:build e2e`，`package sproxy_test`）：
-  `startCLIEnv(t, extraConfig)` 复用 `startSPROXYImpl` 起真实 sproxy 子进程 + `e2eBinPath(t,"cmd/sclient")`
-  构建的 sclient 二进制；`(e *cliEnv).sclientRun/sclient/sclientJSON` 以**子进程**驱动 CLI
-  （自动注入 `--config <不存在路径>` 与 `XDG_CACHE_HOME`/`XDG_CONFIG_HOME` 隔离本机用户态，
-  以及 `--access-key/-secret/-id` 走加密隧道）；`findFilesNamed`/`findFilesPrefixed`（磁盘副作用）、
-  `getJSON`（签名 HTTP 接口交叉核对）、`rawGET`（公开 `/s/{token}`）为断言原语。
-  新增 CLI 用例请按命令族拆到 `test/e2e_cli_<族>_test.go` 并复用上述 helper；入口 `make test-e2e`
-  （递归 `./test/...`，含 `test/e2e/` 子包）。**断言铁律**：每条正例 CLI 调用必须落到真实副作用
-  （磁盘文件内容/checksum 或签名 API 响应），不得只断退出码或 stdout 含某字样。
 - **`pkg/tunnel/xfer/xfertest/`** — 跨传输实现的通用测试套件（`harness.go`, `pipe.go`, `suite.go`）
 - **`pkg/testutil/mockserver/`** — mock HTTP server
 - **`pkg/testutil/mockdht/`** — mock DHT
@@ -661,11 +654,10 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
 5. **Viper 隔离** — 测试优先使用 `viper.New()` 创建独立实例而非 `GetViper()` 全局单例（`LoadFromViper(v *viper.Viper)` 已接受参数）。
 
 ### 测试注意事项
-1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 access_key/access_key_secret 等配置，导致测试意外通过隧道/认证通信。
+1. **E2E 测试配置隔离** — 启动 sclient 子进程时，必须用 `--config` 指向临时配置文件，不要只用 `--server` flag。`--server` 不会阻止加载本地 `~/.config/sproxy/sclient.yaml` 中的 server_url/凭据等配置，导致测试行为被本机配置污染。
 2. **`-race` 下超时翻倍** — 含 goroutine 的测试（特别是 mux/p2p）在 `-race` 下运行时间显著增加。Context timeout 设置时留足余量，推荐正常值的 3 倍。
 3. **覆盖率测量排除`test/`和`tools/`** — `go test -cover ./...` 包含 E2E 测试包和工具包会稀释 total 覆盖率。正确做法：`go test -cover ./internal/... ./pkg/... ./cmd/...`
 4. **Makefile 修改优先用 Edit tool** — sed 处理 Makefile 的多行模式（反斜杠续行、`$$` 转义、`{` `}`嵌套）极其脆弱。复杂修改用 Read + Edit 工具。
-5. **`test/` 由 `//go:build e2e` 门控** — `test/*.go`（真二进制 e2e 套件）带 `//go:build e2e`，默认单测（`make test` / `go test ./...`）不编译、不运行；显式入口为 `make test-e2e`（`go test -tags=e2e ./test/...`，递归，CI e2e job 调用），tag 化前后覆盖场景 1:1 不丢门禁。`make test-e2e` 递归 `./test/...`，`test/e2e/` 子包（CLI 真服务二进制 e2e）一并纳入门禁。
 
 ### 测试模式清单
 
@@ -695,7 +687,7 @@ mesh connect / relay start / p2p / mesh node 的 `--hub`/`--node-id` 与全局
 
 ## 可用 Skills
 
-Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` 文件。
+Skills 位于 `.Codex/skills/` 目录，每个 skill 有独立的 `SKILL.md` 文件。
 
 <details>
 <summary>展开查看 20 个 skills 列表</summary>
@@ -717,7 +709,7 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 - **using-git-worktrees**: 当需要开始与当前工作区隔离的功能开发，或在执行实现计划之前使用——通过原生工具或 git worktree 回退机制确保隔离工作区存在
 - **using-superpowers**: 在开始任何对话时使用——确立如何查找和使用技能，要求在任何响应（包括澄清性问题）之前调用 Skill 工具
 - **verification-before-completion**: 在宣称工作完成、已修复或测试通过之前使用，在提交或创建 PR 之前——必须运行验证命令并确认输出后才能声称成功；始终用证据支撑断言
-- **workflow-runner**: 在 Claude Code / OpenClaw / Cursor 中直接运行 agency-orchestrator YAML 工作流——无需 API key，使用当前会话的 LLM 作为执行引擎。当用户提供 .yaml 工作流文件或要求多角色协作完成任务时触发。
+- **workflow-runner**: 在 Codex / OpenClaw / Cursor 中直接运行 agency-orchestrator YAML 工作流——无需 API key，使用当前会话的 LLM 作为执行引擎。当用户提供 .yaml 工作流文件或要求多角色协作完成任务时触发。
 - **writing-plans**: 当你有规格说明或需求用于多步骤任务时使用，在动手写代码之前
 - **writing-skills**: 当创建新技能、编辑现有技能或在部署前验证技能是否有效时使用
 
@@ -729,124 +721,3 @@ Skills 位于 `.claude/skills/` 目录，每个 skill 有独立的 `SKILL.md` �
 
 如果你认为哪怕只有 1% 的可能性某个 skill 适用于你正在做的事情，你必须调用该 skill 检查。
 <!-- superpowers-zh:end -->
-
-## 记录
-
-### 跨文件隐式全局陷阱（formatSize/escHtml 转发删除事故）
-- **教训**：`app.js` 曾定义 `formatSize`/`escHtml` 等转发函数（委托 `appRender`），为去重整体删除后，**页面其他文件（upload.js）仍有裸调用** → 运行期 `ReferenceError: escHtml is not defined`（上传时才触发）。
-- **根因**：`node --check` 只做语法解析、**不做跨文件符号解析**；`make web-test` 只测 app.js 相关，`upload.js` 的调用点从未被单测覆盖；浏览器只测列表加载、没触发上传操作 → 错误路径完全未被触及。
-- **规则（避免重演）**：
-  1. **渲染工具一律走 `appRender.xxx` 命名空间**（`formatSize`/`escHtml`/`getChecksumPrefix`/`bytesToHex`），**禁止在 app.js/upload.js 内再定义同名函数**；
-  2. 签名/SHA-256 一律走 `sclientCrypto`/`sclientSig`，同理禁止页面层重复定义；
-  3. **所有引用跨文件隐式全局的文件**（upload.js 引用 `currentSubdir`/`showToast`）须在文件顶部 `// global：<名>（<提供文件>）` 注释显式声明调用方，加载序安全靠 index.html script 顺序（调用点运行期解引用）；
-  4. **补 `node --check` 覆盖每个非 cli 的静态 JS**（Makefile web-test 已把 upload.js 纳入）；
-  5. **可测入口**：进度文案纯函数双入口（`app-render.uploadProgressText`），避免埋 DOM 依赖；其余纯函数一律放 app-render 并在 app-render.test.js + upload.test.js 覆盖。
-  6. **回归验证必须触发用户报错路径**：列表加载 ≠ 上传；至少实测一次真实上传 + 断点续传 + 列表刷新 + 分享/版本弹窗，并确认 console 无 error。
-- 已固化：`Makefile` 加 `node --check web/static/upload.js`；`upload.js` 顶部显式 `// global` 声明；`appRender.uploadProgressText` 可测入口。
-
-### 云端下载文件名生成规则（双端共享）
-- 规则唯一实现：Go `pkg/cloudfilename`（`DefaultFromURL` / `Safe` / `ResolveFilename` / `ValidateEntries`）+ JS `web/static/cloudfilename.js`（UMD，浏览器全局 `cloudfilename` 与 Node 导出双用）。
-- **一致性靠共享语料保证**：`pkg/cloudfilename/testdata/cases.json` 是权威语料，Go 测试 `TestDefaultFromURL_FromFixture` 与 JS 测试 `web/static/cloudfilename.test.js`（`make web-test`）都断言它 → 双端任一改规则导致不一致，测试立即失败。
-- **`DefaultFromURL` 返回即安全文件名**（内部已调用 `Safe`），调用方无需再额外包装；JS 对应 `safeDefaultFromURL`。
-- **`Entry` 类型**（URL + Filename）定义在 `pkg/cloudfilename`，client 与 server 共用（不再各自定义 CloudDownloadEntry / CloudBatchURL）。
-- **`ResolveFilename(e Entry)`** 校验+解析文件名：显式 Filename 含非法字符返回哨兵错误 `ErrEntryUnsafeFilename`（**只校验不修改**，不静默改写保存名）；Filename 为空则按 URL 自动生成。
-- **`ValidateEntries(entries)`** 统一做 URL scheme/host 校验 + 同 URL 不同 filename 去重（`ErrEntryDupURL`）；client 批量/组创建前调用，server `validateCloudDownloadURL` 用 `ValidateEntry` + `ResolveFilename`。
-- wget 行为：路径以 `/` 结尾 → `index.html`（`/xx/?a=v` → `index.html_a=v`，`?` 被 Safe 替换为 `_`）；raw query 直接附加在文件名后；路径最后一段百分号解码。
-- Go 用 `url.Parse`（path 已解码一次）+ `url.PathUnescape`（二次解码，**不把 `+` 转空格**）；JS 用 `parseURL`（从原始字符串提取 rawPath/rawQuery/hash）对齐 Go url.Parse，**不能**用 `new URL().pathname`（WHATWG 会折叠点段、归一化 query）。
-- **Go/JS 语义差异（已对齐并录入语料）**：
-  - 非法百分号编码 → 两端都返回 `"download"`，但 **Go 只校验 path 与 fragment**，query 原样保留（`?x=100%` → `file.txt?x=100%`）。JS 正则必须只查 `rawPath + hash`，**不能查整个 href**（否则 query 非法 `%` 误判 download）。
-  - Go `url.Parse` **不做点段归一化**（`/dir/..` 保留）；JS 从原始字符串提取未归一化路径，不能直接读 `pathname`。
-  - **query 原样保留（两端一致）**：JS 用 raw query（不做归一化），与 Go `parsed.RawQuery` 一致——`?x=中文`、`?x=a b`、`?x=%E4%B8%AD%E6%96%87` 均已入语料（历史曾因 JS 用 WHATWG `search` 归一化产生分歧，已修复）。
-  - 已知接受的分歧（畸形输入，不入语料）：非法 UTF-8 字节序列（`%FF`）首次解码时 Go `url.Parse` 按字节解码、JS `decodeURIComponent` 抛错返回 download；双重编码 `%25FF` 二次解码时 Go `PathUnescape` 解出原始字节、JS 保留字面 `%FF`（JS 无法表示非法 UTF-8 字节）。
-- `Safe` 替换 `\ / ? : < > | " *` 与 NUL 为 `_`；`=` `&` 保留；Trim 首尾空格与点；**抵御 Windows 保留设备名**（CON/NUL/PRN/AUX/COM1-9/LPT1-9 加 `_` 前缀）；**按 254 字节截断**（优先保留扩展名、不劈开 UTF-8 字符）；结果为空返回 `"download"`。
-- 注意：`url.QueryUnescape` 会把 `+` 转空格，**不要**用它做路径段解码（历史上导致与 wget/JS 不一致）。
-
-### If-Range 续传一致性校验
-- `Result.ETag` 字段已加入；`writeFullBody` / `handleRangeResume` / `finalizePartial` 三条完成路径都会把 ETag 写入 `.partial.etag` 伴侣文件。
-- 续传时发送 `If-Range` 头；服务端返回 200 = 不匹配 → 删除 partial+etag 回退全量下载；416 三条分支（finalize / 全量重下 / stale partial 全量重下）。
-- **416 收尾必须有内容身份确认**：`416 + total==existingSize` 只有在**缓存 ETag 与 416 响应 ETag 匹配**时才走 `finalizePartial`；否则回退全量重下。否则"同尺寸但内容已变"的陈旧 partial 会被静默收尾为错误文件（数据损坏）。回归测试：`TestHTTPDownloader_RangeResume_416SameSizeStalePartialRedownloads`。
-- **206 续传必须交叉校验 ETag**：`handleRangeResume` 接收 cachedETag，若响应 ETag 非空且与发送的 If-Range 不同（服务端忽略 If-Range），回退全量下载，防止新旧内容拼接成混合文件。回归测试：`TestHTTPDownloader_IfRange_ServerIgnores_206NewETag`。
-- 教训：`finalizePartial` 曾只返回 ETag 却不 saveETag，被测试捕获——**三条完成路径的 ETag 落盘必须一致**。
-
-### 文件名预览流程（Web UI）
-- 用户输入 URL → 预览界面显示每个 URL 的自动生成文件名（已做 `filepathSafe`，**预览即最终保存名**，避免"预览 a/b 实际保存 a_b"）→ 用户可修改 → 确认后提交。
-- 三个按钮（链式下载/仅提交/创建组）都经过预览确认流程；批量/组下载每个 URL 可独立指定保存文件名。
-- 创建组时前端本地预检文件名冲突（与服务端 `CreateGroup` 规则一致），冲突在发送前拦截，避免 409 往返。
-
-### 暗色模式对比度（WCAG AA）
-- 文字 token：`--text-primary` #e8e8f0、`--text-secondary` #c0c4d0、`--text-muted` #989aad；背景层次 `--bg-page` #12122a / `--bg-container` #1a1a3e / `--bg-hover` #252550。
-- 按钮/提示 token 全部按**白字 ≥4.5:1** 校准：primary `#3a6ea5`、danger `#b84040`、warning `#9c6a10`、share `#2e6f70`、toast-success `#1e8449`/error `#c0392b`/warning `#9c6a10`/info `#2b6cb5`。改暗色 token 时用相对亮度公式逐色验证（勿用原 #4a8cd6 之类浅色配白字）。
-- **陷阱 1**：`style.css` 中 `@media (prefers-color-scheme: dark)` 块用 4 空格缩进、`[data-theme="dark"]` 块用 2 空格缩进 → `Edit` 的 `replace_all` 只能命中一种缩进。改暗色 token 必须**同时更新两处**并 curl 验证（`grep -c` 应为 2）。
-- **陷阱 2**：index.html 内联样式与 app.js 动态 HTML 曾硬编码亮色（`#dir-bar` 背景 `#f0f4ff`、目录行 `#f8f9fa`、tab 激活 `#4a90d9`、`#333/#666/#888/#777/#555/#eee/#ccc`），暗色下直接不可读且被 Lighthouse 标记。新 UI 一律走 CSS 变量，禁止内联亮色。验证：`chrome lighthouse snapshot (dark)` 的 color-contrast 必须 score=1。
-- 三个 tab 切换函数（stats/share/cloud）的 JS 里 `el.style.color` 也要用 `var(--tab-active)/var(--text-primary)/var(--text-secondary)`，不能硬编码。
-
-### 组创建保证无文件冲突
-- `CreateGroup` 在创建子任务前先校验所有 URL 的文件名（`ResolveFilename`：显式 filename 或按 URL 自动生成）是否唯一，冲突返回 409 并回滚（不泄漏任务与存储预留）。
-- 去重命中（相同 URL 已属其他组）同样拒绝并入组；客户端可指定 `filename` 字段消除冲突。
-- CLI `group` 命令在发送前用共享 `cloudfilename.ResolveFilename` 本地预校验并打印 URL→文件名计划；`--url-file` 每行 `URL<TAB>FILENAME` 可指定保存文件名。
-
-### 禁止静默失败（原则 + 已修复清单）
-- 任务终态（completed/failed/cancelled）的持久化失败不能只打 Warn：`saveTask`/`saveGroup` 写盘失败意味着重启后状态回滚。已改为**返回 error**，终态调用点（完成/fail/cancel/resume、组状态变更）记 **Error 日志**；进度类 dirty flush 仍容忍。
-- 清理类 I/O（`_ = os.Remove(...)`）可容忍失败，但**状态流转与存储账本（ReservedSize）不能静默不一致**；释放前先归零防二次释放。
-- 网络/超时错误要显式分类（可重试 vs 终态），避免"失败被吞掉后任务永久挂起"或"不可重试错误反复重试"。
-- **已修复的静默失败/可靠性缺陷**（审查确认）：
-  - 去重命中对副本重复启动下载（Critical）：`SubmitAndStart` 现在同步置 `running` 再 `go`，`running` 已置即跳过启动——防止同一 URL 无限并发下载 + 存储账本变负。
-  - 完成路径覆盖取消/删除（Important）：写 `completed` 前复查任务存在且未被取消，取消的任务丢弃已下载文件。
-  - 取消/启动边界竞态（Important）：executeDownload 启动前、取得信号量后复查 `cancelled`；排队取消不再 `failTask`（避免 cancelled→failed 反转）。
-  - 组回滚误删既有任务（Important）：`CreateGroup` 回滚只删本次新建任务，去重吸收的既有任务仅清除组归属。
-  - 失败任务存储账本欠计（Important）：`failTask` 按磁盘实际占用对账，保留 `.partial` 时账本不欠计。
-  - CLI `wait` 静默吞轮询错误（Important）：轮询/初始获取失败改为返回 error，不伪造 failed。
-  - 链式下载部分失败静默成功（Important）：`submitTasks` 提交失败即报错、`waitForTasks` 有失败任务即返回错误，不再无条件打印"完成"。
-
-### 开发环境陷阱：sproxy 双进程
-- `go build -o build/bin/sproxy`（无扩展名）与 `build/bin/sproxy.exe` 是两个可执行体；旧进程会一直占用端口，导致新二进制不生效（curl 拿到旧 CSS/旧行为）。
-- 重启前必须**两个都杀**：`taskkill //F //IM sproxy.exe` 和 `taskkill //F //IM sproxy`；然后确认 `curl /healthz` 无响应再起新进程。
-
-### 字符串转义注意事项
-- Go 源文件中 `"\\"` 在 JSON/JS 编辑时需要双重转义。
-- `tools.edit` 的 `old_string` 必须精确匹配源文件内容。
-
-### Sonar 质量门禁清理 + CI 覆盖架构（2026-10-01 战役）
-> 完整踩坑记录见 `docs/archive/sonar-ci-experience.md`；以下为高频要点。
-- **NOSONAR 只认行尾**：`code // NOSONAR: 规则 — 理由` 必须写在被标记行末尾；「独立上一行」格式 SonarGo 不识别（#692/#698 白加、#704 修正后清零）。多行理由留前置注释。
-- **Sonar 专属规则 lint 查不到**：S8242（结构体 ctx 字段，S107 收敛必触发）、S8196/S8209 等 godre 规则 golangci-lint 0 issues 也漏——等价重构后必须 **Sonar 复扫验证**，不能只信本地 lint。
-- **覆盖率口径**：本地 cover-check 81.4% 是「根 module 语句覆盖」；Sonar 33.3% 是「全仓行覆盖」（分母含 15 子 module + 测试文件，一条语句跨 1~3 行）——两者差 2.4 倍**正常**，不可直接比较。Sonar 总体覆盖率对 Go 参考价值有限，价值在 issue 规则维度。
-- **go.work 下 `./...` 只测根 module**（实证 82 包、16 子 module 零命中）→ `make test-cover` 只覆盖根 → Sonar 把子 module 按 0% 稀释。聚合用 `make test-cover-all`（cd 进子 module + GOWORK=off + coverprofile 绝对路径 → 覆盖记录为 import path，与根同构）。
-- **等价重构「制造」低 new_coverage**（度量伪象非回归）：S107/S3776 拆方法行号全变，Go 行级覆盖不匹配新行 → Sonar 算成未覆盖新代码。重构 PR 应配套补关键分支测试。
-- **MinIO 挂 test job 是死配置**（s3 集成在子 module，根 `./...` 不跨）→ 迁 test-submodules + `S3_ENDPOINT` 首次实跑，暴露并发 `MakeBucket` TOCTOU（用 `BucketAlreadyOwnedByYou` 容忍修复）。
-- **fuzz 必须限时**（`-fuzztime=30s`）并放 chaos job（非常规类别），不进常规 test。
-
-### Sonar 覆盖率数字解读（33.3% vs 本地 81.4%）
-- Sonar `lines_to_cover`（139,523）**超过任何源码行统计**（非空非注释行 94k）：其行级机制把多行语句起止区间全计入 + ncloc 含测试文件（158k 测试行）。
-- `sonar.test.exclusions=**/*_test.go` 已配（测试文件不计分母）；`.pi/**` 已排除。
-- **提升 Sonar 覆盖率的正确路径 = 补低覆盖子 module 测试**（baidupcs 48.6%/s3 49.6%/sclient 主包 67.2%），不是调口径。
-
-### 双引擎排除纪律（lint + Sonar，2026-10-02 落地）
-> 规则见 AGENTS.md 硬规则 18；代码侧 .golangci.yml 已启用 containedctx（对齐 S8242）与 gocognit=15（对齐 S3776）。
-- **优先设计修复，禁止自动排除**：新告警先拆分/收编/方法化消除；只有**人工确认**设计特意保留才算（长期驻留循环 ctx、webdav.File 无 ctx 参数的存储 ctx、状态机编排）。3 处生产 gocognit（CloudDownloadChain.Run / doRequestPrepared / Config.Validate）已设计拆分而非排除。
-- **双标记格式（两引擎都认）**：golangci 只认**注释开头**的 `//nolint`（`// NOSONAR //nolint:gosec` 同注释无效）。正确：
-  ```go
-  //nolint:containedctx // S8242：单次操作作用域共享 ctx（设计保留）
-  ctx context.Context // NOSONAR: S8242 — 同理由
-  ```
-- **铁律**：排除必须成对（Sonar Sxxx + golangci linter 名），缺一即漂移；复杂度>15 先拆不排除。
-
-### Sonar 高频反模式速查（写代码直接避免，2026-10-05 沉淀）
-> 完整清单见根 `AGENTS.md`「Sonar 质量门禁常见反模式」；本文件记 sproxy 实测反复命中的：
-
-- **禁止 `max`/`min`/`cap`/`len` 作局部变量**（go:S978）——用 `mx`/`mn`/`n`（实测 config.go transferConcurrencyEffective 命中）。
-- **测试 err 不赋局部变量**（godre:S8193/S4144 族）：`if err := f(); err != nil { t.Fatalf }` 直写；测试断言与既有用例完全相同 → 合并/参数化，不复制。
-  **S8193 判据补充（2026-10-07 实测）**：变量声明后**只在条件里用一次**（`if x := f(); x != nil { return }` 且 x 在分支内不再用）→ 内联 `if f() != nil`；**若 x 在分支体内复用（如 `t.Fatalf("... %v", jerr)`）必须保留声明**——两处 `json.Decode` 分别处理（断言 Fatalf 保留 / WaitFor 闭包 return false 内联）。
-- **空函数必须括号内注释**（go:S1186）：`func() {}` 返回空闭包（no-op release 等）→ 在 `{}` **内部**写 `func() { /* 理由 */ }`——函数体外行注释 Sonar 不识别（2026-10-07 实测 acquireCheckMem 空 release 命中）。
-- **字符串字面量重复**（go:S1192）：同一字面量（如 Kind 注册键 `"archive/tar"`）≥3 处 → 提包级常量（`const TarKind = "archive/tar"`，Register/Kind 共用）。
-- **参数过多**（go:S107）：>7 参函数 → 相关参数归组 struct（本仓先例 srcMeta/finalizeRequest；ctx 保持首参——containedctx 纪律）。
-- **单方法接口命名**（godre:S8196）：能力接口（`WriteIfAbsent`/`ReserveSpace`/`LocalVolume`）命名表达能力语义 = 设计保留，行尾 `// NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留`。
-- **测试认知复杂度**（go:S3776）：表驱动断言抽 `assert*` helper；mock 路由 switch 抽独立 handler 函数（实测 transfer_test/account_test/hybrid_multiaccount_test 命中）。
-- **大函数/并发测试拆子函数**（go:S3776）：长并发/阶段测试把「执行」与「断言」分开（如 runLockstepWorkers + assertConcurrentDayUsed）。
-- **测试复杂度可直接豁免（2026-10-05 用户明示）**：测试内 mock 路由 switch / 复杂断言等 S3776 **允许直接双标记豁免**（`//nolint:gocognit` 行首 + 行尾 `// NOSONAR: S3776`）——测试非生产逻辑，**不为解决而解决**、不做无谓重构（拆多函数伤可读性）。生产代码才须真正拆分。
-- **测试文件 issue 收紧（2026-10-05 用户裁定）**：Sonar 对 `*_test.go` 的分析只关心 bugs/vulnerabilities 与正确性（race、mock 契约、断言有效性）；**code smells（S3776/S8196/S978/S8193）在测试文件上直接忽略**——本仓实测测试文件 bugs/vuln 恒 0，正确性由 `-race`/archcheck/e2e 保障，Sonar 测试 code smells 无增量价值。
-- **硬编码盐**（go:S2053）：KDF 盐必须版本/随机派生（`secretExportKey` 单一 helper，禁字面量散落）。
-
-### PR title 纪律（2026-10-05 用户明示）
-- **title 只含功能维度**：`type(scope): 能力描述`——禁止携带「rebase / 审核 / sonar 修复 / 代码评审 / 第二轮」等**功能无关信息**（这些是过程，不是交付物）。squash 合并后 title 会成为 changelog 条目，只描述交付了什么能力。
-- 过程信息（rebase 复核、评审轮次、Sonar 清理）写进 body（背景段），不进 title。
