@@ -93,8 +93,19 @@
 
 ## 执行偏好
 
-- **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能，禁用 worktree，直接在当前分支开发。
-- **worktree**：除非用户明确要求，不使用 git worktree。
+- **worktree（强制；用户 2026-11-13 明示，取代此前的「禁用 worktree」）**：
+  **所有 agent 一律在独立 git worktree 内改动代码**，**绝对禁止直接在主库工作区修改任何文件**
+  （含源码 / docs / 配置 / 脚本）。
+  - 开工前先建：`git worktree add .worktrees/<task> -b <branch> origin/master`；
+  - 之后**只在 `.worktrees/<task>/` 内**编辑、提交、推送；
+  - **主库工作区只读**：仅允许 `git fetch` / `git worktree` / `git branch --show-current` 等**只读**操作；
+    严禁在主库 checkout 分支、编辑文件、跑 `make fmt`/`gofmt -w` 之类**会改文件**的命令。
+  - 理由（实测教训）：并发会话与子代理共享同一主库 ⇒ 直改主库会**互相覆盖**、
+    **污染他人在途改动**、使 `rebase`/diff 不可控（本仓已发生过他人在我分支上 rebase 导致
+    `cannot lock ref ... expected <sha>` 的事件）。
+- **子代理开发**：多步骤实现计划优先使用 `subagent-driven-development` 技能；
+  **每个子代理必须独占一个 worktree**（`subagent({workflow:"parallel"})` 的 `worktree:true`，
+  或显式 `cwd` 指向其专属 worktree），**不得共享工作区**。
 - **使用中文思考**
 - **提交/发布相关任务先加载项目 skill**：`.pi/skills/sproxy-release-discipline/SKILL.md`（提交信息格式、破坏性变更标注与补救、release-please 发布纪律）——凡涉及 commit message 规范、BREAKING CHANGE 标注、squash 合并、release PR 审校、版本号校验的任务，按需加载该 skill 后执行。
 - **文档产出/合并前先加载项目 skill**：`.pi/skills/sproxy-docs-lifecycle/SKILL.md`（文档生命周期纪律）——凡涉及设计/计划/规格文档产出、PR 合并前文档完整性审核、docs/ 结构变动、文档清理/归档的任务，按需加载该 skill 后执行。**核心约束：每次 PR 合并前将已完成的设计文档合并到权威文档（docs/*.md）；squash 合并前审核文档完整性正确性；多阶段任务允许跨 PR 但最终必须收敛成权威文档或归档精华（docs/archive/），过程产物不留 master。**
