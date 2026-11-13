@@ -34,6 +34,19 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `registration.login_fail_limit` | int | `5` | per-AK TOTP 登录失败锁定阈值（U4）：连续失败达此数即进入锁定窗口 |
 | `registration.login_fail_window` | duration | `15m` | per-AK 登录失败锁定期（U4）：达阈值后锁定该时长，到期自动解锁 |
 | `allow_insecure_loopback` | bool | `false` | 无任何凭据时（ring 空）放行 loopback 来源的 GET/HEAD（仅本地调试；生产勿开） |
+| `auth.allow_ips` | []string | (空) | 来源 IP 白名单（CIDR 列表；纯 IP 归一 `/32`、`/128`）。非空 = **认证前 IP 门**：真实客户端 IP 不在任一网段 → `403 forbidden: ip not allowed`（Warn 日志，不落审计）。空 = 不启用（零回归）。生效范围见下方说明 |
+| `auth.trusted_proxies` | []string | (空) | 信任的反向代理来源 IP/CIDR（同支持纯 IP）。**仅**命中时才解析 `X-Forwarded-For`（从右向左取首个非信任项）供 IP 门与 per-IP 限流桶键共用；空 = 一律忽略 XFF（防伪造）；畸形/超长/全信任链 → 回落 `RemoteAddr`（fail-closed） |
+
+> **认证前 IP 门生效范围**（`auth.allow_ips` 非空时）：
+> - **覆盖**：所有经 `authMiddleware` 的路由（文件组、cloud/audit/config/hub/凭据管理/`/tunnel`、`/dav/` 等）
+>   在**认证链最前**先判 IP（未授权来源含合法签名/Bearer 也直接 403，不泄露认证面）；
+>   公开凭据端点 `POST /api/credentials/{register,nonce,login}` 与 OIDC/LDAP 登录面同样挂门。
+> - **不覆盖**：`/livez`、`/readyz`、`/healthz`、`/version`、`/metrics`、`/ui/`（探活与静态资源须可达）
+>   与 `/s3/`（自带 SigV4 验签、不经 `authMiddleware`，打到 `/s3/` 的请求不受本门约束）。
+> - **回环不自动放行**：白名单必须显式包含 `127.0.0.1`/`::1`，否则运维本机来源恒 403；
+>   启动时对「已启用但未含回环」打印响亮警告（区分于 `allow_insecure_loopback` 语义）。
+> - 非法 CIDR → **启动校验拒绝**（fail-closed，不静默忽略）；反向代理部署必须同时配 `auth.trusted_proxies`，
+>   否则白名单按直连 IP 判定（代理来源恒 403）。
 | `credential_ttl` | duration | `720h` (30d) | 新建 SK 条目有效期（renew 新 SK 用，服务端控 TTL；默认 30d） |
 | `credentials.rotation.interval` | duration | `0`（关闭） | 凭据定期自动轮换调度周期：`> 0` 时启用（如 `24h`），`0`/缺省 = 关闭（零回归）。变更需重启进程生效（与 SIGHUP 硬配置同语义） |
 | `credentials.rotation.notify_before` | duration | `168h` (7d) | 到期前提前轮换的提前量：SK 到期时间 ≤ now+此值即触发 renew（避免到期当天才换的断链窗口） |
@@ -119,6 +132,16 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.rules[]` | array |  | 路由规则：`{action: "upload"|"*"|..., object: "", channels: ["wecom"]}`——action 精确或 `*`（全部），object 空 = 全部对象 |
 | `notify.debounce` | duration | `1m` | 同 action+object+渠道 去抖窗口：窗口内重复事件只发一次（恢复后再次触发再发） |
 | `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
+| `notify.ai_advisor.enabled` | bool | `false` | 告警根因建议（LLM）：`true` 且 `api_key_ref` 解析出非空 key 才装配；未解析到 key → Warn 一次并降级固定模板（fail-closed，AI 失败/未启用不影响告警投递）。**重启生效**（SIGHUP 不热载） |
+| `notify.ai_advisor.provider` | string | `openai` | `openai` / `anthropic`（Anthropic 走同一 OpenAI 兼容 JSON 形状；未知值回落 `openai`） |
+| `notify.ai_advisor.base_url` | string | (空) | 空 = provider 默认（`openai`: `https://api.openai.com/v1`、`anthropic`: `https://api.anthropic.com/v1`）；自建网关可配 |
+| `notify.ai_advisor.api_key_ref` | string | (空) | **存放 key 的环境变量名**（如 `SPROXY_OPENAI_API_KEY`）；`enabled=true` 时非法环境变量名启动校验拒绝；key 本体不落 yaml/日志（`api_key` 字段 `yaml:"-"`，仅装配期内存持有） |
+| `notify.ai_advisor.model` | string | (空) | 空 = provider 默认（`gpt-4o-mini`） |
+| `notify.ai_advisor.timeout` | duration | `10s` | 单次 LLM 请求超时；`<=0` 回落 `10s`（响应体读取上限 64 KiB） |
+
+> `notify.ai_advisor` 生效形态：告警 fire/recover 通知组装后**同步**追加「【AI 建议】」段（建议截断 ≤1000 字）；
+> 建议为空（未启用 / 无 key / 网关失败 / 超时）即固定模板原样，绝不吞掉告警。出口走 `pkg/llmgate`
+> （`pkg/server/alerts.NewAIAdvisorFromConfig` 装配，`AlertEngine.SetAdvisor` 注入）。
 | `notify.channels.wecom.webhook` | string | (空) | 企业微信机器人 Webhook URL（配置后启用 wecom 渠道；markdown 消息） |
 | `notify.channels.serverchan.sct_key` | string | (空) | Server 酱 SCT Key（配置后启用 serverchan 渠道） |
 | `notify.channels.email.smtp_host` | string | (空) | 邮箱渠道 SMTP 主机（配置 + from/to 后启用 email 渠道；net/smtp 纯标准库） |
@@ -426,9 +449,21 @@ volumes:
       node: "node-id"        # 远端 mesh 节点 ID（hub 服务发现表）
       volume: "remote-vol"   # 远端节点卷名
       path: ""               # 卷内子路径（可选；空 = 卷根）
+      writable: false        # 默认 false = 只读挂载（写操作 ErrReadOnly，fail-closed）
+      conflict_mode: lww     # 仅 writable=true 时有意义：lww（默认）/ version / conflict
 ```
 
-- 只读强制：写方法恒 `ErrReadOnly`（fail-closed，联邦卷不写远端）
+- **写面（`extra.writable`）**：`false`/缺省 = **只读**（写方法恒 `ErrReadOnly`，fail-closed）；
+  `true` = 注入远端写面，`WriteFile/Rename/Delete/MakeDir` 转发到远端（经远端 volwrite 面）。
+- **写冲突策略（`extra.conflict_mode`，仅写面存在时生效）**：
+  - `lww`（缺省，含空值）：直转写面，**远端以最后写入者胜**（零回归）；
+  - `version`：写前 `CheckVersion` 取当前版本 → `WriteFileVersioned(expected=当前)` 远端 **CAS**
+    （当前版本 == expected 才写并 +1），不匹配 → 版本冲突错误（对应 409 + 当前版本号，客户端重取重试）；
+  - `conflict`：写前发现远端已存在 → 旧文件改名 `<path>.conflict-<unixNano>` **保留双方**，
+    再以「期望不存在」写新内容；改名失败则整次写入失败（不写新内容，防丢旧内容）。
+  - 值大小写不敏感；**非法值启动即报错**（禁静默回落 lww）。
+  - `version`/`conflict` 要求 `writable=true` **且**写面实现版本感知写入（`VersionedWriter`），
+    不满足 → **装配报错**（fail-closed：禁静默降级回 lww）。
 - 健康探针：`registry.HealthProbe`（拨号 + 建链到 node），`GET /api/volumes` 的
   `state` 可观测（healthy/degraded/unknown）
 - 前置：`mesh.hub_url`/凭据已配置（hub 中继 Dialer 装配）；hub 服务发现表含目标节点

@@ -945,7 +945,7 @@ type Config struct {
 	TLS            TLSConfig       `yaml:"tls" mapstructure:"tls"`
 	RateLimit      RateLimitConfig `yaml:"rate_limit" mapstructure:"rate_limit"`
 	// Auth 是认证前 IP 门配置（auth.allow_ips + auth.trusted_proxies）。双配置空 =
-	// 特性不启用（零回归）；非空时按设计文档 2026-09-24-ip-whitelist.md 装配。
+	// 特性不启用（零回归）；非空时按设计文档 docs/archive/2026-09-24-ip-whitelist.md 装配。
 	Auth AuthConfig `yaml:"auth" mapstructure:"auth"`
 	// ExternalAuth 是外部认证（OIDC/LDAP）配置（external_auth 段，roadmap 11.7-⑥）：
 	// 双子段均 disabled（缺省）→ 不启用（零回归：无外部端点、认证链默认链不变）。

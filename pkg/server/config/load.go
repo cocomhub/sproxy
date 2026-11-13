@@ -29,7 +29,7 @@ func LoadFromProvider(p provider.Provider) (*Config, error) {
 		return nil, err
 	}
 	// allow_ips 已启用但未含回环：运维本机可能因误配被锁死——启动打印响亮告警
-	// （设计文档 ip-whitelist 风险 2；回环仍须显式在白名单，无自动放行双通道）。
+	// （设计文档 docs/archive/2026-09-24-ip-whitelist.md 风险 2；回环仍须显式在白名单，无自动放行双通道）。
 	if len(cfg.Auth.AllowIPs) > 0 && !netutil.AllowIPsCoverLoopback(cfg.Auth.AllowIPs) {
 		slog.Warn("auth.allow_ips 已启用但未包含 127.0.0.1/::1——运维本机来源将被 403，请确认有意为之")
 	}

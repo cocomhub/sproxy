@@ -848,11 +848,18 @@ Hub 统计。
 
 ### POST /api/credentials
 
-新增 AK 条目。
+新增 AK 条目（admin-only，403 否则）。
+
+- 请求体：`{ak, owner?, secret?, role?}`；`secret` 为 64-hex（32B），缺省由服务端生成并**单次回传**。
+- `role` 取值：`user`（缺省）/ `node`；**`admin` 拒绝 400**（只能由首次注册原子授予）；
+  `reader` 目前也拒绝 400（详见下方「账号角色」）。
 
 ### DELETE /api/credentials/{ak}
 
 删除 AK 条目（幂等）。
+
+- admin-only；需 `{confirm: "<目标 AK>", force?: bool}` 二次确认；**`admin` 角色 AK 不可删除**（防唯一
+  admin 自删导致接管竞态）；有活跃 SK 且未 `force=true` → 400。
 
 ### POST /api/credentials/{ak}/renew
 
@@ -869,6 +876,30 @@ Hub 统计。
 ### POST /api/credentials/{ak}/sk/{skID}/expire
 
 使 SK 条目过期。
+
+### 账号角色（role）
+
+账号级角色持久化在凭据条目（`credentials.json` 的 `role` 字段；缺字段的旧条目载入时归一为
+`user`），共**四档**：
+
+| role | 文件组（读） | 文件组（写） | mesh/hub 组 | 管理端点 |
+|------|-------------|-------------|-------------|----------|
+| `reader` | ✅ | ❌ 403 | ❌ | ❌ |
+| `user`（缺省） | ✅ | ✅ | ❌ | ❌ |
+| `node` | ❌ | ❌ | ✅ | ❌ |
+| `admin` | ✅ | ✅ | ✅ | ✅ |
+
+- 层级：`reader < user < node < admin`（admin 全组放行）；未知角色门限**fail-closed 403**。
+- 只读面（`reader` 可读）由**路由表分类**单一事实源给出（`ClassReader` → `requireRole(reader)`）：
+  `GET /download`、`GET /download/chunk`、`GET /api/files`、`HEAD /api/files/stat`、
+  `GET /api/files/search`、`GET /api/files/meta`、`GET /api/versions`、`GET /api/archive-dir`、
+  `GET /api/volumes*`、`GET /api/quota`、`GET /api/backends`、`GET /api/secrets*` 等读端点在列；
+  其余文件组端点（upload/delete/rename/mkdir/rmdir/batch*/archive/versions-restore/共享创建/trash 写等）
+  需 `user`；隧道内层（`/tunnel` 外解密后的 localMux）同一份分类，reader 写面同样 403。
+- **创建入口现状（以代码为准）**：`POST /api/credentials` 只接受 `user`/`node`；TOTP 注册恒产
+  `user`（首次注册原子授予 `admin`）。即 `reader` 档位可被**认证/路由层执行**，但**当前没有
+  公开创建入口**（直接改凭据 store / Ring 快照属非公开运维面）。`api_keys`（Bearer 多用户）是
+  独立特性，恒 `user` 语义，不并入 reader。
 
 ## 外部认证登录面（OIDC / LDAP）
 
@@ -1914,6 +1945,31 @@ S3 兼容网关（SigV4 验签）：bucket = 已装配卷名（映射该卷 user
   **用户可见（明文）长度**；不支持 CreateBucket / DeleteBucket
 - 错误：`400` key 为空 / 卷不可用；`403` 验签失败；`500` 列目录/读写失败
 
+### S3 分块上传语义（Multipart）
+
+`POST ?uploads`（init）→ `PUT ?partNumber=&uploadId=`（part）→ `POST ?uploadId=`（complete）→
+`DELETE ?uploadId=`（abort）；编码与响应 XML 遵循 S3 协议，下面只列额外语义。
+
+- **part**：`partNumber` ∈ `[1, 10000]`，非法 → `400`；part 落 chunk 桶；响应 `ETag` 为该 part
+  内容的 MD5（带引号）。**在途 part 当场入双账本**（owner 配额 Scope + 卷容量池：写前 `TryReserve`、
+  写成功 `Commit`、失败回滚；同 partNumber 重传按差分释放）——额度/容量不足时 **`507`
+  `s3: 配额不足`**（不落盘）。
+- **complete**：
+  - body 有界（超限 `413`）；XML 解析失败 / 无 `<Part>` / `PartNumber` 越界或重复 → `400`；
+  - **会话归属校验**：会话 meta 缺失、或 meta 记录的 key 与本次请求 key 不一致 → **`409`
+    `s3: 会话无效或 key 不匹配`**（防「借自己的上传会话写别人的 key」）；
+  - **逐 part ETag 校验**：客户端回传 ETag（去引号后）必须等于**落盘 part 内容的 MD5**，
+    不匹配 → `400`（防伪造/篡改 ETag）；引用的 part 不存在 → `400`；
+  - 成功 → 按 `PartNumber` 升序拼接为目标对象，响应 XML 含 `<Key>` 与**复合 ETag**
+    （`hex(md5(concat(md5(p1), …)))-N`，S3 分块标准形态）；
+  - **失败不变量**：任何 `400`/`500` 返回前清理「半截目标对象 + 其旧 sidecar」（不残留部分内容），
+    **parts 保留**（可重试 complete）；成功删除的 part 逐个释放其记账。
+- **abort**：删 parts + 会话 meta（删除成功的 part 逐个释放记账）；孤儿会话超 24h TTL 由清扫任务回收。
+- **配额是「转移」不是「再预留」**：这批字节在 **part 上传时**已预留+提交（上传期即强制额度），
+  complete 只把账从 parts 转到目标对象——覆盖写按 `prev → 落盘真值` 差分（`Adjust`），新文件按
+  `0 → 落盘真值`；若在 complete 再预留会**双计**（使「配额刚好等于文件大小」的上传恒被 507 拒绝）。
+  未装配配额/卷池时跳过记账（旧行为零回归）。
+
 ## 错误码附录
 
 | HTTP | 业务原因（示例） |
@@ -1926,6 +1982,7 @@ S3 兼容网关（SigV4 验签）：bucket = 已装配卷名（映射该卷 user
 | 413 | 请求体超过限制 |
 | 416 | Range 越界 |
 | 500 | 服务端写文件、目录失败 |
+| 507 | 配额/卷容量不足（S3 `InsufficientStorage`；`s3: 配额不足`） |
 
 ## 配额与等待（`GET /api/quota`）
 

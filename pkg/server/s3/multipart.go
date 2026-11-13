@@ -11,7 +11,7 @@ package s3
 //   - s3AbortMultipart：DELETE ?uploadId → 清 parts + meta（会话残留清理）。
 //
 // CompleteMultipartUpload 正确性加固（roadmap 11.2 审查待办，设计文档：
-// docs/designs/2026-09-24-s3-complete-etag.md + 2026-09-24-s3-complete-quota.md）：
+// docs/archive/2026-09-24-s3-complete-etag.md + 2026-09-24-s3-complete-quota.md）：
 // meta key 一致性 409 / 逐 part ETag 校验 400 / PartNumber 范围+重复 400 / body 有界 413 /
 // 失败清理半截目标（不变量）/ 双账本 TryReserve-Commit 507 / 失败双 Release。
 

@@ -16,7 +16,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/router"
 )
 
-// 本文件是 RBAC 角色细分（roadmap 11.5-① / docs/designs/2026-09-24-rbac-roles.md）
+// 本文件是 RBAC 角色细分（roadmap 11.5-① / docs/archive/2026-09-24-rbac-roles.md）
 // 片 1（核心）的测试：RoleReader 常量 + requireRole reader 档 + isReadOnlyFileRoute
 // 只读/写子组拆分 + fileRoute/localMuxGate 双面接线。
 //
