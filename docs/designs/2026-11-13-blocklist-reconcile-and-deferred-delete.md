@@ -412,3 +412,31 @@ func (r *AuditRecorder) MarkDone(ctx) error
 
 **风险**：③ 若把副本移到稳定目录，需确认**不落在卷内**（否则会走 `pkg/files` 用户内容路径/占配额语义），
 并确保与 `StagingQuotaTracker` 记账的资源**同一盘**（否则"记账了但占的是另一块盘"）。
+
+### 7.9 实施后订正（2026-11-13，含真机 e2e 实测）
+
+**④ 的触发条件比预期罕见**（真机实测）：
+`Put` 的既有后校验循环（重传 + rapidupload 秒传刷新 + ETag 复核）**通常会在返回前把远端 md5 收敛**，
+此时 `verifyAfterUpload` 走 `ETag == 本地 md5` 分支 ⇒ 判定"已收敛" ⇒ **正确地不做保留**。
+真机 e2e（`reconcile_pending_e2e_test.go`）实测：5 MiB 随机内容上传后 `etag == 本地 md5` ⇒ 未触发保留（符合预期）。
+
+⇒ **④ 真正会触发的场景**：一致性循环**用尽后仍未权威**，例如
+① `PutHints.DeferVerify`（批量延迟校验路径：上传后跳过即时复核）；
+② 重传达上限（`ErrTransient`）前的中间态；
+③ 百度侧长时间不刷新（用户称"目前未遇到"，但存在）。
+
+**实现要点（已在代码中落实）**：
+- 保留判据**同源**（`markReconcileIfNeeded`：`!md5Converged(meta, st)`），两处调用（block_list 命中分支 + `MD5Unreliable` 分支），避免漂移。
+- ⚠️ 实施中曾出现**两次空转**，均已修：
+  1. `block_list` 对账命中即**提前 return** ⇒ 走不到"md5 非权威"那段 ⇒ 副本被删、重试无源可传
+     ⇒ 修法：命中分支**也**调用 `markReconcileIfNeeded`（内容已确认在云端但 md5 未权威 ⇒ 保留 + 上报，**对客户端仍返回成功**）。
+  2. 事项 `Path` 若存**随机副本路径** ⇒ 事项 ID（Kind+Volume+Path 派生）每次都变 ⇒ 重复事项堆积
+     ⇒ 修法：`Path` 存**稳定的 rel**，副本由执行器按 `(volume, rel)` 从 pending 集合**反查**。
+- 副本保护期：保留在 `<TempDir>/sproxy-reconcile-pending/`（**不在** `pkg/tempclean` 已知前缀内 ⇒ 不会被按龄误清）；
+  由重试任务在终态（收敛/转人工）清理；**启动兜底扫描**补登记孤儿（不依赖 issues 持久化）。
+
+**验证**：
+- 单测：`reconcile_pending_test.go` 6 例（保留/上报/扫描/越界防护/nil reporter/重试收敛清理）
+  + `issues_executors_blobmd5_test.go` 2 例 + `blob_reconcile_wiring_test.go` 3 例；
+- **变异命中 4 处**：不可判定当通过 / 去掉接线 / md5 只看形态 / 忽略保留标记 / 去掉越界防护 / 去掉 skipped 统计；
+- 全量回归：`pkg/server` 51.5 s、`pkg/volume/ext/baidupcs` 289.7 s、`cmd/sproxy` 全绿；`gofmt`/`goimports`/`go vet` 干净。

@@ -38,6 +38,11 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
+// reconcileWiring 是装配期注入的「blob md5 待复查」接线（见 blob_reconcile_wiring.go）。
+// 由装配根在创建 IssueCenter 后设置一次（`setupBaidupcsReconcileWiring`）；nil ⇒ 该能力关闭：
+// 上传后仍会保留本地副本，但不登记事项（不会自动重试）。**仅 baidupcs 后端使用**。
+var reconcileWiring *blobReconcileWiring
+
 // baidupcsStorageFactory 构造网盘 Storage（可注入，测试用内存 fake）。
 // nil（生产）时用 baidupcs.DefaultFactory().New。
 type baidupcsStorageFactory func(cfg baidupcs.StorageConfig) (baidupcs.StorageAPI, error)
@@ -224,10 +229,15 @@ func newBaidupcsBackendWithFactory(ctx context.Context, v volume.Volume, factory
 		UploadCore:        uploadCore,
 		UploadConcurrency: uploadConcurrency,
 		Logger:            slog.Default(),
+		// 「内容已确认在云端但 md5 未权威」时上报待复查项（装配根接线；nil ⇒ 只保留副本不登记）。
+		Reconcile: reconcileWiring.reporterFor(v.Name),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("baidupcs backend: 卷 %q Storage 构造失败: %w", v.Name, err)
 	}
+	// 登记该卷的「blob md5 重试」能力（issues 执行器按卷名路由到此；不支持则忽略）。
+	reconcileWiring.register(v.Name, storage)
+
 	vb, err := baidupcs.NewVolumeBackend(ctx, baidupcs.VolumeBackendConfig{
 		Name:      v.Name,
 		Storage:   storage,

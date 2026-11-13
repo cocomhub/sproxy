@@ -13,13 +13,16 @@ import (
 )
 
 // TestRunBlobMD5Reconcile_参数校验与透传 锁定「blob md5 未收敛」重试执行器的契约：
-//   - 登记约定三要素（Volume / Path=本地副本 / Detail=rel）缺一 ⇒ **返回错误转人工**
+//   - 登记约定（`Volume`=卷名、`Path`=**卷内 rel**）缺一 ⇒ **返回错误转人工**
 //     （不静默成功——否则会让人误以为在自动重试）；
 //   - 未注入动作 ⇒ 返回错误；
-//   - 正常路径 ⇒ 透传 (volume, rel, localCopy)，**参数顺序错位会让重传打到错误目标**（故逐参断言）。
+//   - 正常路径 ⇒ 透传 (volume, rel)，**逐参断言**（错位会让重传打到错误目标）。
+//
+// 注：副本路径**不由事项携带**（Path 取稳定的 rel 以保证事项 ID 稳定）；实现方按
+// (volume, rel) 自行反查副本 —— 见 cmd/sproxy/blob_reconcile_wiring.go。
 func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
 	t.Parallel()
-	base := issues.Item{Volume: "baidu", Path: "/tmp/stage-x/blob", Detail: "jav/a/b.bin"}
+	base := issues.Item{Volume: "baidu", Path: "jav/a/b.bin"}
 
 	// ① 缺任一要素 ⇒ 错误
 	for _, tc := range []struct {
@@ -27,12 +30,11 @@ func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
 		item issues.Item
 		want string
 	}{
-		{"缺卷名", issues.Item{Path: base.Path, Detail: base.Detail}, "卷名"},
-		{"缺本地副本路径", issues.Item{Volume: base.Volume, Detail: base.Detail}, "本地副本"},
-		{"缺 rel", issues.Item{Volume: base.Volume, Path: base.Path}, "rel"},
+		{"缺卷名", issues.Item{Path: base.Path}, "卷名"},
+		{"缺 rel", issues.Item{Volume: base.Volume}, "rel"},
 	} {
 		err := runBlobMD5Reconcile(context.Background(), ExecutorDeps{
-			ReconcileBlobMD5: func(context.Context, string, string, string) error { return nil },
+			ReconcileBlobMD5: func(context.Context, string, string) error { return nil },
 		}, tc.item)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: 期望含 %q 的错误，得到 %v", tc.name, tc.want, err)
@@ -44,20 +46,20 @@ func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
 		t.Error("未注入 ReconcileBlobMD5 时必须返回错误")
 	}
 
-	// ③ 正常路径 ⇒ 透传参数（顺序：(volume, rel, localCopy)）
-	var gotVol, gotRel, gotCopy string
+	// ③ 正常路径 ⇒ 透传 (volume, rel)
+	var gotVol, gotRel string
 	runErr := errors.New("对账仍未收敛")
 	err := runBlobMD5Reconcile(context.Background(), ExecutorDeps{
-		ReconcileBlobMD5: func(_ context.Context, volume, rel, localCopy string) error {
-			gotVol, gotRel, gotCopy = volume, rel, localCopy
+		ReconcileBlobMD5: func(_ context.Context, volume, rel string) error {
+			gotVol, gotRel = volume, rel
 			return runErr
 		},
 	}, base)
 	if !errors.Is(err, runErr) {
 		t.Fatalf("动作错误应原样透传（供 RunDue 退避），得到 %v", err)
 	}
-	if gotVol != "baidu" || gotRel != "jav/a/b.bin" || gotCopy != "/tmp/stage-x/blob" {
-		t.Fatalf("参数透传错位：volume=%q rel=%q localCopy=%q", gotVol, gotRel, gotCopy)
+	if gotVol != "baidu" || gotRel != "jav/a/b.bin" {
+		t.Fatalf("参数透传错位：volume=%q rel=%q", gotVol, gotRel)
 	}
 }
 
@@ -66,7 +68,7 @@ func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
 func TestNewIssuesExecutors_注册md5未收敛(t *testing.T) {
 	t.Parallel()
 	execs := NewIssuesExecutors(ExecutorDeps{
-		ReconcileBlobMD5: func(context.Context, string, string, string) error { return nil },
+		ReconcileBlobMD5: func(context.Context, string, string) error { return nil },
 	})
 	fn, ok := execs[issues.KindBlobMD5Unconverged]
 	if !ok || fn == nil {
@@ -75,10 +77,10 @@ func TestNewIssuesExecutors_注册md5未收敛(t *testing.T) {
 	// 已注册的执行器必须真的会调用注入动作（防“注册了空壳”）
 	called := false
 	execs = NewIssuesExecutors(ExecutorDeps{
-		ReconcileBlobMD5: func(context.Context, string, string, string) error { called = true; return nil },
+		ReconcileBlobMD5: func(context.Context, string, string) error { called = true; return nil },
 	})
 	if err := execs[issues.KindBlobMD5Unconverged](context.Background(),
-		issues.Item{Volume: "v", Path: "/p", Detail: "r"}); err != nil || !called {
+		issues.Item{Volume: "v", Path: "r"}); err != nil || !called {
 		t.Fatalf("执行器未调用注入动作：err=%v called=%v", err, called)
 	}
 }

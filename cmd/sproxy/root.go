@@ -1158,6 +1158,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	// 注意：IssueCenter 必须在 secret 后端**注册之前**创建，因为注册即注入（否则上报是 no-op）。
 	issueCenter := server.NewIssueCenter(server.DefaultIssuesStorePath(cfg.StorageRoot))
 	rt.issueCenter = issueCenter
+	// 「blob md5 未收敛」待复查接线：**必须在卷后端类型注册/卷装配之前**建立，
+	// 否则 baidupcs 后端构造时读到的接线器仍为 nil（能力静默关闭）。
+	setupBaidupcsReconcileWiring(issueCenter)
 	registerSecretVolumeBackendsWith(issueCenter)
 	// **卷后端类型必须早于 assembleVolumes 注册**（缺陷修复，2026-10-21）：
 	// baidupcs/webdav/sftp/ftp/s3 的类型与建卷 schema 此前在 `setupSyncVolumeBackends`
@@ -1242,9 +1245,21 @@ func (rt *runServerRuntime) setupServerCore() error {
 		// 取修复目标经统一卷视图直接断言装饰后的 FS（不再直连后端 FS 视图，也不再解包，见 R27）。
 		Resolve: server.CleanupTargetResolver(h.Volumes()),
 		Log:     logger,
+		// 「blob md5 未收敛」重试：**迟绑定**读接线器（此时已建立）——
+		// 副本由接线器按 (volume, rel) 反查，避免事项携带随机路径导致 ID 不稳定。
+		ReconcileBlobMD5: func(ctx context.Context, volume, rel string) error {
+			return reconcileWiring.retry(ctx, volume, rel)
+		},
 	})
 	if rerr := h.RegisterIssuesRetryTask(issuesExecs); rerr != nil {
 		logger.Warn("注册待处理事项重试任务失败（不影响启动）", "error", rerr.Error())
+	}
+	// **启动兜底扫描**：把「本地副本仍在、但事项登记丢失」（进程被强杀 / 持久化写入失败）
+	// 的孤儿重新登记为待复查事项 —— 不依赖 issues 持久化是否成功（用户口径：内存为主，
+	// WAL/持久化只用于重启恢复，目的是降低"丢问题处理"的风险）。
+	if reported, skipped := reconcileWiring.scanAndReport(); reported > 0 || skipped > 0 {
+		logger.Info("blob md5 待复查：启动兜底扫描完成",
+			"reported", reported, "skipped", skipped)
 	}
 	// 云端下载下载器注册（cloud 独立于 sync：注册不依赖 SyncManager 装配）。
 	// registerPikpakDownloader 内部用 sync.Once 保证只注册一次。
