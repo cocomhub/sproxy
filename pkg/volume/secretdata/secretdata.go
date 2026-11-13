@@ -192,6 +192,14 @@ type Options struct {
 	// 重下 452 个 meta（20-30 分钟）。缓存密文后重启直接本地读；解密失败（GCM 认证）即删
 	// 缓存重下（自愈）。装配层按 `<storage_root>/state/<卷>/metacache` 设置。
 	MetaCacheDir string
+
+	// MetaCacheQuotaBytes 是该缓存目录的**磁盘配额**（默认见 defaultMetaCacheQuotaBytes = 2 GiB；
+	// 零值 ⇒ 用默认；**负值 ⇒ 不限制**）。超配额时按**最旧优先**（mtime 升序）淘汰 ——
+	// 缓存可重建，时间淘汰足够且无需维护访问序。
+	//
+	// 为什么要它（实测 2026-11-13）：此前无上限，本地缓存曾涨到 **5.29 GB / 9,489 文件**
+	// （单文件最大 86.98 MB）⇒ 持续吃本地磁盘。
+	MetaCacheQuotaBytes sizex.ByteSize
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -342,6 +350,10 @@ type SecretdataFS struct {
 	// ②给「按需加载后被挂到 `metaEntry.meta` 的常驻量」设**硬上限**（淘汰时须回清 `e.meta`）。
 	// nil = 关闭缓存（各方法对 nil 安全 ⇒ 退化为每次直读，零回归）。
 	metaCache *metaEntryCache
+
+	// metaCacheWrites 是精简缓存（L1a）的写计数：**低频**触发磁盘配额检查用
+	// （每次写都全扫目录不划算）。
+	metaCacheWrites atomic.Int64
 	// spanCache 是本机**磁盘**块密文跨度缓存（2026-10-22，见 span_disk_cache.go）：staging
 	// 目录 + 字节预算 + 定期清理 + 空间不足自动降级。nil = 未装配（默认关闭零回归）。
 	spanCache *spanDiskCache
