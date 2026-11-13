@@ -4,7 +4,11 @@
 package baidupcs
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -254,3 +258,75 @@ func TestFinishStaged_配额不足时不保留且不失败上传(t *testing.T) {
 type syncpkgErrNoSpace struct{}
 
 func (syncpkgErrNoSpace) Error() string { return "no space" }
+
+// fakeSample 造一个 sampleReader 替身（返回固定字节或错误）。
+func fakeSample(data []byte, err error) func(context.Context, string, int64, int64) (io.ReadCloser, error) {
+	return func(context.Context, string, int64, int64) (io.ReadCloser, error) {
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+}
+
+// TestSampleReadback_一致与否的判定 锁定 P0-1 缓解的核心：
+//   - 读回块的 md5 与本地分块 md5 相等 ⇒ (ok=true, decidable=true)；
+//   - **不相等** ⇒ (ok=false, decidable=true) —— 这是"远端 block_list 一致但内容损坏"的唯一拦截点；
+//   - 取不到（无直链/读失败）⇒ (false,false) **不判定**（不得据此判失败）。
+func TestSampleReadback_一致与否的判定(t *testing.T) {
+	t.Parallel()
+	payload := []byte("0123456789abcdef")
+	want := md5HexOf(payload) // 本地分块 md5（测试内计算）
+	mkSt := func() *stagedUpload {
+		return &stagedUpload{size: int64(len(payload)), blockMD5s: []string{want}}
+	}
+	mkS := func(fn func(context.Context, string, int64, int64) (io.ReadCloser, error)) *Storage {
+		s := newFinishStagedStorage(t, nil)
+		s.sampleReader = fn
+		return s
+	}
+
+	// ① 一致
+	if ok, dec := mkS(fakeSample(payload, nil)).sampleReadback(context.Background(), "k", mkSt()); !dec || !ok {
+		t.Fatalf("一致时应 (ok=true, decidable=true)，实际 ok=%v dec=%v", ok, dec)
+	}
+	// ② 不一致 ⇒ 必须判定（供重传）
+	bad := append([]byte(nil), payload...)
+	bad[0] ^= 0xFF
+	if ok, dec := mkS(fakeSample(bad, nil)).sampleReadback(context.Background(), "k", mkSt()); !dec || ok {
+		t.Fatalf("不一致时应 (ok=false, decidable=true)，实际 ok=%v dec=%v", ok, dec)
+	}
+	// ③ 取不到 ⇒ 不可判定
+	if _, dec := mkS(fakeSample(nil, errors.New("no dlink"))).sampleReadback(context.Background(), "k", mkSt()); dec {
+		t.Fatal("取不到样本时必须判不可判定")
+	}
+	// ④ 未完整装配（无 dlinkCache）⇒ 不可判定且**不 panic**
+	s := newFinishStagedStorage(t, nil)
+	if _, dec := s.sampleReadback(context.Background(), "k", mkSt()); dec {
+		t.Fatal("未完整装配时应判不可判定")
+	}
+}
+
+// TestAfterUploadByBlockList_抽样不一致判重传 锁定**接线**：block_list 一致但 md5 未权威时，
+// 若抽样读回不一致 ⇒ 必须返回 (done=false, decided=true)（走重传），而不是放行。
+func TestAfterUploadByBlockList_抽样不一致判重传(t *testing.T) {
+	t.Parallel()
+	a := strings.Repeat("a", 32)
+	payload := []byte("payload-bytes")
+	// 本地分块 md5 与读回内容**不符** ⇒ 抽样失败
+	s := newFinishStagedStorage(t, nil)
+	s.sampleReader = fakeSample([]byte("different-content"), nil)
+	st := &stagedUpload{md5: strings.Repeat("f", 32), size: int64(len(payload)), blockMD5s: []string{a}}
+	// meta: block_list 与本地一致；md5 未权威（ETag 为空 ⇒ md5Converged=false）⇒ 触发抽样
+	done, decided := s.afterUploadByBlockList(context.Background(), "k", &ObjectMeta{BlockList: []string{a}}, st)
+	if !decided || done {
+		t.Fatalf("抽样不一致应判重传 (done=false, decided=true)，实际 done=%v decided=%v", done, decided)
+	}
+}
+
+// md5HexOf 计算字节的 md5 hex（测试助手）。
+func md5HexOf(b []byte) string {
+	h := md5.New() //nolint:gosec // 测试用途
+	_, _ = h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}

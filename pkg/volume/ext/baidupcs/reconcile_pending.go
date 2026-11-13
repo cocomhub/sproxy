@@ -16,9 +16,12 @@ package baidupcs
 //     `multipart-*`），故不会被按龄误清 ⇒ 天然获得保护期；由重试任务在收敛/转人工后清理。
 import (
 	"context"
+	"crypto/md5" //nolint:gosec // 与百度 block_list 比对（协议哈希），非安全用途
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +61,69 @@ var _ StagingQuotaSettable = (*Storage)(nil)
 func AssertStagingQuotaSettable(v any) (StagingQuotaSettable, bool) {
 	sq, ok := v.(StagingQuotaSettable)
 	return sq, ok
+}
+
+// sampleReadback 是**抽样读回**（P0-1 缓解）：用**既有** `Storage.GetRange`
+// （`syncfs_range.go`，即 `pkg/sync.RangeReader` 在 baidupcs 的唯一实现）读回第 0 块，
+// 与本地分块 md5 比对——防止"远端 `block_list` 报一致、实际内容却损坏"的**假一致**。
+//
+// **不新增任何区间读实现**（用户明示 2026-11-13：确认已有随机读机制、避免多套实现）：
+// 直接调 `GetRange`；测试可经 `sampleReader`（结构体字段）注入替身。
+//
+// 采样策略：**仅在"内容一致但 md5 未权威"时采样**（这正是我们唯一无法用 md5 自证的情形）
+// ⇒ **快路径（md5 已权威）零成本**；该情形本身罕见（见设计文档 §7.9）。
+//
+// 返回 (ok, decidable)：decidable=false 表示**取不到样本**（无直链/区间错）⇒ 调用方维持原判定，
+// **不得**据此判失败。
+func (s *Storage) sampleReadback(ctx context.Context, key string, st *stagedUpload) (ok, decidable bool) {
+	if st == nil || len(st.blockMD5s) == 0 {
+		return false, false
+	}
+	want := st.blockMD5s[0]
+	size := int64(uploadBlockSize)
+	if st.size > 0 && st.size < size {
+		size = st.size
+	}
+	if size <= 0 {
+		return false, false
+	}
+	open := s.sampleReader
+	if open == nil {
+		// **防御**：抽样是"额外防线"，绝不能让上传崩溃。走默认 `GetRange` 时，未完整装配
+		// （无 adapter / 无直链缓存）会失败甚至 panic（实测 nil dlinkCache）⇒ 判"不可判定"。
+		if s.adapter == nil || s.dlinkCache == nil {
+			return false, false
+		}
+		open = s.GetRange
+	}
+	rc, err := open(ctx, key, 0, size)
+	if err != nil {
+		s.log.Debug("抽样读回：取区间失败（按不可判定处理）", "key", key, "error", err)
+		return false, false
+	}
+	defer rc.Close()
+	data, rerr := io.ReadAll(io.LimitReader(rc, size))
+	if rerr != nil || int64(len(data)) == 0 {
+		s.log.Debug("抽样读回：读取失败或空（按不可判定处理）", "key", key, "error", rerr)
+		return false, false
+	}
+	if !blockMD5Matches(data, want) {
+		s.log.Warn("抽样读回**不一致**（远端 block_list 一致但内容不符）⇒ 重传",
+			"key", key, "got_len", len(data))
+		return false, true
+	}
+	s.log.Debug("抽样读回一致（远端内容与本地分块 md5 相符）", "key", key, "bytes", len(data))
+	return true, true
+}
+
+// blockMD5Matches 判断数据块的 md5 是否等于期望值（大小写不敏感）。
+func blockMD5Matches(data []byte, wantMD5 string) bool {
+	if wantMD5 == "" {
+		return false
+	}
+	h := md5.New() //nolint:gosec // 与百度 block_list 比对，非安全用途
+	_, _ = h.Write(data)
+	return strings.EqualFold(hex.EncodeToString(h.Sum(nil)), wantMD5)
 }
 
 // ReconcileReporter 是**窄接口**：上报「内容已在云端但 md5 未收敛」的待复查项。

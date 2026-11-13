@@ -96,6 +96,9 @@ type Storage struct {
 	root    string
 	temp    string
 	adapter Adapter
+	// sampleReader 是抽样读回的**注入 seam**（nil ⇒ 用 Storage.GetRange；测试注入替身）。
+	// 按仓库纪律：测试注入一律走**结构体字段**（构造/装配期设定），不用包级变量替换。
+	sampleReader func(ctx context.Context, key string, offset, size int64) (io.ReadCloser, error)
 	// pendingQuota 是「待复查副本」的**专用配额作用域**（方案 A；装配后经 SetStagingQuota 注入）。
 	// nil ⇒ 不记账（仅保留副本）。与 FS 层"用户上传在途"记账**分账**，避免双重计量。
 	pendingQuota syncpkg.StagingQuotaTracker
@@ -761,6 +764,14 @@ func (s *Storage) afterUploadByBlockList(ctx context.Context, key string, meta *
 	if equal {
 		s.log.Info("上传后 block_list 逐块一致（内容已在云端）",
 			"key", key, "blocks", len(remoteBlocks))
+		// **抽样读回（P0-1 缓解）**：block_list 是**远端声明**，理论上可能过期/缓存 ⇒ 对于
+		// **无法用 md5 自证**的情形（md5 未权威），额外读回第 0 块比对本地分块 md5。
+		// 仅在此时采样 ⇒ 快路径（md5 已权威）零成本。
+		if !md5Converged(meta, st) {
+			if ok, decidable := s.sampleReadback(ctx, key, st); decidable && !ok {
+				return false, true // 抽样不一致 ⇒ 已判定需重传
+			}
+		}
 		return true, true
 	}
 	s.log.Warn("上传后 block_list 逐块不一致（重传）",

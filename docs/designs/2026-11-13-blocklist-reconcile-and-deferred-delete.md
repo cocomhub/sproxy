@@ -470,3 +470,28 @@ func (r *AuditRecorder) MarkDone(ctx) error
 
 **验证**：baidupcs 侧 2 例（按字节记账 + 清理释放；配额不足 ⇒ 不保留且不影响上传成功）+
 装配层 1 例（各卷注入**同一个**专用 tracker）；**变异命中 3 处**（保留不预留 / 清理不释放 / register 不收集可注入能力）。
+
+### 7.11 抽样读回（P0-1 缓解）落地：**复用既有区间随机读，不新增实现**（2026-11-13）
+
+**用户提醒（关键）**：「注意确认已有随机读机制，避免多套实现」——经核实**完全正确**：
+
+| 事实 | 位置 |
+| --- | --- |
+| 区间随机读**能力接口 + 助手**（仓内唯一契约） | `pkg/sync/range.go`：`RangeReader.OpenRangeRead` + `AssertRangeReader` + `RangeReadAll` |
+| baidupcs 侧的**唯一实现** | **`Storage.GetRange`**（`syncfs_range.go:86`）；`StorageFS.OpenRangeRead`（:57）正是委托它 |
+| 语义 | 越出文件 **fail-closed**；直链失效**自愈一次**（失效缓存 + 重签）；size=0 ⇒ 空读；无直链 ⇒ 报错 |
+
+⇒ 抽样读回**直接调用 `s.GetRange`**（零新实现）。测试经 **`Storage.sampleReader`（结构体字段）** 注入替身
+（按仓库纪律：测试注入走结构体字段，不用包级变量替换）。
+
+**实现（`reconcile_pending.go` 的 `sampleReadback` + `storage.go` 接线）**：
+- **采样时机**：仅当 `block_list` 逐块一致 **且 `md5Converged == false`**（即我们**唯一无法用 md5 自证**的情形）
+  ⇒ **快路径（md5 已权威）零成本**。
+- 读回**第 0 块**（`min(uploadBlockSize, size)`）⇒ `md5(读回) == st.blockMD5s[0]`？
+  不等 ⇒ `(decided=true, done=false)` ⇒ **重传**（这是"远端声明与内容不符"的唯一拦截点）。
+- 取不到样本（无直链/读失败/未完整装配）⇒ **不可判定**，维持原判定 —— **不得据此判失败**。
+- **防御**：未完整装配（无 adapter / 无 dlinkCache）时 **判不可判定并跳过**（实测曾 panic 于 nil dlinkCache：
+  由既有用例抓出 ⇒ 抽样是"额外防线"，绝不能让上传崩溃）。
+
+**验证**：单测 2 例（一致/不一致/取不到/未装配四分支 + 接线"不一致 ⇒ 判重传"）；
+**变异命中 2 处**（去掉接线调用 / `blockMD5Matches` 恒真）；全包回归 289.6 s 全绿；gofmt/goimports/vet(双 tag) 干净。
