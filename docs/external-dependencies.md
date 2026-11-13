@@ -440,7 +440,8 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
   当前 `binaryAdapter.list` 以 `runBinaryOutput(ctx, "ls", …)` 为**首选** ⇒ **建议改为库（pan）优先、CLI 兜底**。
 - **不要**用"上传后可见性/md5 收敛"作为切换接口面的理由（**已证伪**）；md5 权威化是**独立问题**，另行定位。
 - 验证工具：`pkg/volume/ext/baidupcs/pan_first_proof_e2e_test.go`、`md5_conv_probe_e2e_test.go`（均 `//go:build e2e`）；
-  脚本 `sproxy/build/run_panfirst.sh`、`verify_paging2.sh`。
+  验证用例（**入库、可复核**）：`pkg/volume/ext/baidupcs/pan_first_proof_e2e_test.go`（三通道对照）。
+  （分页/原始响应对比当时用一次性 shell 探针，**未入库**；结论以本文件实测表为准。）
   ⚠️ WSL 需 `GOTOOLCHAIN=go1.27.1`；git-bash 传中文路径需 `MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`。
 
 ### 7.8.5 ★ **`block_list` 是上传后立即可用的权威内容标识**（2026-11-13 实测，解决 md5 收敛问题）
@@ -470,4 +471,5 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
    （此前"看到 gcid"应是 **PikPak 分享侧**的 hash 或 sproxy/其它组件**本地计算**的 GCID）。
 
 **验证工具**：`pkg/volume/ext/baidupcs/blocklist_authority_e2e_test.go`（`//go:build e2e`）；
-原始响应抓取脚本 `sproxy/build/probe_gcid{,2,3}.sh`、分页实测 `verify_paging2.sh`。
+  验证用例（**入库、可复核**）：`pkg/volume/ext/baidupcs/blocklist_authority_e2e_test.go`。
+  （原始响应抓取与分页对比当时用一次性 shell 探针，**未入库**。）
