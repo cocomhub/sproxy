@@ -119,6 +119,16 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `notify.rules[]` | array |  | 路由规则：`{action: "upload"|"*"|..., object: "", channels: ["wecom"]}`——action 精确或 `*`（全部），object 空 = 全部对象 |
 | `notify.debounce` | duration | `1m` | 同 action+object+渠道 去抖窗口：窗口内重复事件只发一次（恢复后再次触发再发） |
 | `notify.retry` | int | `3` | 渠道发送失败指数退避重试次数（1s/2s/4s...） |
+| `notify.ai_advisor.enabled` | bool | `false` | 告警根因建议（LLM）：`true` 且 `api_key_ref` 解析出非空 key 才装配；未解析到 key → Warn 一次并降级固定模板（fail-closed，AI 失败/未启用不影响告警投递）。**重启生效**（SIGHUP 不热载） |
+| `notify.ai_advisor.provider` | string | `openai` | `openai` / `anthropic`（Anthropic 走同一 OpenAI 兼容 JSON 形状；未知值回落 `openai`） |
+| `notify.ai_advisor.base_url` | string | (空) | 空 = provider 默认（`openai`: `https://api.openai.com/v1`、`anthropic`: `https://api.anthropic.com/v1`）；自建网关可配 |
+| `notify.ai_advisor.api_key_ref` | string | (空) | **存放 key 的环境变量名**（如 `SPROXY_OPENAI_API_KEY`）；`enabled=true` 时非法环境变量名启动校验拒绝；key 本体不落 yaml/日志（`api_key` 字段 `yaml:"-"`，仅装配期内存持有） |
+| `notify.ai_advisor.model` | string | (空) | 空 = provider 默认（`gpt-4o-mini`） |
+| `notify.ai_advisor.timeout` | duration | `10s` | 单次 LLM 请求超时；`<=0` 回落 `10s`（响应体读取上限 64 KiB） |
+
+> `notify.ai_advisor` 生效形态：告警 fire/recover 通知组装后**同步**追加「【AI 建议】」段（建议截断 ≤1000 字）；
+> 建议为空（未启用 / 无 key / 网关失败 / 超时）即固定模板原样，绝不吞掉告警。出口走 `pkg/llmgate`
+> （`pkg/server/alerts.NewAIAdvisorFromConfig` 装配，`AlertEngine.SetAdvisor` 注入）。
 | `notify.channels.wecom.webhook` | string | (空) | 企业微信机器人 Webhook URL（配置后启用 wecom 渠道；markdown 消息） |
 | `notify.channels.serverchan.sct_key` | string | (空) | Server 酱 SCT Key（配置后启用 serverchan 渠道） |
 | `notify.channels.email.smtp_host` | string | (空) | 邮箱渠道 SMTP 主机（配置 + from/to 后启用 email 渠道；net/smtp 纯标准库） |
