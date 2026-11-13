@@ -192,6 +192,13 @@ type Options struct {
 	// 重下 452 个 meta（20-30 分钟）。缓存密文后重启直接本地读；解密失败（GCM 认证）即删
 	// 缓存重下（自愈）。装配层按 `<storage_root>/state/<卷>/metacache` 设置。
 	MetaCacheDir string
+
+	// MetaCacheBytes 是**元数据内存缓存 L1b** 的字节上限（零值 ⇒ 默认 256 MiB；**负值 ⇒ 关闭缓存**）。
+	//
+	// 依据实测（见 docs/designs/2026-11-12-...lazy-meta-and-cache-layers.md §4.3）：
+	// 单条大 meta 常驻 ~82 MB ⇒ 默认 256 MiB 约容纳 3 条；**再大也无益**
+	// （加载吞吐在并发 4 之后饱和 ⇒ 内存才是瓶颈）。
+	MetaCacheBytes sizex.ByteSize
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -524,8 +531,8 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		loadGate:     make(chan struct{}, maxParallelLoads(&alg)),
 		dedupPool:    map[string]*dedupBlob{},
 		blockCache:   newBlockletCache(opts.BlockletCacheBytes.Bytes()),
-		metaCache:    newMetaEntryCache(0),
-		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(defaultMetaCacheBytes)),
+		metaCache:    newMetaEntryCache(metaCacheBudget(opts.MetaCacheBytes.Bytes())),
+		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(metaCacheBudget(opts.MetaCacheBytes.Bytes()))),
 	}
 	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
 	attachSpanDiskCache(fs, opts)
@@ -5301,4 +5308,14 @@ func newDefaultTempDir() (string, error) {
 // （覆盖旧散落前缀、固定父目录与客户端/multipart 残留），按 mtime 超龄判定。
 func cleanupStaleTempDirs(_ string) {
 	tempclean.CleanupStale(staleTempMaxAge)
+}
+
+// metaCacheBudget 把配置值规范化为 L1b 预算：**负值保持 <0（表示关闭缓存）**、零值 ⇒ 默认。
+// **唯一口径**：`newMetaEntryCache` 与并发闸（`metaLoadConcurrency`）都从这里取值，
+// 避免两处各写一套判断而漂移（`newMetaEntryCache` 的语义本就是 <0 ⇒ nil、0 ⇒ 默认）。
+func metaCacheBudget(cfg int64) int64 {
+	if cfg == 0 {
+		return defaultMetaCacheBytes
+	}
+	return cfg // <0 原样传递 = 关闭
 }
