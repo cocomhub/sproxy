@@ -25,6 +25,15 @@ type ExternalBackend interface {
 	Close() error
 }
 
+// MetaPrewarmer 是可选能力接口：后端支持「后台限速预热本地 meta 缓存」。
+//
+// 与 Presigner/URLResolver 同模式 —— registry 通用层**不提及任何具体后端类型**；
+// 装配层用类型断言检测（**不触碰 `FS()`** ⇒ 不产生 R27 直连点）。
+type MetaPrewarmer interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），表达能力语义
+	// StartMetaPrewarm 启动后台预热（**立即返回**，预热在后台进行；不支持的实现不应声明本能力）。
+	StartMetaPrewarm(ctx context.Context)
+}
+
 // Presigner 是可选能力接口：后端支持预签名 URL（当前 s3 实现）。
 // 装配/API 层用类型断言检测；不支持的后端调用方回 405。
 type Presigner interface {
