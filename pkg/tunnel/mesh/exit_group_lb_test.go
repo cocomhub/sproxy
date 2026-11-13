@@ -4,7 +4,7 @@
 package mesh
 
 // exit_group_lb_test.go 验证多出口负载均衡（roadmap 11.1-④，设计文档
-// docs/designs/2026-09-24-mesh-exit-loadbalance.md）：
+// docs/archive/2026-09-24-mesh-exit-loadbalance.md）：
 //   - PickExitGroup 纯函数：failover 恒 0 / round-robin 自增取模 / weighted 权重扇区轮转；
 //   - NewExitGroupDialWithMode：round-robin/weighted 起点轮转分发 + 无论模式都保留组内 failover 兜底；
 //   - 旧签名 NewExitGroupDial 委托 failover（零回归）。

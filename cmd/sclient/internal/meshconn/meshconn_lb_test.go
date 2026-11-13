@@ -4,7 +4,7 @@
 package meshconn
 
 // meshconn_lb_test.go 验证多出口负载均衡 CLI 层（roadmap 11.1-④，设计文档
-// docs/designs/2026-09-24-mesh-exit-loadbalance.md）：
+// docs/archive/2026-09-24-mesh-exit-loadbalance.md）：
 //   - --exit-group-mode / --exit-group-weight flag 注册与默认值；
 //   - FromFlags 校验：非法模式 / weight 语法 / 非 weighted 带 weight / 未知 node fail-closed；
 //   - weighted 权重缺失 → 等权回落（不报错，Warn 可观测）；

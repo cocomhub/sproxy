@@ -4,7 +4,7 @@
 package verify
 
 // verify.go 是全仓 checksum 巡检（roadmap 11.3-⑩，设计文档
-// docs/designs/2026-09-24-checksum-verify.md）：
+// docs/archive/2026-09-24-checksum-verify.md）：
 //
 //   - `POST /api/verify`：重算全部文件 SHA-256 比对 per-tenant checksum 台账
 //     （<tenant meta>/checksums.json），产出 {total, ok, mismatched, missing, errors} 报告；
