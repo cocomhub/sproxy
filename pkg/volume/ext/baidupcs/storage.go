@@ -96,6 +96,9 @@ type Storage struct {
 	root    string
 	temp    string
 	adapter Adapter
+	// pendingQuota 是「待复查副本」的**专用配额作用域**（方案 A；装配后经 SetStagingQuota 注入）。
+	// nil ⇒ 不记账（仅保留副本）。与 FS 层"用户上传在途"记账**分账**，避免双重计量。
+	pendingQuota syncpkg.StagingQuotaTracker
 	// reconcile 是可选上报口（装配层注入）：把「内容已确认在云端但 md5 未收敛」的
 	// 待复查项登记到事项中心（`KindBlobMD5Unconverged`）。nil ⇒ 不登记（仅保留副本 + 告警）。
 	reconcile ReconcileReporter

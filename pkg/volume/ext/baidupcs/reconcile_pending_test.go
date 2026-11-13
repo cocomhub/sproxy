@@ -4,6 +4,7 @@
 package baidupcs
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -182,3 +183,74 @@ func TestRetryBlobMD5Reconcile_缺参或副本丢失必须报错(t *testing.T) {
 		t.Error("副本不存在必须报错（无源可传 ⇒ 转人工）")
 	}
 }
+
+// fakeQuota 记录预留/释放（实现 syncpkg.StagingQuotaTracker）。
+type fakeQuota struct {
+	reserved []int64
+	released []int64
+	failWith error
+}
+
+func (f *fakeQuota) ReserveUsage(_ context.Context, size int64) error {
+	if f.failWith != nil {
+		return f.failWith
+	}
+	f.reserved = append(f.reserved, size)
+	return nil
+}
+func (f *fakeQuota) ReleaseUsage(size int64) { f.released = append(f.released, size) }
+
+// TestFinishStaged_保留时按字节记账并在清理时释放 锁定方案 A 的配额契约：
+//   - 保留 ⇒ `ReserveUsage(副本字节数)`（否则保留期占用不受配额约束）；
+//   - 清理 ⇒ `ReleaseUsage(同一字节数)`，且该值**从 pending.json 读回** ⇒ 进程重启后仍正确释放
+//     （避免额度泄漏）；
+//   - 未注入配额 ⇒ 仍保留副本（不 panic，仅不记账）。
+func TestFinishStaged_保留时按字节记账并在清理时释放(t *testing.T) {
+	t.Parallel()
+	fq := &fakeQuota{}
+	s := newFinishStagedStorage(t, nil)
+	s.SetStagingQuota(fq)
+
+	st, _ := mkStage(t, s, "k.bin", "0123456789") // 10 字节
+	st.retainForReconcile = true
+	s.finishStaged("k.bin", st)
+
+	if len(fq.reserved) != 1 || fq.reserved[0] != 10 {
+		t.Fatalf("保留时未按字节预留：%v", fq.reserved)
+	}
+	pend := s.PendingReconcile()
+	if len(pend) != 1 {
+		t.Fatalf("应保留 1 个副本")
+	}
+	if err := s.RemovePendingReconcile(pend[0].LocalCopy); err != nil {
+		t.Fatalf("清理: %v", err)
+	}
+	if len(fq.released) != 1 || fq.released[0] != 10 {
+		t.Fatalf("清理时未释放同一字节数：%v", fq.released)
+	}
+}
+
+// TestFinishStaged_配额不足时不保留且不失败上传 锁定：磁盘将满 ⇒ **不保留副本**
+// （不让未受管占用累积）且**上传仍成功**（内容已在云端）；上报副本路径为空（交人工）。
+func TestFinishStaged_配额不足时不保留且不失败上传(t *testing.T) {
+	t.Parallel()
+	fq := &fakeQuota{failWith: syncpkgErrNoSpace{}}
+	s := newFinishStagedStorage(t, &testReporter{})
+	s.SetStagingQuota(fq)
+
+	st, dir := mkStage(t, s, "k.bin", "payload")
+	st.retainForReconcile = true
+	s.finishStaged("k.bin", st) // 不得 panic、不得阻塞
+
+	if n := len(s.PendingReconcile()); n != 0 {
+		t.Fatalf("配额不足时不应保留副本，实际 %d 个", n)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("配额不足时连原临时目录也应清理（避免更占盘），仍存在: %v", err)
+	}
+}
+
+// syncpkgErrNoSpace 模拟配额实现返回的"无空间"错误（任意非 nil 即可）。
+type syncpkgErrNoSpace struct{}
+
+func (syncpkgErrNoSpace) Error() string { return "no space" }

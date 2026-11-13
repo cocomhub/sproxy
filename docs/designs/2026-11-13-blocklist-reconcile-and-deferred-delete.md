@@ -440,3 +440,33 @@ func (r *AuditRecorder) MarkDone(ctx) error
   + `issues_executors_blobmd5_test.go` 2 例 + `blob_reconcile_wiring_test.go` 3 例；
 - **变异命中 4 处**：不可判定当通过 / 去掉接线 / md5 只看形态 / 忽略保留标记 / 去掉越界防护 / 去掉 skipped 统计；
 - 全量回归：`pkg/server` 51.5 s、`pkg/volume/ext/baidupcs` 289.7 s、`cmd/sproxy` 全绿；`gofmt`/`goimports`/`go vet` 干净。
+
+### 7.10 配额缺口核实与方案 A 落地（2026-11-13）
+
+**订正（我先前表述不准确）**：
+- ❌「`baidupcs` 的 `stage-*` 裸写未被配额记账」——**不准确**。普通上传的本地峰值**已被 FS 层预留覆盖**：
+  `pkg/server/volumes.go:765` `syncpkg.ApplyStagingQuota(fs, h.stagingQuotaTrackerFor(owner))`
+  （HTTP 上传 / 转存 / 备份 / 同步推送同一装配形状）。
+- ✅ **真实缺口 = "④ 保留的待复查副本"**：保留发生在 `Storage.Put` **返回之后**（FS 层的预留已释放），
+  副本继续占盘却**无账**。
+
+**架构约束（决定了方案形态）**：
+| 事实 | 影响 |
+| --- | --- |
+| `h.StagingQuotaTrackerFor` 只在 `RegisterRoutes` **之后**可用 | 而 `baidupcs.Storage` 在**卷装配期**构造 ⇒ 构造参数注入不可行 |
+| tracker 是**按 owner** 的，`Storage` 是**按卷**的（不感知 owner） | Storage 内无法选出 owner 作用域 |
+
+**方案 A（用户裁定）**：为「待复查副本」设**专用配额作用域**（保留 owner 名 `pending-reconcile`
+⇒ 独立 `staging/<该名>` Scope），装配后经 `SetStagingQuota` 注入；保留 ⇒ `ReserveUsage(字节数)`，
+清理 ⇒ `ReleaseUsage(同值)`。
+- **分账**：与"用户上传在途"分开计量（同一磁盘两本账，但语义清晰：一份是"请求级在途"，一份是"系统级待复查"）；
+  实际占用因"原子保留/清理"而**不重叠**，不会重复计量同一份 Peak。
+- **字节数随副本落盘**（`pending.json` 记 `size`）⇒ **进程重启后仍能正确释放**，避免额度泄漏。
+- **磁盘将满时**：`ReserveUsage` 失败 ⇒ **不保留**（连原目录一起清掉，不让未受管占用累积），
+  **上传仍成功**（内容已在云端）⇒ 上报时不带副本路径，重试执行器判"副本不存在"转人工（Detail 写明配额不足）。
+- **对外拒绝语义**：新上传的「空间不足 ⇒ 507 稍后重试」由既有 FS 层闸 + 各 handler 的 507 映射承担
+  （`chunked_upload.go:547`、`write_ops.go:1293/1542`、`options.go:464`、`dir_charge.go:67/76`、`version.go:368/386`），
+  本片**未改动**该面。
+
+**验证**：baidupcs 侧 2 例（按字节记账 + 清理释放；配额不足 ⇒ 不保留且不影响上传成功）+
+装配层 1 例（各卷注入**同一个**专用 tracker）；**变异命中 3 处**（保留不预留 / 清理不释放 / register 不收集可注入能力）。

@@ -17,18 +17,48 @@ package baidupcs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
+
+// ErrPendingQuotaExceeded 是「待复查副本配额不足」的**哨兵错误**（方案 A）：
+// 表示**未保留副本**（副本已删）⇒ 由上报方写明"需人工/稍后重试"，且**不影响**上传成功语义。
+var ErrPendingQuotaExceeded = errors.New("待复查副本配额不足")
 
 // reconcilePendingDirName 是保留副本的固定父目录名（位于 StorageConfig.TempDir 下）。
 const reconcilePendingDirName = "sproxy-reconcile-pending"
 
 // reconcilePendingMetaFile 是每个保留副本旁的元数据文件名（记录卷内 key）。
 const reconcilePendingMetaFile = "pending.json"
+
+// StagingQuotaSettable 是**可选能力**：装配层在 `Handlers` 就绪后（此时才能拿到
+// per-owner staging tracker）把**「待复查副本」专用配额作用域**注入本后端。
+//
+// 为什么必须"事后注入"而不是构造参数（实测约束）：`h.StagingQuotaTrackerFor` 只在
+// `RegisterRoutes` 之后可用，而 `baidupcs.Storage` 在**卷装配期**构造 ⇒ 构造时拿不到。
+// 又：tracker 是**按 owner** 的，而 Storage 是**按卷**的（不感知 owner）⇒ 方案 A 用
+// **卷级专用作用域**（装配层以保留名 owner 构造，见 cmd/sproxy），与"用户上传在途"分账。
+type StagingQuotaSettable interface {
+	SetStagingQuota(t syncpkg.StagingQuotaTracker)
+}
+
+// SetStagingQuota 注入「待复查副本」配额记账器（nil ⇒ 不记账，仅告警）。
+// 幂等：装配层只调用一次；不做并发保护（启动期单线程注入，之后只读）。
+func (s *Storage) SetStagingQuota(t syncpkg.StagingQuotaTracker) { s.pendingQuota = t }
+
+var _ StagingQuotaSettable = (*Storage)(nil)
+
+// AssertStagingQuotaSettable 断言对象是否可注入「待复查副本」配额记账器。
+func AssertStagingQuotaSettable(v any) (StagingQuotaSettable, bool) {
+	sq, ok := v.(StagingQuotaSettable)
+	return sq, ok
+}
 
 // ReconcileReporter 是**窄接口**：上报「内容已在云端但 md5 未收敛」的待复查项。
 //
@@ -66,12 +96,20 @@ func (s *Storage) finishStaged(key string, st *stagedUpload) {
 		return
 	}
 	localCopy, err := s.moveToPending(key, st.tmpPath)
-	if err != nil {
-		// 移动失败：**不删**（保重传源），按原路径上报；重试任务读不到会转 needs_human。
+	switch {
+	case errors.Is(err, ErrPendingQuotaExceeded):
+		// 磁盘将满：**不保留**（连原目录一起清掉）——不出让"未受管占用"，也不让上传失败
+		// （内容已在云端，对客户端仍是成功）。上报时副本路径留空 ⇒ 重试执行器会判"副本不存在"
+		// 并转人工（Detail 已写明配额不足）。
+		_ = os.RemoveAll(stageDir)
+		s.log.Warn("待复查副本配额不足 ⇒ 未保留副本（上传仍成功）", "key", key, "error", err)
+		localCopy = ""
+	case err != nil:
+		// 其它移动失败：**不删**（保重传源），按原路径上报；重试任务读不到会转 needs_human。
 		s.log.Warn("保留待复查副本时移动失败（保持原目录不删，仍上报）",
 			"key", key, "stage_dir", stageDir, "error", err)
 		localCopy = st.tmpPath
-	} else {
+	default:
 		s.log.Info("已保留本地副本待 md5 复查（内容已确认在云端）",
 			"key", key, "local_copy", localCopy)
 	}
@@ -97,7 +135,17 @@ func (s *Storage) moveToPending(key, tmpPath string) (string, error) {
 		_ = os.RemoveAll(dst)
 		return "", fmt.Errorf("移动副本: %w", mvErr)
 	}
-	meta, _ := json.Marshal(map[string]string{"key": key})
+	// **配额记账（方案 A）**：保留期为副本预留额度（按字节）。无空闲 ⇒ **不保留**
+	// （删副本并如实报错），以免在磁盘将满时继续累积未受管占用；上传本身已成功
+	// （内容在云端），故**不影响**对客户端的成功返回。
+	if s.pendingQuota != nil {
+		sz := sizeOf(target)
+		if rerr := s.pendingQuota.ReserveUsage(context.Background(), sz); rerr != nil {
+			_ = os.RemoveAll(dst)
+			return "", fmt.Errorf("%w（%d 字节）: %v", ErrPendingQuotaExceeded, sz, rerr)
+		}
+	}
+	meta, _ := json.Marshal(pendingRecord{Key: key, Size: sizeOf(target)})
 	if werr := os.WriteFile(filepath.Join(dst, reconcilePendingMetaFile), meta, 0o600); werr != nil {
 		// 元数据写失败 ⇒ 副本仍在但无法被扫描复原 key；保留文件并如实报错。
 		return target, fmt.Errorf("写 pending.json: %w", werr)
@@ -120,7 +168,7 @@ func (s *Storage) PendingReconcile() []PendingReconcile {
 			continue
 		}
 		dir := filepath.Join(s.pendingRoot(), e.Name())
-		key := readPendingKey(dir)
+		key := readPending(dir).Key
 		// 副本文件 = 目录内除 pending.json 外的常规文件（本实现只保留一个）。
 		for _, f := range listFiles(dir) {
 			if strings.HasSuffix(f, reconcilePendingMetaFile) {
@@ -143,20 +191,44 @@ func (s *Storage) RemovePendingReconcile(localCopy string) error {
 	if filepath.Dir(dir) != s.pendingRoot() {
 		return fmt.Errorf("拒绝删除非待复查目录: %s", dir)
 	}
-	return os.RemoveAll(dir)
+	rec := readPending(dir)
+	if rerr := os.RemoveAll(dir); rerr != nil {
+		return rerr
+	}
+	// 释放配额（读盘上的 size ⇒ 重启后也能正确释放，避免额度泄漏）。
+	if s.pendingQuota != nil && rec.Size > 0 {
+		s.pendingQuota.ReleaseUsage(rec.Size)
+	}
+	return nil
 }
 
-// readPendingKey 读取 pending.json 中的 key（读不到返回空串——调用方须按"无法定位"处理）。
-func readPendingKey(dir string) string {
+// pendingRecord 是 `pending.json` 的内容（**key 用于定位，size 用于配额释放**；
+// 落盘 size 使进程重启后仍能正确 ReleaseUsage，避免额度泄漏）。
+type pendingRecord struct {
+	Key  string `json:"key"`
+	Size int64  `json:"size"`
+}
+
+// readPending 读取 pending.json（读不到返回零值——调用方须按"无法定位"处理）。
+func readPending(dir string) pendingRecord {
 	raw, err := os.ReadFile(filepath.Join(dir, reconcilePendingMetaFile))
 	if err != nil {
-		return ""
+		return pendingRecord{}
 	}
-	var m map[string]string
-	if json.Unmarshal(raw, &m) != nil {
-		return ""
+	var r pendingRecord
+	if json.Unmarshal(raw, &r) != nil {
+		return pendingRecord{}
 	}
-	return m["key"]
+	return r
+}
+
+// sizeOf 返回文件字节数（失败/目录 ⇒ 0）。
+func sizeOf(p string) int64 {
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return 0
+	}
+	return fi.Size()
 }
 
 // listFiles 返回目录内的常规文件绝对路径（忽略错误项）。

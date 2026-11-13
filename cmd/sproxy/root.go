@@ -1254,6 +1254,10 @@ func (rt *runServerRuntime) setupServerCore() error {
 	if rerr := h.RegisterIssuesRetryTask(issuesExecs); rerr != nil {
 		logger.Warn("注册待处理事项重试任务失败（不影响启动）", "error", rerr.Error())
 	}
+	// 「待复查副本」专用配额作用域（方案 A）：h 就绪后注入（见 blob_reconcile_wiring.go
+	// 的 pendingReconcileQuotaOwner 说明）。与"用户上传在途"分账 ⇒ 保留期占用受配额约束，
+	// 磁盘将满时**不保留**（上传仍成功）。
+	reconcileWiring.setStagingQuota(h.StagingQuotaTrackerFor(pendingReconcileQuotaOwner))
 	// **启动兜底扫描**：把「本地副本仍在、但事项登记丢失」（进程被强杀 / 持久化写入失败）
 	// 的孤儿重新登记为待复查事项 —— 不依赖 issues 持久化是否成功（用户口径：内存为主，
 	// WAL/持久化只用于重启恢复，目的是降低"丢问题处理"的风险）。
