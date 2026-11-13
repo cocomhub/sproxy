@@ -36,6 +36,11 @@ func (s *SecretdataFS) StartMetaPrewarm(ctx context.Context) {
 	if s.opts.DisableMetaPrewarm {
 		return
 	}
+	// **本地卷直接跳过**：本地读 meta 本来就快（无远端下载），预热只会多付一份后台扫描开销 ⇒
+	// 零收益。判断下沉到此处（装配层不必触碰 `FS()`）—— 见用户在 2026-11-13 明示的架构原则。
+	if s.IsLocalVolume() {
+		return
+	}
 	// 快照待预热清单（rel → blobKey），避免长期持锁。
 	s.mu.RLock()
 	jobs := make([]prewarmJob, 0, len(s.index))

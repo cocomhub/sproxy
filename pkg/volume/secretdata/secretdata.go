@@ -804,6 +804,13 @@ type backend struct{ fs *SecretdataFS }
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
 
+// StartMetaPrewarm 实现 `registry.MetaPrewarmer`（可选能力）：**转发**给内部 FS。
+// 装配层经**后端句柄**断言本能力即可，**无需 `FS()`**（避免 R27 直连点）。
+func (b *backend) StartMetaPrewarm(ctx context.Context) { b.fs.StartMetaPrewarm(ctx) }
+
+// 编译期断言：secretdata 后端必须提供该可选能力。
+var _ registry.MetaPrewarmer = (*backend)(nil)
+
 // RefreshIndex 实现 registry.IndexRefresher：显式重扫底层并原子重建内存索引（S5，2026-10-27）。
 // 服务端 `sclient volume refresh <卷>` / Web UI 卷面板刷新按钮触发——收敛「卷被本进程外
 // 修改（网盘 App / 另一实例）后的幽灵条目/旧哈希」。

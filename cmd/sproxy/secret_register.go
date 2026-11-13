@@ -813,20 +813,11 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 	// **只对「外部（非本地）卷」预热**：本地卷读 meta 本来就快（无远端下载），
 	// 预热只会多付一份后台扫描开销 ⇒ 无收益。判据用 `syncpkg.LocalVolume` 的能力自述
 	// （全仓约定：**未实现 ⇒ 视为外部** ⇒ 保守起见仍预热）。
+	// **经后端句柄断言能力**（不触碰 `FS()` ⇒ 不产生 R27 直连点；本地卷由实现侧自行跳过）。
 	if be := set.External(v.Name); be != nil {
-		if fs := be.FS(); !isLocalVolumeFS(fs) { // FS() 只取一次（R27 直连点计数）
-			if pw, ok := secretdata.AssertMetaPrewarmer(fs); ok {
-				pw.StartMetaPrewarm(ctx)
-			}
+		if pw, ok := be.(registry.MetaPrewarmer); ok {
+			pw.StartMetaPrewarm(ctx)
 		}
 	}
 	return nil
-}
-
-// isLocalVolumeFS 判断 FS 是否**自述为本地卷**（`syncpkg.LocalVolume`）。
-// 全仓约定：**未实现该能力 ⇒ 视为外部卷** ⇒ 本函数返回 false ⇒ 保守地仍做预热
-// （外部卷预热有收益；本地卷预热是纯开销）。
-func isLocalVolumeFS(fs syncpkg.FS) bool {
-	lv, ok := fs.(syncpkg.LocalVolume)
-	return ok && lv.IsLocalVolume()
 }
