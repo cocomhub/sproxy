@@ -188,6 +188,8 @@ func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReport
 		MetaCacheBytes: vcExtraByteSize(v, "meta_cache_bytes"),
 		// meta_cache_quota_bytes：L1a（**磁盘**精简缓存）配额（零值 ⇒ 默认 2 GiB；负值 ⇒ 不限制）。
 		MetaCacheQuotaBytes: vcExtraByteSize(v, "meta_cache_quota_bytes"),
+		// disable_meta_prewarm：关闭「后台限速预热 L1a」（**默认 false = 默认开启**）。
+		DisableMetaPrewarm: vcExtraBool(v, "disable_meta_prewarm"),
 		// normalize_names：""/"audit"/"apply"（默认空 = 不动；见 Options 注释）
 		NormalizeNames:        vcExtraStr(v, "normalize_names"),
 		NormalizeExportDir:    vcExtraStr(v, "normalize_export_dir"),
@@ -805,5 +807,26 @@ func attachSecretdataVolume(ctx context.Context, set *registry.Set, v volume.Vol
 		return fmt.Errorf("secret backends: secretdata 卷 %q 挂回卷集失败（boot fail）: %w", v.Name, aerr)
 	}
 	log.Info("secretdata 卷补装完成（config 声明，推迟装配）", "volume", v.Name)
+	// P4（2026-11-13）：启动后台**限速**预热 L1a（**只写磁盘，不常驻内存**）。
+	// 复用 `readFileMetaFast` ⇒ 自动复用并发闸与限速；`disable_meta_prewarm` 可关闭。
+	//
+	// **只对「外部（非本地）卷」预热**：本地卷读 meta 本来就快（无远端下载），
+	// 预热只会多付一份后台扫描开销 ⇒ 无收益。判据用 `syncpkg.LocalVolume` 的能力自述
+	// （全仓约定：**未实现 ⇒ 视为外部** ⇒ 保守起见仍预热）。
+	if be := set.External(v.Name); be != nil {
+		if fs := be.FS(); !isLocalVolumeFS(fs) { // FS() 只取一次（R27 直连点计数）
+			if pw, ok := secretdata.AssertMetaPrewarmer(fs); ok {
+				pw.StartMetaPrewarm(ctx)
+			}
+		}
+	}
 	return nil
+}
+
+// isLocalVolumeFS 判断 FS 是否**自述为本地卷**（`syncpkg.LocalVolume`）。
+// 全仓约定：**未实现该能力 ⇒ 视为外部卷** ⇒ 本函数返回 false ⇒ 保守地仍做预热
+// （外部卷预热有收益；本地卷预热是纯开销）。
+func isLocalVolumeFS(fs syncpkg.FS) bool {
+	lv, ok := fs.(syncpkg.LocalVolume)
+	return ok && lv.IsLocalVolume()
 }

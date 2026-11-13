@@ -207,6 +207,12 @@ type Options struct {
 	// 为什么要它（实测 2026-11-13）：此前无上限，本地缓存曾涨到 **5.29 GB / 9,489 文件**
 	// （单文件最大 86.98 MB）⇒ 持续吃本地磁盘。
 	MetaCacheQuotaBytes sizex.ByteSize
+
+	// DisableMetaPrewarm 关闭「启动后后台限速预热 L1a（磁盘）」（**默认 false = 默认开启**，
+	// 遵守「bool 配置必须默认 false」纪律：用**关闭语义**表达"默认开启"）。
+	// 预热只写磁盘（不常驻内存）、复用既有 `readFileMetaFast`、与正常读共用并发闸，且**限速**
+	// （对远端卷是必需的节流）。装配层可只对外部卷开启。
+	DisableMetaPrewarm bool
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
