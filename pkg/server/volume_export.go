@@ -3,7 +3,7 @@
 
 package server
 
-// volume_export.go 实现卷备份/导出（roadmap 11.3-② / docs/designs/2026-09-24-volume-export.md）：
+// volume_export.go 实现卷备份/导出（roadmap 11.3-② / docs/archive/2026-09-24-volume-export.md）：
 //
 //   - GET /api/volumes/export?volume=<name> → `application/x-tar` 流式响应：逐文件写
 //     `user/<rel>` 条目（流式边读边写，不整卷入内存），末尾 append `manifest.json`

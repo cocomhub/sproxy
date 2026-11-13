@@ -543,7 +543,7 @@ SPDX-License-Identifier: Apache-2.0
 | 里程碑 | 内容 | 状态 |
 |--------|------|------|
 | **P1：全仓 checksum 巡检** | `POST /api/verify` 全卷一致性审计（重算 checksum 比对台账，坏文件隔离/报告），定时巡检 + 告警联动 | **已落地**（`POST /api/verify` + `verify_interval` 周期巡检 + `checksum_mismatch` 告警；见 [config.md](./config.md#全仓-checksum-巡检）） |
-| **P2：卷备份/导出** | `GET /api/volumes/export`（tar 流式导出卷）+ `POST /api/volumes/import`（恢复），跨实例迁移 | **已落地**（export 流式 + manifest 校验 + import 复用写路径；见 [docs/designs/2026-09-24-volume-export.md](./designs/2026-09-24-volume-export.md)） |
+| **P2：卷备份/导出** | `GET /api/volumes/export`（tar 流式导出卷）+ `POST /api/volumes/import`（恢复），跨实例迁移 | **已落地**（export 流式 + manifest 校验 + import 复用写路径；见 [docs/archive/2026-09-24-volume-export.md](./archive/2026-09-24-volume-export.md)） |
 | **P2：联邦卷强一致性** | LWW 之外补版本检查/冲突文件（复用 sync 冲突策略），可选 `extra.conflict_mode` | **已落地**（`pkg/volume/federated`）：`ConflictMode`（lww/version/conflict）+ `VersionedWriter` 接口（CheckVersion + WriteFileVersioned CAS）+ `WithConflictMode` 三分支转发；`extra.conflict_mode` 装配 fail-fast（写面非 VersionedWriter → 启动报错，禁静默降级） |
 
 ### 11.4 演进原则（补充）

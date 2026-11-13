@@ -5,7 +5,7 @@
 // 仿 pkg/tunnel/xfer/ext/* 模式——依赖 go.mongodb.org/mongo-driver 隔离在独立 module，
 // 领域包 pkg/state 核心不引）。
 //
-// 与设计 docs/designs/2026-09-24-statestore.md §2.5 / 2026-09-24-leader-elector.md
+// 与设计 docs/archive/2026-09-24-statestore.md §2.5 / 2026-09-24-leader-elector.md
 // §2.3 对齐：
 //
 //   - MongoStateStore：集合文档 `_id=key`，字段 `{v: <bytes>, rev: <int64>}`；

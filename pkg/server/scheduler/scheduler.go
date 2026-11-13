@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // scheduler.go 是**统一任务调度器**（roadmap 11.10-H2，设计文档
-// docs/designs/2026-09-24-task-scheduler.md）：
+// docs/archive/2026-09-24-task-scheduler.md）：
 //   - 注册周期任务（唯一名 + 间隔 > 0 校验），Start 为每个任务起一个 goroutine
 //     （ticker + stopCh，与既有 versionGCLoop/trashGCLoop 同构）；
 //   - 维护窗口：MaintenanceOnly 任务在窗口外跳过（未配窗口 = 恒执行，零回归）；

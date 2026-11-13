@@ -22,7 +22,7 @@ import (
 // usage_store.go 是计量报告（roadmap 11.10-⑩）P1 的 usageStore 纯逻辑层：
 // per-owner 周期用量聚合（日/月桶），供配额审计/成本分摊导出（片 2 handler 接线）。
 //
-// 设计（对齐设计文档 docs/designs/2026-09-24-usage-report.md 片 1）：
+// 设计（对齐设计文档 docs/archive/2026-09-24-usage-report.md 片 1）：
 //   - RecordUsage(owner, kind, n) 按记录时刻累加进对应「日桶」（key = YYYY-MM-DD）；
 //   - 内存环只保留最近 usageRingRetention 个日桶（跨日/跨月轮转即建新桶 + 弹最旧）；
 //   - 周期落盘：Flush 把当月全部日桶序列化为 <persistDir>/<owner>/<YYYY-MM>.json

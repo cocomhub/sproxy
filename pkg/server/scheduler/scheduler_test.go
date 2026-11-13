@@ -4,7 +4,7 @@
 package scheduler
 
 // scheduler_test.go 覆盖统一任务调度器（roadmap 11.10-H2，设计文档
-// docs/designs/2026-09-24-task-scheduler.md §5）：
+// docs/archive/2026-09-24-task-scheduler.md §5）：
 //  1. Register/Start/Stop 生命周期（计数到 2 → Stop 冻结）；
 //  2. panic 恢复（首次 panic 后下个 tick 照常执行）；
 //  3. 单飞防重入（长任务阻塞期间并发峰值恒 1）；

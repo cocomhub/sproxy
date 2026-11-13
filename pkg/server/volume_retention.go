@@ -4,7 +4,7 @@
 package server
 
 // volume_retention.go 实现卷级数据保留策略（roadmap 11.7-⑨，设计文档
-// docs/designs/2026-09-24-volume-retention.md）：对绑定本卷的过期数据做周期清理。
+// docs/archive/2026-09-24-volume-retention.md）：对绑定本卷的过期数据做周期清理。
 //
 // 三个维度（对齐 audit TTL / 分享 TTL / 版本 retention）：
 //   - VersionTTL：遍历 <卷根>/<owner>/version/<rel>/，按版本创建时间（版本 ID 解码）
