@@ -1,3 +1,9 @@
+> **原位置**：`docs/superpowers/specs/`（**已移除**；实现细节查 git 历史）。
+>
+> **归档说明（2026-11-13，用户口径）**：本文件为**精简后的背景知识**——保留**设计意图 / 经验 /
+> 原则 / 依赖与约束**，**移除具体实现**（代码块、逐行文件/函数引用、任务拆解步骤、验收清单）。
+> 实现细节以**代码与 git 历史**为准（多轮迭代后可能已不一致，故不在此固化）。
+
 <!--
 Copyright 2026 The Cocomhub Authors. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
@@ -75,18 +81,6 @@ v0.23.0..master 期间交付了大量**后端能力**（secret 加密卷、视�
 - **嵌套允许 + 防成环**：底层卷可选任意已注册卷（含 wrapper），但创建时做**闭环检测**（防 `secrets→secretdata→secrets` 循环引用），fail-closed。
 
 **`GET /api/backends` 扩展**（`pkg/server/backends_api.go`）：
-```json
-{"backends": [{
-  "type": "secretdata",
-  "category": "wrapper",
-  "label": "数据加密封装卷",
-  "fields": [
-    {"key":"target","label":"底层卷","type":"volume-select","required":true,"allow_wrapper":true},
-    {"key":"secret_url","label":"密钥引用","type":"text","required":true},
-    {"key":"algorithm","label":"加密算法","type":"enum","options":["shardseal-high","shardseal-standard","shardseal-low","aes-256-gcm"]}
-  ]
-}]}
-```
 - **schema 来源**：后端实现可选 `registry.SchemaProvider` 接口（`Schema() FieldSchema`）；未实现则只给 `type`/`category`（表单只填 name）。
 - **`NewBackend`** 用 schema 校验 `Extra`（封装卷必填底层卷 + 卷存在 + 防环）。
 
@@ -95,55 +89,6 @@ v0.23.0..master 期间交付了大量**后端能力**（secret 加密卷、视�
 **定位**：跨层级 span 式计量 + 独立文件每行落盘，**可复用**于任意场景（云下载/转存/加密/同步/上传/批处理）。
 
 #### 4.1 核心类型 `pkg/audit/audit.go`
-
-```go
-type Type string
-const (
-    TypeAPI       Type = "api"
-    TypeDownload  Type = "download"
-    TypeTransfer  Type = "transfer"
-    TypeEncrypt   Type = "encrypt"
-    TypeResource  Type = "resource"  // CPU/内存采样行
-    TypeSensitive Type = "sensitive" // 预迁移现有 server/audit 敏感操作
-    TypeError     Type = "error"
-)
-type Level string
-const (LevelDebug, LevelInfo, LevelWarn, LevelError)
-
-// Dimension 用于 with 不同类型的审计维度（任务/系统/…）。
-type Dimension string
-const (DimTask Dimension="task", DimSystem Dimension="system")
-
-// Row 一行审计日志（落盘一行 JSON）。
-type Row struct {
-    Type      Type   `json:"type"`
-    Level     Level  `json:"level"`
-    Dim       Dimension `json:"dim"`
-    Step      string `json:"step"`
-    Start     int64  `json:"start_ms"`  // 距作用域起点
-    DurMS     int64  `json:"dur_ms"`
-    Err       string `json:"err,omitempty"`
-    BandwidthBps int64 `json:"bw_bps,omitempty"`
-    Bytes     int64  `json:"bytes,omitempty"`
-    Meta      any    `json:"meta,omitempty"`   // 灵活附加
-    NodeID    string `json:"node,omitempty"`
-}
-
-type Logger struct { ... } // 作用域审计记录器
-func NewScope(scopeID string, opts ScopeOpts) (*Logger, error)
-func WithContext(ctx context.Context, l *Logger) context.Context
-func From(ctx context.Context) *Logger          // 无则返回 nil（安全）
-func (l *Logger) With(d Dimension, kv ...any) *Logger  // 复制出带维度的派生子（多维度观测）
-func (l *Logger) Begin(step string, kv ...any) *Span
-func (s *Span) End(kv ...any)
-func (s *Span) Fail(err error)
-func (l *Logger) Log(t Type, lvl Level, step string, kv ...any)
-func (l *Logger) Err(err error, step string, kv ...any)
-func (l *Logger) Save(ctx, key string, v any) error  // 跨函数计算值
-func (l *Logger) Get(ctx, key string) (any, bool)
-func (l *Logger) Flush() error
-func (l *Logger) Close() error
-```
 
 #### 4.2 `Save/Get`（跨层级数据粘合）
 Logger 承载一个 `map[string]any`（bound 到作用域），配合 `Span.End` 供上层累计（如 transfer 把字节写入，encrypt 读取对照明密文）。
@@ -158,10 +103,6 @@ Logger 承载一个 `map[string]any`（bound 到作用域），配合 `Span.End`
 所有阶段埋点在任何深度经 `From(ctx)` 拿同一 Logger 记 span；任务隔离靠独立文件（scopeID 派生）。
 
 #### 4.5 归档到卷（未来扩展，接口预留 + 配置门）
-```go
-type Archiver interface { Archive(ctx, scopeID, rows []Row) error }
-// ScopeOpts.Archive *ArchiveHook；默认关。
-```
 - **默认不归档**；开启时需**选卷 + 路径**（config `audit.archive.enabled/volume/path`）。把 `<scope>.audit.log` 副本写入所选卷（如 secretdata://audit/）。
 
 #### 4.6 与现有 `server/audit*.go` 关系：**并存 + 预留迁移**
