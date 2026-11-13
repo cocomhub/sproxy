@@ -380,3 +380,63 @@ func (r *AuditRecorder) MarkDone(ctx) error
    → 一致 ⇒ 返回 nil（`RunDue` 会 `markResolved`）；不一致 ⇒ 返回错误（走退避，达上限转 `needs_human`）；
 3. 上传路径在「`md5` 未对账一致」时 `Report` 该事项（**不影响**返回给客户端的成功）；
 4. （可选）复用 `POST /api/issues/resolve` / `/scan` 实现人工"立即触发重新检查并重传"。
+
+### 7.8 ④「副本条件保留」的精确实施方案（code-anchored，2026-11-13 复核）
+
+> 面向 PR #1143 的下一片；已按源码复核，**不是推断**。
+
+**现状（源码事实）**：
+- `pkg/volume/ext/baidupcs/storage.go:946` `stageUpload(ctx, r, key) (*stagedUpload, error)`：
+  创建 `sub := os.MkdirTemp(s.temp, "stage-*")`，定义 `cleanup := func(){ tmp.Close(); os.RemoveAll(sub) }`，
+  **但该 closure 只在错误路径被调用，成功路径不返回给调用方**
+  ⇒ **副本目录实际留在 `s.temp`（TempDir）下**，当前由 **`pkg/tempclean` 按 mtime 老化清理**。
+- `*stagedUpload` 只携带 `tmpPath`（= `<TempDir>/stage-*/<base>`）。
+
+**⇒ ④ 的形态是「登记 + 保护期」，而不是「改成不删」**：
+
+| 步骤 | 落点 | 要点 |
+| --- | --- | --- |
+| 1. 产出"待复查"结论 | `putCheckAfterUpload` / `verifyAfterUpload` / `checkAfterUploadUnreliableMD5` | 现返回 `(meta, done, err)`；需**显式表达**「`block_list` 一致 **且** md5 未权威」（建议新增结果枚举或 sentinel，**不要**用布尔拼装） |
+| 2. 上报事项 | `Storage` 侧注入 `issues` 上报口（窄接口，避免 `baidupcs` 反向依赖 `pkg/server`） | `Kind=blob_md5_unconverged`；`Path`=**副本路径**；`Detail`=rel；`Volume`=卷名 |
+| 3. **保护期** | `pkg/tempclean` 与登记路径的协作 | 副本若留在 `TempDir` 会被按龄清掉 ⇒ 二选一：① 登记时把副本**移动到稳定目录**（如 `<TempDir>/reconcile-pending/<hash>`）并让 tempclean 跳过该子目录；② 让 tempclean 接受"已登记路径集合"（需注入）。**必须显式选择并测试** |
+| 4. 仅 baidu 后端启用 | 装配层（卷后端判据） | 非 baidu 卷不上报、不保护（无此可见性语义） |
+| 5. 启动兜底 | 启动时扫描 `reconcile-pending/` | 孤儿副本补登记（**不依赖** issues 持久化是否成功） |
+
+**必须覆盖的测试（TDD + 变异）**：
+1. 「`block_list` 一致 && md5 未权威」⇒ ①上报事项（断言 `Path`/`Detail`/`Volume`）②副本**在保护期内不被清理**
+   ——变异：去掉登记 ⇒ 红；去掉保护 ⇒ 红（用 tempclean 老化后断言副本仍存在）
+2. md5 权威 ⇒ 副本**被清理**，且**不上报** ——变异：反转判据 ⇒ 红
+3. `RetryFunc` 收敛 ⇒ `resolved` 且副本清理；连续不一致 ⇒ 退避至 `needs_human` ——变异：无退避 ⇒ 红
+4. 非 baidu 后端 ⇒ **不上报/不保护** ——变异：删后端判据 ⇒ 红
+5. 启动兜底扫描补登记 ——变异：去掉扫描 ⇒ 红
+
+**风险**：③ 若把副本移到稳定目录，需确认**不落在卷内**（否则会走 `pkg/files` 用户内容路径/占配额语义），
+并确保与 `StagingQuotaTracker` 记账的资源**同一盘**（否则"记账了但占的是另一块盘"）。
+
+### 7.9 实施后订正（2026-11-13，含真机 e2e 实测）
+
+**④ 的触发条件比预期罕见**（真机实测）：
+`Put` 的既有后校验循环（重传 + rapidupload 秒传刷新 + ETag 复核）**通常会在返回前把远端 md5 收敛**，
+此时 `verifyAfterUpload` 走 `ETag == 本地 md5` 分支 ⇒ 判定"已收敛" ⇒ **正确地不做保留**。
+真机 e2e（`reconcile_pending_e2e_test.go`）实测：5 MiB 随机内容上传后 `etag == 本地 md5` ⇒ 未触发保留（符合预期）。
+
+⇒ **④ 真正会触发的场景**：一致性循环**用尽后仍未权威**，例如
+① `PutHints.DeferVerify`（批量延迟校验路径：上传后跳过即时复核）；
+② 重传达上限（`ErrTransient`）前的中间态；
+③ 百度侧长时间不刷新（用户称"目前未遇到"，但存在）。
+
+**实现要点（已在代码中落实）**：
+- 保留判据**同源**（`markReconcileIfNeeded`：`!md5Converged(meta, st)`），两处调用（block_list 命中分支 + `MD5Unreliable` 分支），避免漂移。
+- ⚠️ 实施中曾出现**两次空转**，均已修：
+  1. `block_list` 对账命中即**提前 return** ⇒ 走不到"md5 非权威"那段 ⇒ 副本被删、重试无源可传
+     ⇒ 修法：命中分支**也**调用 `markReconcileIfNeeded`（内容已确认在云端但 md5 未权威 ⇒ 保留 + 上报，**对客户端仍返回成功**）。
+  2. 事项 `Path` 若存**随机副本路径** ⇒ 事项 ID（Kind+Volume+Path 派生）每次都变 ⇒ 重复事项堆积
+     ⇒ 修法：`Path` 存**稳定的 rel**，副本由执行器按 `(volume, rel)` 从 pending 集合**反查**。
+- 副本保护期：保留在 `<TempDir>/sproxy-reconcile-pending/`（**不在** `pkg/tempclean` 已知前缀内 ⇒ 不会被按龄误清）；
+  由重试任务在终态（收敛/转人工）清理；**启动兜底扫描**补登记孤儿（不依赖 issues 持久化）。
+
+**验证**：
+- 单测：`reconcile_pending_test.go` 6 例（保留/上报/扫描/越界防护/nil reporter/重试收敛清理）
+  + `issues_executors_blobmd5_test.go` 2 例 + `blob_reconcile_wiring_test.go` 3 例；
+- **变异命中 4 处**：不可判定当通过 / 去掉接线 / md5 只看形态 / 忽略保留标记 / 去掉越界防护 / 去掉 skipped 统计；
+- 全量回归：`pkg/server` 51.5 s、`pkg/volume/ext/baidupcs` 289.7 s、`cmd/sproxy` 全绿；`gofmt`/`goimports`/`go vet` 干净。

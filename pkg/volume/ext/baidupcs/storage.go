@@ -47,6 +47,9 @@ type StorageConfig struct {
 	BinaryPath string
 	// Adapter 是底层执行器（二进制优先或库）；空 = 默认装配 binary+library 双路径。
 	Adapter Adapter
+	// Reconcile 可选：待 md5 复查项的上报口（装配层提供，可闭包卷名）。
+	// nil ⇒ 仅保留本地副本并告警，不登记事项（不会自动重试）。
+	Reconcile ReconcileReporter
 	// Logger 是日志。
 	Logger *slog.Logger
 	// AllowLibraryUpload 允许**上传**在二进制失败时回退到库实现（默认 false = 禁止）。
@@ -93,7 +96,10 @@ type Storage struct {
 	root    string
 	temp    string
 	adapter Adapter
-	log     *slog.Logger
+	// reconcile 是可选上报口（装配层注入）：把「内容已确认在云端但 md5 未收敛」的
+	// 待复查项登记到事项中心（`KindBlobMD5Unconverged`）。nil ⇒ 不登记（仅保留副本 + 告警）。
+	reconcile ReconcileReporter
+	log       *slog.Logger
 	// httpc 是 Range GET 专用客户端（评审 I4 修复：禁 http.DefaultClient/共享
 	// DefaultTransport——dlink 拉取无 per-host 超时/连接池上限会占住全局池拖累
 	// 同进程其它外部请求）。per-instance 独立连接池 + ResponseHeaderTimeout 兜底。
@@ -210,7 +216,8 @@ func NewStorage(cfg StorageConfig) (*Storage, error) {
 	gate, slots := newUploadGate(limit)
 	st := &Storage{
 		root: root, temp: cfg.TempDir, adapter: cfg.Adapter, log: logger,
-		httpc: newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
+		reconcile: cfg.Reconcile,
+		httpc:     newRangeHTTPClient(), dlinkCache: newDlinkLRU(0),
 		auditSvc: cfg.Audit, coreMode: normalizeUploadCoreMode(cfg.UploadCore),
 		coreCooldown: defaultCoreDegradeCooldown, coreNow: time.Now,
 		uploadGate: gate, uploadSlots: slots, uploadLimit: limit,
@@ -258,9 +265,12 @@ func (s *Storage) Put(ctx context.Context, key string, r io.Reader) (*ObjectMeta
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(filepath.Dir(st.tmpPath)) // 清理独立临时子目录（含 tmp 文件）
-
-	return s.putStaged(ctx, key, st)
+	// 条件清理：默认删除独立临时子目录（含 tmp 文件）；若上传后校验判定
+	// 「block_list 一致但 md5 未权威」（`st.retainForReconcile`），则**保留副本**
+	// 并移入 pending 目录 + 上报事项（重传源；md5 收敛后由重试任务清理）。
+	meta, perr := s.putStaged(ctx, key, st)
+	s.finishStaged(key, st)
+	return meta, perr
 }
 
 // PutHints 是 baidupcs **后端特化**的上传提示（PutFromStagedPath 可选参数，2026-10-21）。
@@ -755,6 +765,30 @@ func (s *Storage) afterUploadByBlockList(ctx context.Context, key string, meta *
 	return false, true
 }
 
+// md5Converged 判断远端 md5 是否**已权威**（可据以清理保留副本）：
+// 非「可能不正确」标注 **且** ETag 与本地整文件 md5 相等。
+func md5Converged(meta *ObjectMeta, st *stagedUpload) bool {
+	return meta != nil && st != nil && !meta.MD5Unreliable && md5Authoritative(meta.ETag, st.md5)
+}
+
+// markReconcileIfNeeded 在「内容已确认在云端（block_list 逐块对账通过）**但**远端 md5 仍未权威」时
+// 标记**保留本地副本**（由 `Put` 侧 `finishStaged` 移入 pending 目录并上报事项，供后续
+// 「连续上传 2 次 + 复查」收敛 md5）。
+//
+// 为什么必须在这里标记（实测踩到，2026-11-13）：block_list 对账命中时会**提前 return**，
+// 若不在该分支标记，就永远走不到"md5 非权威"那段 ⇒ 副本被删 ⇒ **重试任务无源可传**（功能空转）。
+//
+// 语义对齐（用户明示）：`block_list` 一致 ⇒ **对客户端即成功**；但 sproxy **内部**仍需
+// md5 权威才清理自己的副本 ⇒ 两条判据分层，互不阻塞。
+func (s *Storage) markReconcileIfNeeded(key string, meta *ObjectMeta, st *stagedUpload) {
+	if st == nil || md5Converged(meta, st) {
+		return
+	}
+	st.retainForReconcile = true
+	s.log.Info("内容已确认在云端但远端 md5 未权威 ⇒ 保留本地副本待复查",
+		"key", key, "remote_md5", meta.ETag, "md5_unreliable", meta != nil && meta.MD5Unreliable)
+}
+
 func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 	meta *ObjectMeta, st *stagedUpload, attempt int) (*ObjectMeta, bool, error) {
 	if meta.MD5Unreliable {
@@ -770,6 +804,11 @@ func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 		// 性能：快路径（ETag 相等）不受影响；本分支原本在多轮失败后会走**整文件重传**
 		// ⇒ 对账命中反而**减少重传**。
 		if done, decided := s.afterUploadByBlockList(ctx, key, meta, st); decided {
+			if done {
+				// 内容已确认在云端 ⇒ 对客户端成功；但若 md5 尚未权威 ⇒ **保留副本待复查**
+				// （分片上传的 md5 由百度在异步刷新；此刻删副本会让重试无源可传）。
+				s.markReconcileIfNeeded(key, meta, st)
+			}
 			return meta, done, nil
 		}
 		// 列举（`ls`）返回的 size 对大文件是**近似值**（实测 87.3MiB 文件差 312B：want=91593425
@@ -816,7 +855,12 @@ func (s *Storage) checkAfterUploadUnreliableMD5(ctx context.Context, key string,
 			"key", key, "local_md5", st.md5, "remote_etag", meta.ETag, "attempt", attempt)
 		return meta, false, nil
 	}
-	s.log.Warn("远端 md5 非权威（rapidupload 刷新后仍非权威），md5 复核跳过",
+	// ★ 该状态（内容一致/已上传，但远端 md5 仍非权威）**需要保留本地副本**以便后续
+	// 「连续上传 2 次 + 复查」收敛 md5 —— 置位后由 `Put` 侧的 `finishStaged` 负责移入
+	// pending 目录并上报事项（不在此处删除）。判据与 block_list 命中分支**同源**
+	// （`markReconcileIfNeeded`），避免两处漂移。
+	s.markReconcileIfNeeded(key, meta, st)
+	s.log.Warn("远端 md5 非权威（rapidupload 刷新后仍非权威），md5 复核跳过；已标记保留本地副本待复查",
 		"key", key, "remote_etag", meta.ETag, "attempt", attempt)
 	if verr := s.verifyUnreliableMD5Size(key, st, meta, attempt); verr != nil {
 		if errors.Is(verr, errSizeMismatchRetry) {
@@ -907,12 +951,16 @@ func (s *Storage) renewAuthoritativeMD5(ctx context.Context, key string, st *sta
 // md5），>4MB 文件用整文件 md5 秒传恒 miss。blockMD5s 按上传分块大小（4MB）从 tmp 读回
 // 计算，供 RapidUpload 完整版（blockListMD5 参数）命中秒传。
 type stagedUpload struct {
-	tmpPath   string
-	md5       string   // 整文件 md5（ETag 复核基准）
-	sliceMD5  string   // 前 256KB md5（rapidupload 秒传参数）
-	crc32     string   // 整文件 CRC32 IEEE（rapidupload 秒传参数）
-	size      int64    // 文件大小（rapidupload length 参数）
-	blockMD5s []string // 按 uploadBlockSize 分块的 md5 列表（秒传 blockListMD5 参数，C-C1）
+	tmpPath string
+	// retainForReconcile 由上传后校验置位：表示「内容已确认在云端（block_list 逐块对账通过）
+	// 但远端 md5 仍未权威」⇒ **不得删除本地副本**（后续"连续上传 2 次 + 复查"的重传源），
+	// 由 `finishStaged` 移入 pending 目录并上报事项（见 KindBlobMD5Unconverged）。
+	retainForReconcile bool
+	md5                string   // 整文件 md5（ETag 复核基准）
+	sliceMD5           string   // 前 256KB md5（rapidupload 秒传参数）
+	crc32              string   // 整文件 CRC32 IEEE（rapidupload 秒传参数）
+	size               int64    // 文件大小（rapidupload length 参数）
+	blockMD5s          []string // 按 uploadBlockSize 分块的 md5 列表（秒传 blockListMD5 参数，C-C1）
 }
 
 // uploadBlockSize 是分片上传的块大小（与 multiupload.go 的 MultiUploader BlockSize

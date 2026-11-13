@@ -43,6 +43,14 @@ const (
 	KindContainerNotIndexed Kind = "container_not_indexed"
 	// KindUploadFailed 上传/转存失败——**可自动重试**。
 	KindUploadFailed Kind = "upload_failed"
+	// KindBlobMD5Unconverged 内容已确认在云端（`block_list` 逐块对账通过）但远端 md5 尚未权威
+	// ——**可自动重试**：连续上传 2 次（命中秒传触发刷新）→ 退避（默认 5min）后再对账；
+	// 达上限转人工。
+	//
+	// 登记约定：`Volume` = 卷名；**`Path` = 卷内相对路径（rel）** —— 取 rel 而非随机副本路径，
+	// 是为让事项 ID（Kind+Volume+Path 派生）**稳定**，同文件重复上报自动合并为一条。
+	// 上传时保留的本地副本由执行器按 (volume, rel) 反查（见 cmd/sproxy/blob_reconcile_wiring.go）。
+	KindBlobMD5Unconverged Kind = "blob_md5_unconverged"
 	// KindOther 其它（兜底，登记时必须写明确 Detail）。
 	KindOther Kind = "other"
 )
