@@ -47,6 +47,25 @@ sclient 是 sproxy 的配套客户端，基于 cobra + pflag。所有命令均�
 | `--json` | false | 以 JSON 格式输出（机器可读；`-o`/人类可读文案被抑制） |
 | `--verbose`, `-v` | false | 显示详细输出 |
 
+### 输出语言（i18n）
+
+`sclient` 的人类可读（Text）输出支持中英双语，由**环境变量**探测，无需 flag：
+
+```bash
+LC_ALL=en_US.UTF-8 sclient ls        # 英文（最高优先级）
+LC_MESSAGES=en sclient ls           # 次优先
+LANG=en_US.UTF-8 sclient ls         # 最低
+export LANG=en_US.UTF-8            # 影响后续所有调用
+```
+
+- **优先级**：`LC_ALL` > `LC_MESSAGES` > `LANG`（空值跳过）。进程内环境变量视为不变，
+  改了要重新启动命令。
+- **取值归一**：`zh*` / `C` / `POSIX` / 空 → **中文（默认，零变化）**；`en*` → 英文；
+  其它合法语言代码（fr/ja/de …）→ **英文**（没翻译表时的国际通用回退）；非法形态（数字开头/
+  纯符号）→ 中文。
+- **边界**：只翻译**固定文案**（列头、提示、错误前缀）；文件名/URL/大小/路径等数据原样，
+  表格列宽与 JSON 输出（`--json`）契约**不变**；字典缺键时返回原键（绝不空串/panic）。
+
 ### 错误输出与 `--json` 脚本化
 
 - **稳定 stderr 文案**：命令失败时会用 `WriteErrLine` 向 **stderr** 打印一行可读文案（如
