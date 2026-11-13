@@ -3,7 +3,7 @@
 
 // Package state 提供统一状态存储抽象（StateStore）与配套能力接口。
 //
-// 背景（roadmap 11.12，设计 2026-09-24-statestore.md）：sproxy 各状态
+// 背景（roadmap 11.12，设计 docs/archive/2026-09-24-statestore.md）：sproxy 各状态
 // （凭据/checksum/dedup/share/index/audit）此前均为各自为政的本地 JSON 落盘，
 // 每份都重复「tmp+rename 原子写 + saveMu 串行化」样板且无 CAS 原语。本包定义
 // 跨实现一致的 StateStore 接口（本地 JSON 为默认实现，mongo/raft 为插件位），

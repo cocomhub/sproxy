@@ -11,7 +11,7 @@ import (
 
 // StateStore 是状态存储抽象：key → 不透明字节值。
 //
-// 实现约定（跨实现一致，见设计 2026-09-24-statestore.md §2.2）：
+// 实现约定（跨实现一致，见设计 docs/archive/2026-09-24-statestore.md §2.2）：
 //   - Get：key 不存在返回 ErrKeyNotFound（与 os.ErrNotExist 语义对齐），
 //     绝不返回 (nil, nil)；
 //   - Put：原子写（tmp+rename 语义——本地实现；mongo 为 upsert 单文档），

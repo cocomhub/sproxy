@@ -84,7 +84,7 @@ type AuthConfig struct {
 //   - Interval 是周期落盘间隔（>0 启用统一调度器周期 Flush；0 = 关闭周期落盘，
 //     仅优雅停服时 Flush 一次）。
 //
-// 默认不启用（design docs/2026-09-24-usage-report.md 风险与零回归：启用才产生落盘
+// 默认不启用（design docs/archive/2026-09-24-usage-report.md 风险与零回归：启用才产生落盘
 // 与计数开销）；启动装配读一次，SIGHUP 后不重建（与 bucket_limits 同语义）。
 type UsageConfig struct {
 	Enabled  bool          `yaml:"enabled" mapstructure:"enabled"`
@@ -819,7 +819,7 @@ type VolumeConfig struct {
 	// 下载时 302 跳到后端直链，流量不经服务端）。零值即安全默认，无需 *bool。
 	// 仅明文外部卷（baidupcs 等）消费；secretdata 密文卷恒服务端解密，本字段忽略。
 	DirectLink bool `yaml:"direct_link,omitempty" mapstructure:"direct_link"`
-	// Retention 是卷级数据保留策略（roadmap 11.7-⑨，docs/designs/2026-09-24-volume-retention.md）：
+	// Retention 是卷级数据保留策略（roadmap 11.7-⑨，docs/archive/2026-09-24-volume-retention.md）：
 	// 对绑定本卷的过期数据（版本桶、分享 token、审计日志）做周期清理。0/缺省 = 关闭（零回归）。
 	// 卷级 TTL > 0 时优先于全局配置（versioning.retention 等）；审计为默认卷单点权威——
 	// 非默认卷配置 audit_ttl 在装配期 Warn + 忽略（禁静默忽略）。

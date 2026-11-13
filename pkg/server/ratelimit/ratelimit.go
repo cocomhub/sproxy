@@ -30,7 +30,7 @@ import (
 // Middleware 的最终放行还须经 coordinator.Allow（key=归一化 IP），多实例
 // 共享配额。nil = 不协调（既有单实例行为，零回归）。
 //
-// 限流维度扩展（roadmap 11.10-⑪ P1，设计文档 2026-09-24-ratelimit-dimensions.md）：
+// 限流维度扩展（roadmap 11.10-⑪ P1，设计文档 docs/archive/2026-09-24-ratelimit-dimensions.md）：
 //   - endpointLimits/endpointDefaults：per-endpoint 限流（path → {limit, window}），
 //     精确匹配优先 + "/" 段边界前缀最长匹配；无匹配规则透传（只限显式配置的端点）。
 //   - sem：全局并发上限（非阻塞 semaphore，0/未装配 = 关闭）。Middleware 放行链：

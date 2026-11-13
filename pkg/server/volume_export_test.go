@@ -3,7 +3,7 @@
 
 package server
 
-// volume_export_test.go 覆盖卷备份/导出（roadmap 11.3-② / docs/designs/2026-09-24-volume-export.md）：
+// volume_export_test.go 覆盖卷备份/导出（roadmap 11.3-② / docs/archive/2026-09-24-volume-export.md）：
 //  1. GET /api/volumes/export 流式 tar（条目 user/<rel> + 尾部 manifest.json）——内容与源一致；
 //  2. manifest 每条目 SHA-256 与源一致（变异：checksum 错/缺 → 红）；
 //  3. POST /api/volumes/import 恢复 → POST /api/verify 全绿（往返校验，变异：导入不校验 → 红）；

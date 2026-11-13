@@ -4,7 +4,7 @@
 // Package oidcldap 是 OIDC（Authorization Code + PKCE）与 LDAP（绑定）外部认证的
 // **独立 go module**（ext 隔离，roadmap 11.7-⑥）。
 //
-// 设计要点（docs/designs/2026-09-24-oidc-ldap.md）：
+// 设计要点（docs/archive/2026-09-24-oidc-ldap.md）：
 //   - 本 module 是独立 go.mod（与 pkg/tunnel/xfer/ext/* 同款），只依赖
 //     golang.org/x/oauth2（x/ 准标准库）与 go-ldap/ldap/v3（唯一第三方，ext 隔离评审
 //     已放行）；核心库（pkg/server）零新依赖。
