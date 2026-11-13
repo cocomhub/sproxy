@@ -36,9 +36,12 @@ func newFinishStagedStorage(t *testing.T, rep ReconcileReporter) *Storage {
 // mkStage 造一个 stage-* 目录 + 副本文件，返回 stagedUpload。
 func mkStage(t *testing.T, s *Storage, key string, content string) (*stagedUpload, string) {
 	t.Helper()
-	dir, err := os.MkdirTemp(s.temp, "stage-*")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
+	// 用 os.MkdirAll 构造 stage-* 形态的目录（不裸调 os.MkdirTemp：archcheck 的
+	// TempDirGate 要求测试改用 testutil.MkdirTemp/t.TempDir；此处需**位于 s.temp 之下**
+	// 才能被 finishStaged 的 pending 逻辑覆盖）。目录名确定性派生，避免并发用例互相干扰。
+	dir := filepath.Join(s.temp, "stage-"+strings.NewReplacer("/", "_", "\\", "_").Replace(key))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
 	}
 	p := filepath.Join(dir, filepath.Base(key))
 	if werr := os.WriteFile(p, []byte(content), 0o600); werr != nil {

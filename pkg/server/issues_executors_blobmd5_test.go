@@ -12,7 +12,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/server/issues"
 )
 
-// TestRunBlobMD5Reconcile_参数校验与透传 锁定「blob md5 未收敛」重试执行器的契约：
+// TestRunBlobMD5ReconcileArgs 锁定「blob md5 未收敛」重试执行器的契约：
 //   - 登记约定（`Volume`=卷名、`Path`=**卷内 rel**）缺一 ⇒ **返回错误转人工**
 //     （不静默成功——否则会让人误以为在自动重试）；
 //   - 未注入动作 ⇒ 返回错误；
@@ -20,7 +20,7 @@ import (
 //
 // 注：副本路径**不由事项携带**（Path 取稳定的 rel 以保证事项 ID 稳定）；实现方按
 // (volume, rel) 自行反查副本 —— 见 cmd/sproxy/blob_reconcile_wiring.go。
-func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
+func TestRunBlobMD5ReconcileArgs(t *testing.T) {
 	t.Parallel()
 	base := issues.Item{Volume: "baidu", Path: "jav/a/b.bin"}
 
@@ -63,9 +63,9 @@ func TestRunBlobMD5Reconcile_参数校验与透传(t *testing.T) {
 	}
 }
 
-// TestNewIssuesExecutors_注册md5未收敛 锁定该 Kind **已注册**（否则 RunDue 会把事项直接转 needs_human，
+// TestNewIssuesExecutorsRegistersBlobMD5 锁定该 Kind **已注册**（否则 RunDue 会把事项直接转 needs_human，
 // 即“看起来有类型、实际不重试”）。
-func TestNewIssuesExecutors_注册md5未收敛(t *testing.T) {
+func TestNewIssuesExecutorsRegistersBlobMD5(t *testing.T) {
 	t.Parallel()
 	execs := NewIssuesExecutors(ExecutorDeps{
 		ReconcileBlobMD5: func(context.Context, string, string) error { return nil },
