@@ -24,24 +24,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var cfgFile string
-
 // cliErrReported 记录本次进程是否已由命令打印过错误（main 据此避免重复打印，
 // 同时保留命令的稳定 stderr 文案供脚本消费）。
 var cliErrReported atomic.Bool
 
 // cliJSONMode 记录本次进程是否启用 --json（main 据此输出结构化错误对象）。
 var cliJSONMode atomic.Bool
-
-// contextFlags 保存 --context/--env/--user 三个全局 flag 的解析结果（供
-// factory/cfgSvc 后续消费；T3a 只负责解析注入，消费在 T3b）。
-// PersistentPreRunE 中从 flag 读取（未显式指定时用 SCLIENT_CONTEXT/
-// SCLIENT_ENV/SCLIENT_USER 环境变量作为默认值）。
-var contextFlags struct {
-	context string
-	env     string
-	user    string
-}
 
 // resolvedContext 是 PersistentPreRunE 解析出的有效上下文（env+user 都解析成功
 // 才非 nil）。config.yaml 不存在或解析失败时为 nil（回落旧平铺路径）。
@@ -104,6 +92,16 @@ func (c *cliConfigProvider) LoadSealfileConfig(out any) error {
 
 // NewRootCmd 创建完整的 sclient 根命令，包含所有 flags 和子命令。
 func NewRootCmd() *cobra.Command {
+	// **局部化（2026-11-13，消除真实数据竞争）**：这两个"当前进程"的 flag 载体原先声明在
+	// **包级** ⇒ 多个测试并行调用 NewRootCmd() 会**同时写同一变量** ⇒ `-race` 报
+	// `cmd/sclient/root.go` 的 StringVar 写竞争（CI 已复发 ≥2 次：#1127/#1129）。
+	// 改为**每次调用独立**的局部变量（子命令仍按指针接收，但指向本次调用的实例）⇒ 无共享。
+	var cfgFile string
+	var contextFlags struct {
+		context string
+		env     string
+		user    string
+	}
 	var (
 		currentDir string
 		cliState   = &state.State{}
@@ -342,7 +340,8 @@ func homeDir() string {
 // 解析失败（config.yaml 损坏/引用缺失）不阻断命令，但同样置 nil——需要配置的
 // 命令会经 ConfigProvider/factory 得到明确错误（不再静默回落默认值）。
 func resolveAndMigrateContext(cmd *cobra.Command, errW io.Writer) {
-	cfgPath := cfgFile
+	// **从本次命令的 flag 读**（不再读包级变量，见 NewRootCmd 的局部化说明）。
+	cfgPath, _ := cmd.Flags().GetString("config")
 	// --context/--env/--user flag 值（flag 注册时已用环境变量作为默认值）。
 	ctxName, _ := cmd.Flags().GetString("context")
 	envName, _ := cmd.Flags().GetString("env")
