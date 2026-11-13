@@ -936,3 +936,9 @@ var (
 	_ syncpkg.TreeInspector    = (*CapacityFS)(nil)
 	_ syncpkg.DirMetaCleaner   = (*CapacityFS)(nil)
 )
+
+// 编译期契约：本装饰器必须支持 `DecoratorCapabilities` 的**全部**共同可选能力
+// ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
+var (
+	_ syncpkg.DecoratorCapabilities = (*CapacityFS)(nil)
+)

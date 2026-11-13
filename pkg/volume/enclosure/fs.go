@@ -159,3 +159,10 @@ var (
 	_ syncpkg.TreeInspector    = (*FS)(nil)
 	_ syncpkg.DirMetaCleaner   = (*FS)(nil)
 )
+
+// 编译期契约：本装饰器必须支持 `syncpkg.DecoratorCapabilities` 的**全部**共同可选能力
+// ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
+// （本类型嵌入 `*syncpkg.PrefixFS` ⇒ 能力由其转发提供。）
+var (
+	_ syncpkg.DecoratorCapabilities = (*FS)(nil)
+)
