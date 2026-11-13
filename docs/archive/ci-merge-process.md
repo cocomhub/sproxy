@@ -199,3 +199,49 @@ git push --force-with-lease       # 重写 head SHA ⇒ 触发 pull_request: syn
 ### 验证记录（2026-11-13）
 恢复 `*.md`/`docs/**` 后（#1124 合并，master `24c43a295`），本 PR **只改 docs/** ⇒ 用于实测：
 应只有 `CI (docs-only)` + `PR title check`（**无 `CI` run**）⇒ 即「纯文档 PR 秒合并」恢复。
+
+## 并行 PR 的三条硬教训（2026-11-13 实测沉淀）
+
+> 背景：一次流水线并行推进 8 个 PR（用户要求「不等 CI 连续执行」）时连续踩到三个坑。
+> 它们**都可预防**，以下为口径。
+
+### ① **相关功能不要拆过细**（用户明示原则，最根本的一条）
+**「不要拆分过细，相关功能一起 PR 合并即可，减少冲突。」**
+
+实测代价：`#1135`（并发闸）/ `#1136`（L1a 配额）/ `#1137`（L1b 可配置）**三改同一文件**
+（`pkg/volume/secretdata/secretdata.go` 的字段区与初始化区）⇒ `#1135` 一合并，另两个**立即
+`CONFLICTING`**、`gh pr merge` 失败 ⇒ **每个都要单独 rebase 解冲突**。
+
+⇒ 口径：
+- **同族改动（同文件 / 同模块 / 同一能力链）⇒ 一个 PR 一次做完**（代码 + 测试 + 装配接线 + 文档）；
+  冲突在**提交时**就解决了，不会等到合并才爆；
+- **只有真正无关**（不同文件 / 不同能力、无共享冲突面）才并行多 PR；
+- 这与既有规则一致：**不拆小 PR**。
+
+### ② **合并前也要 rebase**（不只 push 前）
+即便 push 前 rebase 过，**等 CI 的这段时间里上游可能已合并** ⇒ 轮到自己合并时又落后
+（本轮 `#1137`/`#1138` 各自二次冲突）。⇒ 口径：
+```bash
+gh pr view <n> --json mergeable --jq .mergeable   # 必为 MERGEABLE 才 merge
+# 若 CONFLICTING：git fetch origin && git rebase origin/master && git push --force-with-lease
+```
+
+### ③ **删分支必须在 `state == MERGED` 之后**
+本轮脚本在 `gh pr merge` **失败后仍执行**了 `git push --delete <branch>` ⇒ 分支消失 ⇒
+GitHub **自动关闭** PR，且**无法 reopen**（它同时缓存了旧的 `CONFLICTING`）⇒ 只能**重新 push 分支 + 开新 PR**
+（本轮 `#1138` 即 `#1136` 的重开）。⇒ 口径：
+```bash
+gh pr merge <n> --squash -t "..." -b "$(cat body.md)"
+ST=$(gh pr view <n> --json state --jq .state)
+[ "$ST" = "MERGED" ] && git push origin --delete <branch>   # 只在确认合并后删
+```
+
+## Flake 治理纪律
+
+与 CI 相关的偶发失败**不要一律 rerun 过关**：修 / 补可诊断信息 / 明确记档为待复现。
+清单、分类（A 真实竞态 / B 时序夹具 / C 基础设施）与**取证要求**（必须核对**失败 step** 而非
+"日志里有没有该消息"）见 **`docs/testing/flake-ledger.md`**。
+
+（典型反例：把 `setup-go` 缓存的 `BlobNotFound` 404 当 flake 并提了「禁用缓存」的 PR ⇒
+取证发现该步骤**始终 success**、近 100 run 零失败 ⇒ **404 是正常 cache miss**，属**误判**，
+PR 已撤回。**不要为换稳定而禁用工作正常的能力。**）
