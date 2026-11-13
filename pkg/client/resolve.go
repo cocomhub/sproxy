@@ -24,6 +24,12 @@ type ResolvedFile struct {
 	Type       string `json:"type,omitempty"`
 	Hash       string `json:"hash,omitempty"`
 	DirectLink string `json:"direct_link,omitempty"`
+
+	// 媒体探测结果（服务端尽力而为；未探测/失败时缺省 ⇒ 消费方必须容忍零值）。
+	// 对应服务端 downloader.ResolvedFile 的 Width/Height/Resolution（PR #1153）。
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Resolution string `json:"resolution,omitempty"`
 }
 
 // ResolveInfo 是 URL 解析结果（与服务端 downloader.ResolveInfo JSON 对齐）。
