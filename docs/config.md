@@ -436,9 +436,21 @@ volumes:
       node: "node-id"        # 远端 mesh 节点 ID（hub 服务发现表）
       volume: "remote-vol"   # 远端节点卷名
       path: ""               # 卷内子路径（可选；空 = 卷根）
+      writable: false        # 默认 false = 只读挂载（写操作 ErrReadOnly，fail-closed）
+      conflict_mode: lww     # 仅 writable=true 时有意义：lww（默认）/ version / conflict
 ```
 
-- 只读强制：写方法恒 `ErrReadOnly`（fail-closed，联邦卷不写远端）
+- **写面（`extra.writable`）**：`false`/缺省 = **只读**（写方法恒 `ErrReadOnly`，fail-closed）；
+  `true` = 注入远端写面，`WriteFile/Rename/Delete/MakeDir` 转发到远端（经远端 volwrite 面）。
+- **写冲突策略（`extra.conflict_mode`，仅写面存在时生效）**：
+  - `lww`（缺省，含空值）：直转写面，**远端以最后写入者胜**（零回归）；
+  - `version`：写前 `CheckVersion` 取当前版本 → `WriteFileVersioned(expected=当前)` 远端 **CAS**
+    （当前版本 == expected 才写并 +1），不匹配 → 版本冲突错误（对应 409 + 当前版本号，客户端重取重试）；
+  - `conflict`：写前发现远端已存在 → 旧文件改名 `<path>.conflict-<unixNano>` **保留双方**，
+    再以「期望不存在」写新内容；改名失败则整次写入失败（不写新内容，防丢旧内容）。
+  - 值大小写不敏感；**非法值启动即报错**（禁静默回落 lww）。
+  - `version`/`conflict` 要求 `writable=true` **且**写面实现版本感知写入（`VersionedWriter`），
+    不满足 → **装配报错**（fail-closed：禁静默降级回 lww）。
 - 健康探针：`registry.HealthProbe`（拨号 + 建链到 node），`GET /api/volumes` 的
   `state` 可观测（healthy/degraded/unknown）
 - 前置：`mesh.hub_url`/凭据已配置（hub 中继 Dialer 装配）；hub 服务发现表含目标节点
