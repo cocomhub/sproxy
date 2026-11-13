@@ -238,6 +238,12 @@ func (s *SecretdataFS) ensureEntryMeta(ctx context.Context, e *metaEntry) error 
 		s.mu.Unlock()
 		return nil
 	}
+	// **加载并发闸**（P3）：拿住名额再加载 —— 防止 N 个并发请求同时展开 N 个大 meta
+	// （瞬时峰值 N × ~350 MB ⇒ OOM）。名额等待可被 ctx 取消。
+	if aerr := s.metaLoadGate.acquire(ctx); aerr != nil {
+		return aerr
+	}
+	defer s.metaLoadGate.release()
 	m, _, merr := s.readFileMetaFast(ctx, blobKey)
 	if merr != nil {
 		return merr

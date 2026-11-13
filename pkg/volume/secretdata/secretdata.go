@@ -342,6 +342,11 @@ type SecretdataFS struct {
 	// ②给「按需加载后被挂到 `metaEntry.meta` 的常驻量」设**硬上限**（淘汰时须回清 `e.meta`）。
 	// nil = 关闭缓存（各方法对 nil 安全 ⇒ 退化为每次直读，零回归）。
 	metaCache *metaEntryCache
+
+	// metaLoadGate 限制「同时加载 meta」的并发数（P3，2026-11-13）：实测单条加载瞬时峰值
+	// 可达 ~350 MB（常驻 ~82 MB），并发雪崩会直接 OOM；L1b 的字节预算只管"已加载常驻量"，
+	// 管不了"正在加载的峰值" ⇒ 由本闸兜住（上限见 metaLoadConcurrency）。
+	metaLoadGate metaLoadGate
 	// spanCache 是本机**磁盘**块密文跨度缓存（2026-10-22，见 span_disk_cache.go）：staging
 	// 目录 + 字节预算 + 定期清理 + 空间不足自动降级。nil = 未装配（默认关闭零回归）。
 	spanCache *spanDiskCache
@@ -516,10 +521,11 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 		dirIDs: map[string]string{}, dirParents: map[string]string{},
 		dirMTime: map[string]int64{}, keyCache: newDeriveCache(64),
-		loadGate:   make(chan struct{}, maxParallelLoads(&alg)),
-		dedupPool:  map[string]*dedupBlob{},
-		blockCache: newBlockletCache(opts.BlockletCacheBytes.Bytes()),
-		metaCache:  newMetaEntryCache(0),
+		loadGate:     make(chan struct{}, maxParallelLoads(&alg)),
+		dedupPool:    map[string]*dedupBlob{},
+		blockCache:   newBlockletCache(opts.BlockletCacheBytes.Bytes()),
+		metaCache:    newMetaEntryCache(0),
+		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(defaultMetaCacheBytes)),
 	}
 	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
 	attachSpanDiskCache(fs, opts)
