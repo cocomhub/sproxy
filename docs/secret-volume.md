@@ -112,6 +112,8 @@ sclient sealfile info ./sealed --key ./datakey
 | `preserve_mtime` | `false` | 默认 blob mtime 打散；`true` 才透传原始 mtime（§3.5） |
 | `gc_interval` | `0`（禁用） | 后台孤儿/墓碑 GC 周期（§6；可选维护工具，默认关） |
 | `max_file_bytes` | `0`（不限） | 单文件上限（文件级总闸；流式路径按声明 size 预检，§9） |
+| `meta_cache_bytes` | `256 MiB`（零值即默认） | **L1b 元数据内存缓存**字节上限（负值 ⇒ 关闭缓存）。依据实测：单条大 meta 常驻 ~82 MB、加载瞬时峰值 ~350 MB，且加载吞吐在并发 4 后饱和 ⇒ 默认约容纳 3 条，**再大无益**；同时有**加载并发闸**（`min(4, 预算/单条)`）兜住瞬时峰值 |
+| `meta_cache_quota_bytes` | `2 GiB`（零值即默认） | **L1a 精简 meta 磁盘缓存**配额（负值 ⇒ 不限制）。超配额时按 **mtime 最旧优先**淘汰（缓存可重建 ⇒ 无需维护访问序）；实测该目录曾无上限涨到 **5.29 GB / 9,489 文件** |
 | `targets` | 空 | 多 local root 副本列表（write 复制全部 target、读主失败回退；§3.6） |
 | `erasure` | `false` | XOR parity 基于（**实验性**，§3.7） |
 | `dedup` | — | **预留、装配层不接线**（不解析 `extra.dedup`），内容去重为独立内容寻址子系统的未来能力 |
