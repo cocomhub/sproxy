@@ -3,7 +3,10 @@
 
 package baidupcs
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // reconcileBlockList 比较远端 `block_list` 与本地分块 md5 列表（依据 docs/external-dependencies.md §7.8.5 实测）。
 //
@@ -58,4 +61,47 @@ func isHex32Str(s string) bool {
 		}
 	}
 	return true
+}
+
+// blockListProvider 是**可选能力**：返回远端对象的**分块 md5 列表**（`block_list`）。
+//
+// 为什么必须单独成接口（实测 gap，否则功能在生产空转）：生产是 **binary 优先**，而
+// CLI `meta` 的输出**不含 `block_list`**（实测输出仅 类型/文件路径/文件名称/文件大小/md5/
+// app_id/fs_id/创建日期/修改日期）⇒ `binaryAdapter.Meta` 恒填不出该字段。
+// 只有**库** `FilesDirectoriesMeta`（`pcs/file?method=meta`）返回 `BlockList`。
+type blockListProvider interface {
+	BlockList(ctx context.Context, remotePath string) ([]string, error)
+}
+
+// blockListOf 取底层（含 binary→库兜底）的分块列表能力；无则 nil。
+//
+// 顺序：① adapter 自身实现（库装配）② `binaryAdapter` 的库兜底（生产 binary 优先时走此处）。
+func (s *Storage) blockListOf() blockListProvider {
+	if p, ok := s.adapter.(blockListProvider); ok {
+		return p
+	}
+	if ba, ok := s.adapter.(*binaryAdapter); ok {
+		if p, ok := ba.cfg.Fallback.(blockListProvider); ok {
+			return p
+		}
+	}
+	return nil
+}
+
+// fetchBlockList 取远端分块 md5 列表（拿不到 ⇒ nil，调用方**必须**按"不可判定"处理）。
+func (s *Storage) fetchBlockList(ctx context.Context, key string) []string {
+	p := s.blockListOf()
+	if p == nil {
+		return nil
+	}
+	remote, err := s.remotePath(key)
+	if err != nil {
+		return nil
+	}
+	blocks, berr := p.BlockList(ctx, remote)
+	if berr != nil {
+		s.log.Debug("取远端 block_list 失败（按不可判定处理）", "key", key, "error", berr)
+		return nil
+	}
+	return blocks
 }

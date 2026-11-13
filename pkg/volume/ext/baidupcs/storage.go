@@ -731,21 +731,27 @@ func (s *Storage) putCheckAfterUpload(ctx context.Context, key string, st *stage
 //
 // 注意：`meta.BlockList` 仅库 `FilesDirectoriesMeta` 路径有值（binary/列举路径为空）
 // ⇒ 空列表时恒返回 (false,false)，**行为与接入前完全一致**（零回归）。
-func (s *Storage) afterUploadByBlockList(key string, meta *ObjectMeta, st *stagedUpload) (done, decided bool) {
+func (s *Storage) afterUploadByBlockList(ctx context.Context, key string, meta *ObjectMeta, st *stagedUpload) (done, decided bool) {
 	if meta == nil || st == nil {
 		return false, false
 	}
-	equal, decidable := reconcileBlockList(meta.BlockList, st.blockMD5s)
+	remoteBlocks := meta.BlockList
+	if len(remoteBlocks) == 0 {
+		// 生产为 binary 优先，而 CLI `meta` **不含 block_list** ⇒ 此处按需从**库**取一次
+		// （`blockListOf` 会沿 binary→库兜底下探）。仅出现在退化分支，不增加快路径开销。
+		remoteBlocks = s.fetchBlockList(ctx, key)
+	}
+	equal, decidable := reconcileBlockList(remoteBlocks, st.blockMD5s)
 	if !decidable {
 		return false, false
 	}
 	if equal {
 		s.log.Info("上传后 block_list 逐块一致（内容已在云端）",
-			"key", key, "blocks", len(meta.BlockList))
+			"key", key, "blocks", len(remoteBlocks))
 		return true, true
 	}
 	s.log.Warn("上传后 block_list 逐块不一致（重传）",
-		"key", key, "remote_blocks", len(meta.BlockList), "local_blocks", len(st.blockMD5s))
+		"key", key, "remote_blocks", len(remoteBlocks), "local_blocks", len(st.blockMD5s))
 	return false, true
 }
 
@@ -763,7 +769,7 @@ func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 		// 替代“size 容差”这一弱判据；仅当**不可判定**（无 block_list/长度不符/非法值）才回落。
 		// 性能：快路径（ETag 相等）不受影响；本分支原本在多轮失败后会走**整文件重传**
 		// ⇒ 对账命中反而**减少重传**。
-		if done, decided := s.afterUploadByBlockList(key, meta, st); decided {
+		if done, decided := s.afterUploadByBlockList(ctx, key, meta, st); decided {
 			return meta, done, nil
 		}
 		// 列举（`ls`）返回的 size 对大文件是**近似值**（实测 87.3MiB 文件差 312B：want=91593425
@@ -799,7 +805,7 @@ func (s *Storage) checkAfterUploadUnreliableMD5(ctx context.Context, key string,
 	// ★ 主判据：**远端 block_list 逐块对账**（§7.8.5：与本地 4 MiB 分块同构、**T+0 可用**），
 	// **不依赖**远端 md5 字段是否权威。已判定即返回；**不可判定**（binary/列举路径 BlockList 恒空）
 	// ⇒ 回落下方既有逻辑 ⇒ **零回归**。
-	if done, decided := s.afterUploadByBlockList(key, meta, st); decided {
+	if done, decided := s.afterUploadByBlockList(ctx, key, meta, st); decided {
 		return meta, done, nil
 	}
 	if !meta.MD5Unreliable {

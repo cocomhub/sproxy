@@ -500,6 +500,31 @@ func (a *libraryAdapter) Meta(ctx context.Context, remotePath string) (*ObjectMe
 	return &m, nil
 }
 
+// BlockList 返回远端对象的**分块 md5 列表**（`pcs/file?method=meta` 的 `block_list`）。
+// 实测：与本地 4 MiB 分块同构、上传后 T+0 可用（docs/external-dependencies.md §7.8.5）。
+// 这是**父目录列举与 CLI `meta` 都拿不到**的信息 ⇒ 上传后逐块对账只能走本接口。
+func (a *libraryAdapter) BlockList(ctx context.Context, remotePath string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if a.pcs == nil {
+		return nil, fmt.Errorf("baidupcs: library adapter without client")
+	}
+	fd, pcsErr := a.pcs.PCS().FilesDirectoriesMeta(remotePath)
+	if pcsErr != nil {
+		return nil, mapPCSError(pcsErr)
+	}
+	if fd == nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, remotePath)
+	}
+	if len(fd.BlockList) == 0 {
+		return nil, nil
+	}
+	return append([]string(nil), fd.BlockList...), nil
+}
+
+var _ blockListProvider = (*libraryAdapter)(nil)
+
 // fileDirectoryMeta 把库 FileDirectory 映射为 ObjectMeta（Key 为网盘绝对路径，由调用方归一）。
 func fileDirectoryMeta(fd *bdlib.FileDirectory) ObjectMeta {
 	m := ObjectMeta{

@@ -52,7 +52,7 @@ func TestAfterUploadByBlockList_对账判定(t *testing.T) {
 	}
 	for _, tc := range cases {
 		st := &stagedUpload{blockMD5s: tc.localBlocks}
-		done, decided := s.afterUploadByBlockList("k", &ObjectMeta{BlockList: tc.remoteBlocks}, st)
+		done, decided := s.afterUploadByBlockList(t.Context(), "k", &ObjectMeta{BlockList: tc.remoteBlocks}, st)
 		if done != tc.wantDone || decided != tc.wantDecided {
 			t.Errorf("%s: got (done=%v, decided=%v), want (done=%v, decided=%v)",
 				tc.name, done, decided, tc.wantDone, tc.wantDecided)
@@ -67,10 +67,10 @@ func TestAfterUploadByBlockList_空BlockList零回归(t *testing.T) {
 	s := newReconcileTestStorage(t)
 	st := &stagedUpload{md5: strings.Repeat("a", 32), size: 8 << 20,
 		blockMD5s: []string{strings.Repeat("a", 32), strings.Repeat("b", 32)}}
-	if done, decided := s.afterUploadByBlockList("k", &ObjectMeta{}, st); done || decided {
+	if done, decided := s.afterUploadByBlockList(t.Context(), "k", &ObjectMeta{}, st); done || decided {
 		t.Fatalf("空 BlockList 必须回落，得到 (done=%v, decidable=%v)", done, decided)
 	}
-	if done, decided := s.afterUploadByBlockList("k", nil, st); done || decided {
+	if done, decided := s.afterUploadByBlockList(t.Context(), "k", nil, st); done || decided {
 		t.Fatalf("nil meta 必须回落，得到 (done=%v, decidable=%v)", done, decided)
 	}
 }
