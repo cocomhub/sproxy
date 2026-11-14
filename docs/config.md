@@ -95,6 +95,7 @@ sproxy 的运行参数由 4 个来源合并而成，**优先级从高到低**：
 | `archive.key_file` | string | (空) | 归档加密密钥文件（base64 32B 或 raw 32B，同 credential master key 语义）；`POST /api/archive` 带 `encrypt:true` 时输出 `.tar.gz.aes`（AES-256-GCM 流式分块加密，roadmap P2 加密归档插件化）。空 = 加密归档请求报错（fail-closed） |
 | `debug_pprof_enabled` | bool | `false` | 内存观测（roadmap §6 P2）：受认证保护的 `/debug/pprof` 端点开关。默认关零回归（404）；显式开启才暴露 pprof 索引/profile（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace），且必须经 SproxySig/APIKey 认证（未认证 401）——启用状态启动日志可见（安全开关可观测铁律） |
 | `metrics_token` | string | (空) | `/metrics` 端点可选访问令牌（roadmap §6 P1 指标深化）：空 = 匿名可读（默认零回归）；非空 = GET /metrics 必须带 `?token=<t>` 或 `Authorization: Bearer <t>`（常量时间比较），否则 401。仅门 /metrics（其它端点不受影响）；token 不随 SIGHUP 重载（重启生效） |
+| `apdex_threshold` | duration | `500ms` | Apdex 满意阈值 T（roadmap 11.10-H3 SLO）：`0`/缺省 = 默认 500ms。请求延迟分档 `d <= T` satisfied / `T < d <= 4T` tolerated / `d > 4T` frustrated，输出 `sproxy_apdex` gauge（见 `docs/api.md` §SLO 指标）；启动装配（`SetApdexThreshold`），**SIGHUP 不热载**（重启生效） |
 | **rate_limit** | object |  | 速率限制（仅限制 `POST /tunnel` 入口） |
 | `rate_limit.enabled` | bool | `false` | 启用 |
 | `rate_limit.requests` | int | `10` | 窗口内允许请求数 |
@@ -404,6 +405,23 @@ mesh / relay / p2p 的中继与传输配置：
 
 凭据已 store 化（`<storage_root>/<owner>/meta/credentials.json`），不再经配置文件——
 SIGHUP 与凭据无关；轮换/管理凭据请用 `sclient trust renew` / `/api/credentials`。
+
+## 优雅重启（SIGUSR2，roadmap 11.6-②）
+
+`kill -USR2 <pid>` 触发**零停机重启**：旧进程把已绑定的 TCP listener 经 `ExtraFiles` 传给新进程
+（环境变量 `SPROXY_INHERIT_FD` = fd 3），新进程 `net.FileListener` 重建同一监听（nginx 风格，
+同端口、无内核依赖，TLS 握手仍在新进程内完成）→ 旧进程探到新进程 `/readyz` 就绪后 drain
+（复用 `handleSignalShutdown`，语义与 SIGTERM 完全一致）→ 退出，已建连接不中断。
+
+- **失败安全**：spawn 失败 / `/readyz` 超时（默认 `max(60s, shutdownTimeout)`）⇒ 记 Error 并
+  **中止重启，旧进程继续服务**（不自杀，禁静默降级）。
+- **仅 Unix**（Linux/macOS）：Windows 无 SIGUSR2 投递且 `ExtraFiles` 不支持跨进程套接字继承
+  ⇒ 特性天然关闭，行为零变化。
+- **旁路监听不继承**：hub TCP/QUIC/gRPC/xfer 等由新进程自行重建（接受短暂重建窗口）。
+- **TLS 注意**：新进程独立跑 certmgr，`tls.auto_tls` 自签证书会重新生成 ⇒ 客户端 pin 证书指纹
+  会失效；生产建议固定 `tls.cert_file`/`tls.key_file`。
+- 实现：`cmd/sproxy/graceful_restart_unix.go`（`inheritRestartFd` / `startRestartChild` /
+  `waitRestartReady` / `handleSignalRestart`）、`cmd/sproxy/restart_signal_{unix,windows,stub}.go`。
 
 ## 全仓 checksum 巡检
 

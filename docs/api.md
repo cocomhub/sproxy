@@ -65,6 +65,12 @@ BuildAt: 2026-06-01T12:00:00Z
 
 嵌入式 Web UI。静态文件来源 `web/static/`。
 
+- **多语言（i18n，roadmap 11.10-H1）**：内置 zh/en 双语（`web/static/i18n.js`）——静态文案经
+  `data-i18n` / `data-i18n-placeholder` 批量替换，动态文案经 `I18N.t(key, vars)` 插值；语言解析
+  优先级 `localStorage['sproxy_lang']` > `navigator.language` > 默认 `zh`（**zh 为默认与兜底**，
+  缺 key 回落 zh，仍缺则返回 key 原文便于定位漏译）；auth-bar 的语言切换器持久化选择并派发
+  `i18n:changed` 事件驱动动态视图重渲染。
+
 ## 文件
 
 ### POST /upload
@@ -788,7 +794,13 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### GET /api/hub/nodes
 
-列出已注册节点（含 `id`、`virtual_ip`、`services`、`tags` 等；SproxySig 签名数据源）。
+列出已注册节点（含 `id`、`virtual_ip`、`services`、`tags`、`quality`、`rtt_ms` 等；SproxySig 签名数据源）。
+
+- `rtt_ms`：该节点最近一次 Ping→Pong 往返延迟（毫秒；**`-1` = 尚无采样**，显式未知不冒充 0），
+  与 `/metrics` 的 `sproxy_hub_node_rtt_ms` **同一数据源**（省去 WebUI 再抓 `/metrics`）。
+- **Web UI**：Hub 面板节点拓扑图（SVG）以 hub 为中心 + 叶子节点、边色按 RTT 分档
+  （`<100ms` 绿 / `<500ms` 黄 / `≥500ms` 红，未知虚线 + `N/A`）渲染，数据源即本端点（轮询 5s）；
+  节点数过大时降级为提示不卡渲染。
 
 ### GET /api/hub/services
 
@@ -1012,7 +1024,7 @@ Prometheus 文本格式运行时指标（`text/plain; version=0.0.4`）。
   `?token=<t>` 或 `Authorization: Bearer <t>`，缺失/不匹配 → `401`（常量时间比较）。
 - 分类口径：`route_classes.tsv` 记为 `public`（与实现一致——空 token = 可达）。
 
-指标族见下文各小节（跨节点 / mux 传输质量 / 卷健康 / 派生状态 / 内存观测）；
+指标族见下文各小节（跨节点 / mux 传输质量 / hub 节点质量 / 卷健康 / 派生状态 / 内存观测 / SLO）；
 无样本时仍输出 `HELP`/`TYPE` 头（让「一直没数据」与「指标不存在」在面板上可区分）。
 
 ### 跨节点指标（`GET /metrics`，W4）
@@ -1059,6 +1071,29 @@ sproxy_mux_retransmit_exhausted_total 2
 `sproxy_mux_stream_window_violations`（对端超窗口被 abort 的流数）、
 `sproxy_mux_readloop_push_*`（接收背压等待耗时，即传输延迟指标）、
 `sproxy_mux_datagram_handler_drops`（数据报丢包数）。
+
+### Hub 节点质量指标（`GET /metrics`）
+
+从已注册节点的 mux 实例聚合的 per-node 质量 gauge（`node` 标签），Hub 面板节点表与
+节点拓扑图的数据源（`WriteHubNodeLinkGauge`）：
+
+```
+# 该节点 mux 重传成功次数（数据帧首次 Send 失败入队、退避后重发成功；持续增长提示劣化）
+sproxy_hub_node_retransmits{node="node-a"} 3
+
+# 该节点 mux 错误数
+sproxy_hub_node_errors{node="node-a"} 0
+
+# 该节点连接存活秒数
+sproxy_hub_node_connected_seconds{node="node-a"} 7200
+
+# 该节点最近一次 Ping→Pong 往返延迟（毫秒；-1 = 尚无采样）
+sproxy_hub_node_rtt_ms{node="node-a"} 12
+```
+
+- `sproxy_hub_node_rtt_ms` 由 mux 心跳 Ping/Pong 采样（`mux.Metrics.LastRTTNanos`，**无在途 ping 跳过**
+  不冒充）；**`-1` 显式标记无样本**（禁静默当 0 造成假健康）；
+- 节点质量分档（healthy/degraded/stale）与 `/api/hub/nodes` 的 `quality` 字段同源。
 
 ### 卷健康指标（`GET /metrics`，roadmap §3 P1）
 
@@ -1115,6 +1150,33 @@ sproxy_gc_cycles 42
 `/debug/pprof/`（heap/goroutine/allocs/block/mutex + cmdline/symbol/trace）受认证保护：
 `debug_pprof_enabled: true` 显式开启（默认关 = 404），且必须经 SproxySig/APIKey 认证（未认证 401）。
 启用状态启动日志可观测（安全开关铁律）。
+
+### SLO 指标（`GET /metrics`，roadmap 11.10-H3）
+
+请求处理延迟直方图 + Apdex 评分（标准库手写无锁实现，无 prometheus client 依赖）——支撑
+PromQL 求 p99 与「SLO 是否达标」判断：
+
+```
+# HELP sproxy_request_duration_seconds HTTP request duration histogram
+# TYPE sproxy_request_duration_seconds histogram
+sproxy_request_duration_seconds_bucket{le="0.1"} 8
+sproxy_request_duration_seconds_bucket{le="+Inf"} 10
+sproxy_request_duration_seconds_sum 0.42
+sproxy_request_duration_seconds_count 10
+
+# TYPE sproxy_apdex gauge
+sproxy_apdex 0.95
+sproxy_apdex_satisfied_total 8
+sproxy_apdex_tolerated_total 1
+sproxy_apdex_frustrated_total 1
+```
+
+- 默认桶边界（秒）：`0.005/0.01/0.025/0.05/0.1/0.25/0.5/1/2.5/5/10` + `+Inf`；bucket 为**累计**计数（le 升序）；
+  无样本也输出 `HELP`/`TYPE`（与其它族同约定）；
+- p99 查询：`histogram_quantile(0.99, sproxy_request_duration_seconds_bucket)`；
+- Apdex 分档（阈值 T = `apdex_threshold`，默认 500ms）：`d <= T` satisfied；`T < d <= 4T` tolerated；
+  `d > 4T` frustrated；`sproxy_apdex = (satisfied + tolerated/2) / total`（total=0 → 0，不 NaN）；
+- 计时口径 = `metricsMiddleware` 包一层 `time.Now()`；`/metrics` 自身请求也计入（如需排除留后续片）。
 
 ### GET /debug/pprof/
 

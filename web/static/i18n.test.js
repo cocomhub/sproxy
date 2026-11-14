@@ -2,7 +2,7 @@
 /*
  * i18n.test.js —— web/static/i18n.js 的单元测试（node --test）。
  *
- * 覆盖 docs/designs/2026-09-24-webui-i18n.md「测试与变异点」：
+ * 覆盖 docs/archive/2026-09-24-webui-i18n.md「测试与变异点」：
  *   1. zh/en 字典键集完全一致（深比较）——变异：删 en 任一 key → 红
  *   2. t() 命中 / 回落 zh / 返回 key 原文 三态——变异：删回落逻辑 → 红
  *   3. fmt() 插值、缺变量、多变量——变异：改插值实现 → 红
