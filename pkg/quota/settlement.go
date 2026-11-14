@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// settlement.go 实现**配额结算状态机** `Settlement`（设计 docs/designs/2026-10-31-policy-object-extraction.md §2.2）。
+// settlement.go 实现**配额结算状态机** `Settlement`（设计 docs/archive/2026-10-31-policy-object-extraction.md §2.2）。
 //
 // 背景：`Reserve → 写入 → Reconcile → Commit/Release` 这一顺序此前散落在 cloud 归档、卷迁移、
 // 版本保存、S3 complete 等调用点，全靠每处自觉——顺序错或漏回滚会直接造成**配额泄漏**

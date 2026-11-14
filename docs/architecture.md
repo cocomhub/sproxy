@@ -1009,7 +1009,7 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `pkg/server`（`self_credential_test.go` / `state_store_config_test.go`）。
 - 度量：`pkg/server` 非测试行 28,489 → **28,125**；子包 18 → 19。
 
-**P2 总体度量（2026-11-01，设计见 `docs/designs/2026-11-01-residual-assembly-optimization.md`）**
+**P2 总体度量（2026-11-01，设计见 `docs/archive/2026-11-01-residual-assembly-optimization.md`）**
 
 - `pkg/server` 非测试行 **42,568 → 28,125（−33.9%）**；服务端子包 **1 → 19**；
 - 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 `internal/httpjson`（#995 一期 + 二期，收敛 5 份实现 + 41 处裸写，R54 升级为硬禁止）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
@@ -1023,7 +1023,7 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   状态机，幂等、未提交自动回滚、排队等待复用既有 `waitq`；云归档硬编码 30s 超时缺陷一并修正。
 - `cloudtasks.Orchestrator`（#968/#970/#971/#972/#973/#974/#975）：云下载/归档迁入
   `pkg/server/cloudtasks`，`Deps` 恒 8 字段（7 窄接口 + Logger）、接口方法 40 个；
-  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/designs/2026-10-31-cloudtasks-deps-mapping.md`。
+  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/archive/2026-10-31-cloudtasks-deps-mapping.md`。
 
 **路由表数据化与下放（`pkg/server/router`，2026-11-02）**
 

@@ -4,7 +4,7 @@
 // archive.go 是云归档（单任务 / 批量）的 HTTP 编排入口（P1-c S3a）：把已完成云任务
 // 的产物打包为 tar.gz（落租户 archive 桶，或经统一转存写外部卷）。
 //
-// 分层纪律与 download.go/group.go 相同（docs/designs/2026-10-31-cloudtasks-deps-mapping.md
+// 分层纪律与 download.go/group.go 相同（docs/archive/2026-10-31-cloudtasks-deps-mapping.md
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账一律不变）。
 //

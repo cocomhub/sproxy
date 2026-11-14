@@ -41,7 +41,7 @@ func (h *Handlers) cloudTaskService() *cloudtasks.Service {
 
 // cloudTaskHandler 把编排核心的 HTTP 入口适配成 http.HandlerFunc：owner（任务归属与
 // 可见性）在此从认证上下文解析——`ActorFrom` 的 ctx key 是装配层私有，核心按设计
-// §4/§9.5 **显式接收 owner**（docs/designs/2026-10-31-cloudtasks-deps-mapping.md：
+// §4/§9.5 **显式接收 owner**（docs/archive/2026-10-31-cloudtasks-deps-mapping.md：
 // 「不要把 ctx→actor 塞进领域包」）。
 func (h *Handlers) cloudTaskHandler(fn func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

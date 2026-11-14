@@ -6,7 +6,7 @@
 // 产物（租户 archive 桶归档名 / 外部卷转存 URL）的删除与占用释放。
 //
 // 本文件由装配层 pkg/server/cloud_download_handler.go + cloud_archive_handler.go 迁入，
-// 行为零变化（docs/designs/2026-10-31-cloudtasks-deps-mapping.md §4/§9.5）：
+// 行为零变化（docs/archive/2026-10-31-cloudtasks-deps-mapping.md §4/§9.5）：
 //   - 目标 FS = Volumes.TransferFS（可信卷写视图 Guard(Wrap(...))，meta 恒生成、meta 桶隔离）；
 //   - 目标键经 volume.ResolveLocation 唯一入口（恒 owner 前缀 + 路径安全），与读路径
 //     ResolveUserLocation 同键空间；
