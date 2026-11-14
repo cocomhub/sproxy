@@ -1,8 +1,16 @@
+<!--
+Copyright 2026 The Cocomhub Authors. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Secret 加密卷：历史决策归档（维护者 WHY 参考）
 
 > 本文档只记录**方案反复的高层 WHY**（为什么是这个设计、权衡了什么、最终态是什么），供维护者理解
-> 「为什么是这样」，不作过程流水账（不记任务编号 / commit 序号 / 修复步骤 / 行号）。设计规格详述见
-> `docs/designs/2026-10-01-secret-volume.md`；功能文档（使用者）见 `docs/secret-volume.md`。
+> 「为什么是这样」，不作过程流水账（不记任务编号 / commit 序号 / 修复步骤 / 行号）。
+>
+> **归档说明**：原文 `docs/designs/2026-10-01-secret-volume-decisions.md` 已于 2026-11-14 归档（本文
+> 本就是已提炼的决策记录，几乎原样保留）。设计规格以 `docs/archive/2026-10-01-secret-volume.md`
+> 与本文为准；功能文档（使用者）见 `docs/secret-volume.md`（现行事实源）。
 
 ## 目录保密演进：data/meta 目录 → 随机容器 → 父引用解耦
 

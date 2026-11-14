@@ -1,8 +1,8 @@
 # Secret 加密卷（Encrypted Volume）功能文档
 
 > 本文档面向使用者：如何配置、寻址、使用加密卷（`type=secrets` + `type=secretdata`），以及安全模型与未来方向。
-> 设计规格详述见 `docs/designs/2026-10-01-secret-volume.md`；历史决策与方案反复的 WHY 见
-> `docs/designs/2026-10-01-secret-volume-decisions.md`；算法包文档 `pkg/cryptox/shardseal/README.md`、
+> 设计规格详述见 `docs/archive/2026-10-01-secret-volume.md`；历史决策与方案反复的 WHY 见
+> `docs/archive/2026-10-01-secret-volume-decisions.md`；算法包文档 `pkg/cryptox/shardseal/README.md`、
 > 卷包文档 `pkg/volume/secretdata/README.md`。
 
 ## 1. 能力总览

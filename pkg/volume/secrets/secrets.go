@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package secrets 是 secret 文件管理封装卷（设计 docs/designs/2026-10-01-secret-volume.md
+// Package secrets 是 secret 文件管理封装卷（设计 docs/archive/2026-10-01-secret-volume.md
 // §6.1）：底层指向任意卷的 `secrets/` 目录（可以是 local/baidupcs/s3/webdav，
 // 也可以是 secret_data 加密卷——嵌套封装）。显式卷寻址 `secrets://<卷名>/<name>`。
 // 管理 API：创建（随机 32B hex 密钥）/ 列 / 读 / 删。

@@ -1,7 +1,7 @@
 # shardseal (pkg/cryptox/shardseal)
 
 纯 Go 随机分块 + AES-256-GCM + scrypt 派生的**自描述加密分块算法**（设计
-`docs/designs/2026-10-01-secret-volume.md`；使用者文档 `docs/secret-volume.md`；未来方向见
+`docs/archive/2026-10-01-secret-volume.md`；使用者文档 `docs/secret-volume.md`；未来方向见
 `docs/secret-volume.md §8`）。
 
 ## 能力

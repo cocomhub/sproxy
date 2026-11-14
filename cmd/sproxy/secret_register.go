@@ -3,7 +3,7 @@
 
 package main
 
-// secret_register.go 是 secret 加密卷的装配（设计 docs/designs/2026-10-01-secret-volume.md
+// secret_register.go 是 secret 加密卷的装配（设计 docs/archive/2026-10-01-secret-volume.md
 // §9）：把 secrets 卷（secret 文件管理）与 secretdata 卷（加密数据 wrapper）注册为
 // volumes[] 的 backend 插件。
 //

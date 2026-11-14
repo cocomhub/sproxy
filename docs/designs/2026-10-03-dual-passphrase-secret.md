@@ -2,7 +2,7 @@
 
 > 日期：2026-10-03
 > 状态：设计定稿（初版实现）
-> 关联：`pkg/volume/secrets`（secret 文件管理封装卷，设计 `docs/designs/2026-10-01-secret-volume.md` §6.1）
+> 关联：`pkg/volume/secrets`（secret 文件管理封装卷，设计 `docs/archive/2026-10-01-secret-volume.md` §6.1）
 >
 > 代码落点：`pkg/volume/secrets/passphrase.go`（新）+ `secrets.go`（抽 `writeSecret` 共用）+ `passphrase_test.go`（新）
 

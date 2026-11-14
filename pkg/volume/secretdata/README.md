@@ -2,7 +2,7 @@
 
 `secretdata` 卷是**透明加密封装卷（wrapper）**：写入自动分块加密、读取自动解密，对上层透明
 （`sync.FS` wrap）。算法由 `pkg/cryptox/shardseal` 提供；密钥来自 `secrets://` 卷（`pkg/volume/secrets`）。
-设计 `docs/designs/2026-10-01-secret-volume.md`；使用者文档 `docs/secret-volume.md`；未来方向见
+设计 `docs/archive/2026-10-01-secret-volume.md`；使用者文档 `docs/secret-volume.md`；未来方向见
 `docs/secret-volume.md §8`。
 
 ## 能力
