@@ -4,7 +4,7 @@
 package server
 
 // volume_inspect.go 暴露「真实存储审查」的只读 HTTP 入口（设计
-// docs/designs/2026-11-04-secretdata-storage-inspection.md §5.2）。
+// docs/archive/2026-11-04-secretdata-storage-inspection.md §5.2）。
 //
 // 本文件只做**薄编排**：解析卷 → 断言能力 → 调用 → 错误映射。布局解析的唯一实现在
 // 掌握布局的卷里（当前 = pkg/volume/secretdata），此处不得复制任何布局知识。

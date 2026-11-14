@@ -84,7 +84,7 @@ type indexSnapshotEntry struct {
 	// ⚠️ **快照不得承载 `Meta`**（P1，2026-11-12，OOM 根因修复）：实测单个大文件的
 	// meta 常驻内存达 78 MB（430,652 个 blocklets × 191 B），而热路径（ListDir/Stat/搜索）
 	// **完全不用**它 —— 只有 openRead/OpenRangeRead 需要 ⇒ 改为由 ensureEntryMeta 惰性加载。
-	// 详见 docs/designs/2026-11-12-secretdata-index-lazy-meta-and-cache-layers.md。
+	// 详见 docs/archive/2026-11-12-secretdata-index-lazy-meta-and-cache-layers.md。
 	OrigSHA256 string `json:"orig_sha256,omitempty"`
 }
 

@@ -4,7 +4,7 @@
 package secretdata
 
 // inspect_test.go 锁「真实存储审查」的映射准确性（设计
-// docs/designs/2026-11-04-secretdata-storage-inspection.md）。
+// docs/archive/2026-11-04-secretdata-storage-inspection.md）。
 //
 // 每个用例都从**真实写入后的落盘状态**出发（不是构造假索引），因为本能力的价值就是
 // 「相信磁盘事实」，用假索引测等于自证。

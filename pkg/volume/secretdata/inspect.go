@@ -5,7 +5,7 @@ package secretdata
 
 // inspect.go 实现 pkg/syncpkg.StorageInspector（真实存储审查）。
 //
-// 设计：docs/designs/2026-11-04-secretdata-storage-inspection.md
+// 设计：docs/archive/2026-11-04-secretdata-storage-inspection.md
 //
 // 布局事实（本文件是唯一解析处，禁止在 pkg/server / CLI 另写一份）：
 //   - 逻辑目录 → 随机容器目录（子容器物理嵌套在父容器内；卷根容器唯一）；

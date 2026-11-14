@@ -640,7 +640,7 @@ type StorageInspector interface {
 - **安全**：只解 meta 不读内容；真实路径越界显式拒绝（`ErrOutsideVolume` → 403）；
   只读（无删除/修复）；差异码不是删除建议（回收走 GC）。
 - **未实现能力的卷** ⇒ `501 not_inspectable`，绝不返回空结果（空结果会被误读为「没有落点」）。
-- 设计：`docs/designs/2026-11-04-secretdata-storage-inspection.md`。
+- 设计：`docs/archive/2026-11-04-secretdata-storage-inspection.md`。
 
 ## 统一转存（归档 = 转存 + 预处理）
 

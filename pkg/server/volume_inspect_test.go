@@ -4,7 +4,7 @@
 package server
 
 // volume_inspect_test.go 锁「真实存储审查」HTTP 入口（设计
-// docs/designs/2026-11-04-secretdata-storage-inspection.md §5.2）。
+// docs/archive/2026-11-04-secretdata-storage-inspection.md §5.2）。
 //
 // 覆盖：正常正向/反向、非支持卷 501（不得返回空结果）、越界 403、缺失 404、
 // 参数缺失 400。使用真实 secretdata 卷（本地 inner FS）而非假能力，避免「自证」。

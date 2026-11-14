@@ -4,7 +4,7 @@
 package main
 
 // volume_inspect.go 提供「真实存储审查」CLI（设计
-// docs/designs/2026-11-04-secretdata-storage-inspection.md §5.3–§5.5）。
+// docs/archive/2026-11-04-secretdata-storage-inspection.md §5.3–§5.5）。
 //
 //	volume trace   <逻辑路径> [--volume <v>] [--disk] [--json]
 //	volume explain <真实路径> [--volume <v>] [--disk] [--json]
