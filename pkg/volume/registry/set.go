@@ -48,7 +48,7 @@ type Set struct {
 	// 运行时句柄，FS() 提供同步视图供 syncexec 工厂消费；Close 时统一关闭。
 	external map[string]ExternalBackend
 	// storageVolumes 是 name → 统一存储卷身份（本地 localBackend / 外部 capacity.Backend）。
-	// **U1 统一存储卷模型**（docs/designs/2026-10-28-unified-volume-model.md）：装配期一次
+	// **U1 统一存储卷模型**（docs/archive/2026-10-28-unified-volume-model.md）：装配期一次
 	// 构造，`StorageVolume(name)` 是唯一取卷入口——本地卷不再只能经 `Root` 拿裸 root。
 	// 与 roots/external 的关系：本地卷同时进 roots（服务默认卷 tenant/globalRoot 存量语义）
 	// 与 storageVolumes（统一身份）；外部卷进 external 与 storageVolumes（同一实例）。

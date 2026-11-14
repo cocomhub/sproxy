@@ -8,7 +8,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/volume/trusted"
 )
 
-// views.go —— 按用途统一访问器（U2，docs/designs/2026-10-28-unified-volume-model.md §二）。
+// views.go —— 按用途统一访问器（U2，docs/archive/2026-10-28-unified-volume-model.md §二）。
 //
 // 核心原则：`StorageVolume` 是唯一卷身份，`VolumeView` 是唯一取卷入口——同一卷按用途
 // 看到不同装饰链/键空间（用户文件 / 控制面 / 密钥）。消费方**永远拿不到裸 FS**。

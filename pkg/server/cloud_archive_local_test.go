@@ -5,7 +5,7 @@ package server
 
 // cloud_archive_local_test.go —— 统一卷模型 U3 的转存到本地卷验收测试。
 //
-// 设计：docs/designs/2026-10-28-unified-volume-model.md §二 U3。
+// 设计：docs/archive/2026-10-28-unified-volume-model.md §二 U3。
 // 钉住：本地卷成为**合法转存目标**——preflight 不拒（scheme 空按 local 归一）、
 // 产物落 `<owner>/user/<rel>`（与外部卷同键空间）、经 /download 可读回一致。
 

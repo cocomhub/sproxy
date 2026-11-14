@@ -5,7 +5,7 @@ package registry
 
 // storage_volume_unify_test.go —— 统一存储卷模型 U1/U2/U4 的接入测试。
 //
-// 设计：`docs/designs/2026-10-28-unified-volume-model.md`（本文件覆盖 U1 的
+// 设计：`docs/archive/2026-10-28-unified-volume-model.md`（本文件覆盖 U1 的
 // `Set.StorageVolume` / `RegisterStorageVolume`；U2 的 `VolumeView` 与 U4 的
 // `local://` 解析在同一文件追加，便于对照「同一 Set 的统一视图」）。
 //

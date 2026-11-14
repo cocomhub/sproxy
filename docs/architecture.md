@@ -450,7 +450,7 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
 
 ### 统一存储卷模型（StorageVolume 唯一身份 + VolumeView 唯一取卷入口）
 
-设计：`docs/designs/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
+设计：`docs/archive/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
 
 本地卷与外部卷统一为 **`registry.StorageVolume`** 契约（`Name/Kind/FS/Close` + 可选能力
 `Footprinter`/`PhysBound`/`StatsProvider`），`registry.Set` 持有 `storageVolumes` 表，

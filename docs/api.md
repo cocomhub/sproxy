@@ -700,7 +700,7 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 将任务已下载文件打包为 tar.gz（`cloud_archive_max_bytes` 限制原始大小总和）。
 
 请求体可选字段 `target_volume`：非空 = **统一转存**——打包后经可信卷写视图转存到该卷
-（**任意存储卷**：本地卷与外部卷皆可——统一卷模型 U3，见 docs/designs/2026-10-28-unified-volume-model.md；
+（**任意存储卷**：本地卷与外部卷皆可——统一卷模型 U3，见 docs/archive/2026-10-28-unified-volume-model.md；
 本地卷 target 产物同样走 `<owner>/user/<rel>` 键空间、可经 `/download` 命中），不落租户 archive 桶。
 可选 `target_path` 指定目标键（目标卷 **user 桶内**相对路径，可含子目录；空 = 默认 `archive/<archive_name>`，
 以 `/` 结尾 = 目录并拼上归档名）。目标键实际为 `<owner>/user/<target_path>`（经 `volume.ResolveUserLocation`

@@ -5,7 +5,7 @@ package server
 
 // volumes_unify_test.go —— 统一存储卷模型 U1 的装配层验收测试。
 //
-// 设计：docs/designs/2026-10-28-unified-volume-model.md §二 U1。
+// 设计：docs/archive/2026-10-28-unified-volume-model.md §二 U1。
 // 钉住：`assembleVolumes` 装配本地卷后，`Set.StorageVolume(name)` 可取到统一身份
 // （不再只能经 `Set.Root` 拿裸 root），且容量记账（pool）仍在位。
 
