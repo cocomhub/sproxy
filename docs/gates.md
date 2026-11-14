@@ -1,7 +1,7 @@
 # 门禁（结构门禁 > 运行时用例）
 
-> 设计依据：`docs/designs/2026-10-19-audit-service.md` §8.2、`docs/designs/2026-10-19-waitq.md` §8.3、
-> `docs/designs/2026-10-19-audit-wal-program.md`（R37）。本文件是**索引**：编号 → 断言所在的测试位置；
+> 设计依据：`docs/archive/2026-10-19-audit-service.md` §8.2、`docs/archive/2026-10-19-waitq.md` §8.3、
+> `docs/archive/2026-10-19-audit-wal-program.md`（R37）。本文件是**索引**：编号 → 断言所在的测试位置；
 > 每个门禁的**准确语义**以该测试的文档注释为准（本文件不重复描述，避免两处漂移）。
 
 ## 1. 运行方式
@@ -89,7 +89,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `quota_capability_wiring_gate_test.go` | R31 | quota_capability_wiring_gate_test.go 是「**决策驱动的配额能力必须有生产接线**」门禁（R31）。 |
 | `quota_waitlock_gate_test.go` | R31 · R32 · R33 · R34 | quota_waitlock_gate_test.go 是**门禁 R34**：释放/放宽可用额度的公开入口必须在根等待锁 |
 | `recover_ordering_gate_test.go` | R33 | recover_ordering_gate_test.go 是「**恢复必须先完成 map 写入、之后才启动 goroutine**」门禁（R33）。 |
-| `recovery_gate_test.go` | R37 | recovery_gate_test.go 是门禁 **R37**（设计 docs/designs/2026-10-19-audit-service.md §8.2 + |
+| `recovery_gate_test.go` | R37 | recovery_gate_test.go 是门禁 **R37**（设计 docs/archive/2026-10-19-audit-service.md §8.2 + |
 | `release_policy_test.go` | R12 | release_policy_test.go 是「**CHANGELOG 单一事实源不得被回退成手工维护**」的门禁（R12）。 |
 | `repo_hygiene_test.go` | R16 | repo_hygiene_test.go 是「开源仓库卫生文档」门禁（R16）。 |
 | `repo_walk_test.go` | R11 · R14 · R18 | repo_walk_test.go 是「全仓源码遍历类门禁」**共用的目录排除口径**（单一事实源）。 |
@@ -113,7 +113,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `user_io_gate_test.go` | R25 | user_io_gate_test.go 是「用户内容读写必须经用户可见入口」的门禁（R25，第 5 轮对抗评审 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
 | `volume_backend_registration_order_gate_test.go` | R45 | 门禁 **R45**：外部卷后端**类型注册**必须早于 `assembleVolumes`（`setupServerCore` 内 `registerVolumeBackendTypes()` 先于 `server.RegisterRoutes(`），且 `setupSyncVolumeBackends` 不得再回退注册类型。背景（用户实测 2026-10-21）：baidupcs/webdav/sftp/ftp/s3 的类型此前在 RegisterRoutes **之后**注册 ⇒ config 静态声明 `type: baidupcs` 等外部卷在装配期报「未注册后端」并启动失败（只能运行期建卷绕过）。 |
 | `volume_root_bypass_gate_test.go` | R26 | volume_root_bypass_gate_test.go 是「**卷根直连适配器**」门禁（R26；仓库的 R 号按设计文档 （**2026-11-03 变异验证**：在未登记文件加一行对应调用 ⇒ 门禁红，扫描面可信） |
-| `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）： |
+| `waitq_gates_test.go` | R36 | waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/archive/2026-10-19-waitq.md §8.3）： |
 | `web_assets_test.go` | R10 | web_assets_test.go 是「**Web 前端每个 JS 文件都必须被自动化测试覆盖**」的门禁（R10）。 |
 | `http_client_ratchet_test.go` | R57 | 裸 HTTP 客户端/传输构造点棘轮（2026-11-08）：生产代码（`pkg`/`cmd`/`internal`，排除 `_test.go` 与**已写明理由**的豁免目录 `pkg/httpc`〔基座本体〕、`pkg/netutil`〔Transport 唯一构造点〕、`pkg/testutil`〔测试辅助〕、`tools/`）中 `&http.Client{` / `&http.Transport{` / `http.DefaultTransport` 逐文件计数**只减不增**（基线 `internal/archcheck/http_client_budgets.tsv`）；新增文件出现构造点即红。背景：裸构造曾达 89 处（含测试），超时字段 90 处各写一遍、指数退避 ≥5 处、裸 worker 池 10 处 —— 没有任何一处能统一回答「这个请求会不会卡、能不能取消」（baidupcs 上传卡 ~90s 且不可取消，正是该病根的第三方库版本）。新代码请用 `pkg/httpc.New`（默认 Transport = `netutil.IsolatedTransport()`）+ `pkg/pipe` 编排。 （**2026-11-08 变异验证**：新增文件出现构造点 ⇒ 红；既有文件 +1 ⇒ 红） |
 | `httpc_pool_close_gate_test.go` | R58 | **关闭空闲连接必须是自有连接池**（2026-11-08）：文件含 `CloseIdleConnections(` 且含 httpc 客户端构造（`httpc.New`/`NewHTTPClient`）时，必须显式 `Isolated: true` 或自备 `Transport:`。背景：`pkg/httpc` 默认池由"独立"改为**进程级共享**后，若干原本依赖隔离、且会 `defer CloseIdleConnections()` 的调用点（client SDK / tunnel / cmd）退化为"关闭共享池"⇒ 会打断全进程在途请求（硬规则 17 的原始事故），且注释仍写着"隔离"（注释与行为矛盾）。**变异验证**：删掉某调用点的 `Isolated: true` ⇒ 门禁红。 |

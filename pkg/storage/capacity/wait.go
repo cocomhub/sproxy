@@ -4,7 +4,7 @@
 package capacity
 
 // wait.go 把容量层（StorageManager）接入通用等待队列 pkg/waitq（设计
-// docs/designs/2026-10-19-waitq.md §8.2「层 B 容量」）：
+// docs/archive/2026-10-19-waitq.md §8.2「层 B 容量」）：
 //
 // 此前容量层只有 `TryReserve(n, cat)`（不足立即失败 ⇒ 调用方 507），与层 A 配额一致地
 // 收敛为「**严格上界预占 + 不够时排队重试等待**」（用户裁定 2026-10-14）：

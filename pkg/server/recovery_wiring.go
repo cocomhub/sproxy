@@ -4,7 +4,7 @@
 package server
 
 // recovery_wiring.go 是 **M3 统一恢复协调器在服务端的装配与启动单一起点**
-// （设计 docs/designs/2026-10-19-audit-service.md §6.3 + program M3）。
+// （设计 docs/archive/2026-10-19-audit-service.md §6.3 + program M3）。
 //
 // 为什么放在装配层：`pkg/recovery` 只依赖 `pkg/audit`（不 import cloud/syncexec，避免循环依赖）；
 // 各任务族的注册（作用域恢复 / legacy 兜底）都由装配层完成 —— 于是「启动恢复」在全服务**只有

@@ -5,7 +5,7 @@ package registry
 
 // quota_volume_user_test.go —— `QuotaVolume` 的**每用户读侧**（片 5：用户配额**按卷持有**）。
 //
-// 设计口径（docs/designs/2026-10-16-quota-volume-layer.md §1.3/§1.5）：`QuotaVolume` 是存储卷的
+// 设计口径（docs/archive/2026-10-16-quota-volume-layer.md §1.3/§1.5）：`QuotaVolume` 是存储卷的
 // **唯一配额权威**，每用户配额**按卷持有**；用户视图 = 对「该用户可访问的卷」**求和**（联邦查询 ✓）。
 // ⇒ 本文件钉住「**单卷**读侧」；跨卷求和与 ACL 收敛在 `pkg/server` 侧用例。
 //

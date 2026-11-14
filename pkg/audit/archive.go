@@ -3,7 +3,7 @@
 
 package audit
 
-// archive.go 是 **M4 归档原语**（设计 docs/designs/2026-10-19-audit-service.md §5.5 / M4）：
+// archive.go 是 **M4 归档原语**（设计 docs/archive/2026-10-19-audit-service.md §5.5 / M4）：
 //
 //	sealed 段 → 外置归档适配器（Archiver）→ 写内核（外部/加密卷由使用方实现）→ 热段回收
 //

@@ -5,7 +5,7 @@ package main
 
 // quota.go 实现 `quota` 子命令：展示本 owner 配额水位。
 //
-// **权威源 = 联邦视图**（片 5 读侧，设计 docs/designs/2026-10-16-quota-volume-layer.md §1.5）：
+// **权威源 = 联邦视图**（片 5 读侧，设计 docs/archive/2026-10-16-quota-volume-layer.md §1.5）：
 // 用户配额**按卷持有** ⇒ 用户视图 = 对「该用户可访问的卷」**求和**（`GET /api/quota`，
 // 含逐卷明细 ✓）。旧集中树（`/api/stats` 的 `quota` 段：usage/max_bytes/watermark）仍作
 // **补充**信息（预警水位），**best-effort** —— 端点不可用不阻塞联邦视图 ✓。

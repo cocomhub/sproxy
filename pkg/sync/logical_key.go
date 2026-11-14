@@ -6,7 +6,7 @@ package sync
 import "github.com/cocomhub/sproxy/pkg/storage"
 
 // logical_key.go —— `LogicalKey` 的**类型别名重导出**（统一存储卷模型片 4，设计
-// `docs/designs/2026-10-16-quota-volume-layer.md` §9.5）。
+// `docs/archive/2026-10-16-quota-volume-layer.md` §9.5）。
 //
 // **定义在 `pkg/storage`**（**零仓内依赖**的叶子包）—— 完整文档见该包 `logical_key.go`。
 //

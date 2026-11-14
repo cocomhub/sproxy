@@ -50,7 +50,7 @@ const lanes = [
       '1) 注释/文档与实现是否一致（尤其：注释声称的契约是否真的被代码保证，如「锁外触发」「不静默回落」「绝不记录文本」）。',
       '2) 复杂度与可读性：是否有函数复杂度逼近门禁阈值、可抽未抽、参数膨胀、布尔旗标爆炸。',
       '3) **测试保真**：新增的 §9.1 场景用例是否真能红（断言是否依赖实现细节/弱断言/重复断言）；`audit_cold_merge_test.go`、`audit_archive_volume_test.go`、`audit_presign_scenarios_test.go` 等是否存在「注释说验证 A，实际只验证 B」；`t.Parallel()`/串行预算是否合规。',
-      '4) **完整性**：设计文档（`docs/designs/2026-10-19-audit-service.md` §9.1/§5.7/§6/§8.2）声明 vs 实现 vs 测试 三者是否闭环；`docs/testing/audit-scenarios.md` 的 60/60 声称是否与代码埋点一致（有无漏项或虚标）。',
+      '4) **完整性**：设计文档（`docs/archive/2026-10-19-audit-service.md` §9.1/§5.7/§6/§8.2）声明 vs 实现 vs 测试 三者是否闭环；`docs/testing/audit-scenarios.md` 的 60/60 声称是否与代码埋点一致（有无漏项或虚标）。',
       '5) 配置与运维：新增配置项（`audit.max_total_bytes`/`archive_dir`/`archive_keep`/`archive_volume`）的默认值、校验、文档、迁移口径是否一致；升级路径（旧 `<卷根>/audit/` 迁移）是否会丢数据。',
     ].join('\n'),
   },

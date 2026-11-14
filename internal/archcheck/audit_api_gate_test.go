@@ -13,7 +13,7 @@ import (
 
 // audit_api_gate_test.go 是门禁 R35-d：`pkg/audit` 只能有**一套**审计 API。
 //
-// 设计（docs/designs/2026-10-19-audit-service.md §2.1/§8.2）要求「审计能力唯一由 pkg/audit 提供、
+// 设计（docs/archive/2026-10-19-audit-service.md §2.1/§8.2）要求「审计能力唯一由 pkg/audit 提供、
 // 包内亦只有一套实现」：新 API = Service/Scope/Step/Journal/Index/Entry；旧 API
 // （Logger/Row/Sink/FileSink/NewScope/NewScopeSink/ScopeOpts/WithContext/From/Archiver/Filter/Span）
 // 必须整体删除（不做兼容门面 ⇒ 避免两套语义漂移与「同名封装不同实现」类缺陷）。

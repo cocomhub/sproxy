@@ -17,7 +17,7 @@ import (
 
 // volume_local_backend.go —— 本地卷的**统一后端实现**（统一存储卷模型 M1）。
 //
-// 设计：`docs/designs/2026-10-16-quota-volume-layer.md` §11。
+// 设计：`docs/archive/2026-10-16-quota-volume-layer.md` §11。
 //
 // 现状（本文件要消除的特例）：本地卷**不是**注册后端 —— 装配层以 `Type == "" || TypeLocal`
 // 走 `assembleLocalVolume` 特例分支，`*storage.Root` 因此泄漏到非测试源码 **254 处**；

@@ -5,7 +5,7 @@ package registry
 
 // local_backend_registration_test.go —— M1b：`local` 注册为**普通后端** + 用户可创建面守卫。
 //
-// 设计：`docs/designs/2026-10-16-quota-volume-layer.md` §11。M1b 的三条不变量：
+// 设计：`docs/archive/2026-10-16-quota-volume-layer.md` §11。M1b 的三条不变量：
 //  1. `local` **可注册**（`RegisterBackend` 不再拒绝）且 `NewBackend` 可统一分派（`""` 归一为 local）；
 //  2. **注册 ≠ 用户可创建**：`IsUserCreatableBackendType` 排除 local/空串 ⇒ 建卷 API 行为不变 ✓
 //     （否则调用方可指定任意 `RootDir` ⇒ 路径/权限面 ✗）；

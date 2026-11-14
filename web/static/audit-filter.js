@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // audit-filter.js — 审计面板的**筛选纯函数**（S4：审计新字段/筛选，设计
-// docs/designs/2026-10-19-audit-wal-program.md「S4 面与文档」）。
+// docs/archive/2026-10-19-audit-wal-program.md「S4 面与文档」）。
 //
 // 设计约束：
 //   - **纯函数、无 DOM / 无网络** ⇒ 可用 `node --test` 覆盖（R10 硬要求：改动的前端逻辑必须有单测）；

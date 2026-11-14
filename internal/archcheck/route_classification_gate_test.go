@@ -5,7 +5,7 @@ package archcheck
 
 // route_classification_gate_test.go 是门禁 **R38**：**路由分类表 + deny-by-default**。
 //
-// 设计 docs/designs/2026-10-19-audit-service.md §2.5（tunnel 鉴权 A 改良版）要求
+// 设计 docs/archive/2026-10-19-audit-service.md §2.5（tunnel 鉴权 A 改良版）要求
 // 「**单一路由分类表**，两个 mux 同源」：每个已注册路由都必须显式归类（public / auth /
 // reader / user / node / admin / tunnel），未登记的新路由即红 —— 防止「顺手加一条无鉴权或
 // 无角色门的路由」这类**静默扩大攻击面**的改动（历史上 `/api/audit` 就是这样漏掉角色门的，

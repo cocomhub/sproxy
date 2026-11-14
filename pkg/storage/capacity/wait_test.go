@@ -3,7 +3,7 @@
 
 package capacity
 
-// wait_test.go 锁定容量层等待语义（设计 docs/designs/2026-10-19-waitq.md §8.2 层 B）：
+// wait_test.go 锁定容量层等待语义（设计 docs/archive/2026-10-19-waitq.md §8.2 层 B）：
 // 与配额层同口径 —— 零字节直通 / 不足排队且释放唤醒 / 超时 / 不可能容纳立即失败。
 
 import (

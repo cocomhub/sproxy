@@ -10,7 +10,7 @@ package archcheck
 //	   比 owner 过滤更强；将来开放用户维度视图时必须在同一裁决函数内收紧）；
 //	③ `export` 与 `list` **同一门、同一读管线**（不得出现绕过门的第二条读路径）。
 //
-// 设计 docs/designs/2026-10-19-audit-service.md §5.7 + M1-11（revC P0：读面曾无 ACL，
+// 设计 docs/archive/2026-10-19-audit-service.md §5.7 + M1-11（revC P0：读面曾无 ACL，
 // `reader` 可读全量）。此前只有行为用例、没有机械门禁（评审 R13 列为「R35-e 门禁缺失但注释宣称」）。
 //
 // 本门禁是**结构性**的：断言注册面（两个 mux 四个注册）+ 裁决点唯一 + 读管线唯一，

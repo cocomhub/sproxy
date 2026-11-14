@@ -106,6 +106,7 @@ export LANG=en_US.UTF-8            # 影响后续所有调用
 | [`delete`](#delete) | 删除文件 |
 | [`mv`](#mv) | 重命名 / 移动 |
 | [`stat`](#stat) | 查询文件元信息 |
+| [`meta`](#meta) | 查询/编辑文件元数据（extra KV 读/写 + 版本历史；`set --extra/--replace/--delete`） |
 | [`ls`](#ls) | 列出文件/目录（`list` 为等价别名） |
 | [`tree`](#tree) | 树形递归显示目录结构 |
 | [`mkdir`](#mkdir) | 创建目录 |
@@ -136,6 +137,7 @@ export LANG=en_US.UTF-8            # 影响后续所有调用
 | [`genkey`](#genkey) | 生成 64 hex 随机 AES-256 密钥（自检/手动构造用；隧道密钥由凭据 SK 派生） |
 | [`config`](#config) | 配置管理 |
 | [`trust`](#trust) | 凭据管理（TOTP register/login、renew、`sk`/`ak` 子命令；`ak add --role`） |
+| [`secret`](#secret) | secrets 卷密钥管理（`create` 随机/双口令、`list`/`export`/`import`/`delete`） |
 | [`sealfile`](#sealfile) | 本地文件加解密（与 secretdata 卷同内核；加密产物可作卷加载播放） |
 | [`upgrade`](#upgrade) | 自更新（GitHub Releases 校验 + 原子替换） |
 | [`version`](#version) | 打印版本信息 |
@@ -319,6 +321,25 @@ sclient stat <filename>
 ```
 
 输出文件 size、checksum、mod_time。不下载内容。
+
+### meta
+
+```bash
+sclient meta <file>                                   # 元信息 + extra（KV）
+sclient meta <file> --raw                             # Text 模式输出 extra 原始 JSON
+sclient meta version list <file>                      # 版本历史
+sclient meta set <file> --extra='{"code":"EXAMPLE-001","maker":"STUDIO X"}'   # 合并（默认新增/覆盖同名键）
+sclient meta set <file> --extra='{...}' --replace     # 整表替换（丢弃所有旧键）
+sclient meta set <file> --delete=code,maker           # 删指定键（逗号分隔）
+```
+
+- `meta <file>` 输出文件元信息，并在 `extra` 中展示自定义 KV 元数据（自定义键以 `x_` 前缀开头的
+  嵌套 map/array 亦支持）。
+- **写 `extra` 三模式**：默认 **merge**（新增/覆盖同名键、**不删**旧键）；`--replace` 整表替换；
+  `--delete` 删指定键（与 `--extra` 互斥）。**上传时带 `meta_extra` 同口径为合并**（不覆盖旧键）。
+- **裸外部卷（无 trusted sidecar）不支持 `extra`**：读返回空、补录 fail-closed（无 meta 载体），
+  **不静默假成功**。加密卷（secretdata over local/网盘）/ 本地卷 / 封装卷均支持。
+- 位置参数支持卷 URI（`meta vault:/a.txt`，见「跨卷操作」）。
 
 ### ls（别名 list）
 
@@ -806,6 +827,28 @@ sclient trust ak add [ak] --role user --owner <owner>   # 新增 AK（admin-only
   （同进程立即生效、无需重启；在途连接依赖服务端旧 SK 宽限期兜底）。服务端同源调度（可独立开启）
   见 [`docs/config.md`](./config.md) §`credentials.rotation.*`。
 
+### secret
+
+```bash
+sclient secret create <name>                    # 服务端生成随机 secret（返回值供立即备份）
+sclient secret create <name> --passphrase       # CLI 本地双口令派生（只上传派生 hex）
+sclient secret list                             # 列全部 secret 名
+sclient secret export <name> [--out path] [--plain]   # 导出（默认口令加密 AES-GCM+scrypt；--plain 明文）
+sclient secret import <name> <file>             # 导入（明文 hex 或加密信封）
+sclient secret delete <name>
+```
+
+- 管理 **per-owner 默认 secrets 卷**上的密钥材料（服务端 `/api/secrets` 四端点；见 `docs/api.md`、
+  [`docs/secret-volume.md`](./secret-volume.md)）。
+- **随机 secret 由服务端 `crypto/rand` 生成**（客户端不参与随机生成——更安全，加解密全在云端）；
+  生成后返回 secret 值给创建者供立即备份。
+- **双口令模式（仅 CLI）**：`--passphrase` 本地 `x/term.ReadPassword` 读两口令 → scrypt 派生
+  （`secret = scrypt(SHA256(口令A), salt=SHA256(口令B), high 档, 32B)`）→ **只上传派生 hex**，
+  原始口令**永不上网**、按需不进 bash 历史；非 tty 输入拒绝（防明文管道）。
+- **双口令安全边界（诚实标注）**：有效安全上限 = 输入口令熵（约 110-160 bit），**不是 2^256**；
+  两口令不得合置一处（否则组合熵打回单点）；空口令 fail-closed。
+- 导出默认需口令加密（`--plain` 可选明文）；导入校验 hex。
+
 ### version
 
 ```bash
@@ -868,7 +911,7 @@ sclient df
 ### quota
 
 查看本 owner 的配额。**权威源是跨卷联邦视图**（片 5，设计
-`docs/designs/2026-10-16-quota-volume-layer.md` §1.5）：用户配额**按卷持有** ⇒ 用户视图 =
+`docs/archive/2026-10-16-quota-volume-layer.md` §1.5）：用户配额**按卷持有** ⇒ 用户视图 =
 对「该用户可访问的卷」**求和**（只含 ACL 允许的卷，不泄露他人卷用量）。
 
 ```bash

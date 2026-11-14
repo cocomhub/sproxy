@@ -3,7 +3,7 @@
 
 package archcheck
 
-// waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/designs/2026-10-19-waitq.md §8.3）：
+// waitq_gates_test.go 汇总 W1 收敛的两条门禁（设计 docs/archive/2026-10-19-waitq.md §8.3）：
 //
 //	R36-a：非测试源码不得**新增**直接调用 TryReserve / WaitReserve / TryReserveChunked /
 //	       semaphore.Weighted —— 新增获取路径必须走 pkg/waitq（Acquire/AcquireUnder），
@@ -138,7 +138,7 @@ func TestR36a_NoNewDirectAcquirePaths(t *testing.T) {
 	}
 	if len(unknown) > 0 {
 		t.Fatalf("R36-a：以下文件**新增**了直接获取入口调用（必须先收敛到 pkg/waitq，或登记到白名单适配器文件）：\n  %s\n"+
-			"设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。", strings.Join(unknown, "\n  "))
+			"设计 docs/archive/2026-10-19-waitq.md §8.2/§8.3。", strings.Join(unknown, "\n  "))
 	}
 	if len(grew) > 0 {
 		t.Fatalf("R36-a：直接获取入口调用点数**增加**（棘轮只减不增）：\n  %s", strings.Join(grew, "\n  "))

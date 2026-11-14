@@ -26,7 +26,7 @@ import (
 
 // ledger.go —— 卷级容量记账的**唯一实现**：跨进程分片日志账本。
 //
-// 设计文档：`docs/designs/2026-10-17-quota-ledger-persistence.md`。
+// 设计文档：`docs/archive/2026-10-17-quota-ledger-persistence.md`。
 //
 // # 为什么只有一套（取代旧的两套）
 //

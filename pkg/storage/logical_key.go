@@ -4,7 +4,7 @@
 package storage
 
 // logical_key.go —— `LogicalKey`：**配额归属键**（统一存储卷模型片 4，设计
-// `docs/designs/2026-10-16-quota-volume-layer.md` §9.5）。
+// `docs/archive/2026-10-16-quota-volume-layer.md` §9.5）。
 //
 // # 为什么需要它
 //

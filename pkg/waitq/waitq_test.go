@@ -3,7 +3,7 @@
 
 package waitq
 
-// waitq_test.go 锁定设计 docs/designs/2026-10-19-waitq.md §3.1 的关键不变式：
+// waitq_test.go 锁定设计 docs/archive/2026-10-19-waitq.md §3.1 的关键不变式：
 // I2 无惊群 / I3 无忙等 / I4 无死锁（原子 + 回滚）/ I5 有界 / I6 优先级。
 //
 // 纪律：**不使用 time.Sleep**（R14 棘轮）—— 同步一律用 channel（测试内同步通道）；

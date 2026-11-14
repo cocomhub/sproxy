@@ -3,7 +3,7 @@
 
 package audit
 
-// wal_test.go 锁定 M2（设计 docs/designs/2026-10-19-audit-service.md §6）：
+// wal_test.go 锁定 M2（设计 docs/archive/2026-10-19-audit-service.md §6）：
 // ① Resume **按 Seq 重放**且纯依赖 Journal（进程重启后仍可用）；
 // ② **提交语义红灯用例**：MarkDone 之前崩溃 ⇒ 重放完成；MarkDone 之后 ⇒ **跳过**（设计 §6.1）；
 // ③ 幂等契约：apply 出错必须向上传播（不静默跳过状态）；

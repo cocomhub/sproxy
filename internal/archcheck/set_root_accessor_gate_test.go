@@ -7,7 +7,7 @@ package archcheck
 //
 // 背景：`registry.Set.Root(name) *storage.Root` 让调用方**直接拿裸卷根**，绕过统一存储卷视图
 // （`StorageVolume`/`FS` + 能力接口）。它是「装配层伸手进卷集拿 root」的点，也是统一存储卷模型
-// M3 要收缩的面（设计 `docs/designs/2026-10-16-quota-volume-layer.md` §11）。
+// M3 要收缩的面（设计 `docs/archive/2026-10-16-quota-volume-layer.md` §11）。
 //
 // 与 R26/R27 的分工：R26 管「`NewLocalFS` 直连路径」（根本不进 Root）；R27 管「`be.FS()` 直连」
 // （外部卷封印绕过）；**R28 管「经 `Set.Root` 拿裸 root」**（进了 Root 但绕过统一视图）。

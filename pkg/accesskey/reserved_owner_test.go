@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// reserved_owner_test.go 锁定 M1-9（设计 docs/designs/2026-10-19-audit-service.md §5.6）：
+// reserved_owner_test.go 锁定 M1-9（设计 docs/archive/2026-10-19-audit-service.md §5.6）：
 // **保留租户名**（审计租户 `audit`）不得被用户面登记占用 —— 租户键的唯一收口点是
 // `UpsertAK`（注册 / admin 新增凭据 / 改名均经此），故在此 fail-closed。
 

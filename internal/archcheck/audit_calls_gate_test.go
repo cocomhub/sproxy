@@ -14,7 +14,7 @@ import (
 
 // audit_calls_gate_test.go 是门禁 R35-a：审计调用点**棘轮**（只减不增）。
 //
-// 设计（docs/designs/2026-10-19-audit-service.md §8.2）：审计能力唯一由 pkg/audit 提供；
+// 设计（docs/archive/2026-10-19-audit-service.md §8.2）：审计能力唯一由 pkg/audit 提供；
 // 业务审计调用点（RecordAudit( / recordFileAudit(）必须登记；新增散点会绕开唯一实现与覆盖
 // 门禁 ⇒ 用登记表 + 棘轮锁死（沿用本仓 R30/R31/R34 纪律）。
 //

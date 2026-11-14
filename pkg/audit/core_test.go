@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// core_test.go 覆盖 P1 统一核心（设计 docs/designs/2026-10-19-audit-service.md）：
+// core_test.go 覆盖 P1 统一核心（设计 docs/archive/2026-10-19-audit-service.md）：
 // 条目过滤、内存索引有界保留、两种 Journal 布局与轮转、Service 的作用域/能力门/有界保留/
 // panic 隔离/惰性过时轮转/读取触发轮转/防递归/提交语义/fail-closed/实例隔离。
 //

@@ -5,7 +5,7 @@ package registry
 
 // quota_volume_test.go —— 配额层（M4a）回归：**每用户 + 整卷**双账本 + 足迹委托。
 //
-// 设计：`docs/designs/2026-10-16-quota-volume-layer.md` §1.3。本片**不挂载**（零行为变更 ✓），
+// 设计：`docs/archive/2026-10-16-quota-volume-layer.md` §1.3。本片**不挂载**（零行为变更 ✓），
 // 故测试直接构造 `QuotaVolume` + 替身卷。
 //
 // 覆盖：

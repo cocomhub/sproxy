@@ -2,7 +2,7 @@
 
 > 口径（设计 §9.1）：每个业务动作的审计场景用例应**逐项断言** `action` / `actor` / `object` /
 > `volume` / `result`。本文件是**活文档**：新增埋点或新增用例后请同步更新。
-> 设计正文：`docs/designs/2026-10-19-audit-service.md` §9.1 / §9.2。
+> 设计正文：`docs/archive/2026-10-19-audit-service.md` §9.1 / §9.2。
 
 ## 1. 判定方法
 

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// core.go 是**统一审计条目模型**（设计 docs/designs/2026-10-19-audit-service.md §4.1）。
+// core.go 是**统一审计条目模型**（设计 docs/archive/2026-10-19-audit-service.md §4.1）。
 //
 // 与既有 legacy API（audit.go 的 Row/Sink/Logger/Span）的关系：同一份实现、同一个模型 ——
 // 新 API 是唯一实现，legacy 是**门面**（见 legacy.go，门禁 R35-d）。本文件只放**数据与策略**，

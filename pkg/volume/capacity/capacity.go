@@ -834,7 +834,7 @@ func (b *Backend) SecretsManagerAny() any {
 // 新增能力接口后遗漏——装饰器不转发会让上层断言恒 false → 静默降级）。
 // BlockAccessor 有意不实现（documented）：直接转发会让 sync 引擎对无该能力的底层
 // 也走块级路径（ErrUnsupported 无法表达「未实现」），需 Capability 探测语义，见
-// docs/designs/2026-10-10-trusted-volume.md §8。
+// docs/archive/2026-10-10-trusted-volume.md §8。
 var (
 	_ syncpkg.FS = (*CapacityFS)(nil)
 	_ Counter    = (*LedgerCounter)(nil)

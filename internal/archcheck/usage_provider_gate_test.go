@@ -8,7 +8,7 @@ package archcheck
 // **为什么需要**：`registry.UsageProvider` 的「外部卷后端真值覆盖」是**横切关注点**，而它曾被
 // **三个调用点各自实现**（`volume_usage.go` 的唯一实现 + `volumes_api.go` 与
 // `user_volume_api.go` 各一份**冗余复制**）—— 正是设计
-// docs/designs/2026-10-16-quota-volume-layer.md §0 命名的根因形态：
+// docs/archive/2026-10-16-quota-volume-layer.md §0 命名的根因形态：
 // 「横切关注点实现成 N 个调用点义务 ⇒ 改一处漏一处 ⇒ 多源即多漂移面」。
 //
 // 本门禁把「唯一实现」机制化：`usage_provider_calls.tsv` 登记每文件允许的最大**直连次数**

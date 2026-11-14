@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package waitq 提供**通用的资源等待队列**能力（设计 docs/designs/2026-10-19-waitq.md）：
+// Package waitq 提供**通用的资源等待队列**能力（设计 docs/archive/2026-10-19-waitq.md）：
 // 使用方（配额 / staging / 内存 / CPU 槽 / 带宽…）只需实现 Resource 接口，即可获得
 // FIFO + 优先级 + 有界排队 + 定向唤醒 + 超时/取消 + 指标 的完整等待语义。
 //

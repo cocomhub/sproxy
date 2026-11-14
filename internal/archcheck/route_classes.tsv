@@ -1,6 +1,6 @@
 # 门禁 R38：**路由分类表**（deny-by-default）——每个已注册路由必须显式归类；
 # 未登记的新路由即红（防止「顺手加一条无鉴权/无角色门的路由」）。
-# 设计 docs/designs/2026-10-19-audit-service.md §2.5（tunnel 鉴权 A 改良版：单一路由分类表）。
+# 设计 docs/archive/2026-10-19-audit-service.md §2.5（tunnel 鉴权 A 改良版：单一路由分类表）。
 # 分类语义（**由现有 wrapper 链机械提取**，本表不臆造策略）：
 #   admin   = adminRoute/requireRole(admin)（管理端点）
 #   node    = nodeRoute/requireRole(node)（mesh/hub 组）

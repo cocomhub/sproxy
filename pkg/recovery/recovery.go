@@ -1,8 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package recovery 是**统一任务恢复协调器**（设计 docs/designs/2026-10-19-audit-service.md §6.3 +
-// docs/designs/2026-10-19-audit-wal-program.md M3；用户裁定见
+// Package recovery 是**统一任务恢复协调器**（设计 docs/archive/2026-10-19-audit-service.md §6.3 +
+// docs/archive/2026-10-19-audit-wal-program.md M3；用户裁定见
 // docs/archive/architecture-task-recovery.md）。
 //
 // 定位：
