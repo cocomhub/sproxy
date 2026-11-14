@@ -73,6 +73,9 @@ type fakeExternalSink struct {
 	truncateWrite bool
 	// writeCount 记录 WriteFile 实际调用次数（重试次数断言用）。
 	writeCount int
+	// onWrite 非 nil 时在每次真实写入前调用（模拟远端/加密卷在**写入期**经 ctx 上报阶段
+	// 进度）。默认 nil = 既有用例零变化。
+	onWrite func(ctx context.Context)
 }
 
 func newFakeExternalSink() *fakeExternalSink {
@@ -86,16 +89,20 @@ func (f *fakeExternalSink) MakeDir(_ context.Context, path string) error {
 	return nil
 }
 
-func (f *fakeExternalSink) WriteFile(_ context.Context, path string, r io.Reader, _ /*size*/, _ /*mtime*/ int64) error {
+func (f *fakeExternalSink) WriteFile(ctx context.Context, path string, r io.Reader, _ /*size*/, _ /*mtime*/ int64) error {
 	f.mu.Lock()
 	f.writeCount++
 	failing := f.failWrite != nil && (f.failWriteTimes < 0 || f.failWriteTimes > 0)
 	if f.failWriteTimes > 0 {
 		f.failWriteTimes--
 	}
+	onWrite := f.onWrite
 	f.mu.Unlock()
 	if failing {
 		return f.failWrite
+	}
+	if onWrite != nil {
+		onWrite(ctx)
 	}
 	b, err := io.ReadAll(r)
 	if err != nil {

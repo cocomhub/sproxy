@@ -157,6 +157,9 @@ const (
 	errMsgAccessFile    = "访问文件失败"
 	errMsgDedupPersist  = "dedup 存储持久化失败"
 	errMsgRetryPersist  = "重试持久化失败"
+	// msgServerWriteInProgress 是「无 chunked 会话的单次上传在途」时 `/upload/status?filename=` 的
+	// 成功文案（进度可视化二期 T4）：与「文件已存在」完成态区分，供上层进度页识别「进行中」。
+	msgServerWriteInProgress = "服务端写入进行中"
 
 	headerContentType  = "Content-Type"
 	headerFileChecksum = "X-File-Checksum"

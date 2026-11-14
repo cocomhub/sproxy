@@ -98,6 +98,14 @@ func (s *Service) WriteFile(ctx context.Context, input WriteFileInput, src io.Re
 	}
 	logger.DebugContext(ctx, "上传路径", "remote_path", remotePath)
 
+	// 服务端写入阶段进度（二期 T4）：**单次上传主路径**（POST /upload → 本函数 →
+	// writeFileSettle → writeTargetSettle）不经过 `WriteTarget`，故此处必须自行注入回调，
+	// 否则卷层（加密/远端）的 `ReportUploadProgress` 全为 no-op ⇒ 上层按 filename 轮询
+	// `/upload/status` 永远看不到阶段进度。键口径与 `WriteTarget` **完全相同**（`rel`）。
+	// inject-if-absent：上层已装配更细回调时**不覆盖**（不会双重注入）；未装配时一切上报 no-op
+	// （零回归）。
+	ctx = s.withUploadProgress(ctx, rel)
+
 	// 并发上传防护：防止同一 owner 同 rel 被多个上传请求同时写入导致 OOM。
 	// 键空间与 delete / move / 分块 complete 共用（FileLocks 实现负责归一 owner 与分隔符）。
 	releaseUpload, acquired := s.rt.fileLocks().TryMark(owner, rel, uploadingLockUpload)
