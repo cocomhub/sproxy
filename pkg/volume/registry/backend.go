@@ -55,7 +55,7 @@ type Presigner interface {
 
 // IndexRefresher 是可选能力接口（S5，2026-10-27）：后端支持**显式重建内存索引**。
 //
-// 背景（docs/designs/2026-10-27-remote-derived-state-cache.md §6 裁定 B）：secretdata 的
+// 背景（docs/archive/2026-10-27-remote-derived-state-cache.md §6 裁定 B）：secretdata 的
 // 内存索引只在挂载时扫描一次；卷被**本进程之外**修改（用户用网盘 App 直改 / 另一实例
 // 写入）后幽灵条目/旧哈希永不收敛。本接口让装配/API 层**类型断言**探测——支持则暴露
 // 显式 refresh 入口（`sclient volume refresh <卷>`），不支持的后端调用方明确拒绝。

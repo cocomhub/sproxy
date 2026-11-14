@@ -6,7 +6,7 @@
 //
 // 本文件只做**薄委托**（一行一方法），不复制任何逻辑；S1 不接任何调用点，
 // 编排核心迁移（S2/S3）才把 cloudtasks.Deps 构造并注入。方法语义与
-// docs/designs/2026-10-31-cloudtasks-deps-mapping.md §5 逐条对应。
+// docs/archive/2026-10-31-cloudtasks-deps-mapping.md §5 逐条对应。
 package server
 
 import (

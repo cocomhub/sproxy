@@ -4,7 +4,7 @@
 // group.go 是云任务组（group）的 HTTP 编排入口（P1-c S2b）：创建、列表、详情、
 // 取消、删除、恢复。
 //
-// 分层纪律与 download.go 相同（docs/designs/2026-10-31-cloudtasks-deps-mapping.md
+// 分层纪律与 download.go 相同（docs/archive/2026-10-31-cloudtasks-deps-mapping.md
 // §4/§9.5）：owner 由装配层解析后显式传入；响应写出用包内 writeJSON；行为与迁移前
 // 逐行等价（状态码、错误文案、审计动作一律不变，由 pkg/server 的既有 HTTP 测试锁定）。
 //

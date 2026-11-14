@@ -4,7 +4,7 @@
 // group_archive.go 是云**组归档**的 HTTP 编排入口（P1-c S3b）：把组内已完成子任务的
 // 产物打包为单个 tar.gz（落租户 archive 桶，或经统一转存写目标卷）。
 //
-// 分层纪律与 archive.go 相同（docs/designs/2026-10-31-cloudtasks-deps-mapping.md
+// 分层纪律与 archive.go 相同（docs/archive/2026-10-31-cloudtasks-deps-mapping.md
 // §4/§9.5）：owner 由装配层解析后显式传入，响应写出用包内 writeJSON，行为与迁移前逐行
 // 等价（状态码、错误文案、配额预留/结算顺序、archiveUsage 记账、组归档名落库一律不变）。
 //

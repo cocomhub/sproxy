@@ -6,7 +6,7 @@
 // 本包只声明编排核心需要的窄接口与构造期注入的 Deps，不包含编排逻辑，也不
 // 依赖装配根 pkg/server；装配层负责把 *Handlers 适配成这些接口（见
 // pkg/server/cloudtasks_wiring.go）。依赖映射与 S1–S4 拆分见
-// docs/designs/2026-10-31-cloudtasks-deps-mapping.md。
+// docs/archive/2026-10-31-cloudtasks-deps-mapping.md。
 //
 // 接口命名按 S1 任务契约使用领域名词（Tasks/…）；设计文档 §5.1–§5.7 中的
 // TaskStore/GroupStore/… 与之一一对应，不另设别名（同一概念只保留一个导出名）。

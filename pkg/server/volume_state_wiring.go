@@ -14,7 +14,7 @@ import (
 )
 
 // volume_state_wiring.go —— 卷状态缓存的**唯一装配点**（设计
-// docs/designs/2026-10-28-volume-state-maintenance.md §3.3）。
+// docs/archive/2026-10-28-volume-state-maintenance.md §3.3）。
 //
 // 形态刻意与 `capacity.WrapStorageVolume`（R29 唯一入口）一致：横切关注点收敛到一处，
 // 由门禁 R44 保证没有第二个包装点 ⇒ 新增卷型/新增装配路径自动获得该能力（P2）。

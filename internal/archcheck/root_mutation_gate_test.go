@@ -6,7 +6,7 @@ package archcheck
 // root_mutation_gate_test.go 是「`storage.Root` 结构性变异必须发事件」门禁（R45）。
 //
 // 为什么需要：本地卷的派生状态（搜索索引、卷状态缓存代际）依赖 Root 发变异事件
-// （设计 2026-10-28-volume-state-maintenance §4.1）。Root 一旦新增/改写结构性变异方法却
+// （设计 docs/archive/2026-10-28-volume-state-maintenance.md §4.1）。Root 一旦新增/改写结构性变异方法却
 // 忘记 `notifyMutation`，机制会**静默失效**——写成功、视图不更新（#874 事故族的形态）。
 // 本门禁把「机制完整性」变成编译期之外的第二道保险。
 //

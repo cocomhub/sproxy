@@ -8,7 +8,7 @@ package server
 // 不再在 routes.go 里手工配对两遍（此前 45 条路由 × 2 个 mux = 90 处注册）。
 //
 // 分类语义（本表即**单一事实源**，运行期经 route_class_index.go 按 r.Pattern 查表；
-// 见 docs/designs/2026-11-03-route-class-single-source.md）：
+// 见 docs/archive/2026-11-03-route-class-single-source.md）：
 //   - `Server: ClassUser`   ⇒ fileRoute（写子组，requireRole(user)）
 //   - `Server: ClassReader` ⇒ fileRouteRead（只读子组，requireRole(reader)）
 //   - `Local:  ClassTunnel` ⇒ 隧道内层裸注册（隧道加密即认证；角色门由 localMuxGate 收口）
@@ -66,7 +66,7 @@ func fileDomainRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *htt
 		{Method: "POST", Path: "/api/volumes/copy", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).copyVolumeHandler},
 		{Method: "POST", Path: "/api/volumes/refresh", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).refreshVolumeHandler},
 		{Method: "GET", Path: "/api/volumes/export", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).exportVolumeHandler},
-		// 真实存储审查（只读；设计 docs/designs/2026-11-04-secretdata-storage-inspection.md）：
+		// 真实存储审查（只读；设计 docs/archive/2026-11-04-secretdata-storage-inspection.md）：
 		// 正向落点 + 反向解释。仅实现 StorageInspector 的卷可用（其它卷 501）。
 		{Method: "GET", Path: "/api/volumes/{name}/trace", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeTraceHandler},
 		{Method: "GET", Path: "/api/volumes/{name}/explain", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeExplainHandler},

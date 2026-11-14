@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // mutation_index.go 把 `storage.Root` 的结构性变异事件接到**搜索索引**上
-// （设计 2026-10-28-volume-state-maintenance §4.1 的本地卷落地，V3）。
+// （设计 docs/archive/2026-10-28-volume-state-maintenance.md §4.1 的本地卷落地，V3）。
 //
 // 为什么要这样做：#874 的根因是「写 user 桶但绕经写内核」的路径必须**记得**手动维护派生
 // 状态（`RecordBypassWrite` / `IndexMove`）。现在结构性变异统一从 Root 观察 ⇒ 转存/归档/

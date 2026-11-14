@@ -279,7 +279,7 @@ func OpenLocalVolumeRoot(name, rootDir string, extra map[string]any, log *slog.L
 
 // assembleLocalVolume 装配单个本地卷（统一后端 + 容量池 + 卷记录 + 首卷默认名）。
 //
-// **U1 接线**（docs/designs/2026-10-28-unified-volume-model.md）：改走 `NewLocalBackend`
+// **U1 接线**（docs/archive/2026-10-28-unified-volume-model.md）：改走 `NewLocalBackend`
 // 产出统一存储卷身份（`registry.StorageVolume`），不再裸 `OpenLocalVolumeRoot` 只进 roots。
 // roots 仍保留（服务默认卷 tenant/globalRoot 存量语义——`localBackend.Root()` 复用同一根），
 // storageVols 持有统一身份供 `Set.StorageVolume`/`VolumeView` 取用。

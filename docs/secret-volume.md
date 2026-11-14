@@ -236,6 +236,28 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 | ⑧ | **config 声明顺序限制解除**（2026-10-15）：装配序拆为四步（Store 卷集 → 先行补装 → `enclosure.AttachAll` → 后置补装），使 config 可同时声明「嵌套 secrets 卷」与「`secret_url` 指向它的 secretdata 卷」（旧序下密钥解析遇「源卷后端未装配」必然 boot fail）。判据取**静态声明**（`secretdataRefsEnclosureVolume`），不靠「试装失败」的错误文案重试 | 已完成 |
 | ⑦ | **per-owner 默认 secrets 卷**（用户裁定 2026-10-15）：`default-secrets` 成为**每个 owner 各自的**默认桶（`<storage_root>/<owner>/meta/secrets/`——owner 租户根的 **meta 桶**内，免声明、首次使用自动派生、`/api/secrets` 恒作用于请求者桶 ⇒ per-owner 隔离）；删除「全局默认 secrets 卷 + 多全局卷确定性选取（`extra.default` 标记 / 基础卷优先 / 卷名升序）」整套模型与 `extra.wrapper` 冗余键书写；`secret_url` 双寻址：`secrets://default-secrets/<名>` → per-owner 桶（需请求 owner 上下文），其它卷名 → 显式声明的 secrets 卷（含多层嵌套链，如 secrets over secretdata over baidupcs） | 已完成 |
 
+### 3.10 索引快照与元数据缓存分层（2026-11-12）
+
+- **问题**：启动期加密卷内存峰值可达 GB 级（WSL OOM）。根因是内存索引把**单个文件的冷结构
+  `Meta`**（含 `Chunks[].Blocklets`，实测单文件常驻 **78 MB**）焊进热记录，而热路径（`ListDir`/
+  `Stat`）根本不用它——`ensureEntryMeta`/`readFileMetaFast` 的**按需加载**设计被快照绕过。
+- **四层**：L0 热索引（本地快照，必常驻，~150 B/文件：`rel→{size,mtime,origSHA256,…}`，覆盖
+  list/stat/search）；L1a 元数据磁盘缓存（`metacache`，持久 + 配额 + LRU，跨重启）；L1b 元数据内存
+  LRU（**字节计量 + 硬上限**，仅缓存最近真正被读取的 meta）；L2 远端 meta blob（权威）。
+- **关键改动**：快照**不再序列化 `Meta`**（加载后 `e.meta = nil`，交既有 `ensureEntryMeta`）；
+  `origSHA256` 提升为 **L0 扁平字段** ⇒ `Stat`/checksum 巡检**零 meta 加载**。
+- **命中率组合策略**：**按字段级别路由**（能在 L0 满足的绝不碰 meta）；批量操作两阶段（全量查
+  L1b→L1a → 只对 miss 集走 L2）；回填 + single-flight 去重 + 限速；预热（只写 L1a 磁盘）。
+- **配置**（见 §3.2 表）：`meta_cache_bytes`（L1b，默认 256 MiB）/`meta_cache_quota_bytes`
+  （L1a，默认 2 GiB）/`disable_meta_prewarm`（默认 false = 开启预热）。
+- **实测修正**：L1b 只保证「热集 ≤ 预算」时的复用（单条大 meta ~78 MB ⇒ 256 MiB 只容纳 ~3 条，
+  全量操作第二轮命中率极低）⇒ 批量「大概率命中」**只能靠字段级别路由**；L1a 只省带宽不省 CPU
+  （命中后仍要解密+解析）。**加载并发硬性封顶**（实测吞吐在并发 4 后饱和、内存 ≈ 并发 × 单条
+  常驻 ⇒ 上限 `min(4, 内存预算/单条)`）。
+- **不选**：WAL + 定期压缩（解决写放大，而瓶颈是读内存，且与 `pkg/recovery`/`pkg/audit` 职责
+  重叠）；按目录聚合清单缓存（热字段提升到 L0 后已无必要）。
+- 设计全文：`docs/archive/2026-11-12-secretdata-index-lazy-meta-and-cache-layers.md`。
+
 ## 4. 寻址
 
 ```

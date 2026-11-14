@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// checksum_api.go 是 checksum 台账的**运维修复面**（设计 2026-10-28-volume-state-maintenance
+// checksum_api.go 是 checksum 台账的**运维修复面**（设计 docs/archive/2026-10-28-volume-state-maintenance.md
 // §15.1 步骤 ②）：`POST /api/checksums/rebuild?owner=<owner>`。
 //
 // 为什么需要显式入口：台账为空时 `List/Search` 会**自动**从对象 meta 一次性重建（自愈读），

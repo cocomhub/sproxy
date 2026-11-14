@@ -111,7 +111,7 @@ const volumeKeySep = "\x00"
 
 // volumeKey 拼接卷维度键（`<vol>\x00<rel>`）。
 //
-// 为什么要卷维度（设计 2026-10-28-volume-state-maintenance §15.1.1）：旧台账键是**租户相对
+// 为什么要卷维度（设计 docs/archive/2026-10-28-volume-state-maintenance.md §15.1.1）：旧台账键是**租户相对
 // rel**（`user/<rel>`），同一 owner 在多卷上的同名文件会互相覆盖 ⇒ list 显示的 checksum
 // 张冠李戴。新写入改用卷维度键；旧键保留为**只读兼容**（升级前的数据仍可读）。
 func volumeKey(vol, filename string) string { return vol + volumeKeySep + filename }

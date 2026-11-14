@@ -3,7 +3,7 @@
 
 package files
 
-// search_external.go 实现**外部卷的搜索**（设计 2026-10-30-derived-state-projection D4 定案）：
+// search_external.go 实现**外部卷的搜索**（设计 docs/archive/2026-10-30-derived-state-projection.md D4 定案）：
 // 用户裁定「基于缓存能力提供全卷缓存实现搜索，支持对有权限访问的所有卷搜索并聚合结果」。
 //
 // 数据源与缓存：

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // checksum_rebuild.go 实现「checksum 台账自愈 / 一次性导入」（设计
-// 2026-10-28-volume-state-maintenance §15.1 步骤 ①+②）。
+// docs/archive/2026-10-28-volume-state-maintenance.md §15.1 步骤 ①+②）。
 //
 // 背景：per-tenant 台账 `meta/checksums.json` 是**整体重写**的单个 JSON——丢失/损坏/被裁掉时，
 // list/search 的 checksum 会整片变空（文件还在，校验能力却没了）。而对象 meta sidecar

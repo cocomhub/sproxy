@@ -48,7 +48,7 @@ type Set struct {
 	// 运行时句柄，FS() 提供同步视图供 syncexec 工厂消费；Close 时统一关闭。
 	external map[string]ExternalBackend
 	// storageVolumes 是 name → 统一存储卷身份（本地 localBackend / 外部 capacity.Backend）。
-	// **U1 统一存储卷模型**（docs/designs/2026-10-28-unified-volume-model.md）：装配期一次
+	// **U1 统一存储卷模型**（docs/archive/2026-10-28-unified-volume-model.md）：装配期一次
 	// 构造，`StorageVolume(name)` 是唯一取卷入口——本地卷不再只能经 `Root` 拿裸 root。
 	// 与 roots/external 的关系：本地卷同时进 roots（服务默认卷 tenant/globalRoot 存量语义）
 	// 与 storageVolumes（统一身份）；外部卷进 external 与 storageVolumes（同一实例）。
@@ -213,7 +213,7 @@ func (vs *Set) Root(name string) *storage.Root {
 
 // LocalRoots 返回本地卷根的快照（卷名 → 根句柄）。
 //
-// 用途：装配层为本地卷接线**结构性变异观察者**（设计 2026-10-28-volume-state-maintenance
+// 用途：装配层为本地卷接线**结构性变异观察者**（设计 docs/archive/2026-10-28-volume-state-maintenance.md
 // §4.1）——观察点只认卷根，故装配层需要一次性遍历全部本地根。返回副本 ⇒ 调用方可自由迭代
 // （运行期新增卷由创建点自行接线）。
 func (vs *Set) LocalRoots() map[string]*storage.Root {

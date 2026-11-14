@@ -5,7 +5,7 @@ package archcheck
 
 // legacy_state_usage_gate_test.go 是「旧派生状态实现」棘轮（R46）。
 //
-// 背景（设计 2026-10-28-volume-state-maintenance §五）：本地卷的派生状态有两套——旧的
+// 背景（设计 docs/archive/2026-10-28-volume-state-maintenance.md §五）：本地卷的派生状态有两套——旧的
 // 「写路径逐点维护」（`searchIndex.upsert/remove`、`checksums.json` 独立台账、`ExternalList`
 // 薄转发）与新的「Root/FS 变异事件驱动」（`pkg/files/mutation_index.go` + `pkg/volumestate`）。
 // 用户裁定允许**短期共存**，但共存不能演变成永久双轨 ⇒ 旧实现的独立使用点数由

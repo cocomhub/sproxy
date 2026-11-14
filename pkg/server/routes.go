@@ -196,7 +196,7 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	// U2：装配期注入卷视图装饰器（`VolumeView` 的唯一取卷入口）——本地卷也经同一
 	// recipe（trusted.Guard(Wrap) + capacity）成为可信卷；staging 是 per-owner 瞬态，
 	// 由消费方 `ApplyStagingQuota` 在取值时套（registry 不 import server，避免成环）。
-	// 卷状态缓存（唯一装配点，设计 2026-10-28-volume-state-maintenance）：
+	// 卷状态缓存（唯一装配点，设计 docs/archive/2026-10-28-volume-state-maintenance.md）：
 	// 未启用 ⇒ nil（零回归）；启用 ⇒ 为非本地卷在**最外层**套「读缓存 + 写自动失效」。
 	stateCache := newVolumeStateCache(cfg, vs, log)
 	vs.SetVolumeViewDecorator(func(name string, use registry.ViewUse, raw syncpkg.FS) syncpkg.FS {

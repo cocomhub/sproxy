@@ -5,7 +5,7 @@ package archcheck
 
 // fs_derived_state_gate_test.go 是「FS 实现自述派生状态」门禁（R42）。
 //
-// 背景（设计 2026-10-28-volume-state-maintenance §六 R42）：卷状态缓存（`pkg/volumestate`）在
+// 背景（设计 docs/archive/2026-10-28-volume-state-maintenance.md §六 R42）：卷状态缓存（`pkg/volumestate`）在
 // 命中前会探测代际（`StateGen(ctx, path) (uint64, error)`）——**跨进程/外部改动**的收敛依赖它。
 // 若某个 `sync.FS` 实现持有进程内派生状态（自己的 list 缓存/索引）却不实现 `StateGen`，
 // 缓存层就看不到它的变化 ⇒ 陈旧的视图会一直命中（#853/#874 事故族的另一种形态）。

@@ -1126,7 +1126,7 @@ type Config struct {
 	//     行为（安全可靠）**；true = 跳过下载数据校验（显式放宽，仅极端性能场景）。
 	//     meta 生成恒在（只关校验，不关 meta——桶隔离/凭据保护不随本字段变化）。
 	TrustedVolume TrustedVolumeConfig `yaml:"trusted_volume" mapstructure:"trusted_volume"`
-	// VolumeState 是**卷状态缓存**配置（卷状态维护设计 2026-10-28-volume-state-maintenance）：
+	// VolumeState 是**卷状态缓存**配置（卷状态维护设计 docs/archive/2026-10-28-volume-state-maintenance.md）：
 	// list 目录视图与 checksum 派生值的统一缓存层（外部卷优先）。默认关闭 = 旧行为零回归。
 	VolumeState VolumeStateConfig `yaml:"volume_state" mapstructure:"volume_state"`
 
@@ -1235,7 +1235,7 @@ func TransferConcurrencyEffective(c *Config) int {
 
 // VolumeStateConfig 是卷状态缓存的配置（`volume_state` 段）。
 //
-// 设计：docs/designs/2026-10-28-volume-state-maintenance.md。
+// 设计：docs/archive/2026-10-28-volume-state-maintenance.md。
 // **默认值纪律**（AGENTS.md 7c）：bool 默认 false；需要「默认开启」的能力把语义反转为
 // `disable_*`（本段即如此——**缓存默认开启**，`disable: true` 才关闭）。字节/时长取
 // 「安全且有界」的默认（上限 256 MiB、TTL 5 分钟）。

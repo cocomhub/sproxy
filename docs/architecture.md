@@ -450,7 +450,7 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
 
 ### 统一存储卷模型（StorageVolume 唯一身份 + VolumeView 唯一取卷入口）
 
-设计：`docs/designs/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
+设计：`docs/archive/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。
 
 本地卷与外部卷统一为 **`registry.StorageVolume`** 契约（`Name/Kind/FS/Close` + 可选能力
 `Footprinter`/`PhysBound`/`StatsProvider`），`registry.Set` 持有 `storageVolumes` 表，
@@ -473,7 +473,7 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 
 ### 卷状态维护（list / checksum / 索引的统一缓存层）
 
-设计：[docs/designs/2026-10-28-volume-state-maintenance.md](./designs/2026-10-28-volume-state-maintenance.md)。
+设计：[docs/archive/2026-10-28-volume-state-maintenance.md](./archive/2026-10-28-volume-state-maintenance.md)。
 
 **问题**：list 的目录视图与 checksum 派生值此前有**三套实现**（本地卷 `searchIndex` +
 `checksums.json`、外部卷每次远端 `ListDir`、secretdata 自管索引）⇒ 三个真相源、三条失效路径
@@ -491,6 +491,12 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 **校验巡检的台账读取（2026-10-30）**：`/api/verify` 用可选扩展 `checksum.Iterator` **分批遍历**
 （锁外回调，峰值内存 O(键列表 + 单批)），不再 `GetAll()` 全量拷贝；判空用 `LenCounter`（O(1)）。
 store 未实现这些能力时回落 `GetAll`（零回归）。
+
+**读路径口径（2026-11-11 裁定，D4）**：list 的 `checksum` **优先取视图条目自报**
+（`sync.Entry.Checksum`，未自报时回落台账）；本地卷的自报由 `volumestate.CacheFS` 在 cache-miss
+回源后按内层 `meta.Provider` 读 sidecar `TotalSHA256` 补齐（**不**把 meta 读取下沉到 `rootfs`——
+那是架构倒置），随目录快照缓存并落盘。远端卷不自报 ⇒ **不主动补**（每文件一次网络往返），
+消费方按需 `stat` 兜底。口径与分期见 `docs/archive/2026-11-11-checksum-ledger-read-path.md`。
 
 **读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
 （`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce
@@ -634,7 +640,7 @@ type StorageInspector interface {
 - **安全**：只解 meta 不读内容；真实路径越界显式拒绝（`ErrOutsideVolume` → 403）；
   只读（无删除/修复）；差异码不是删除建议（回收走 GC）。
 - **未实现能力的卷** ⇒ `501 not_inspectable`，绝不返回空结果（空结果会被误读为「没有落点」）。
-- 设计：`docs/designs/2026-11-04-secretdata-storage-inspection.md`。
+- 设计：`docs/archive/2026-11-04-secretdata-storage-inspection.md`。
 
 ## 统一转存（归档 = 转存 + 预处理）
 
@@ -1003,7 +1009,7 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   `pkg/server`（`self_credential_test.go` / `state_store_config_test.go`）。
 - 度量：`pkg/server` 非测试行 28,489 → **28,125**；子包 18 → 19。
 
-**P2 总体度量（2026-11-01，设计见 `docs/designs/2026-11-01-residual-assembly-optimization.md`）**
+**P2 总体度量（2026-11-01，设计见 `docs/archive/2026-11-01-residual-assembly-optimization.md`）**
 
 - `pkg/server` 非测试行 **42,568 → 28,125（−33.9%）**；服务端子包 **1 → 19**；
 - 本系列四片：T1 `remotefs`（#994，1,074 行）、T2 `internal/httpjson`（#995 一期 + 二期，收敛 5 份实现 + 41 处裸写，R54 升级为硬禁止）、T3-b `enclosure`（#996，419 行）、T3-a `credentials`（#997，458 行进包、装配层 433 → 68）；
@@ -1017,7 +1023,7 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   状态机，幂等、未提交自动回滚、排队等待复用既有 `waitq`；云归档硬编码 30s 超时缺陷一并修正。
 - `cloudtasks.Orchestrator`（#968/#970/#971/#972/#973/#974/#975）：云下载/归档迁入
   `pkg/server/cloudtasks`，`Deps` 恒 8 字段（7 窄接口 + Logger）、接口方法 40 个；
-  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/designs/2026-10-31-cloudtasks-deps-mapping.md`。
+  `pkg/server` 42,568 → **31,221 行（−26.6%）**。设计见 `docs/archive/2026-10-31-cloudtasks-deps-mapping.md`。
 
 **路由表数据化与下放（`pkg/server/router`，2026-11-02）**
 
@@ -1038,8 +1044,8 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
   **隧道内层静默越权**。写面（`isWriteFaceRoute`）同样声明化：`Route.Mutating` +
   文件域/分享由 `ClassUser` 派生，S3 子树挂载特判；新增路由漏声明由
   `TestWriteFace_EveryRegisteredRouteIsDeclared` 拦住。
-- 设计见 `docs/designs/2026-11-02-route-group-registration.md` 与
-  `docs/designs/2026-11-03-route-class-single-source.md`。
+- 设计见 `docs/archive/2026-11-02-route-group-registration.md` 与
+  `docs/archive/2026-11-03-route-class-single-source.md`。
 
 ### 剩余三块为何不再按切片下沉（2026-10-30 实测）
 

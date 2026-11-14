@@ -129,7 +129,7 @@
   const TEXT_EXT = ['txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'sh', 'bat', 'go', 'js', 'py', 'css', 'html', 'conf', 'ini', 'cfg'];
   // isTransferTargetVolume(v)：转存目标卷候选判定（U3 统一卷模型）。
   // 服务端 `checkTransferVolumePreflight` 现要求目标是**已装配的任意存储卷**（本地卷亦可
-  // ——见 docs/designs/2026-10-28-unified-volume-model.md U3），仅拒绝：
+  // ——见 docs/archive/2026-10-28-unified-volume-model.md U3），仅拒绝：
   //   - secrets：密钥管理卷（secret 名禁路径分隔符），非通用转存目标 → 400。
   // 前端据此过滤候选，避免「选中即 400」（文案明确但仍是用户可见故障）。
   function isTransferTargetVolume(v) {

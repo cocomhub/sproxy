@@ -5,7 +5,7 @@ package archcheck
 
 // config_defaults_gate_test.go 是「配置默认值安全」门禁（R43）。
 //
-// 规则（AGENTS.md 7c + 设计 2026-10-28-volume-state-maintenance §六 R43）：
+// 规则（AGENTS.md 7c + 设计 docs/archive/2026-10-28-volume-state-maintenance.md §六 R43）：
 // **新增配置字段的默认值必须安全**——bool 默认 false（需要「默认开启」时把语义反转成
 // `disable_xxx`），string 默认空串。默认 true 的 bool 让「显式关闭」与「未配置」不可区分；
 // 非空 string 默认让「用户没配」与「用户配了这个值」不可区分。

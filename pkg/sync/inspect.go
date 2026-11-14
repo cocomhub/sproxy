@@ -10,7 +10,7 @@ package sync
 // 断言恒 false ⇒ **静默降级**（详见 docs/decorator-capability-forwarding.md）。把能力放到它该在的层，
 // 各层装饰器才能一致转发；pkg/volume 侧保留**类型别名**，调用点零改动。
 //
-// 原始说明（设计 docs/designs/2026-11-04-secretdata-storage-inspection.md）：
+// 原始说明（设计 docs/archive/2026-11-04-secretdata-storage-inspection.md）：
 //
 // 为什么定义在 pkg/volume 而不是 pkg/server 或 CLI：真实落点（容器链、meta pad、分块/parity、
 // blocklet、去重共享容器）**只有掌握布局的卷自己知道**；调用方无法反推。写在别处就是第二份

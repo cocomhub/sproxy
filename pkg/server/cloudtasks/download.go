@@ -4,7 +4,7 @@
 // download.go 是云任务 CRUD 的 HTTP 编排入口（P1-c S2a）：创建（单条/批量）、列表、
 // 详情、取消、删除、恢复。
 //
-// 分层纪律（docs/designs/2026-10-31-cloudtasks-deps-mapping.md §4/§9.5）：
+// 分层纪律（docs/archive/2026-10-31-cloudtasks-deps-mapping.md §4/§9.5）：
 //   - owner（任务归属与可见性）由装配层从认证上下文解析后**显式传入**；本包不持有
 //     ctx→actor 的键（`ActorFrom` 的 ctx key 是装配层私有）；
 //   - 响应写出用包内 writeJSON（Deps 已满 8 字段，HTTP 面在包内自洽）；
