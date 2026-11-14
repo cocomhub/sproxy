@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package shardseal 实现随机分块 + AES-256-GCM + scrypt 派生的自描述加密分块算法
-// （设计 docs/designs/2026-10-01-secret-volume.md）。对外 API：EncryptShards /
+// （设计 docs/archive/2026-10-01-secret-volume.md）。对外 API：EncryptShards /
 // DecryptFile；命名含三段 16hex 校验和截断 + 随机段，meta 含全 stat + 每分块 stat。
 package shardseal
 

@@ -800,6 +800,11 @@ sclient trust ak add [ak] --role user --owner <owner>   # 新增 AK（admin-only
   （读到只读子组语义存在，但无创建入口）。
 - 角色全集、生效矩阵与创建入口现状见 [`docs/api.md`](./api.md) §凭据管理 ·「账号角色（role）」。
 - register/login 的 TOTP 流程与回填规则见 [`docs/config.md`](./config.md) §sclient trust register 与 trust login。
+- **运行中凭据自动轮换（`--renew-interval`）**：常驻命令（`http-proxy` / `socks` / `mesh connect` /
+  `mesh up` / `mesh node` / `relay start` / `p2p listen`）支持 `--renew-interval <dur>`（默认 `24h`，
+  `0` = 关闭）：到期前自动调 `POST /api/credentials/<ak>/renew` 轮换当前 context 的 SK 并**热替换签名器**
+  （同进程立即生效、无需重启；在途连接依赖服务端旧 SK 宽限期兜底）。服务端同源调度（可独立开启）
+  见 [`docs/config.md`](./config.md) §`credentials.rotation.*`。
 
 ### version
 

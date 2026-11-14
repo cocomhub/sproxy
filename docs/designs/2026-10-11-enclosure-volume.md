@@ -1,7 +1,7 @@
 # 封装卷（Enclosure Volume）设计
 
 > 2026-10-11 · 状态：设计定稿（Stage 1 已落地），Stage 2+ 实施中
-> 前置：`2026-10-10-trusted-volume.md`（可信卷/sidecar/容量）、`2026-10-01-secret-volume.md`（加密卷）
+> 前置：`2026-10-10-trusted-volume.md`（可信卷/sidecar/容量）、`docs/archive/2026-10-01-secret-volume.md`（加密卷）
 > 触发：多角度对抗评审 P0——at-rest 加密卷在 S3/DAV/分享/分块上传面未接线（读密文、写明文）
 
 ## 1. 目标与非目标

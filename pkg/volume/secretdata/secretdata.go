@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package secretdata 是 secret_data 加密封装卷（设计 docs/designs/2026-10-01-secret-volume.md
+// Package secretdata 是 secret_data 加密封装卷（设计 docs/archive/2026-10-01-secret-volume.md
 // §6.2）：wrapper 卷，写入手动分块加密上传底层卷随机容器目录、读取经 meta 解密还原。
 // 实现 sync.FS，对上层透明（OpenRead/WriteFile/Stat/Delete/MakeDir 转发）。
 //
