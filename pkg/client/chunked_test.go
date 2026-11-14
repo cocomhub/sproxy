@@ -474,13 +474,14 @@ func TestTryResumeSession(t *testing.T) {
 	})
 }
 
-// testResumeFileAlreadyExists 覆盖服务端已标记 finished 的上传会话（直接成功）。
+// testResumeFileAlreadyExists 覆盖服务端已标记 completed 的上传会话（直接成功）。
+// 注：夹具用 completed（服务端 ChunkStatusResponse 的真实字段）而非 finished（服务端从不下发）。
 func testResumeFileAlreadyExists(t *testing.T) {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"finished":true,"upload_id":"test-123"}`))
+		_, _ = w.Write([]byte(`{"success":true,"completed":true,"upload_id":"test-123"}`))
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)

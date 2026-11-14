@@ -742,41 +742,17 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 
 // tryResumeSession 尝试续传已有的上传会话。
 // 返回专用结果类型 tryResumeResult。
+//
+// 解析复用导出的 UploadStatus（与服务端 pkg/files.ChunkStatusResponse 逐字对应），
+// 本函数只保留「续传语义」的宽容处理：任何非 2xx / 无会话 / 解析失败一律视为
+// 「无可用会话」⇒ shouldContinue，由调用方走新建会话路径。
 func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams) tryResumeResult {
-	statusResp, statusErr := c.doRequest(ctx, "GET",
-		fmt.Sprintf("/upload/status?upload_id=%s&filename=%s", p.UploadID, url.QueryEscape(p.Filename)), nil, nil)
-	if statusErr != nil || statusResp.StatusCode != http.StatusOK {
-		if statusResp != nil {
-			statusResp.Body.Close()
-		}
+	statusData, statusErr := c.UploadStatus(ctx, p.UploadID, p.Filename)
+	if statusErr != nil || statusData == nil || !statusData.Success {
 		return tryResumeResult{shouldContinue: true}
 	}
 
-	var statusData struct {
-		Success       bool   `json:"success"`
-		Finished      bool   `json:"finished"`
-		UploadID      string `json:"upload_id"`
-		ReceivedCount int    `json:"received_count"`
-		TotalChunks   int    `json:"total_chunks"`
-		MissingChunks []int  `json:"missing_chunks"`
-		Completed     bool   `json:"completed"`
-		FileChecksum  string `json:"file_checksum"`
-		Message       string `json:"message"`
-		// 服务端写入阶段进度（进度可视化二期 T4）：供调用方（sdserver 进度页）展示
-		// 「服务端加密 / 远端卷上传」两阶段。全部可选（旧服务端不返回 ⇒ 零值，向后兼容）。
-		Stage        string `json:"stage"`
-		EncryptDone  int64  `json:"encrypt_done"`
-		EncryptTotal int64  `json:"encrypt_total"`
-		RemoteDone   int64  `json:"remote_done"`
-		RemoteTotal  int64  `json:"remote_total"`
-	}
-	if json.NewDecoder(io.LimitReader(statusResp.Body, 1<<20)).Decode(&statusData) != nil || !statusData.Success {
-		statusResp.Body.Close()
-		return tryResumeResult{shouldContinue: true}
-	}
-	statusResp.Body.Close()
-
-	if statusData.Finished || statusData.Completed {
+	if statusData.Completed {
 		c.logger.InfoContext(ctx, "文件已存在，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
 		return tryResumeResult{result: &ChunkedUploadResult{
 			Success:      true,
