@@ -177,7 +177,7 @@ func (h *Handlers) isAuditAdmin(actor string) bool {
 	return actor != "" && h.getRole(actor) == "admin"
 }
 
-// auditReadAllowed 是审计读面的权限裁决（设计 docs/designs/2026-10-19-audit-service.md
+// auditReadAllowed 是审计读面的权限裁决（设计 docs/archive/2026-10-19-audit-service.md
 // §5.7 / M1-11，**审核 P0**）：仅管理员可读全量。非管理员（含未认证主体与隧道内非管理员
 // 主体）**一律拒绝** —— 审计条目含 actor/mesh/object/detail/source_ip/request_id/volume，
 // 是最低权限主体可读的**全局证据链**，泄露面随 secrets/presign/DAV/S3/sync 全量纳入而放大。

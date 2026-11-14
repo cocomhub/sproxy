@@ -200,7 +200,7 @@ type AuditConfig struct {
 	// Disabled 显式关闭审计（默认 false = 启用）：读面返回空表、写入 no-op，且**不创建**
 	// 任何审计目录/文件（与 buffer_size=0 的区别：后者只关内存环形缓冲，落盘仍在）。
 	Disabled bool `yaml:"disabled" mapstructure:"disabled"`
-	// Startup 是审计的**启动期行为**（设计 docs/designs/2026-10-19-audit-service.md
+	// Startup 是审计的**启动期行为**（设计 docs/archive/2026-10-19-audit-service.md
 	// §5.6 点 6 / M1-14）。
 	Startup AuditStartupConfig `yaml:"startup" mapstructure:"startup"`
 }

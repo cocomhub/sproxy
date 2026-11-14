@@ -105,7 +105,7 @@ var (
 	// ErrRegistrationRequiresSecret 注册必须提供 sk 或 totpSecret 之一（不能双 nil）。
 	ErrRegistrationRequiresSecret = errors.New("accesskey: registration requires sk or totpSecret")
 	// ErrReservedOwner 表示 owner（租户键）为保留租户名（如审计租户 `audit`）⇒ 拒绝登记。
-	// 保留名清单见 ReservedOwnerNames（设计 docs/designs/2026-10-19-audit-service.md §5.6）。
+	// 保留名清单见 ReservedOwnerNames（设计 docs/archive/2026-10-19-audit-service.md §5.6）。
 	ErrReservedOwner = errors.New("accesskey: reserved owner name")
 )
 
@@ -376,7 +376,7 @@ func hexSegmentOK(s string) (int, bool) {
 
 // ReservedOwnerNames 是**租户键（AK 的 Owner，即租户名）**的保留名：用户/注册/凭据管理
 // 一律不得占用。目前唯一保留名是**审计租户 `audit`**（设计
-// docs/designs/2026-10-19-audit-service.md §5.6）：审计条目按租户隔离，其租户目录
+// docs/archive/2026-10-19-audit-service.md §5.6）：审计条目按租户隔离，其租户目录
 // `<卷根>/audit/` 与用户租户**同一命名空间**（参与 ListOwners / 配额 / 巡检）⇒ 若可被
 // 注册占用，攻击者即可劫持/污染审计空间。内部装配（server 启动建立审计空间）**不经**
 // UpsertAK 路径创建该租户，故在此拒绝不影响功能。

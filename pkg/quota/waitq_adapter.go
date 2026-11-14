@@ -4,7 +4,7 @@
 package quota
 
 // waitq_adapter.go 是配额池接入 `pkg/waitq` 通用等待队列的**适配器**（架构级收敛，
-// 设计 docs/designs/2026-10-19-waitq.md §8）：把「配额不足时排队重试」从 pkg/quota 私有的
+// 设计 docs/archive/2026-10-19-waitq.md §8）：把「配额不足时排队重试」从 pkg/quota 私有的
 // `sync.Cond` 实现收敛到通用能力包，同时**不丢失**任何能力（严格上界 / 沿父链强制 /
 // 不可能容纳立即失败 / 超时与取消 / 进入等待的可观测计数）。
 //

@@ -5,7 +5,7 @@ package archcheck
 
 // mutating_route_audit_gate_test.go 是门禁 **R35-b**：**变更型路由 → 业务语义审计**。
 //
-// 设计 docs/designs/2026-10-19-audit-service.md §2.5 / R35-b 要求：每个变更型路由
+// 设计 docs/archive/2026-10-19-audit-service.md §2.5 / R35-b 要求：每个变更型路由
 // （POST/PUT/PATCH/DELETE）都必须留下**业务语义**审计（action/object/result）；
 // 传输层兜底事件（`http.*`，`fidelity=transport`）**不计入**达标。
 //

@@ -3,7 +3,7 @@
 
 package archcheck
 
-// recovery_gate_test.go 是门禁 **R37**（设计 docs/designs/2026-10-19-audit-service.md §8.2 +
+// recovery_gate_test.go 是门禁 **R37**（设计 docs/archive/2026-10-19-audit-service.md §8.2 +
 // program M3「统一恢复协调器」）：
 //
 //	① **唯一编排入口**：非测试源码中构造恢复协调器（`recovery.New(`）的文件必须登记为

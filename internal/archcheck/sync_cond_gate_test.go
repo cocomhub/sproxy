@@ -4,7 +4,7 @@
 package archcheck
 
 // sync_cond_gate_test.go 是门禁 **R36-b**：非测试源码**不得**再出现 `sync.Cond`
-// （等待队列一律走 `pkg/waitq` 通用能力 —— 唯一实现）。设计 docs/designs/2026-10-19-waitq.md §8.3。
+// （等待队列一律走 `pkg/waitq` 通用能力 —— 唯一实现）。设计 docs/archive/2026-10-19-waitq.md §8.3。
 //
 // 背景（W1 收敛，2026-10-19）：迁移前仓库有 **4 套**独立等待实现（quota 私有 cond、staging 私有
 // cond + 观察者 goroutine、cloud 下载轮询、以及若干 sleep 轮询）。收敛到 `pkg/waitq` 后，
@@ -98,7 +98,7 @@ func TestR36b_NoSyncCondInRootModule(t *testing.T) {
 	}
 	if len(hits) > 0 {
 		t.Fatalf("R36-b：根 module 非测试源码中出现 sync.Cond（等待队列必须走 pkg/waitq）：\n  %s\n"+
-			"设计 docs/designs/2026-10-19-waitq.md §8.3；确需例外请登记 syncCondAllowedFiles 并写明理由。",
+			"设计 docs/archive/2026-10-19-waitq.md §8.3；确需例外请登记 syncCondAllowedFiles 并写明理由。",
 			strings.Join(hits, "\n  "))
 	}
 }

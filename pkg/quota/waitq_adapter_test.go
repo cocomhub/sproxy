@@ -3,7 +3,7 @@
 
 package quota
 
-// waitq_adapter_test.go 锁定 W1 收敛（设计 docs/designs/2026-10-19-waitq.md §8）后的
+// waitq_adapter_test.go 锁定 W1 收敛（设计 docs/archive/2026-10-19-waitq.md §8）后的
 // **能力等价**要点 —— 迁移到 pkg/waitq 时最容易丢的就是这些边界语义。
 
 import (

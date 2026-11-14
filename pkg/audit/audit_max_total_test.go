@@ -3,7 +3,7 @@
 
 package audit
 
-// audit_max_total_test.go 锁定 M1-8（设计 docs/designs/2026-10-19-audit-service.md §5.4 / T8 / E15）：
+// audit_max_total_test.go 锁定 M1-8（设计 docs/archive/2026-10-19-audit-service.md §5.4 / T8 / E15）：
 // `max_total_bytes` 是**审计全部段（热 + 归档）的总字节硬上限**（用户要求 ⑩：审计落盘纳入配额，
 // 防磁盘打满）。语义：
 //  ① 超上限 ⇒ 先删**最旧归档**（有界保留；计入 IncrEvict —— 受控淘汰，不是丢失）；

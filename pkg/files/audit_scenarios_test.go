@@ -3,7 +3,7 @@
 
 package files
 
-// audit_scenarios_test.go 锁定设计 docs/designs/2026-10-19-audit-service.md §9.1 的
+// audit_scenarios_test.go 锁定设计 docs/archive/2026-10-19-audit-service.md §9.1 的
 // 业务功能「审计场景」（用户要求⑤：生产可用后必须补各业务场景用例，锁定防回归）：
 // 每个写面操作都必须在**域层**留下可断言的 action/object/result/detail 审计记录。
 //

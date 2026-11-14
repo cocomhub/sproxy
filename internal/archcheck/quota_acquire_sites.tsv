@@ -1,7 +1,7 @@
 # 门禁 R36-a：**配额/容量获取入口调用点棘轮**（只减不增）——非测试源码不得新增**直接**调用
 # `TryReserve`/`semaphore.Weighted`（**只计方法调用**）。获取路径应走 pkg/waitq 或收敛后的具名排队入口
 # （`quota.Scope/Pool.WaitReserve`、`capacity.StorageManager.WaitReserve`、
-# `files.StorageManager.WaitReserveChunked` —— **允许**）。设计 docs/designs/2026-10-19-waitq.md §8.2/§8.3。
+# `files.StorageManager.WaitReserveChunked` —— **允许**）。设计 docs/archive/2026-10-19-waitq.md §8.2/§8.3。
 #
 # 分类（class 列）与判定依据（**收敛前三问**：① 期望立即失败还是排队？② 是否锁内？③ 是否逐项 guard？）：
 #   adapter = waitq 适配层 / 跨包转发适配器 / 卷层预留适配器内部（合法调用点）

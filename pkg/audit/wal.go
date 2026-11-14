@@ -3,7 +3,7 @@
 
 package audit
 
-// wal.go 是 **WAL 恢复原语**（设计 docs/designs/2026-10-19-audit-service.md §6 / M2）。
+// wal.go 是 **WAL 恢复原语**（设计 docs/archive/2026-10-19-audit-service.md §6 / M2）。
 //
 // 状态机与**提交语义**（设计 §6.1，审核 P1）：
 //

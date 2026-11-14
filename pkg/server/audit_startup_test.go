@@ -3,7 +3,7 @@
 
 package server
 
-// audit_startup_test.go 锁定 M1-14（设计 docs/designs/2026-10-19-audit-service.md §5.6 点 6）：
+// audit_startup_test.go 锁定 M1-14（设计 docs/archive/2026-10-19-audit-service.md §5.6 点 6）：
 // 审计的**启动期行为可配** —— 默认降级（审计绝不阻断启动）、显式 fail_fast 中止启动、
 // 显式 disabled 完全关闭（**不建目录、不落盘**）。
 

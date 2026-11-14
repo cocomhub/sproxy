@@ -45,7 +45,7 @@ type Pool struct {
 	// 预留保证而非事后对账。仅卷根设置；子节点为 0。
 	reserve int64
 	// queue 是**通用等待队列**（pkg/waitq；仅根池实例有效）：配额不足时排队重试。
-	// 收敛自原私有 sync.Cond 实现（设计 docs/designs/2026-10-19-waitq.md §8），
+	// 收敛自原私有 sync.Cond 实现（设计 docs/archive/2026-10-19-waitq.md §8），
 	// 能力不变（严格上界 / 沿父链 / 不可能容纳立即失败 / 超时取消 / 等待轮次可观测）。
 	queue *waitq.Queue
 	// holderMu/holders 暂存「已预留但尚未被调用方接管」的 Reservation（键 = 请求 holder），

@@ -1,6 +1,6 @@
 # 门禁 R35-b：**变更型路由 → 业务语义审计**登记表（deny-by-default）。
 #
-# 设计 docs/designs/2026-10-19-audit-service.md §2.5 / R35-b：每个变更型路由（POST/PUT/PATCH/DELETE）
+# 设计 docs/archive/2026-10-19-audit-service.md §2.5 / R35-b：每个变更型路由（POST/PUT/PATCH/DELETE）
 # 必须留下**业务语义**审计（action/object/result）；传输层兜底事件（`http.*`，fidelity=transport）
 # **不计入**达标。本表是唯一机器可读事实源，门禁做三条 join：
 #   ① 路由表（route_classes.tsv）中的变更型 pattern ↔ 本表**双向**一一对应（新增不登记 ⇒ 红）；

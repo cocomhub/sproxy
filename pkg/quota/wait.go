@@ -40,7 +40,7 @@ var ErrWaitTimeout = errors.New("quota: 等待配额释放超时")
 // WaitReserve 尝试预留 n 字节；容量不足时**排队等待**（释放唤醒 / ctx 取消 / 超时），
 // 超时或取消才失败。timeout<=0 ⇒ DefaultWaitTimeout。
 //
-// 实现收敛：等待队列用通用能力包 `pkg/waitq`（设计 docs/designs/2026-10-19-waitq.md §8）；
+// 实现收敛：等待队列用通用能力包 `pkg/waitq`（设计 docs/archive/2026-10-19-waitq.md §8）；
 // 「查 + 入队」在**根等待锁**下与释放侧的「改状态 + NotifyAll」串行 ⇒ 结构性无丢唤醒。
 //
 // 语义要点（与迁移前**逐条等价**，能力不丢失）：
@@ -103,7 +103,7 @@ func (s *Scope) WaitReserve(ctx context.Context, n int64, timeout time.Duration)
 // ProbeReserve 是**校验型**预留（探测式）：预留 n 后**立即释放**，只用于沿父链校验
 // 「是否放得下」（副作用 = 校验租户根/全局上限），**不排队** —— 探测语义 ≠ 等待语义。
 //
-// 设计 docs/designs/2026-10-19-waitq.md §8.2「探测式」：明确为校验型 ⇒ 收敛为**具名 API**
+// 设计 docs/archive/2026-10-19-waitq.md §8.2「探测式」：明确为校验型 ⇒ 收敛为**具名 API**
 // （不再让调用方散落「TryReserve + Release」两行 —— 漏掉 Release 会永久泄漏 reserved，
 // 是真实的账本风险）。
 func (s *Scope) ProbeReserve(n int64) error {

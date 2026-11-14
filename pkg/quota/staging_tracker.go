@@ -14,7 +14,7 @@ package quota
 //	                         不足 → 排队等待（pkg/waitq；Release 唤醒 / ctx.Done / 超时中断）
 //	ReleaseUsage(size)     → scope.ReleaseUsage(size) + queue.NotifyAll() // 唤醒等待者
 //
-// **等待队列已收敛到通用能力包 pkg/waitq**（设计 docs/designs/2026-10-19-waitq.md §8）：
+// **等待队列已收敛到通用能力包 pkg/waitq**（设计 docs/archive/2026-10-19-waitq.md §8）：
 // 私有 `sync.Cond` + 观察者 goroutine（ctx/超时打断）全部删除 —— 超时/取消由 waitq 的
 // select + timer 承担（**无常驻 goroutine**），丢唤醒由「锁协作入队」结构性闭合
 // （`AcquireUnder` 在 `q.mu` 内完成「查 + 入队」，与 `ReleaseUsage` 的「改账 + 唤醒」
