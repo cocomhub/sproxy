@@ -423,6 +423,31 @@ volumes[0] (默认卷，root=storage_root 或显式)     volumes[1] (追加盘�
   （`WithVolume`/`SetVolume`，零值=auto）、`Volumes()`/`MoveVolume()`；sclient `volumes` /
   `--volume` / `mv --to-volume`；WebUI 卷 badge + 仪表 + 上传下拉。
 
+### 配额模型（物理占用 · 每卷独立 · 跨进程账本）
+
+设计规格见 `docs/designs/2026-10-14-quota-model-v3.md`（**保留**，含未接线项）；卷层形态见
+`docs/archive/2026-10-16-quota-volume-layer.md`。要点（**已落地**）：
+
+- **只按物理占用记账**（账本 = 卷内实际落盘字节）：逻辑尺寸不入账。六类卷的物理公式由**卷自报**
+  （`Footprinter`/`PhysBound`；加密卷 = 密文长度、secretdata = 分块计划 + meta pad + parity、外部卷 = `Stat` 实测；
+  无能力卷回落逻辑字节）。**预占 ≥ 实际物理占用**（严格上界，e2e 硬断言）。
+- **每卷独立配额**：配额层（`registry.QuotaVolume`）**只包存储卷**（不在其下再叠变换层）⇒ 它看到的尺寸
+  天生是物理、**无需知道卷是否加密**。`WrapStorageVolume` 是整卷计数的**唯一构造入口**（R29 门禁）；
+  5 个旧装配点已收敛（避免「漏一处 = 静默无限额」）。
+- **用户配额 = 跨卷联邦视图**：`GET /api/quota`（`Handlers.federatedUserQuota` 唯一汇总入口，只遍历
+  `AllowedVolumes`）；无权威卷 ⇒ `HasQuota=false` + `Partial=true`（**未知 ≠ 0**）；上限 0 = 不限。见 `docs/api.md`。
+- **跨进程持久账本（分片日志 ledger）**：**只对共享卷启用**（本地卷 = 节点自有磁盘 ⇒ 内存账本本就正确、零 I/O）；
+  每进程 append-only 写**自己的 shard**（无锁）⇒ `used = Σ_shards`；**对账是最终权威**（账本是加速器），
+  崩溃/损坏 shard **跳过 + 计数**（fail-safe）。设计见 `docs/archive/2026-10-17-quota-ledger-persistence.md`。
+- **排队重试**：不足时排队（释放广播唤醒 / ctx 取消 / 超时默认 30s）；区分「卷物理上限不足」（等他人释放）
+  与「用户配额不足」（等自己释放/提额）；统一经 `pkg/waitq`（见 `AGENTS.md` 能力矩阵）。
+- **写路径**：`routeWriteUpload` 双账本预留 → 成功 `Commit`/失败 `Release`；**释放金额取卷自报实测足迹**（同源捕获，
+  避免「释放 ≠ 结算」漂移）；门禁 R29（整卷包装唯一入口）/ R34（丢唤醒根等待锁）等机械保证。
+
+> **未接线（记档，见 quota-model-v3 §已知残余）**：目录级配额（carve-out `EnsureChild`）的生产装配
+> 仍未接线 —— 生产配额树由 `Pool.Scope`/`Scope.Mount`/`EnsureScope` 构建（不记分配账，`Allocated()`/`Unallocated()`
+> 尚未生效）；`owner_quotas`（旧全局/逻辑口径）已由每卷独立配额取代。
+
 ### 统一存储卷模型（StorageVolume 唯一身份 + VolumeView 唯一取卷入口）
 
 设计：`docs/designs/2026-10-28-unified-volume-model.md`（U1-U5 已落地）。

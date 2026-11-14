@@ -4,7 +4,7 @@
 package client
 
 // quota.go —— 配额查询**联邦化**的 SDK 侧（片 5 读侧，设计
-// docs/designs/2026-10-16-quota-volume-layer.md §1.5）。
+// docs/archive/2026-10-16-quota-volume-layer.md §1.5）。
 //
 // **口径**（用户裁定 2026-10-16）：用户配额**按卷持有**；**用户视图 = 对「该用户可访问的卷」
 // 求和** ⇒ 服务端 `GET /api/quota` 返回跨卷汇总 + 逐卷明细（本文件是其 SDK 镜像）。

@@ -911,7 +911,7 @@ sclient df
 ### quota
 
 查看本 owner 的配额。**权威源是跨卷联邦视图**（片 5，设计
-`docs/designs/2026-10-16-quota-volume-layer.md` §1.5）：用户配额**按卷持有** ⇒ 用户视图 =
+`docs/archive/2026-10-16-quota-volume-layer.md` §1.5）：用户配额**按卷持有** ⇒ 用户视图 =
 对「该用户可访问的卷」**求和**（只含 ACL 允许的卷，不泄露他人卷用量）。
 
 ```bash

@@ -14,7 +14,7 @@ import (
 )
 
 // quota_volume.go —— **配额层**（统一存储卷模型 M4a；设计
-// `docs/designs/2026-10-16-quota-volume-layer.md` §1.3）。
+// `docs/archive/2026-10-16-quota-volume-layer.md` §1.3）。
 //
 // 定位：包装一个**存储卷**（`KindStorage`），成为其配额的**唯一权威** —— 同时提供
 // 「**每用户配额**」（owner → Scope）与「**整卷配额**」（卷容量池）。它位于存储卷之上、封装卷

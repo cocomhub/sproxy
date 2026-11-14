@@ -5,7 +5,7 @@ package server
 
 // volume_local_backend_test.go —— 本地卷**统一后端**（M1a）回归。
 //
-// 设计：`docs/designs/2026-10-16-quota-volume-layer.md` §11。本片只提供实现、**不注册**
+// 设计：`docs/archive/2026-10-16-quota-volume-layer.md` §11。本片只提供实现、**不注册**
 // ⇒ 零行为变更（`NewBackend` 仍守卫 local、`BackendSchemas` 仍不含 local）。
 //
 // 覆盖：

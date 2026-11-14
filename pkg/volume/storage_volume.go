@@ -7,7 +7,7 @@ import "context"
 
 // storage_volume.go —— **统一存储卷模型**（M0：类型定义，加法式，**零行为变更**）。
 //
-// 背景与完整设计见 `docs/designs/2026-10-16-quota-volume-layer.md` §11。现状取证：
+// 背景与完整设计见 `docs/archive/2026-10-16-quota-volume-layer.md` §11。现状取证：
 //
 //   - **数据面已统一** ✓：本地与外部卷都经 `sync.FS`（`registry.ExternalBackend` 只有
 //     `FS() + Close()`）；

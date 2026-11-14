@@ -12,7 +12,7 @@ import (
 
 // ledger_test.go —— 共享卷跨进程配额账本（片 7）的 TDD。
 //
-// 设计文档：`docs/designs/2026-10-17-quota-ledger-persistence.md`。
+// 设计文档：`docs/archive/2026-10-17-quota-ledger-persistence.md`。
 //
 // 测试策略：用**同目录下的两个 Ledger 实例**模拟两个进程（各自 node 不同），
 // 因为跨进程语义的全部要素（独立分片、只写自己、读时求和）都在这两个实例之间体现。

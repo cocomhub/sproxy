@@ -5,7 +5,7 @@ package registry
 
 // storage_volume_kind_test.go —— 统一存储卷模型 M0/M1 的**接缝测试**。
 //
-// 设计：`docs/designs/2026-10-16-quota-volume-layer.md` §11。
+// 设计：`docs/archive/2026-10-16-quota-volume-layer.md` §11。
 // 本片（M0）只定义**形状**（`pkg/volume/storage_volume.go`：`Kind`/`StorageVolume`/可选能力）
 // 与**分类入口**（`registry.KindOf`），**零行为变更**：不改动任何现有装配路径。
 //

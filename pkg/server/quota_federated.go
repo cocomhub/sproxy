@@ -3,7 +3,7 @@
 
 package server
 
-// quota_federated.go —— 配额查询**联邦化**（片 5，设计 docs/designs/2026-10-16-quota-volume-layer.md §1.5）。
+// quota_federated.go —— 配额查询**联邦化**（片 5，设计 docs/archive/2026-10-16-quota-volume-layer.md §1.5）。
 //
 // **口径**（用户裁定 2026-10-16）：用户配额**按卷持有**（在各卷的配额层 ✓）；**用户视图 =
 // 对「该用户可访问的卷」求和** ✓ —— 本文件是**唯一实现**（逐卷读取 + 汇总 ✓）。

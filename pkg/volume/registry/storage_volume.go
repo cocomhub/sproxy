@@ -10,7 +10,7 @@ import (
 
 // storage_volume.go —— **统一存储卷模型**的接口定义（M0，加法式，零行为变更）。
 //
-// 完整设计：`docs/designs/2026-10-16-quota-volume-layer.md` §11。现状取证：
+// 完整设计：`docs/archive/2026-10-16-quota-volume-layer.md` §11。现状取证：
 //
 //   - **数据面已统一** ✓：本地与外部卷都经 `sync.FS`（本包 `ExternalBackend` 只有 `FS()+Close()`）；
 //   - **存储身份未统一** ✗：`*storage.Root` 在非测试源码出现 254 处 —— 它是**局部特例**；
