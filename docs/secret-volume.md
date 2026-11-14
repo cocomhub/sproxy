@@ -349,6 +349,12 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
 响高熵密钥的暴力破解成本。淘宝低档期（low）只影响派生速度，不弱化高熵密钥的安全性——跨档 fail-closed
 保证不同档派生 key 不同，不会用错误 key 解出内容。
 
+**口令派生（双口令，仅 CLI）**：`secret = scrypt(SHA256(口令A), salt=SHA256(口令B), **high 档**, 32B)`
+→ hex 64（与随机模式产物同构）。salt 就是 `SHA256(口令B)`（**无公开盐** ⇒ 重建 = 重输两口令 + 固定档位，
+密钥无存储）。**公开面固定 high 档**（不暴露 tier，防误降）。**安全边界**：有效安全 = 输入口令熵
+（两口令各 40-70 bit ⇒ 约 110-160 bit），**不是 2^256**（SHA-256 不增熵）；任一口令空/全空白
+fail-closed；两口令不得合置一处。实现见 `pkg/volume/secrets/passphrase.go`。
+
 ## 8. 未来方向与预留
 
 > 完整预留全景见设计文档 §13；以下为使用者的演进路径（每项给状态）。
@@ -464,3 +470,26 @@ sha256、改 chunks、改 name/path）解密失败 fail-closed。
   产品口径（是否给「卷非空但根不可解析」单独的 fail-closed 判据）。
 - **两条写路径对声明 size 的口径不同**：流式（可 seek）按 size 读、多余丢弃；内存（非 seek）读全、
   **忽略**声明 size（`TestWriteFile_NonSeekableReadsAll` 锁定）。**未修**：统一会破坏既有锁定场景。
+
+### 9.2 上传路径与启动索引性能（2026-10-21 设计落地）
+
+**上传提示（`pkg/sync.UploadHints`，跨后端中性通道）**：写面把「已算好的 md5/sha256/size 等」经 ctx
+（`syncpkg.WithUploadHints`）传给任意后端，后端按各自协议 adapter 映射（baidupcs → sliceMD5/crc32/
+blockMD5s；s3/webdav/本地按需；未知后端安全忽略，零回归）。`Merge` 只补空字段（调用方源头值优先）⇒
+「外层未知 ⇒ 内层首次算一次、之后全程复用」，避免重复整块重读。
+
+- **`RandomContent` 语义边界（用户裁定，红线）**：只跳 pre-Stat（秒传探测），**绝不跳上传后 md5 刷新/
+  复核**——块列表（sliceMD5/blockMD5s）必算、秒传刷新恒做（文件一致性硬保证，任何内容形态都不得绕过；
+  `TestStorage_PutFromStagedPath_RandomBlobStillRefreshesMD5` 钉住）。
+
+**secretdata 装配期索引快照（启动快速装载）**：`SecretdataFS` 把装配期索引加密落盘
+（`extra.index_snapshot_path`，经 `volume_state` 装配时注入；`volume_state.disable` 不注入 ⇒ 零回归）。
+
+- `NewFS` 启动先读快照直接装内存索引（免递归列容器 + 逐 meta 解密，对 baidupcs 是「35min 未完成
+  → 秒级」的差异）；**快照损坏 / 版本不匹配 / 与物理不一致 ⇒ 回退全量重建**（fail-closed，不静默空视图）。
+- 写路径在 commit 时更新内存索引并异步落快照；**本进程发生任何写操作后置位抑制标记**，禁止异步回写
+  陈旧快照（对齐 `pkg/files` 的 `index_save_interval` 取舍）。
+- **不改磁盘格式**：快照是**辅助索引**，任何时刻可删；物理布局 / meta / 块命名零变化，已落盘卷零迁移。
+
+**仍开（后续片）**：baidupcs 库路径「流式直传」（staging 单块密文直接分片上传，省一次整文件拷贝，
+需上游库支持流源分片）；「单次 API 递归列举卷根」替代逐目录 `ls`+`meta`。

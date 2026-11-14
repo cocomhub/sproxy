@@ -15,7 +15,7 @@ import (
 )
 
 // 双口令派生（可记忆、可重建的 opt-in 补充；设计
-// docs/designs/2026-10-03-dual-passphrase-secret.md）：
+// docs/archive/2026-10-03-dual-passphrase-secret.md）：
 //
 //	secret = scrypt( SHA256(口令A), SHA256(口令B) 作 salt, high 档 2^17, 32B )
 //
