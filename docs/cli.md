@@ -128,7 +128,7 @@ export LANG=en_US.UTF-8            # 影响后续所有调用
 | [`tunnel`](#tunnel) | 通过隧道发送任意 HTTP 请求（`--xfer <name> --hub <addr>` 走 xfer/mux 隧道，启用身份指纹 pinning） |
 | [`socks`](#socks) | SOCKS5 代理出口（CONNECT 经 mesh 到出口节点，出口出站拨号） |
 | [`udp`](#udp) | UDP 隧道：`udp map` 端口映射（经 mesh 到出口，出口转发到远程 UDP 地址） |
-| [`mesh`](#mesh) | mesh 服务发现与连接：`connect` / `node` / `status` / `acl` |
+| [`mesh`](#mesh) | mesh 服务发现与连接：`connect` / `node` / `status` / `acl` / `up`（虚拟子网接入） |
 | [`http-proxy`](#http-proxy) | 正向 HTTP 代理（绝对 URI + CONNECT，经出口或本地直连；`http_proxy` 环境变量即用） |
 | [`cloud-download`](#cloud-download) | 云端下载（提交→等待→打包→下载→清理，链式或子命令分步） |
 | [`identity`](#identity) | 节点长时身份密钥管理（Ed25519，供对端指纹 pinning） |
@@ -396,6 +396,14 @@ sclient sync watch --remote <name> [--src <path>] [--dst <path>] [--verify] [--p
   （`sync.max_retries` 次内），任务状态在重试期间显示 `retrying`；达上限转 `failed` 且错误
   信息含"已重试 N 次"；`retries` 字段为已重试次数（持久化，重启后续计）。取消/删除在
   重试等待期间仍立即生效
+- `sclient sync conflicts list`：列出当前 owner 的**未解决**冲突（服务端 `GET /api/sync/conflicts`，
+  时间升序）；列 ID/PATH/HUNKS/OURS_SHA/THEIRS_SHA/TS，空列表输出「无未解决冲突」，`--json` 输出
+  `{conflicts: [...]}`；只展示服务端语义（不在本地过滤 resolved，防与服务端漂移）。列表**不含**
+  Ours/Theirs 内容行（防刷屏）
+- `sclient sync conflicts resolve <id> --strategy ours|theirs|manual [--content <text>]`：提交冲突解决策略
+  并写回文件（服务端 `POST /api/sync/conflicts/{id}/resolve`）。`--strategy` 必填；`manual` 必填
+  `--content`；`ours`/`theirs` 时 `--content` 被忽略（不报错）。非法 strategy / manual 缺 content 在**本地**
+  报错（fail-fast，不出网）；服务端 404（冲突不存在）/400（非法 choice）/500（写回失败）包装透传非零退出
 
 ### tunnel
 
@@ -670,6 +678,8 @@ sclient mesh node ...                        # 常驻 mesh 节点（注册 + 中
 sclient mesh status                          # 列出 hub 上的 mesh 服务（带虚拟 IP）；--gateway 改查本地网关拓扑
 sclient mesh status --server                 # 查询服务端自身的跨节点面/角色状态（GET /api/mesh/status）
 sclient mesh acl                             # 列出本 owner 的跨节点授权（卷 × 节点 × scope）
+sclient mesh up [-l :port] [--exit <node>]   # 虚拟子网接入：默认本地 SOCKS5 代理
+sclient mesh up --tun --vip <addr>           # tun/tap 内核 VPN（需特权）
 ```
 
 - `mesh connect <service>`：`--smart` 并行竞速「直连 / hub 中继 / 经中间节点多跳」择优（胜者缓存 TTL 30s）；
@@ -681,6 +691,11 @@ sclient mesh acl                             # 列出本 owner 的跨节点授�
   `--discover` 自动对等发现（full-mesh 拓扑）、`--mdns` 纯 mDNS 局域网模式。
 - 安全边界：hub 注册准入由凭据 Ring 的 SproxySig AK + HMAC proof 提供；`--dial-allow-cidr` 显式放行网段，
   默认仅公网目标；`--service` 精确放行宣告地址（防 SSRF）。
+- `mesh up`：虚拟子网接入。**默认形态**（无 `--tun`）= 用户态 SOCKS5 代理（复用 `socks` 命令的 mesh
+  路由，零回归，无内核特权要求）；**`--tun --vip <addr>`** = tun/tap 内核 VPN（整网段透明路由，路由逻辑复用
+  hub 权威 VipTable，与 `mesh connect` 同源）：先 `PlatformProbe` 探测平台/特权，通过后 `TUNDevice.Open` +
+  `Router` 主循环（读 IP 包 → `NodeByAddr` 选路 → dial 建链 → 写包）。未支持平台 / 探测不通过 / 打开设备
+  EPERM ⇒ **明确报错不静默回落 SOCKS5**（禁静默降级）；Windows 经 wintun，平台实现 build tag 隔离。
 
 ### http-proxy
 
