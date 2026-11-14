@@ -1079,8 +1079,9 @@ func (s *Service) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, f
 		}
 		// 服务端写入阶段进度（二期 T4，2026-11-10）：会话分块只反映「客户端→sproxy」段；
 		// 写入阶段（加密 / 远端卷上传）由进度注册表提供（卷层经 pkg/sync 回调上报）。
-		// 注册表以**逻辑路径**为键；会话 Filename 与 URL filename 都可能是它，**两个都试**（不猜）。
-		s.fillStageProgress(&resp, session.Filename, filename)
+		// 注册表键是**写入层口径的逻辑路径**（`tnt.UserRel` → `user/<rel>`）；会话 Filename 与
+		// URL filename 都是用户可见路径（无 `user/` 前缀），须先归一再查（两个都试）。
+		s.fillStageProgress(&resp, s.progressRel(owner, session.Filename), s.progressRel(owner, filename))
 		s.sendJSON(w, resp, http.StatusOK)
 		return true
 	}
@@ -1092,34 +1093,85 @@ func (s *Service) lookupUploadIDStatus(w http.ResponseWriter, owner, uploadID, f
 	return false
 }
 
-// lookupFilenameStatus 按 filename 查找上传会话或检查文件是否已存在。返回 true 表示已处理请求。
+// lookupFilenameStatus 按 filename 查找上传会话 / 已存在文件 / 进行中的服务端写入进度。
+// 返回 true 表示已处理请求。
 func (s *Service) lookupFilenameStatus(w http.ResponseWriter, owner, filename string) bool {
 	// 防御性校验：防止路径穿越
 	if _, err := pathguard.ValidateFilePath(filename); err != nil {
 		s.sendJSON(w, ChunkStatusResponse{Success: false, Message: errMsgInvalidFilename}, http.StatusBadRequest)
 		return true
 	}
-	store := s.rt.uploadStore(owner)
-	if store == nil {
-		return s.checkFileExistsStatus(w, owner, filename)
+	// 1. 本租户作用域内按文件名命中未完成会话（分块上传路径）。
+	if store := s.rt.uploadStore(owner); store != nil {
+		if session := store.GetSessionByFilename(filename); session != nil {
+			missing := MissingChunks(session)
+			resp := ChunkStatusResponse{
+				Success:       true,
+				UploadID:      session.UploadID,
+				ReceivedCount: len(session.ReceivedChunks) - len(missing),
+				TotalChunks:   session.TotalChunks,
+				MissingChunks: missing,
+				Completed:     session.Completed,
+				FileChecksum:  session.FileChecksum,
+				Filename:      session.Filename,
+			}
+			// 服务端写入阶段进度（二期 T4）：与按 upload_id 查询同一键口径（见 progressRel）。
+			s.fillStageProgress(&resp, s.progressRel(owner, session.Filename), s.progressRel(owner, filename))
+			s.sendJSON(w, resp, http.StatusOK)
+			return true
+		}
 	}
-	session := store.GetSessionByFilename(filename)
-	if session != nil {
-		missing := MissingChunks(session)
-		s.sendJSON(w, ChunkStatusResponse{
-			Success:       true,
-			UploadID:      session.UploadID,
-			ReceivedCount: len(session.ReceivedChunks) - len(missing),
-			TotalChunks:   session.TotalChunks,
-			MissingChunks: missing,
-			Completed:     session.Completed,
-			FileChecksum:  session.FileChecksum,
-			Filename:      session.Filename,
-		}, http.StatusOK)
+	// 2. 目标文件已存在 ⇒ 「完成态」优先于在途进度：上传完成后进度条目在 TTL 内仍存活，
+	//    若先报在途会把「已存在」误判成「进行中」（pkg/client 续传自愈依赖 Completed）。
+	if s.checkFileExistsStatus(w, owner, filename) {
 		return true
 	}
+	// 3. 文件尚不可见：无 chunked 会话的单次上传（POST /upload）在途 ⇒ 回实时服务端阶段进度。
+	return s.lookupInFlightProgress(w, owner, filename)
+}
 
-	return s.checkFileExistsStatus(w, owner, filename)
+// progressRel 把用户可见路径归一为进度注册表的键（`tnt.UserRel` → `user/<rel>`，与写入层
+// `resolveWritePath` 同一键空间与同一口径，**不另造归一**）。owner/路径非法 ⇒ 空串
+// （`fillStageProgress` / `lookupInFlightProgress` 会跳过空键）。
+func (s *Service) progressRel(owner, filename string) string {
+	tnt := s.rt.tenantOf(owner)
+	if tnt == nil || filename == "" {
+		return ""
+	}
+	rel, ok := tnt.UserRel(filename)
+	if !ok {
+		return ""
+	}
+	return rel
+}
+
+// lookupInFlightProgress 读取某文件**进行中**的服务端写入阶段进度（进度可视化二期 T4）。
+// 数据源是按**逻辑路径**索引的进度注册表（写入层以 `tnt.UserRel` 同一口径为键上报）。
+// 命中 ⇒ 200 + 阶段字段（无 chunked 会话的单次上传在途态）；未命中 ⇒ false（由调用方 404）。
+func (s *Service) lookupInFlightProgress(w http.ResponseWriter, owner, filename string) bool {
+	rel := s.progressRel(owner, filename)
+	if rel == "" {
+		return false
+	}
+	reg := s.progressRegistry()
+	if reg == nil {
+		return false
+	}
+	e, ok := reg.get(rel)
+	if !ok {
+		return false
+	}
+	s.sendJSON(w, ChunkStatusResponse{
+		Success:      true,
+		Filename:     filename,
+		Message:      msgServerWriteInProgress,
+		Stage:        e.Stage,
+		EncryptDone:  e.EncryptDone,
+		EncryptTotal: e.EncryptTotal,
+		RemoteDone:   e.RemoteDone,
+		RemoteTotal:  e.RemoteTotal,
+	}, http.StatusOK)
+	return true
 }
 
 // checkFileExistsStatus 检查租户 user 桶内文件是否已存在且 checksum 匹配。
