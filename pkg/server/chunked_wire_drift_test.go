@@ -275,9 +275,26 @@ func TestChunkedResponses_NoDriftAgainstClientSDK(t *testing.T) {
 		}
 	}
 
-	// ③ status 响应（SDK 用匿名结构解析）：字段名存在性断言。
-	sdkSrc := readRepoFile(t, "pkg/client/chunked.go")
-	assertKeysPresent(t, "pkg/client/chunked.go(statusData)", sdkSrc, jsonTagList(t, reflect.TypeFor[files.ChunkStatusResponse]()))
+	// ③ status 响应：SDK 侧的解析结构必须覆盖服务端每个契约字段。
+	//
+	// 解析已收敛到 `client.UploadStatus`（唯一实现，`tryResumeSession` 复用之）⇒ 这里直接
+	// 用**反射**断言（与 ① 同风格，强于文本扫描：字段被改名/删 tag 会立刻红，而非依赖关键字
+	// 恰好出现在某个文件里）。
+	stStatus := reflect.TypeFor[files.ChunkStatusResponse]()
+	ctStatus := reflect.TypeFor[client.UploadStatus]()
+	byNameStatus := map[string]reflect.StructField{}
+	for field := range ctStatus.Fields() {
+		byNameStatus[field.Name] = field
+	}
+	for sf := range stStatus.Fields() {
+		cf, ok := byNameStatus[sf.Name]
+		if !ok {
+			t.Fatalf("status 响应字段 %s(%s) 在 SDK client.UploadStatus 中缺失——SDK 将静默解析为零值", sf.Name, sf.Tag)
+		}
+		if cf.Tag != sf.Tag {
+			t.Fatalf("status 响应字段 %s tag 漂移：chunked=%s client=%s", sf.Name, sf.Tag, cf.Tag)
+		}
+	}
 }
 
 // TestChunkedResponses_NoDriftAgainstJS 断言 JS 侧消费的分块响应字段在服务端 DTO 中均存在
