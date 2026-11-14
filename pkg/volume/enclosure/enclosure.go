@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package enclosure 实现**通用封装卷**能力层（设计：docs/designs/2026-10-11-enclosure-volume.md）。
+// Package enclosure 实现**通用封装卷**能力层（设计：docs/archive/2026-10-11-enclosure-volume.md）。
 //
 // 职责（且仅此四件，见设计 §2 正交契约）：
 //  1. **声明与拓扑**：解析封装声明（`IsDeclared`：**已注册的 wrapper 类型** +

@@ -214,7 +214,7 @@ blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 m
 ### 3.9 阶段 2 迁移状态
 
 嵌套封装（§3.8）**已完成迁移**到通用封装底座（**声明词汇**：`extra.source: "<源卷>:<子路径>"`
-（`extra.wrapper` 仅为兼容读取的冗余键），见 `docs/config.md`、设计文档 `docs/designs/2026-10-11-enclosure-volume.md`）：
+（`extra.wrapper` 仅为兼容读取的冗余键），见 `docs/config.md`、设计文档 `docs/archive/2026-10-11-enclosure-volume.md`）：
 源目录封印（`storage.SealRule` 唯一事实源，写恒拒/读 hidden|readable）、`sync.PrefixFS` 区域
 视图、`enclosure.AttachAll` 推迟装配、`quota.NewPoolWithParent` 容量继承。用户面 `target:` 语法
 在**装配层翻译**为底座声明（config 装配 / 建卷 API / 重启恢复三入口共用

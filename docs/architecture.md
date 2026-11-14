@@ -517,7 +517,7 @@ StateStore 全量拉回 + 反序列化；`SetStateStore` 切换后端时两者�
 
 「可信卷」把「读回内容 == 写入内容」从**约定**升级为**结构性不变量**：服务端为每个文件维护一份
 用户不可访问的整文件完整性证据（`FileMeta` sidecar），读路径逐分块校验，损坏**fail-closed**。
-设计细节与已记档边界见 [docs/designs/2026-10-10-trusted-volume.md](./designs/2026-10-10-trusted-volume.md)。
+设计细节与已记档边界见 [docs/archive/2026-10-10-trusted-volume.md](./archive/2026-10-10-trusted-volume.md)。
 
 ### 数据模型与布局
 
