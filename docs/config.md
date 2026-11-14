@@ -874,3 +874,26 @@ volumes:
 - 健康探针：后端实现 `registry.HealthProbe`，`GET /api/volumes` 的 `state` 字段可观测
   （healthy/degraded/unknown，30s 缓存）
 - 依赖：`github.com/pkg/sftp`（评估通过：纯 Go + 社区活跃，Go 1.25+）
+
+### FTP 后端配置（volumes[] type=ftp）
+
+FTP 外部后端（pkg/volume/ftp，V3 plugin）：任意 FTP 服务（NAS、企业遗留 FTP 服务器等）作为 sproxy 卷。
+sproxy 只做**客户端适配**（不提供 FTP 服务端），恒用**被动模式（PASV）**。
+
+```yaml
+volumes:
+  - name: remote-ftp
+    type: ftp
+    vol_capacity: 10737418240   # 本系统可用限额（可选）
+    extra:
+      url: ftp://user@host:21/path   # 非空、scheme 必须为 ftp、含用户名与主机
+      password: "..."               # 必填（FTP 无匿名目标）
+      root: ""                      # 远端根（可选；默认服务器登录目录）
+```
+
+- **配置键（fail-closed）**：`url`（必填，scheme 必须 `ftp`）、`password`（必填）为必填；
+  `ftps://` / `sftp://` scheme 直接构造失败（不静默明文降级）；`root` 可选。
+- 健康探针：后端实现 `registry.HealthProbe`（NOOP），`GET /api/volumes` 的 `state` 可观测。
+- 能力边界（已知限制，不承诺）：**无 FTPS**（仅明文 FTP）、无 EPSV/IPv6、**无自动重连**
+  （断连后依赖上层同步任务重试）、控制连接命令响应无超时、`mtime` 不可设置（FTP 协议无标准机制）。
+- 依赖：纯标准库（`net`/`net/textproto`），无新增第三方依赖。

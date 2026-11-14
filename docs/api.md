@@ -1653,6 +1653,7 @@ per-owner 默认 secrets 卷的管理面（存储：`<storage_root>/<owner>/meta
 - 新增外部后端 = 新 backend 包 `RegisterBackend(type, factory)` 注册，前端自动感知
   - `s3`：`endpoint`/`bucket`/`access_key`/`secret_key`（必填），`region`/`use_ssl`/`local_root`（可选）；大文件分片上传（roadmap 3.3 P1）：`multipart_threshold`（分片阈值，默认 64MiB）、`multipart_part_size`（分片大小，默认 16MiB，minio 5MiB 下限钳制）、`upload_retries`（失败重试次数，默认 3）
   - `sftp`：`url`（`sftp://user@host[:port][/root-path]`，必填）+ `private_key` 或 `password`（二选一），`root`（远端根，可选）
+  - `ftp`：`url`（`ftp://user@host[:port][/root-path]`，必填，scheme 必须 `ftp`）+ `password`（必填），`root`（远端根，可选）；仅被动模式（PASV），无 FTPS/EPSV
 
 ### POST /api/backends/{type}/presign
 
