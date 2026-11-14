@@ -76,7 +76,7 @@ func TestDlinkLRU_UpdateRefreshes(t *testing.T) {
 
 // TestStorageDelete_InvalidatesDlink —— **删除后直链缓存必须失效**（S1，2026-10-27）。
 //
-// 背景（设计文档 2026-10-27-remote-derived-state-cache §3.3）：直链缓存描述「远端对象当前
+// 背景（设计文档 docs/archive/2026-10-27-remote-derived-state-cache.md §3.3）：直链缓存描述「远端对象当前
 // 可用性」；对象被删后缓存里的 URL 即使未过期也是死链，且用户**同名重建**新文件时命中旧
 // 缓存会拿到指向旧文件的 URL ⇒ 404 / 取到错误内容。此前 `Storage.Delete` 成功后完全不清
 // 缓存（依赖 TTL 1h 兜底 = 幽灵窗口）。

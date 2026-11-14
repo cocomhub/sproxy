@@ -7,7 +7,7 @@ package volumestate
 // （读 sidecar `TotalSHA256`），并**随目录快照缓存** ⇒ 命中路径零 I/O。
 //
 // 为什么只对本地卷：远端卷 sidecar 读是每文件一次网络往返（N 条目 = N 往返）⇒ 性能回归；
-// 本地卷读本地小文件且随快照缓存（设计 docs/designs/2026-11-11-checksum-ledger-read-path.md §S2）。
+// 本地卷读本地小文件且随快照缓存（设计 docs/archive/2026-11-11-checksum-ledger-read-path.md §S2）。
 //
 // 变异：不做「仅本地卷」判定 ⇒ 远端用例红；不在 fetch 内填充（如仅在返回后填充）⇒
 // 缓存命中仍重复读 sidecar ⇒ metaCalls==2 红。

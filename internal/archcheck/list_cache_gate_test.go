@@ -5,7 +5,7 @@ package archcheck
 
 // list_cache_gate_test.go 是「list 级缓存唯一提供方」门禁（R40）。
 //
-// 背景（设计 2026-10-28-volume-state-maintenance §六 R40）：派生状态（目录列表 / 文件索引）
+// 背景（设计 docs/archive/2026-10-28-volume-state-maintenance.md §六 R40）：派生状态（目录列表 / 文件索引）
 // 在历史上被重复实现多套——`pkg/files.searchIndex`（本地卷索引）、`pkg/volumestate.Cache`
 // （外部卷 list 缓存）、secretdata 自管索引、以及若干局部缓存。每多一套就多一个「忘记失效」
 // 的面（#853/#874 事故族）。

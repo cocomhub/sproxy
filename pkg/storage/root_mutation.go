@@ -1,7 +1,7 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// root_mutation.go 定义 `storage.Root` 的**结构性变异事件**（设计 2026-10-28-volume-state-maintenance §4.1）。
+// root_mutation.go 定义 `storage.Root` 的**结构性变异事件**（设计 docs/archive/2026-10-28-volume-state-maintenance.md §4.1）。
 //
 // 为什么需要它：本地卷的写内核直接用 `storage.Root`（不经 `sync.FS`），因此「卷内容变了」这件事
 // 只能在 Root 层观察。把观察点收敛到 Root ⇒ 任何新写路径都自动被观察到，**不需要逐个登记**
@@ -58,7 +58,7 @@ type Mutation struct {
 	Rel2 string
 	// IsDir 表示变异对象是目录（rename/remove 在操作**前** Stat 判定；Mkdir/RemoveAll 恒 true）。
 	//
-	// 为什么要它（设计 2026-10-30-derived-state-projection D1）：派生状态（搜索索引）的目录
+	// 为什么要它（设计 docs/archive/2026-10-30-derived-state-projection.md D1）：派生状态（搜索索引）的目录
 	// rename/空目录 remove 必须按**子树**处理；此前无此信息，事件层只能删单条 ⇒ 子树条目残留
 	// （用户能搜到已不存在的文件）。
 	IsDir bool

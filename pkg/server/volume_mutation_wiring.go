@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // volume_mutation_wiring.go 是**本地卷结构性变异观察者的唯一接线点**
-// （设计 2026-10-28-volume-state-maintenance §4.1 / V3）。
+// （设计 docs/archive/2026-10-28-volume-state-maintenance.md §4.1 / V3）。
 //
 // 为什么需要接线：本地卷的写内核直接用 `storage.Root`（不经 `sync.FS`），因此「卷内容变了」
 // 只能从 Root 观察。把 `files.Service.ApplyRootMutation` 挂到**每个本地卷根**上 ⇒ 派生状态

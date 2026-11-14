@@ -59,7 +59,7 @@ func (f *CacheFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, er
 }
 
 // fillLocalChecksums 为**本地卷**的列举条目补齐 sidecar 明文 `TotalSHA256`（设计
-// docs/designs/2026-11-11-checksum-ledger-read-path.md §S2；读口径见 §4）。
+// docs/archive/2026-11-11-checksum-ledger-read-path.md §S2；读口径见 §4）。
 //
 // 边界（为什么这样设计）：
 //   - **仅本地卷**：远端卷（s3/baidupcs/…）的 sidecar 读是每文件一次网络往返 ⇒

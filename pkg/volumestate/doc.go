@@ -4,7 +4,7 @@
 // Package volumestate 是**卷状态缓存**的唯一实现：把目录视图（list）与内容派生值
 // （checksum）的缓存、失效收敛到一处，避免每个卷各写一套。
 //
-// 设计：docs/designs/2026-10-28-volume-state-maintenance.md。四条不变量（长期稳定）：
+// 设计：docs/archive/2026-10-28-volume-state-maintenance.md。四条不变量（长期稳定）：
 //
 //	P1 卷维度：缓存键恒为 (卷名, FS 相对路径)（路径首段即 owner）——不存在 owner 级全局状态；
 //	   跨卷聚合是「对卷集合的派生遍历」，不是独立索引。

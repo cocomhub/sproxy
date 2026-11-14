@@ -318,7 +318,7 @@ upload 清理（防泄漏优先级高）与 share 清理不受窗口限制。启
 ### 卷状态缓存（`volume_state`）
 
 卷的 **list 目录视图**与 **checksum 派生值** 的统一缓存层（设计
-[2026-10-28-volume-state-maintenance](./designs/2026-10-28-volume-state-maintenance.md)）。
+[2026-10-28-volume-state-maintenance](./archive/2026-10-28-volume-state-maintenance.md)）。
 **默认开启**（`disable: true` 才关闭）。语义契约（用户裁定 2026-10-28）：
 
 - **作用范围**：**所有存储卷**（含本地卷）。本地卷的对外 list 仍走搜索索引（后续片迁移），

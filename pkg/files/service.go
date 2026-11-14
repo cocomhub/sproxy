@@ -216,7 +216,7 @@ type ExternalEntry struct {
 	Checksum string
 }
 
-// VolumeViewLister 是**唯一的目录列举能力**（设计 2026-10-28-volume-state-maintenance §15.2）：
+// VolumeViewLister 是**唯一的目录列举能力**（设计 docs/archive/2026-10-28-volume-state-maintenance.md §15.2）：
 // 经卷视图（装配层 `VolumeView`，含可信封装/容量/状态缓存装饰）列出任意可见卷的直接子项。
 //
 // **本地卷与外部卷共用这一条路径**（2026-10-29 收敛：`ExternalList` / `ExternalVolumeSource`

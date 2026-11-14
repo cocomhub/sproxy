@@ -4,7 +4,7 @@
 package server
 
 // volume_state_wiring_test.go 锁定卷状态缓存的**装配机制**（设计
-// 2026-10-28-volume-state-maintenance §3.3）：
+// docs/archive/2026-10-28-volume-state-maintenance.md §3.3）：
 //  1. 唯一装配点 `wrapVolumeState` 只包**非本地卷**的 ViewUser 视图；
 //  2. 包上之后目录列举命中缓存（第二次不回源 = 远端流量下降）；
 //  3. 经装饰器的写入**自动失效**（无需调用方登记 —— #874 缺陷族的结构解）；

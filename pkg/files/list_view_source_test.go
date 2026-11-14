@@ -187,7 +187,7 @@ func TestList_ViewSourceEquivalentToScan(t *testing.T) {
 
 // TestList_ViewChecksumPreferredOverLedger 钉住读口径：卷自报 checksum 优先于台账。
 //
-// 背景（docs/designs/2026-11-11-checksum-ledger-read-path.md §S1）：list 路径此前只查台账，
+// 背景（docs/archive/2026-11-11-checksum-ledger-read-path.md §S1）：list 路径此前只查台账，
 // 丢弃了装配层已透传的 `ExternalEntry.Checksum`，而 search 路径已采用自报值 ⇒ 两条读路径
 // 对同一份数据给出不同 checksum。变异：去掉「自报优先」⇒ 本用例拿到台账值（不同）⇒ 红。
 func TestList_ViewChecksumPreferredOverLedger(t *testing.T) {

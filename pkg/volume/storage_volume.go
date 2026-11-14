@@ -102,7 +102,7 @@ type StatsProvider interface {
 }
 
 // StateGeneration 是**卷状态的廉价新鲜度探针**（可选能力，设计
-// docs/designs/2026-10-28-volume-state-maintenance.md §3.1）。
+// docs/archive/2026-10-28-volume-state-maintenance.md §3.1）。
 //
 // 语义：返回 `(卷根相对路径 path 的子树)` 的代际号——同代际 ⇒ 该子树的结构视图与内容
 // 派生值自上次取用后未变。缓存层据此在**命中前**比对，变化即回源；这是「跨进程/外部

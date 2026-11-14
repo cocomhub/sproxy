@@ -473,7 +473,7 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 
 ### 卷状态维护（list / checksum / 索引的统一缓存层）
 
-设计：[docs/designs/2026-10-28-volume-state-maintenance.md](./designs/2026-10-28-volume-state-maintenance.md)。
+设计：[docs/archive/2026-10-28-volume-state-maintenance.md](./archive/2026-10-28-volume-state-maintenance.md)。
 
 **问题**：list 的目录视图与 checksum 派生值此前有**三套实现**（本地卷 `searchIndex` +
 `checksums.json`、外部卷每次远端 `ListDir`、secretdata 自管索引）⇒ 三个真相源、三条失效路径
@@ -491,6 +491,12 @@ trusted 装饰，测试/生产行为一致）；消费方永远拿不到裸 FS�
 **校验巡检的台账读取（2026-10-30）**：`/api/verify` 用可选扩展 `checksum.Iterator` **分批遍历**
 （锁外回调，峰值内存 O(键列表 + 单批)），不再 `GetAll()` 全量拷贝；判空用 `LenCounter`（O(1)）。
 store 未实现这些能力时回落 `GetAll`（零回归）。
+
+**读路径口径（2026-11-11 裁定，D4）**：list 的 `checksum` **优先取视图条目自报**
+（`sync.Entry.Checksum`，未自报时回落台账）；本地卷的自报由 `volumestate.CacheFS` 在 cache-miss
+回源后按内层 `meta.Provider` 读 sidecar `TotalSHA256` 补齐（**不**把 meta 读取下沉到 `rootfs`——
+那是架构倒置），随目录快照缓存并落盘。远端卷不自报 ⇒ **不主动补**（每文件一次网络往返），
+消费方按需 `stat` 兜底。口径与分期见 `docs/archive/2026-11-11-checksum-ledger-read-path.md`。
 
 **读取与写入口径（2026-10-30）**：目录列举与搜索的 `checksum` 一律**逐条 O(1) 查台账**
 （`checksumGetter` / `checksumLookupFor`），不再每请求拷贝全量快照；台账写入经 **debounce

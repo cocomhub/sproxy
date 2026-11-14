@@ -5,7 +5,7 @@
 
 package sproxy_test
 
-// e2e_volume_state_test.go 是**卷状态缓存**（设计 2026-10-28-volume-state-maintenance）
+// e2e_volume_state_test.go 是**卷状态缓存**（设计 docs/archive/2026-10-28-volume-state-maintenance.md）
 // 的端到端验证：真实 sproxy 二进制 + 真实 sclient CLI + 真实 WebDAV 外部卷后端。
 //
 // 锁定的契约（缺一即功能不可用）：

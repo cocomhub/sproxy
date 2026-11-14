@@ -915,7 +915,7 @@ func entryOf(rel, seg string, size, mtime int64, isDir bool) syncpkg.Entry {
 // data-checksum 为空 ⇒ 前端必须每次 HEAD stat 兜底（n 次往返）。
 //
 // checksum 是「内容寻址派生值」（设计文档 A 类）：本进程写/删会同步更新内存 meta ⇒ 与对象
-// 内容强一致；外部侧改动由 loadIndex 语义 + 文档约束覆盖（见 docs/designs/
+// 内容强一致；外部侧改动由 loadIndex 语义 + 文档约束覆盖（见 docs/archive/
 // 2026-10-27-remote-derived-state-cache.md §6）。目录条目不携带 checksum（目录无哈希）。
 func entryOfChecked(rel, seg string, e *metaEntry) syncpkg.Entry {
 	ent := entryOf(rel, seg, e.size, e.mtime, false)

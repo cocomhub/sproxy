@@ -5,7 +5,7 @@ package archcheck
 
 // list_source_gate_test.go 是「list/search 数据源收口」棘轮（R41，影子台账阶段）。
 //
-// 背景（设计 2026-10-28-volume-state-maintenance §15.2）：本地卷 list 曾由 `searchIndex`
+// 背景（设计 docs/archive/2026-10-28-volume-state-maintenance.md §15.2）：本地卷 list 曾由 `searchIndex`
 // 提供（`index.list`）。迁移已完成：
 //   - 步骤 2（#895）：list 优先经**卷状态视图**（`VolumeView.ListDir` + volumestate 缓存）；
 //   - 步骤 3（2026-10-29）：**删除 `index.list`**，视图不可用时直接实时扫描（`listFallback`）——
