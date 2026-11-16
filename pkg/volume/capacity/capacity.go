@@ -439,8 +439,8 @@ func (f *CapacityFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey, relP
 			reserved = d
 		}
 	}
-	cr := &countingReader{r: r}
-	if err := f.inner.WriteFile(ctx, key, relPath, cr, size, mtime); err != nil {
+	cr, src := newCountingReader(r)
+	if err := f.inner.WriteFile(ctx, key, relPath, src, size, mtime); err != nil {
 		// **写错误 ≠ 未落盘**（评审 F2）：远端后端无原子 rename，响应超时/连接中断时对象
 		// 可能已提交——此前一律 Release(reserved) 假定未落盘 ⇒ used 永久偏低（限额可穿透）。
 		// 改为 Stat 复核实测并结算（无法复核则保留预留，宁可偏高）。
@@ -528,6 +528,58 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// newCountingReader 返回记账包装 **及** 交给下游的写源。
+//
+// 底层同时实现 `io.ReaderAt` + `io.Seeker`（`*os.File`/`multipart.File`/`bytes.Reader` 等
+// 可随机读源）时，交给下游的是**能力保留包装** `countingReadAtReader` —— 否则下游流式卷
+// （`secretdata.canStream`）会因包装只暴露 `Read` 而误判「不可流式」⇒ 大文件整读进内存
+// （实测 1.5 GiB 源 ⇒ RSS +3.3 GB，与文件大小线性 ⇒ OOM）。
+//
+// **只在底层确有该能力时**才暴露（不可 seek 源仍回 `countingReader`）：Go 接口是静态的，
+// 若无条件实现 `ReadAt`/`Seek`，不可 seek 源也会被 `canStream` 判为可流式而送入流式路径
+// 失败。判据形态与 `pkg/files.limitReader` 同一先例。
+func newCountingReader(r io.Reader) (*countingReader, io.Reader) {
+	cr := &countingReader{r: r}
+	ra, aok := r.(io.ReaderAt)
+	sk, sok := r.(io.Seeker)
+	if aok && sok {
+		return cr, &countingReadAtReader{countingReader: cr, ra: ra, s: sk}
+	}
+	return cr, cr
+}
+
+// countingReadAtReader 在记账之上**透传 io.ReaderAt + io.Seeker + SourcePath**（见
+// newCountingReader）：使包装对下游「能力透明」，流式卷仍能按 seek 能力选路。
+// `ReadAt` 与 `Read` 同口径计入记账（记的是实际被消费的字节）；`Seek` 不读数据、不计数。
+type countingReadAtReader struct {
+	*countingReader
+	ra io.ReaderAt
+	s  io.Seeker
+}
+
+func (c *countingReadAtReader) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.ra.ReadAt(p, off)
+	c.n += int64(n)
+	return n, err
+}
+
+func (c *countingReadAtReader) Seek(offset int64, whence int) (int64, error) {
+	return c.s.Seek(offset, whence)
+}
+
+// SourcePath 透传内层的**本地可重读路径**（若有）：`secretdata.replayableSourcePath` 按它
+// 判定「批量校验失败可自动重试」——与 `pkg/files.rateLimitReadAtReader.SourcePath` 同一
+// 结构化约定（双方各自声明接口，避免跨包反向依赖）。
+func (c *countingReadAtReader) SourcePath() string {
+	if sp, ok := c.r.(interface{ SourcePath() string }); ok {
+		return sp.SourcePath()
+	}
+	if f, ok := c.r.(*os.File); ok {
+		return f.Name()
+	}
+	return ""
+}
+
 // WriteIfAbsent 原子唯一写 + 卷级记账（与 WriteFile 同口径：声明长度已知则写前预留，
 // 未知/非法长度（<=0，如 copyMeta / 流式）不预留、写后按**实测**结算）。
 func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Reader, size, mtime int64) (bool, error) {
@@ -545,8 +597,8 @@ func (f *CapacityFS) WriteIfAbsent(ctx context.Context, relPath string, r io.Rea
 			reserved = d
 		}
 	}
-	cr := &countingReader{r: r}
-	written, err := pia.WriteIfAbsent(ctx, relPath, cr, size, mtime)
+	cr, src := newCountingReader(r)
+	written, err := pia.WriteIfAbsent(ctx, relPath, src, size, mtime)
 	if err != nil {
 		f.settleAfterWriteError(ctx, relPath, prev, reserved, size)
 		return written, err
