@@ -355,6 +355,9 @@ type SecretdataFS struct {
 	// stagingMu 保护注入与读（装配期注入、服务期读取）。
 	stagingMu    sync.RWMutex
 	stagingQuota syncpkg.StagingQuotaTracker
+	// tmpDirMu 是**确定性临时目录**的进程内互斥（每目录一把、refcount 自动回收，见 newChunkTempDir）。
+	// 目的：同一逻辑任务（rel）并发写者串行化，避免两个写入者共用同一确定性目录时互相踩踏。
+	tmpDirMu tmpDirLocks
 
 	// blockCache 是 blocklet 级明文 LRU 缓存（2026-10-22 缺陷修复，见 blocklet_cache.go）。
 	// 无缓存（未装配/预算<=0）时 nil，读路径零回归。写/删后经 invalidatePrefix 失效对应文件
@@ -1913,9 +1916,10 @@ func (s *SecretdataFS) runUploadJob(ctx context.Context, job uploadJob) error {
 func (s *SecretdataFS) beginInterleavedUpload(ctx context.Context, wc writeCtx, policy shardseal.BlockPolicy) (*interleavedUpload, error) {
 	release, rerr := s.stagingReserveInterleaved(ctx, wc.size, policy)
 	tmp := ""
+	var tmpRelease func()
 	if rerr == nil {
-		if t, terr := os.MkdirTemp(s.temp, "chunks-*"); terr == nil {
-			tmp = t
+		if t, rl, terr := s.newChunkTempDir(chunkTempPrefix, wc.rel); terr == nil {
+			tmp, tmpRelease = t, rl
 		} else {
 			slog.Warn("secretdata: 本地临时分块目录不可用，按回退链评估降级", "rel", wc.rel, "error", terr)
 			release()
@@ -1923,7 +1927,8 @@ func (s *SecretdataFS) beginInterleavedUpload(ctx context.Context, wc writeCtx, 
 		}
 	}
 	if tmp != "" {
-		return s.newInterleavedUpload(ctx, deliverLocalPath, tmp, release), nil
+		// 配额释放与临时目录释放合并为一次（iu.close 调用 release 即两者都释放）。
+		return s.newInterleavedUpload(ctx, deliverLocalPath, tmp, func() { release(); tmpRelease() }), nil
 	}
 	if !wc.sourceReplayable() {
 		return nil, fmt.Errorf("secretdata: 本地临时物不可用（%s）且源不可重读（无法从源重算产物；"+
@@ -2042,12 +2047,12 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 		return sres
 	}
 	defer releaseStaging()
-	tmp, err := os.MkdirTemp(s.temp, "chunks-*")
+	tmp, tmpRelease, err := s.newChunkTempDir(chunkTempPrefix, wc.rel)
 	if err != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: 创建临时分块目录失败: %w", err)
 	}
-	defer os.RemoveAll(tmp)
+	defer tmpRelease()
 
 	policy, perr := s.blockletPolicyFor(wc.rel)
 	if perr != nil {
@@ -5318,6 +5323,111 @@ func (s *SecretdataFS) walkContainerChild(ctx context.Context, p string, depth i
 		return
 	}
 	walk(p, sub, depth+1)
+}
+
+// 确定性临时工作目录（设计 §9.2）：名字 = <temp>/<kind><pid>-<sha256(key)[:16]>。
+//
+// 为什么这样命名：
+//   - key = 逻辑 rel（同一逻辑文件的写任务）⇒ 同任务重跑**复用同目录**（不再随机堆积），
+//     不同任务 ⇒ 不同目录（天然并行）；
+//   - 含 pid ⇒ 即便 Options.TempDir 被显式配置为多进程共享，也不会跨进程踩踏
+//     （本层不可 import pkg/server/filelock；且默认 temp 根 <Temp>/sproxy-secretdata/<pid>-<rand>
+//     本就按进程隔离，故**无需**跨进程锁）；
+//   - kind 前缀（sd-ch- / sd-dd-）便于人工与 tempclean 识别。
+const (
+	chunkTempPrefix = "sd-ch-"
+	dedupTempPrefix = "sd-dd-"
+)
+
+// chunkTempDirName 返回确定性临时目录**名**（不含父路径）。key 为逻辑 rel。
+func chunkTempDirName(kind, key string) string {
+	return fmt.Sprintf("%s%d-%s", kind, os.Getpid(), shardseal.Hash256([]byte(key))[:16])
+}
+
+// newChunkTempDir 在卷临时根下创建/复用确定性命名的工作目录，返回目录与幂等释放函数
+// （删除目录 + 释放进程内互斥）。失败返回错误（调用方按各自回退链处理）。
+//
+// 安全（设计 §9.2）：目录 0700；**不跟随符号链接**（先 Lstat 判定类型，symlink/非目录一律拒绝）；
+// 复用已存在目录时先清空（避免上次中断残留的分块被误上传）——不放宽任何既有权限。
+func (s *SecretdataFS) newChunkTempDir(kind, key string) (string, func(), error) {
+	dir := filepath.Join(s.temp, chunkTempDirName(kind, key))
+	unlock := s.tmpDirMu.acquire(dir)
+	if err := ensureOwnedTempDir(dir); err != nil {
+		unlock()
+		return "", nil, err
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			_ = os.RemoveAll(dir)
+			unlock()
+		})
+	}
+	return dir, release, nil
+}
+
+// ensureOwnedTempDir 确保 dir 是一个**本进程拥有的空目录**（0700）。
+// 不跟随符号链接：叶子为 symlink 直接拒绝（防可预测路径被预置）。
+func ensureOwnedTempDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	switch {
+	case err == nil && fi.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("secretdata: 临时目录被符号链接占用（拒绝跟随）: %s", dir)
+	case err == nil && !fi.IsDir():
+		return fmt.Errorf("secretdata: 临时路径被非目录占用: %s", dir)
+	case err == nil:
+		if rerr := os.RemoveAll(dir); rerr != nil {
+			return fmt.Errorf("secretdata: 清理旧临时目录失败: %w", rerr)
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("secretdata: 检查临时目录失败: %w", err)
+	}
+	if merr := os.Mkdir(dir, 0o700); merr != nil {
+		// 用 Mkdir（而非 MkdirAll）：父目录（卷临时根）不存在 ⇒ 如实报错（本地 staging 不可用），
+		// 不静默重建已删除的临时根（否则「临时目录被删」不再触发回退链）。
+		return fmt.Errorf("secretdata: 创建临时目录失败: %w", merr)
+	}
+	return nil
+}
+
+// tmpDirLocks 是「按绝对路径串行化」的进程内互斥（refcount 归零即回收，避免 map 无界增长）。
+type tmpDirLocks struct {
+	mu    sync.Mutex
+	locks map[string]*tmpDirLock
+}
+
+type tmpDirLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquire 取得 key 对应的互斥，返回幂等释放函数。
+func (t *tmpDirLocks) acquire(key string) func() {
+	t.mu.Lock()
+	if t.locks == nil {
+		t.locks = map[string]*tmpDirLock{}
+	}
+	l := t.locks[key]
+	if l == nil {
+		l = &tmpDirLock{}
+		t.locks[key] = l
+	}
+	l.refs++
+	t.mu.Unlock()
+
+	l.mu.Lock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Unlock()
+			t.mu.Lock()
+			l.refs--
+			if l.refs == 0 {
+				delete(t.locks, key)
+			}
+			t.mu.Unlock()
+		})
+	}
 }
 
 // tempRootName 是默认临时目录的**固定父目录**名（旧实现直接在 os.TempDir() 下散落
