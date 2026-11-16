@@ -17,7 +17,7 @@ import (
 
 // buildFakeBin 编译一个最小 Go 程序为可执行文件（模拟 BaiduPCS-Go 二进制）。
 // mode 控制行为："" = 立即成功退出；"sleep" = sleepCall 变量拼接绕开 R14 睡眠棘轮；
-// "fail" = 非零退出。
+// "stdout" = 向 stdout 写固定文本；"fail" = 非零退出。
 func buildFakeBin(t *testing.T, mode string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -31,6 +31,10 @@ func buildFakeBin(t *testing.T, mode string) string {
 		body = `package main
 import ("time"; "os")
 func main() { time.` + sleepCall + `; os.Exit(0) }`
+	case "stdout":
+		body = `package main
+import "os"
+func main() { _, _ = os.Stdout.WriteString("fake-stdout\n") }`
 	case "fail":
 		body = `package main
 import "os"
