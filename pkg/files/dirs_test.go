@@ -97,6 +97,8 @@ type dirsEnv struct {
 	// bucketLimits 是 bucket_limits 配置（键如 "user/sub"，值是子目录 Scope 上限）；
 	// 非空时 quotaScopeFor 会按它 EnsureScope 子目录，供 rename 跨子目录配额转移用例使用。
 	bucketLimits map[string]int64
+	// metaPolicy 非 nil 时用它替代 testMetaPolicy（测试可注入**计数型**策略观测台账/自愈触达）。
+	metaPolicy FileMetaPolicy
 	// fileMeta 为 true 时注入可信卷 meta 能力（WithFileMeta testMetaPolicy）——软删
 	// 随迁 meta/恢复/清理联动用例需要它；默认 false 零回归（不落 .meta）。
 	fileMeta bool
@@ -190,7 +192,9 @@ func (e *dirsEnv) newService() *Service {
 		WithAudit(rt),
 		WithContentIndex(e.contentIndex),
 	}
-	if e.fileMeta {
+	if e.metaPolicy != nil {
+		opts = append(opts, WithFileMeta(e.metaPolicy))
+	} else if e.fileMeta {
 		opts = append(opts, WithFileMeta(testMetaPolicy{}))
 	}
 	if e.phys != nil {

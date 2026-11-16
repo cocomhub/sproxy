@@ -134,6 +134,28 @@ SPDX-License-Identifier: Apache-2.0
 6. **远端卷（方案 D）**：建议**单独裁定**为「列表 checksum 留空 + 客户端按需 `stat`」，并把该语义写入 API 文档；
    本路线不覆盖远端。
 
+### 5.1 P0.1（已交付 2026-11-16）：list 视图路径**台账惰性获取**
+
+**问题**：`pkg/files` 的 list 视图路径在进入循环前**无条件**调用
+`checksumGetter(s.checksumStoreReady(ctx, owner), volName)`；而 `checksumStoreReady` 在台账为空时会触发
+**`RebuildChecksums`——全卷遍历 + 逐文件读 sidecar**（实测 ≈27 µs/文件 ⇒ 10 万文件≈2.7 s）。
+S2/自报卷（本地卷经 S2、secretdata/s3 自报）已能在列举时给出 checksum ⇒ 此时触达台账**纯属浪费**。
+
+**处置**：改为**逐条惰性**获取——仅当某条目**未自报** checksum 时才触达台账/自愈；全自报时零触达。
+- 代码：`pkg/files/read_ops.go` `fileInfosFromViewEntries`（`ledger()` 惰性闭包）。
+- 验收：`TestList_ViewSelfReportSkipsLedgerRebuild`（计数型 `FileMetaPolicy`：全自报 ⇒ sidecar 读 **0** 次）；
+  `TestList_ViewMissFallsBackToLedger`（未自报 ⇒ 仍走台账兜底并触发一次自愈，语义不变）。
+- 变异：改回无条件获取 ⇒ 第一例计数 1 ⇒ 红。
+- 边界：`listFallback`（无索引回退）**保持 eager**——那条路径台账是唯一来源，自愈是期望行为。
+
+### 5.2 后续性能项（未做，按需排期）
+
+| 项 | 收益 | 代价/风险 |
+| --- | --- | --- |
+| **P0.2 多卷列举并行**（`collectVolumeViewEntries` 现为逐卷串行） | 多卷用户（尤其**远端卷**：每卷一次网络往返）列表延迟 ≈ 1/N；需保序归并以维持「目录跨卷去重先到先得」 | 需有界并发 + 逐卷结果按序归并；lister 需并发安全 |
+| **P0.3 `SemanticSearch` 台账惰性**（现为搜索前 eager） | 0 命中时不必触发自愈重建 | 收益有限（有命中时仍需要台账） |
+| **P1 dirindex** | 列表 checksum 读 ≈25×（见 §3）；台账可退场 | 见 §4/§5（写放大 + 目录级并发/一致性） |
+
 ## 6. 建议新增门禁（P1 必备）
 
 | 门禁 | 断言 | 反例 |
