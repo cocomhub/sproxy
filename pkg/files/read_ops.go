@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/volume"
@@ -236,22 +237,56 @@ func (s *Service) listViaVolumeViews(ctx context.Context, q ListQuery, owner, su
 }
 
 // collectVolumeViewEntries 逐卷列举并聚合；supported=false ⇒ 整层能力不可用（调用方回落）。
+// listVolumeConcurrency 是多卷列举的**有界并发**数（性能项 P0.2）。
+//
+// 为何并行：`collectVolumeViewEntries` 原本逐卷串行 `ListDirView`——多本地卷 / 显式 `?volume=`
+// 场景下延迟随卷数线性叠加（每卷一次 FS 列举 + S2 sidecar 补 checksum）。有界并发后延迟 ≈ 1/N。
+// 为何有界：避免卷多时瞬时创建大量 goroutine/压垮卷后端（与 sidecar 读同口径）。
+const listVolumeConcurrency = 4
+
+// collectVolumeViewEntries 逐卷列举（**有界并发**取数）后再**按 vols 顺序串行归并**。
+//
+// 归并必须保序：目录跨卷去重是「先到先得」语义（`seenDirs`），输出顺序也被上层排序依赖之前
+// 的稳定性；因此并发只用在**取数**阶段，归并一律按 `vols` 下标顺序执行。
 func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeViewLister,
 	vols []volume.Volume, owner, subdir string) ([]FileInfo, bool) {
+	type volResult struct {
+		entries   []ExternalEntry
+		supported bool
+		err       error
+	}
+	results := make([]volResult, len(vols))
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for range min(listVolumeConcurrency, len(vols)) {
+		wg.Go(func() {
+			for i := range work {
+				entries, supported, err := lister.ListDirView(ctx, vols[i].Name, owner, subdir)
+				results[i] = volResult{entries: entries, supported: supported, err: err}
+			}
+		})
+	}
+	for i := range vols {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+
+	// 按 vols 顺序串行归并（确定性：去重先到先得、输出顺序与串行实现一致）。
 	seenDirs := make(map[string]bool)
 	var out []FileInfo
-	for _, v := range vols {
-		entries, supported, err := lister.ListDirView(ctx, v.Name, owner, subdir)
-		if !supported {
+	for i := range vols {
+		r := results[i]
+		if !r.supported {
 			return nil, false
 		}
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				s.rt.logger().Warn("卷视图列举失败", "volume", v.Name, "subdir", subdir, "error", err.Error())
+		if r.err != nil {
+			if !errors.Is(r.err, os.ErrNotExist) {
+				s.rt.logger().Warn("卷视图列举失败", "volume", vols[i].Name, "subdir", subdir, "error", r.err.Error())
 			}
 			continue
 		}
-		out = append(out, s.fileInfosFromViewEntries(ctx, owner, entries, v.Name, subdir, seenDirs)...)
+		out = append(out, s.fileInfosFromViewEntries(ctx, owner, r.entries, vols[i].Name, subdir, seenDirs)...)
 	}
 	return out, true
 }
