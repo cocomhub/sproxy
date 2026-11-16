@@ -23,7 +23,7 @@ func TestEncryptBlocklets_ErrorSegmentCarriesData(t *testing.T) {
 		{Offset: 16, Size: int64(len(errData)), Type: BlockletTypeError, Data: errData},
 	}
 	data := bytes.Repeat([]byte{0xA5}, 16)
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestEncryptBlocklets_ErrorSegmentTamperFailClosed(t *testing.T) {
 		{Offset: 0, Size: 8},
 		{Offset: 8, Size: int64(len(errData)), Type: BlockletTypeError, Data: errData},
 	}
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, bytes.Repeat([]byte{0x5A}, 8), AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, bytes.Repeat([]byte{0x5A}, 8), AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}

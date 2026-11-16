@@ -14,6 +14,12 @@ import (
 // 测试/低配）。各档为不同 AlgoVersion + KDF 域，跨档 fail-closed。
 const AlgorithmName = "shardseal/aes-256-gcm"
 
+// AlgorithmNameConvergent 是**收敛档**（确定性密文）的算法标识（域 "shardseal/v2"）。
+// 默认写版本（secretdata Options.Algorithm 缺省）：同一明文在同一卷上两次加密产出逐字节
+// 相同的密文/名（设计 docs/designs/2026-11-16-deterministic-blob-convergent-encryption.md
+// §3/§6/§10）。v1 blob 仍按自身 meta.AlgoVersion 解密，互不影响。
+const AlgorithmNameConvergent = "shardseal/aes-256-gcm-conv"
+
 // metaVersion 是 meta 结构版本。
 const metaVersion = 1
 

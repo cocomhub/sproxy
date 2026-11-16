@@ -340,7 +340,10 @@ type SecretdataFS struct {
 	// algoVer 是 Options.Algorithm 解析出的已注册算法版本（NewFS fail-fast 校验；
 	// 写路径 DeriveKey/EncryptShards 用，不硬编码版本——只经注册表）。
 	algoVer shardseal.AlgoVersion
-	temp    string
+	// convergent 报告本卷写路径是否用**确定性密文**（AlgoV2GCM）：名字与 meta blob 也走
+	// 确定性构造（见 features.go encryptMetaBlob / createContainerLocked / writeDirMetaLocked）。
+	convergent bool
+	temp       string
 	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
 	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
 	ownedTemp bool
@@ -512,7 +515,11 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		return nil, fmt.Errorf("secretdata: 密钥未提供（Options.Secret 必填）")
 	}
 	if opts.Algorithm == "" {
-		opts.Algorithm = shardseal.AlgorithmName
+		// 缺省 = **收敛档**（确定性密文）：同一明文在同一卷上两次加密产出逐字节相同的
+		// 密文/名 ⇒ 重复上传零重复、网盘秒传可命中、跨路径去重（设计
+		// docs/designs/2026-11-16-deterministic-blob-convergent-encryption.md §5/§6）。
+		// 旧 v1 blob 仍按自身 meta.AlgoVersion 解密，不受影响。
+		opts.Algorithm = shardseal.AlgorithmNameConvergent
 	}
 	// 创建路径 fail-fast 解析算法版本：未知/未注册算法立刻报错，不静默回落默认
 	// （写路径按此版本加密、读路径按 meta 内版本解密，secretdata 只经注册表）。
@@ -542,7 +549,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 	// 清除，避免明文长期驻留磁盘。写路径的临时物是**密文**（分块目录），前缀不同、不会被误删。
 	cleanupStaleReadTemp(opts.TempDir)
 	fs := &SecretdataFS{
-		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, temp: opts.TempDir, ownedTemp: ownedTemp,
+		inner: inner, secret: opts.Secret, opts: opts, algoVer: algoVer, convergent: alg.Convergent, temp: opts.TempDir, ownedTemp: ownedTemp,
 		index: map[string]*metaEntry{}, dirs: map[string]struct{}{}, dirSegs: map[string]string{},
 		dirIDs: map[string]string{}, dirParents: map[string]string{},
 		dirMTime: map[string]int64{}, keyCache: newDeriveCache(64),
@@ -4312,14 +4319,14 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if kerr != nil {
 		return "", "", "", 0, kerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget(), s.convergent)
 	if berr != nil {
 		return "", "", "", 0, berr
 	}
-	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62，
-	// 自包含可不解密验证密文完整；中段 = 目录随机 id（base62 9 字符，匿名性一致）。
-	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
-	name, nerr := shardseal.DirMetaName(blobA, dirID, blobB)
+	// 命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62，
+	// 自包含可不解密验证密文完整；中段 = 目录 id（base62 9 字符）。
+	// conv（v2）走确定性命名（同 blob ⇒ 同名）。
+	name, nerr := dirMetaNameFor(s.convergent, blob, dirID)
 	if nerr != nil {
 		return "", "", "", 0, nerr
 	}
@@ -4925,14 +4932,13 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 	if kerr != nil {
 		return "", kerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget(), s.convergent)
 	if berr != nil {
 		return "", berr
 	}
-	// 新命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62；
-	// 中段 = 目录随机 id（base62 9 字符，与生成端一致）。
-	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
-	name, nerr := shardseal.DirMetaName(blobA, dm.DirID, blobB)
+	// 命名：首/末段 = 同一加密 dir-meta blob 的两窗口（offset 0/16）base62；
+	// 中段 = 目录 id（base62 9 字符，与生成端一致）。
+	name, nerr := dirMetaNameFor(s.convergent, blob, dm.DirID)
 	if nerr != nil {
 		return "", nerr
 	}

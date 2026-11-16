@@ -446,11 +446,11 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	if jerr != nil {
 		return "", nil, jerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, metaJSON, s.metaPadTarget())
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, metaJSON, s.metaPadTarget(), s.convergent)
 	if berr != nil {
 		return "", nil, berr
 	}
-	// 新命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62，自包含可
+	// 命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62，自包含可
 	// 不解密验证密文完整；中段 = HMAC 分组盲签（同文件共享；无明文哈希外泄）。
 	// 组签输入 = meta.Original.SHA256 解码为 raw 32 字节（与 shardseal 内部 GroupSig(secret, fullSum)
 	// 一致——此前直接用 hex 字符串作 HMAC 输入，导致 chunk 组签（raw32）与 meta 组签（hex64）
@@ -459,13 +459,31 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	if derr != nil || len(fullSHA) != 32 {
 		return "", nil, fmt.Errorf("secretdata: meta 原文 SHA256 非法（须 64 hex）: %w", derr)
 	}
-	encA, encB := shardseal.Hash48Pair(blob, 0, 16)
 	group := shardseal.GroupSig(s.secret, fullSHA)
-	metaName, nerr := shardseal.MetaName(encA, group, encB)
+	metaName, nerr := metaNameFor(s.convergent, blob, group)
 	if nerr != nil {
 		return "", nil, nerr
 	}
 	return metaName, blob, nil
+}
+
+// dirMetaNameFor 选目录 meta 名：conv（v2 收敛）用确定性命名（同 blob ⇒ 同名），否则
+// 传统随机段命名。
+func dirMetaNameFor(conv bool, blob []byte, dirID string) (string, error) {
+	if conv {
+		return shardseal.DirMetaNameConv(blob, dirID)
+	}
+	blobA, blobB := shardseal.Hash48Pair(blob, 0, 16)
+	return shardseal.DirMetaName(blobA, dirID, blobB)
+}
+
+// metaNameFor 选 file meta 名：conv（v2 收敛）用确定性命名（同 blob ⇒ 同名），否则传统命名。
+func metaNameFor(conv bool, blob []byte, group string) (string, error) {
+	if conv {
+		return shardseal.MetaNameConv(blob, group)
+	}
+	encA, encB := shardseal.Hash48Pair(blob, 0, 16)
+	return shardseal.MetaName(encA, group, encB)
 }
 
 // cloneMeta 浅拷贝 meta（Chunks 切片独立；内容只读不共享变更）。

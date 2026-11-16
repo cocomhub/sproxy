@@ -44,6 +44,10 @@ type Block struct {
 type RandomPlanner struct {
 	Min int64
 	Max int64
+	// SizeAt 可选：确定性块长来源（v2 收敛加密注入，见 convergent.go injectConvBlockSizes）。
+	// 非 nil 时第 idx 块长 = SizeAt(idx, remain)，不再使用 crypto/rand；nil = 历史随机行为
+	// （v1 语义**逐字节不变**）。
+	SizeAt func(idx, remain int64) int64
 }
 
 // Plan 实现 BlockPlanner。校验 Min/Max > 0 且 Min ≤ Max。
@@ -62,14 +66,22 @@ func (p *RandomPlanner) Plan(origSize int64) ([]Block, error) {
 	}
 	var blocks []Block
 	var off int64
-	for off < origSize {
+	for i := int64(0); off < origSize; i++ {
 		remain := origSize - off
-		// 剩余不足最小块 → 末块收尾；否则在 [Min, max(Min, min(Max, remain))] 随机。
-		size := randomChunkSize(p.Min, p.Max, remain)
+		// SizeAt 注入（v2）⇒ 确定性块长；否则历史随机（v1）。
+		size := p.chunkSize(i, remain)
 		blocks = append(blocks, Block{Offset: off, Size: size})
 		off += size
 	}
 	return blocks, nil
+}
+
+// chunkSize 返回第 idx 块的长度：SizeAt 注入时确定性派生（v2），否则历史随机（v1）。
+func (p *RandomPlanner) chunkSize(idx, remain int64) int64 {
+	if p.SizeAt != nil {
+		return p.SizeAt(idx, remain)
+	}
+	return randomChunkSize(p.Min, p.Max, remain)
 }
 
 // randomChunkSize 在 [minSize, maxSize] 间均匀随机，且不超过 remain；剩余不足 minSize 时取 remain。

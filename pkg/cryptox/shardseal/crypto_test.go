@@ -20,7 +20,7 @@ func TestEncryptBlocklets_UniformOnDiskFormat(t *testing.T) {
 	salt := bytes.Repeat([]byte{0x22}, SaltLen)
 	blocklets := []Blocklet{{Offset: 0, Size: 8}, {Offset: 8, Size: 16}, {Offset: 24, Size: 8}}
 	data := bytes.Repeat([]byte{0xA5}, 32)
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestEncryptBlocklets_Roundtrip(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	blob, _, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestEncryptBlocklets_Roundtrip(t *testing.T) {
 	}
 	// 相对偏移超过 uint32 上限 → 加密 fail-closed（不静默截断 AAD 内 off）。
 	huge := []Blocklet{{Offset: 0, Size: 8}, {Offset: 1 << 32, Size: 8, Padding: true}}
-	if _, _, err := encryptBlocklets(key, salt, huge, make([]byte, 8), AlgoV1GCM); err == nil {
+	if _, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, huge, make([]byte, 8), AlgoV1GCM, 0); err == nil {
 		t.Error("blocklet 相对偏移超 uint32 应 fail-closed")
 	}
 }
@@ -114,7 +114,7 @@ func TestDecryptBlockletAt_RangeRead(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	blob, _, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestDecryptBlock_ChunkSaltMismatch(t *testing.T) {
 	t.Parallel()
 	key := bytes.Repeat([]byte{0x77}, KeyLen)
 	salt := bytes.Repeat([]byte{0x88}, SaltLen)
-	blob, _, err := encryptBlocklets(key, salt, []Blocklet{{Offset: 0, Size: 8}}, bytes.Repeat([]byte{7}, 8), AlgoV1GCM)
+	blob, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, []Blocklet{{Offset: 0, Size: 8}}, bytes.Repeat([]byte{7}, 8), AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestEncryptMetaJSON_PadLengthInRange(t *testing.T) {
 	key := bytes.Repeat([]byte{0x33}, KeyLen)
 	salt := bytes.Repeat([]byte{0x44}, SaltLen)
 	metaJSON := []byte(`{"version":1}`)
-	blob, err := EncryptMetaJSON(key, salt, metaJSON, 0)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, 0, false)
 	if err != nil {
 		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestEncryptMetaJSON_PadToTarget(t *testing.T) {
 	// 最小 tag(16) = 196B，故 128 不可行（仅 R 首部就占满）；此处取 512
 	// 作为可行目标，语义与简报一致（padding 到指定总长）。
 	const padTarget = 512
-	blob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget, false)
 	if err != nil {
 		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestEncryptMetaJSON_TooSmallTargetNoExpand(t *testing.T) {
 	salt := bytes.Repeat([]byte{0x88}, SaltLen)
 	metaJSON := []byte(`{"x":1}`)
 	// padTarget 小于天然总长时视为「不 padding」（padding 只往大里扩，绝不裁剪）。
-	blob, err := EncryptMetaJSON(key, salt, metaJSON, RandPrefixLen)
+	blob, err := EncryptMetaJSON(key, salt, metaJSON, RandPrefixLen, false)
 	if err != nil {
 		t.Fatalf("EncryptMetaJSON: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestTier_RoundTripAndCrossTierFailClosed(t *testing.T) {
 			t.Fatalf("DeriveKey(%d): %v", v, err)
 		}
 		keys[v] = key
-		blob, err := sealBlock(key, salt, plain)
+		blob, err := sealBlock(cryptoSealSource{}, key, salt, plain)
 		if err != nil {
 			t.Fatalf("sealBlock(%d): %v", v, err)
 		}
@@ -437,7 +437,7 @@ func TestParseBlock_LengthHeaderExactMatch(t *testing.T) {
 	t.Parallel()
 	key := bytes.Repeat([]byte{0x77}, KeyLen)
 	salt := bytes.Repeat([]byte{0x88}, SaltLen)
-	blob, err := sealBlock(key, salt, []byte("hello secret"))
+	blob, err := sealBlock(cryptoSealSource{}, key, salt, []byte("hello secret"))
 	if err != nil {
 		t.Fatalf("sealBlock: %v", err)
 	}

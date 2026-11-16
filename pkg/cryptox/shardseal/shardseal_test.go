@@ -495,7 +495,7 @@ func TestValidateMetaTmpRegisteredAlg(t *testing.T) {
 		Name:      "shardseal/tmp-test",
 		KDFDomain: "shardseal/tmp-test",
 		ScryptN:   scryptNLow, ScryptR: scryptR, ScryptP: scryptP,
-		Encrypt: sealBlock,
+		Encrypt: sealBlockAlgo,
 		Decrypt: decryptBlock,
 	})
 	defer delete(registry, tmpVer)
@@ -846,7 +846,7 @@ func TestEncryptBlocklets_PaddingAndExtraFormat(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -882,7 +882,7 @@ func TestEncryptBlocklets_PaddingAndExtraFormat(t *testing.T) {
 		t.Errorf("padding 段解出长度 %d，应为 16", len(pad))
 	}
 	// padding 与已用区间重叠 → fail-closed。
-	if _, _, err := encryptBlocklets(key, salt, []Blocklet{{Offset: 8, Size: 16, Padding: true}}, data, AlgoV1GCM); err == nil {
+	if _, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, []Blocklet{{Offset: 8, Size: 16, Padding: true}}, data, AlgoV1GCM, 0); err == nil {
 		t.Error("padding 与已用区间重叠应 fail-closed")
 	}
 }
@@ -899,7 +899,7 @@ func TestBlob_NoPlaintextSegmentHeaders(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i * 3)
 	}
-	blob, _, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, _, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -938,7 +938,7 @@ func TestDecrypt_SequentialNoMeta(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	blob, _, eerr := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, _, eerr := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if eerr != nil {
 		t.Fatalf("encryptBlocklets: %v", eerr)
 	}
@@ -969,7 +969,7 @@ func TestIndexBlock_RandomAccessNoMeta(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	blob, _, eerr := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, _, eerr := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if eerr != nil {
 		t.Fatalf("encryptBlocklets: %v", eerr)
 	}
@@ -1005,7 +1005,7 @@ func TestBlockletType_Table(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -1090,7 +1090,7 @@ func TestReplaceBlocklet_OthersDirectlyUsable(t *testing.T) {
 	if perr != nil {
 		t.Fatalf("PlanBlocklets: %v", perr)
 	}
-	newBlob, entries, eerr := encryptBlocklets(key, salt, blocklets, newChunk, res.Meta.AlgoVersion)
+	newBlob, entries, eerr := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, newChunk, res.Meta.AlgoVersion, 0)
 	if eerr != nil {
 		t.Fatalf("encryptBlocklets: %v", eerr)
 	}

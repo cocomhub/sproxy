@@ -5,6 +5,7 @@ package shardseal
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 )
 
@@ -171,7 +172,11 @@ func MetaBlobSalt(blob []byte) ([]byte, error) {
 // blob，DecryptFile 按统一路径读取（长度 == meta.OrigSize、整文件 SHA-256 全量校验）。
 func EncryptChunkStandalone(key, salt, plain []byte, v AlgoVersion) ([]byte, error) {
 	blocklets := []Blocklet{{Offset: 0, Size: int64(len(plain))}}
-	blob, _, err := encryptBlocklets(key, salt, blocklets, plain, v)
+	// 重建 blob 的随机源：v1 随机（与历史一致）；v2 以**内容哈希为内容标识**确定性派生
+	// （同明文 ⇒ 同密文/同名，且不同明文 ⇒ 不同 nonce，无同 key/nonce 重用）。
+	cid := sha256.Sum256(plain)
+	ss, _ := sealSourceFor(v, key, cid[:])
+	blob, _, err := encryptBlocklets(ss, key, salt, blocklets, plain, v, 0)
 	return blob, err
 }
 

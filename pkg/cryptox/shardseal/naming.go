@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"hash/crc32"
@@ -276,6 +277,86 @@ func DirMetaName(blobA, dirID, blobB string) (string, error) {
 		seg2 = injectMark(seg2, 'q')
 	}
 	return core[:9] + seg1 + core[9:18] + seg2 + core[18:], nil
+}
+
+// ---- 收敛命名（v2 确定性密文）----
+//
+// 收敛加密下 blob 名必须**内容确定**（同一内容 ⇒ 同名），否则重复上传仍产生新名对象
+// （秒传/去重失败）。因此 v2 写入用以下确定性变体：中间 hash 段与传统命名一致
+// （内容/组签派生），**两个随机段改为由 blob 密文确定性派生**（字符集仍 randCharset，
+// 标记仍在随机段）⇒ 名字看起来仍随机，但可复现。
+//
+// 不向后兼容旧写入：老 blob 的名字来自其 meta（ChunkInfo.FileName）/目录扫描（按标记
+// 分类），读路径不依赖重新派生名字，故新旧命名共存无碍。
+//
+// 注：去掉随机段是**有意为之**（与密文确定性同一取舍，设计 §4 已明示接受「可判断两份
+// 是否同内容」），不是回归。
+
+// convNameBytes 由 blob 与域标签确定性派生 n 字节（SHA-256 计数器模式）。派生源只含
+// blob 密文（已由卷密钥加密 ⇒ 跨卷不同、跨内容不同），**不使用文件名/路径/mtime**。
+func convNameBytes(blob []byte, domain string, n int) []byte {
+	out := make([]byte, 0, n+sha256.Size)
+	var ctr [4]byte
+	for i := 0; len(out) < n; i++ {
+		binary.BigEndian.PutUint32(ctr[:], uint32(i))
+		h := sha256.New()
+		_, _ = h.Write([]byte("sproxy/name-seg/v1"))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(domain))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(ctr[:])
+		_, _ = h.Write(blob)
+		out = append(out, h.Sum(nil)...)
+	}
+	return out[:n]
+}
+
+// convName 构造收敛命名：core 与传统命名同构（encA/mid/encB 交错），两个随机段由 blob
+// 确定性派生；mark 非 0 时注入对应类型标记（与 legacy 一致的语义）。
+func convName(encA, mid, encB string, blob []byte, domain string, mark byte) (string, error) {
+	core, err := interleaveCore(encA, mid, encB)
+	if err != nil {
+		return "", err
+	}
+	seed := convNameBytes(blob, domain, 64)
+	total := 8 + int(seed[0])%9 // 8..16，与 randPairLen 同分布
+	r1 := total / 2
+	r2 := total - r1
+	seg1 := make([]byte, r1)
+	for i := range seg1 {
+		seg1[i] = randCharset[int(seed[1+i])%len(randCharset)]
+	}
+	seg2 := make([]byte, r2)
+	for i := range seg2 {
+		seg2[i] = randCharset[int(seed[1+r1+i])%len(randCharset)]
+	}
+	if mark != 0 {
+		if seed[60]%2 == 0 {
+			seg1[int(seed[61])%r1] = mark
+		} else {
+			seg2[int(seed[61])%r2] = mark
+		}
+	}
+	return core[:9] + string(seg1) + core[9:18] + string(seg2) + core[18:], nil
+}
+
+// ChunkNameConv 构造**收敛**分块名（无标记）：hash 段与传统 ChunkName 一致（blob 两窗口 +
+// group 组签），两随机段由 blob 确定性派生（同密文 ⇒ 同名）。
+func ChunkNameConv(blob []byte, group string) (string, error) {
+	encA, encB := Hash48Pair(blob, 0, 16)
+	return convName(encA, group, encB, blob, "chunk", 0)
+}
+
+// MetaNameConv 构造**收敛** file meta 名（随机段注入 'z' 标记）。
+func MetaNameConv(blob []byte, group string) (string, error) {
+	encA, encB := Hash48Pair(blob, 0, 16)
+	return convName(encA, group, encB, blob, "filemeta", 'z')
+}
+
+// DirMetaNameConv 构造**收敛**目录 meta 名（随机段注入 'q' 标记）。
+func DirMetaNameConv(blob []byte, dirID string) (string, error) {
+	encA, encB := Hash48Pair(blob, 0, 16)
+	return convName(encA, dirID, encB, blob, "dirmeta", 'q')
 }
 
 // NameKind 是三文件名类型。

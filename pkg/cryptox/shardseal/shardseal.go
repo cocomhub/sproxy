@@ -272,12 +272,21 @@ func encryptShards(data []byte, src srcMeta, dest blobDest, secret []byte, polic
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
 	}
+
+	// CID（内容标识）= 明文整文件 SHA-256：兼作分组盲签输入与 v2 确定性派生源。内存变体
+	// 已持有明文 ⇒ 直接算（零额外读）。
+	fullSum := sha256.Sum256(data)
+	ss, conv := sealSourceFor(v, secret, fullSum[:])
+	if conv {
+		// v2：块长也确定性派生（设计 §3.2）。
+		injectConvBlockSizes(blocksPlanner, ss)
+	}
 	blocks, err := blocksPlanner.Plan(int64(len(data)))
 	if err != nil {
 		return nil, err
 	}
 
-	salt, err := newSalt()
+	salt, err := fileSalt(ss)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +297,6 @@ func encryptShards(data []byte, src srcMeta, dest blobDest, secret []byte, polic
 
 	// 分组盲签：同一原始文件的全部分块/meta 共享（中段），供无 meta 时盲分组恢复；
 	// 基于 HMAC(secret, 整文件SHA256)，无 secret 无法反推明文或探测内容存在性。
-	fullSum := sha256.Sum256(data)
 	group := GroupSig(secret, fullSum[:])
 
 	res := &EncryptionResult{Meta: &Meta{
@@ -308,7 +316,7 @@ func encryptShards(data []byte, src srcMeta, dest blobDest, secret []byte, polic
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, key, salt, group, dest, v)
+	names, chunkInfos, cerr := encryptWriteChunks(&chunkPlan{blocks: blocks, blp: blockletsPlanner, srcPath: src.path}, data, ss, conv, key, salt, group, dest, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -325,7 +333,7 @@ func encryptShards(data []byte, src srcMeta, dest blobDest, secret []byte, polic
 		}
 	}
 
-	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget)
+	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget, conv)
 	if merr != nil {
 		return nil, merr
 	}
@@ -341,12 +349,25 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, dest blobDes
 	if blocksPlanner == nil || blockletsPlanner == nil {
 		return nil, fmt.Errorf("shardseal: 未知分块策略 %q 或 blocklet 模式 %q", policy.Mode, policy.BlockletMode)
 	}
+
+	// 流式哈希 pass：整文件一遍，O(1) 内存，得 full SHA256 hash（CID，兼作分组盲签输入与
+	// v2 确定性派生源）。放在规划/派生之前——CID 是 v2 确定性块长/盐/nonce 的派生输入。
+	// 这是**本路径本就必需**的一遍扫描，非为取 CID 额外增加（设计 §6 验收 6）。
+	fullHasher := sha256.New()
+	if _, cerr := io.CopyBuffer(fullHasher, io.NewSectionReader(src, 0, size), make([]byte, 128<<10)); cerr != nil {
+		return nil, fmt.Errorf("shardseal: 流式哈希读源失败: %w", cerr)
+	}
+	fullSum := fullHasher.Sum(nil)
+	ss, conv := sealSourceFor(v, secret, fullSum)
+	if conv {
+		injectConvBlockSizes(blocksPlanner, ss)
+	}
 	blocks, err := blocksPlanner.Plan(size)
 	if err != nil {
 		return nil, err
 	}
 
-	salt, err := newSalt()
+	salt, err := fileSalt(ss)
 	if err != nil {
 		return nil, err
 	}
@@ -355,12 +376,6 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, dest blobDes
 		return nil, err
 	}
 
-	// 流式哈希 pass：整文件一遍，O(1) 内存，得 full SHA256 hash（group+Original.SHA256 用它）。
-	fullHasher := sha256.New()
-	if _, cerr := io.CopyBuffer(fullHasher, io.NewSectionReader(src, 0, size), make([]byte, 128<<10)); cerr != nil {
-		return nil, fmt.Errorf("shardseal: 流式哈希读源失败: %w", cerr)
-	}
-	fullSum := fullHasher.Sum(nil)
 	group := GroupSig(secret, fullSum)
 
 	res := &EncryptionResult{Meta: &Meta{
@@ -382,7 +397,7 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, dest blobDes
 		Block: policy,
 	}}
 
-	names, chunkInfos, cerr := encryptWriteChunksAt(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, &sectionReader{ra: src, sz: size}, key, salt, group, dest, v)
+	names, chunkInfos, cerr := encryptWriteChunksAt(&chunkPlan{blocks: blocks, blp: blockletsPlanner}, &sectionReader{ra: src, sz: size}, ss, conv, key, salt, group, dest, v)
 	if cerr != nil {
 		return nil, cerr
 	}
@@ -394,7 +409,7 @@ func encryptShardsAt(src io.ReaderAt, size int64, srcMetaV srcMeta, dest blobDes
 				"file", srcMetaV.name, "size", srcMetaV.size, "failures", len(fails))
 		}
 	}
-	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget)
+	metaName, merr := encryptWriteMeta(res, key, salt, group, dest, padTarget, conv)
 	if merr != nil {
 		return nil, merr
 	}
@@ -442,10 +457,10 @@ func windowPlanFor(enc []byte, blocklets []BlockletInfo) ([]WindowInfo, error) {
 	return w, nil
 }
 
-func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, ss sealSource, conv bool, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
-	for _, b := range plan.blocks {
+	for idx, b := range plan.blocks {
 		chunk := make([]byte, b.Size)
 		if _, rerr := src.ReadAt(chunk, b.Offset); rerr != nil && rerr != io.EOF {
 			return nil, nil, fmt.Errorf("shardseal: 读块 [%d,%d) 失败: %w", b.Offset, b.Size, rerr)
@@ -454,11 +469,11 @@ func encryptWriteChunksAt(plan *chunkPlan, src io.ReaderAt, key, salt []byte, gr
 		if perr != nil {
 			return nil, nil, perr
 		}
-		enc, entries, eerr := encryptBlocklets(key, salt, blocklets, chunk, v)
+		enc, entries, eerr := encryptBlocklets(ss, key, salt, blocklets, chunk, v, int64(idx))
 		if eerr != nil {
 			return nil, nil, eerr
 		}
-		name, nerr := chunkBlobNameAndWrite(enc, group, dest)
+		name, nerr := chunkBlobNameAndWrite(enc, group, dest, conv)
 		if nerr != nil {
 			return nil, nil, nerr
 		}
@@ -512,7 +527,7 @@ func planSrcSize(plan *chunkPlan) int64 {
 // [R][8B 密文长][salt][nonce][ct+tag]。meta 名三段锚定最终 blob：首/末段 = 同一加密
 // meta blob 的两窗口（offset 0/16）base62，中段 = HMAC 分组盲签——磁盘上不出现明文
 // meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测，匿名性收敛）。
-func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, dest blobDest, padTarget int) (string, error) {
+func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, dest blobDest, padTarget int, conv bool) (string, error) {
 	if dest.skipMeta {
 		return "", nil // 调用方自行按最终 meta 明文加密（见 EncryptShardsReaderToChunks）
 	}
@@ -520,16 +535,23 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, des
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 序列化失败: %w", err)
 	}
-	metaBlob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget)
+	metaBlob, err := EncryptMetaJSON(key, salt, metaJSON, padTarget, conv)
 	if err != nil {
 		return "", fmt.Errorf("shardseal: meta 加密失败: %w", err)
 	}
 	res.MetaBlob = metaBlob
-	// 新命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62 编码，
+	// 命名：首/末段 = 同一加密 meta blob 的不同窗口（offset 0/16）base62 编码，
 	// 自包含可不解密验证密文完整；中段 = HMAC 分组盲签（与分块一致）。
 	// 磁盘上不出现明文 meta JSON，也不出现 meta 明文哈希（明文哈希可被内容存在性探测）。
-	metaA, metaB := Hash48Pair(metaBlob, 0, 16)
-	metaName, nerr := MetaName(metaA, group, metaB)
+	// conv（v2）走确定性命名（同 meta blob ⇒ 同名）。
+	var metaName string
+	var nerr error
+	if conv {
+		metaName, nerr = MetaNameConv(metaBlob, group)
+	} else {
+		metaA, metaB := Hash48Pair(metaBlob, 0, 16)
+		metaName, nerr = MetaName(metaA, group, metaB)
+	}
 	if nerr != nil {
 		return "", nerr
 	}
@@ -541,11 +563,17 @@ func encryptWriteMeta(res *EncryptionResult, key, salt []byte, group string, des
 
 // chunkBlobNameAndWrite 计算加密分块 blob 名并写盘（encryptWriteChunks 循环体内步骤，
 // 抽方法控制认知复杂度 #727 gocognit=15）。首尾段 = 同一加密 blob 的不同窗口
-// （offset 0/16）base62 编码，中段 = HMAC 分组盲签；ChunkName 段长非法返回 error
-// （不 panic，fail-closed）。
-func chunkBlobNameAndWrite(enc []byte, group string, dest blobDest) (string, error) {
-	encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
-	name, nerr := ChunkName(encA, group, encB)
+// （offset 0/16）base62 编码，中段 = HMAC 分组盲签；conv（v2）走确定性命名（同密文 ⇒ 同名）。
+// 段长非法返回 error（不 panic，fail-closed）。
+func chunkBlobNameAndWrite(enc []byte, group string, dest blobDest, conv bool) (string, error) {
+	var name string
+	var nerr error
+	if conv {
+		name, nerr = ChunkNameConv(enc, group)
+	} else {
+		encA, encB := Hash48Pair(enc, 0, 16) // 单次 SHA-256 取两窗口（大块省一次哈希）
+		name, nerr = ChunkName(encA, group, encB)
+	}
 	if nerr != nil {
 		return "", nerr
 	}
@@ -586,23 +614,23 @@ func injectPlannerSrcPath(plan *chunkPlan, blockOffset int64) {
 // encryptWriteChunks 逐块加密并写盘，返回分块文件名与 ChunkInfo（EncryptShards 的
 // 分块处理，抽方法控制认知复杂度 #727 gocognit=15）。Index 为 0 基顺序号；每块按
 // blocklet 规划细分并记录 BlockletInfo（随机访问索引）。
-func encryptWriteChunks(plan *chunkPlan, data []byte, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
+func encryptWriteChunks(plan *chunkPlan, data []byte, ss sealSource, conv bool, key, salt []byte, group string, dest blobDest, v AlgoVersion) ([]string, []ChunkInfo, error) {
 	var names []string
 	var chunks []ChunkInfo
-	for _, b := range plan.blocks {
+	for idx, b := range plan.blocks {
 		chunk := data[b.Offset : b.Offset+b.Size]
 		injectPlannerSrcPath(plan, b.Offset)
 		blocklets, perr := plan.blp.PlanBlocklets(bytes.NewReader(data), int64(len(data)), b.Offset, b.Size)
 		if perr != nil {
 			return nil, nil, perr
 		}
-		enc, entries, cerr := encryptBlocklets(key, salt, blocklets, chunk, v)
+		enc, entries, cerr := encryptBlocklets(ss, key, salt, blocklets, chunk, v, int64(idx))
 		if cerr != nil {
 			return nil, nil, cerr
 		}
-		// 新命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
-		// 中段 = HMAC 分组盲签（同文件共享）。注意 ChunkName 签名 (encA, group, encB)。
-		name, nerr := chunkBlobNameAndWrite(enc, group, dest)
+		// 命名：首尾段 = 同一加密 blob 的不同窗口（offset 0/16）base62 编码，无明文哈希外泄；
+		// 中段 = HMAC 分组盲签（同文件共享）。conv（v2）走确定性命名（同密文 ⇒ 同名）。
+		name, nerr := chunkBlobNameAndWrite(enc, group, dest, conv)
 		if nerr != nil {
 			return nil, nil, nerr
 		}
