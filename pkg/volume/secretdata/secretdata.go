@@ -5383,9 +5383,22 @@ func ensureOwnedTempDir(dir string) error {
 		return fmt.Errorf("secretdata: 检查临时目录失败: %w", err)
 	}
 	if merr := os.Mkdir(dir, 0o700); merr != nil {
-		// 用 Mkdir（而非 MkdirAll）：父目录（卷临时根）不存在 ⇒ 如实报错（本地 staging 不可用），
-		// 不静默重建已删除的临时根（否则「临时目录被删」不再触发回退链）。
-		return fmt.Errorf("secretdata: 创建临时目录失败: %w", merr)
+		// 用 Mkdir（而非 MkdirAll）：**叶子**必须新建（不复用旧目录）——只在父链缺失时补建一次。
+		//
+		// 背景（2026-11-16 线上回归）：原实现假定「卷临时根已存在」，但实操中**进程临时根可能不在**
+		// （进程被重启后旧根已清、或根被临时清理器回收）⇒ Mkdir 恒 ENOENT ⇒ 每次都走「本地 staging
+		// 不可用 ⇒ 内存交付」降级链 ⇒ 写入变慢且重读源（实测 50 MiB 写入被拖到 19 分钟）。
+		// 这里**仅补建缺失的父链**（MkdirAll，0700），叶子仍用 Mkdir 新建 ⇒ 既不误复用旧目录，
+		// 也不再把「临时根缺失」误判为不可用（磁盘满/不可写等真实故障仍会如实报错）。
+		if !errors.Is(merr, fs.ErrNotExist) {
+			return fmt.Errorf("secretdata: 创建临时目录失败: %w", merr)
+		}
+		if perr := os.MkdirAll(filepath.Dir(dir), 0o700); perr != nil {
+			return fmt.Errorf("secretdata: 创建临时根失败: %w", perr)
+		}
+		if merr2 := os.Mkdir(dir, 0o700); merr2 != nil {
+			return fmt.Errorf("secretdata: 创建临时目录失败: %w", merr2)
+		}
 	}
 	return nil
 }
