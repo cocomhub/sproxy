@@ -106,15 +106,16 @@ func (f *tamperOnceFS) didTamper() bool {
 	return f.tampered
 }
 
-// TestWriteFile_BatchVerifyWholeFileRetry 钉住**批量校验 + 整文件自动重试**（2026-11-04 设计）：
+// TestWriteFile_BatchVerifyWholeFileRetry 钉住**批量校验 + 覆盖写重传一次**（2026-11-04 设计；
+// 2026-11-17 收敛纪律修订）：
 //
 //  1. 某块落盘内容被篡改 ⇒ 批量校验（上传阶段不做即时校验）发现 md5 不一致；
-//  2. 当前设计**不保留本地密文副本**（峰值 O(并发度)），单块重建与写侧格式不同构（实测
-//     会写坏数据）⇒ 逐轮重传无副本可用；
-//  3. 轮次耗尽 ⇒ `ErrBatchVerifyFailed` ⇒ `writeFileStreamEntryWithRetry` **整文件重试一次**
+//  2. 批量校验**有界且每轮一次**（不保留本地密文副本：峰值 O(并发度)；单块重建与写侧格式
+//     不同构，实测会写坏数据）⇒ 不通过即快失败；
+//  3. `ErrBatchVerifyFailed` ⇒ `writeFileStreamEntryWithRetry` **覆盖写重传一次**
 //     （源可重读）⇒ 第二次写入全部正常 ⇒ 成功且内容正确。
 //
-// 变异：去掉整文件重试（writeFileStreamEntryWithRetry 直接返回 err）⇒ 本用例必红。
+// 变异：去掉重传（writeFileStreamEntryWithRetry 直接返回 err）⇒ 本用例必红。
 func TestWriteFile_BatchVerifyWholeFileRetry(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

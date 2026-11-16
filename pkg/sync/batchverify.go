@@ -25,6 +25,14 @@ import (
 // 本文件只定义**跨后端中性**的能力接口与 ctx 标记（后端按自身协议实现；未实现 ⇒ 调用方回落
 // 逐次校验，行为零变化）。
 
+// BlockMD5Size 是 `VerifyItem.BlockMD5s` 的**分块大小**（4 MiB）。
+//
+// 取值来源：百度网盘分片上传的固定分块大小（`baidupcs.uploadBlockSize`；实测远端 `block_list`
+// 与之同构且上传后 **T+0 可用**，见 docs/external-dependencies.md §7.8.5）。生产方（如 secretdata
+// 写路径）按本常量切分 `BlockMD5s`，消费方（后端 `VerifyMany`）与远端 `block_list` 对账
+// （`reconcileBlockList`）⇒ 两侧同源。baidupcs 侧有编译期断言锁定与上传分块大小一致。
+const BlockMD5Size = 4 << 20
+
 // VerifyItem 是一项待校验的对象（键 = 后端存储层 key）。
 type VerifyItem struct {
 	// Key 是对象键（相对卷根，正斜杠）。
@@ -35,6 +43,13 @@ type VerifyItem struct {
 	Size int64
 	// CRC32 是内容的 CRC32 IEEE（无符号十进制字符串；秒传类后端的刷新参数，可空）。
 	CRC32 string
+	// BlockMD5s 是按 BlockMD5Size 切分的**本地逐块内容 md5**（hex 顺序列表；可空）。
+	//
+	// 为什么需要（2026-11-17）：远端 `md5` 字段对 **≥ BlockMD5Size（4 MiB）的分片上传**不可靠
+	// （是分片组合值或标注「可能不正确」）⇒ **大对象不得以 md5 相等作为通过判据**；应以远端
+	// `block_list`（按 4 MiB 的逐块 md5，T+0 可用）与本列表逐块对账。小对象（< BlockMD5Size）
+	// 仍用 md5/size。生产方须与实际用于上传的分块大小一致（见 BlockMD5Size 注释）。
+	BlockMD5s []string
 }
 
 // VerifyState 是单项校验结果。
