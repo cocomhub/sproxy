@@ -119,7 +119,7 @@ SPDX-License-Identifier: Apache-2.0
 
 | 阶段 | 内容 | 收益/验收 | 风险 | 回滚 |
 | --- | --- | --- | --- | --- |
-| **P0（建议立即，1 个小 PR）** | **S2 顺序读 → 有限并发批量读**（8 路，`errgroup`/信号量）+ 指标（miss 次数 / 批量耗时 / sidecar 失败数） | cache-miss 大目录读 **4.6×**（实测 54→12 ms/2k）；零新状态 | 极低（纯读并发，无新文件） | 改回顺序（1 行） |
+| **P0 ✅ 已交付（2026-11-16）** | **S2 顺序读 → 有界并发批量读**（**固定 worker 池 8**）+ 计数与指标（`sidecar_reads/errors_total`） | cache-miss 大目录读 **4.6×**（实测 54→12 ms/2k）；零新状态 | 极低（纯读并发，无新文件） | 改回顺序（1 行） |
 | **P1（结构性，独立 PR）** | **dirindex 格式 + 写路径（追加日志 + 压实）** + 校验 + 失败上报（新 `issues.Kind`）+ 结构门禁（写覆盖/一致性自检），**读路径不变**（开关默认关） | v1：写侧 ≈5 µs/文件、压实摊销；读侧未启用（零行为回归） | 中（写路径复杂度、Windows 锁语义） | 开关关闭 ⇒ 完全走 S2 |
 | **P2** | 读路径：**优先 dirindex → 回退 S2 → 回退台账**；打开开关（灰度）；补 e2e（大批量目录/并发写/崩溃重启） | 读 **≈25×**；台账读路径在本地侧可停用 | 中 | 关开关 |
 | **P3** | 迁移/自愈：首列举**重建**索引（逐 sidecar 聚合，一次落盘）+ 压实调度 + 指标/告警 | 存量目录自动收敛 | 低 | 重建幂等 |
@@ -144,7 +144,15 @@ SPDX-License-Identifier: Apache-2.0
 | 预算/上界 | 单目录日志/条目超阈值 ⇒ 强制压实或转分片（不得无界增长） | 无阈值 ⇒ 红 |
 | 回退链 | 索引缺失/损坏/开关关闭 ⇒ 结果与 S2 逐条等价 | 回退后 checksum 缺失 ⇒ 红 |
 
-## 7. 决策点（需用户裁定）
+## 7. 交付记录
+
+- **P0（2026-11-16）**：`pkg/volumestate` —— `fillLocalChecksums` 由顺序读改为**固定 worker 池（8 并发）**
+  （`sidecarReadConcurrency`；用固定池而非「每条目一个 goroutine + 信号量」，避免超大目录爆发 goroutine）；
+  新增计数 `Cache.SidecarStats()` 与指标 `sproxy_volume_sidecar_{reads,errors}_total`。
+  验证：`TestCacheFS_LocalChecksumReadsConcurrently`（峰值 ≥2 且 ≤8；**变异：池改 1 ⇒ 峰值 1 ⇒ 红**）、
+  `TestCacheFS_SidecarErrorsCounted`（缺失计数，不伪造）；`-race` + 全量 archcheck 绿。
+
+## 8. 决策点（需用户裁定）
 
 1. **是否按 P0→P4 推进**？建议：**P0 立即做**（便宜、无风险）；**P1 视 P0 后的基线决定是否继续**
    （若 P0 后大目录 miss 已可接受，P1–P4 可降级为「按需立项」）。

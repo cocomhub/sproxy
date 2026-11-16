@@ -326,6 +326,11 @@ func (h *Handlers) renderIndexCacheMetrics(b *strings.Builder, m *metrics.Metric
 			"Volume state cache misses (list回源 to the volume FS)", misses)
 		metrics.WriteMetric(b, "sproxy_volume_cache_entries", "gauge",
 			"Volume state cache entries currently held in memory (LRU)", int64(entries))
+		sidecarReads, sidecarErrs := c.SidecarStats()
+		metrics.WriteMetric(b, "sproxy_volume_sidecar_reads_total", "counter",
+			"Local-volume sidecar reads performed to fill list checksums (cache miss)", sidecarReads)
+		metrics.WriteMetric(b, "sproxy_volume_sidecar_errors_total", "counter",
+			"Sidecar reads that failed or had no checksum (fall back to stat/all-unknown)", sidecarErrs)
 	}
 	if svc := h.fileService(); svc != nil {
 		owners, entries, rebuilds := svc.IndexStats()
