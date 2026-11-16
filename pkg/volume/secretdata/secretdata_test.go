@@ -779,7 +779,8 @@ func TestLoadIndex_SkipsContainerWithoutDirMeta(t *testing.T) {
 }
 
 // TestNewFS_AlgorithmResolutionFailFast：NewFS 对 Options.Algorithm 做 fail-fast 解析——
-// 未注册算法立刻报错（不静默回落默认）；空默认 v1（shardseal/aes-256-gcm）；显式已知算法成功。
+// 未注册算法立刻报错（不静默回落默认）；空默认 **收敛档**（shardseal/aes-256-gcm-conv，
+// 确定性密文，设计 §5）；显式已知算法成功（此处显式 v1）。
 func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
 	t.Parallel()
 	mkInner := func(t *testing.T) syncpkg.FS {
@@ -796,13 +797,16 @@ func TestNewFS_AlgorithmResolutionFailFast(t *testing.T) {
 		t.Fatal("未注册算法应 fail-fast 报错，却成功")
 	}
 
-	// 空算法 → 默认 v1（shardseal/aes-256-gcm）成功。
+	// 空算法 → 默认**收敛档**（确定性密文）成功。
 	fs, err := NewFS(mkInner(t), Options{Secret: []byte("s"), TempDir: t.TempDir()})
 	if err != nil {
-		t.Fatalf("空算法应默认 v1 成功: %v", err)
+		t.Fatalf("空算法应默认收敛档成功: %v", err)
 	}
-	if fs.algoVer != shardseal.AlgoV1GCM {
-		t.Errorf("空算法默认 version=%d，应为 v1", fs.algoVer)
+	if fs.algoVer != shardseal.AlgoV2GCM {
+		t.Errorf("空算法默认 version=%d，应为收敛档 %d", fs.algoVer, shardseal.AlgoV2GCM)
+	}
+	if !fs.convergent {
+		t.Error("默认算法应为收敛档（convergent=true）")
 	}
 
 	// 显式已知算法 → 成功。
@@ -1214,7 +1218,7 @@ func TestDecryptDirMeta_DirIDFailClosed(t *testing.T) {
 		salt, _ := shardseal.RandSalt()
 		key, _ := shardseal.DeriveKey(fs.secret, salt, fs.algoVer)
 		dmJSON, _ := json.Marshal(dm)
-		b, _ := shardseal.EncryptMetaJSON(key, salt, dmJSON, 0)
+		b, _ := shardseal.EncryptMetaJSON(key, salt, dmJSON, 0, false)
 		return b
 	}
 	for _, bad := range []string{

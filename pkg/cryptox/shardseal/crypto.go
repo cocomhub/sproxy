@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -81,6 +80,11 @@ const (
 	AlgoV1GCMHigh AlgoVersion = 2
 	// AlgoV1GCMLow 是 AES-256-GCM **low 档**（N=2^12，测试/低配；域 "shardseal/v1-low"）。
 	AlgoV1GCMLow AlgoVersion = 3
+	// AlgoV2GCM 是 AES-256-GCM **收敛档**（standard 强度 N=2^14；域 "shardseal/v2"）：与 v1
+	// 唯一差别是**确定性派生**——同一明文在同一卷上两次加密产出逐字节相同的密文/名
+	// （设计 docs/designs/2026-11-16-deterministic-blob-convergent-encryption.md §3/§10）。
+	// v1 blob 仍按自身版本解密（读路径按 meta.AlgoVersion 分派），**不改老版本语义**。
+	AlgoV2GCM AlgoVersion = 5
 )
 
 // Algorithm 是注册的算法定义：版本 + 标识 + 派生域标记 + 加解密工厂。Encrypt/Decrypt
@@ -91,6 +95,10 @@ type Algorithm struct {
 	// Options.Algorithm 按此解析到版本——secretdata 零绑定版本）。
 	Name      string
 	KDFDomain string // scrypt 派生域标记（混入 secret，域不同 key 不同）
+	// Convergent 标记该算法版本使用**确定性派生**（同 (卷密钥, 内容标识 CID) ⇒ 同密文/同名）：
+	// 收敛加密档（AlgoV2GCM）置真，把一次加密里的随机字节（盐/nonce/首部/间隙/块长）改为
+	// 按卷密钥+CID 确定性派生（见 convergent.go）。v1 各档置假（保持 crypto/rand 随机）。
+	Convergent bool
 	// ScryptN/R/P 是 scrypt 派生强度参数（KDF 档位：不同档 = 不同 Version + 域分离，
 	// 同 secret+salt 不同档派生不同 key）。
 	ScryptN, ScryptR, ScryptP int
@@ -216,7 +224,7 @@ func init() {
 		Name:      AlgorithmName,
 		KDFDomain: "shardseal/v1", // scrypt 派生域标记：混入 secret，版本分离
 		ScryptN:   scryptNStandard, ScryptR: scryptR, ScryptP: scryptP,
-		Encrypt: sealBlock,
+		Encrypt: sealBlockAlgo,
 		Decrypt: decryptBlock,
 	})
 	RegisterAlgorithm(Algorithm{
@@ -224,7 +232,7 @@ func init() {
 		Name:      AlgorithmName + "-high",
 		KDFDomain: "shardseal/v1-high",
 		ScryptN:   scryptNHigh, ScryptR: scryptR, ScryptP: scryptP,
-		Encrypt: sealBlock,
+		Encrypt: sealBlockAlgo,
 		Decrypt: decryptBlock,
 	})
 	RegisterAlgorithm(Algorithm{
@@ -232,8 +240,21 @@ func init() {
 		Name:      AlgorithmName + "-low",
 		KDFDomain: "shardseal/v1-low",
 		ScryptN:   scryptNLow, ScryptR: scryptR, ScryptP: scryptP,
-		Encrypt: sealBlock,
+		Encrypt: sealBlockAlgo,
 		Decrypt: decryptBlock,
+	})
+	// 收敛档（确定性密文；AlgoV2GCM）：KDF 域 "shardseal/v2" + Convergent 标记。默认写版本
+	// （secretdata NewFS 的 Options.Algorithm 缺省值经 AlgorithmNameConvergent 命中此档，
+	// 见 meta.go）。Encrypt/Decrypt 回调字段（Algorithm 的工厂签名）不参与统一的
+	// sealBlock/decryptBlock 路径，仅填一个可往返的 AES-GCM 实现以满足注册契约。
+	RegisterAlgorithm(Algorithm{
+		Version:   AlgoV2GCM,
+		Name:      AlgorithmNameConvergent,
+		KDFDomain: "shardseal/v2",
+		ScryptN:   scryptNStandard, ScryptR: scryptR, ScryptP: scryptP,
+		Convergent: true,
+		Encrypt:    sealBlockAlgo,
+		Decrypt:    decryptBlock,
 	})
 }
 
@@ -434,20 +455,27 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-// sealBlock 把 plaintext 加密为统一落盘格式 [R 128B 随机][8B 密文长][salt][nonce][ct+tag]。
-// 派生 key 由调用方每文件一次 DeriveKey(secret, salt, v)，本层不重复 scrypt。
-func sealBlock(key, salt, plain []byte) ([]byte, error) {
+// sealBlockAlgo 是 Algorithm.Encrypt 回调（统一格式简式 AES-GCM，固定随机源）。生产加密走
+// encryptBlocklets 的完整布局，不经该回调；回调用以満足注册契约与包装往返测试。
+func sealBlockAlgo(key, salt, plain []byte) ([]byte, error) {
+	return sealBlock(cryptoSealSource{}, key, salt, plain)
+}
+
+// sealBlock 把 plaintext 加密为统一落盘格式 [R 128B][8B 密文长][salt][nonce][ct+tag]。
+// 派生 key 由调用方每文件一次 DeriveKey(secret, salt, v)，本层不重复 scrypt。ss 提供随机
+// 字节（v1 = crypto/rand；v2 收敛 = 确定性派生）。
+func sealBlock(ss sealSource, key, salt, plain []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
 	}
-	r := make([]byte, RandPrefixLen)
-	if _, err := rand.Read(r); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机首部失败: %w", err)
+	r, err := ss.Bytes("meta/hdr", RandPrefixLen)
+	if err != nil {
+		return nil, err
 	}
-	nonce := make([]byte, NonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机 nonce 失败: %w", err)
+	nonce, err := ss.Bytes("meta/nonce", NonceLen)
+	if err != nil {
+		return nil, err
 	}
 	// ct 长度 = len(明文)+16（含 GCM tag）——长度头与文件大小线性一致。
 	ct := gcm.Seal(nil, nonce, plain, nil)
@@ -558,13 +586,14 @@ func blockFirstUsed(blocklets []Blocklet) int64 {
 	return 0
 }
 
-// randomFill 生成长度为 n 的加密随机字节（padding 段 / 段间间隙填充用）。
-func randomFill(n int64) []byte {
-	b := make([]byte, int(n))
-	if _, err := rand.Read(b); err != nil {
-		return make([]byte, int(n)) // crypto/rand 失败回落全零（上游错误路径可见）
+// randomFill 生成长度为 n 的填充字节（padding 段 / 段间间隙填充用），由 ss 提供
+// （v1 = crypto/rand；v2 收敛 = 确定性派生）；失败即 fail-closed（不静默回零）。
+func randomFill(ss sealSource, label string, n int64) ([]byte, error) {
+	b, err := ss.Bytes(label, int(n))
+	if err != nil {
+		return nil, fmt.Errorf("shardseal: 填充字节失败: %w", err)
 	}
-	return b
+	return b, nil
 }
 
 // BlobIndexEntry 是索引块内单个段的定位（无 meta 随机访问用；off 为块内相对偏移）。
@@ -603,8 +632,10 @@ type BlobDigest struct {
 // boot 明文固定长（记录索引块位置）；index 记录全部段定位 + 文件级摘要（有 blob+secret
 // 即可随机访问，不依赖外部 meta）；每段 AAD=[type][off][len] 认证（type/off/len 不明文），
 // 段间随机 padding 间隙混淆边界——观察者只见随机字节流、不可切分。返回 blob 与索引条目
-// （enc_offset/enc_size 供 meta 冗余记录）。algoVer 仅防御性校验算法注册。
-func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoVer AlgoVersion) ([]byte, []BlobIndexEntry, error) {
+// （enc_offset/enc_size 供 meta 冗余记录）。algoVer 仅防御性校验算法注册。ss 提供随机字节
+// （v1 = crypto/rand；v2 收敛 = 确定性派生）；blockIdx 是块序号（0-based），用于 v2 确定性
+// 派生时给每块/每段唯一标签（保证 nonce 在同文件密钥下不重用）。
+func encryptBlocklets(ss sealSource, key, salt []byte, blocklets []Blocklet, data []byte, algoVer AlgoVersion, blockIdx int64) ([]byte, []BlobIndexEntry, error) {
 	registryMu.RLock()
 	_, ok := registry[algoVer]
 	registryMu.RUnlock()
@@ -619,7 +650,7 @@ func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoV
 	if err != nil {
 		return nil, nil, err
 	}
-	gaps, entries, stream := planBlockletLayout(blocklets, blockOffset)
+	gaps, entries, stream := planBlockletLayout(ss, blocklets, blockOffset, blockIdx)
 	idxJSON, indexEncSize, indexEncOff, err := buildBlockIndex(entries, data, stream)
 	if err != nil {
 		return nil, nil, err
@@ -629,7 +660,7 @@ func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoV
 		gaps: gaps, stream: stream + indexEncSize,
 		indexEncOff: indexEncOff, indexEncSize: indexEncSize,
 	}
-	blob, err := assembleBlockBlob(gcm, salt, blocklets, data, blockOffset, layout, idxJSON)
+	blob, err := assembleBlockBlob(ss, gcm, salt, blocklets, data, blockOffset, layout, idxJSON, blockIdx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -638,12 +669,12 @@ func encryptBlocklets(key, salt []byte, blocklets []Blocklet, data []byte, algoV
 
 // planBlockletLayout 计算段间随机间隙、各段 enc_offset/enc_size 与密文流总长（不写盘）。
 // 布局：boot 固定 blListOff（占用 bootEncSize），随后 blocklet 段（顺序）+ 随机间隙，
-// index 放段序列末。
-func planBlockletLayout(blocklets []Blocklet, blockOffset int64) (gaps []int, entries []BlobIndexEntry, stream int64) {
+// index 放段序列末。间隙由 ss 提供（v1 随机；v2 按 (块序号,间隙序号) 确定性派生）。
+func planBlockletLayout(ss sealSource, blocklets []Blocklet, blockOffset, blockIdx int64) (gaps []int, entries []BlobIndexEntry, stream int64) {
 	gaps = make([]int, len(blocklets)+1) // gaps[i]：boot(i=0)/第 i 个 blocklet 之后的间隙
 	for i := range gaps {
 		if i < len(gaps)-1 {
-			gaps[i] = int(cryptoRandN(64))
+			gaps[i] = int(ss.N(fmt.Sprintf("blk%d/gap%d", blockIdx, i), 64))
 		}
 	}
 	stream = bootEncSize + int64(gaps[0])
@@ -683,10 +714,10 @@ type blobLayout struct {
 }
 
 // assembleBlockBlob 组装最终 blob：R + 8B 密文流总长 + salt + boot + 段序列 + index。
-func assembleBlockBlob(gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data []byte, blockOffset int64, layout blobLayout, idxJSON []byte) ([]byte, error) {
-	r := make([]byte, RandPrefixLen)
-	if _, err := rand.Read(r); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机首部失败: %w", err)
+func assembleBlockBlob(ss sealSource, gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data []byte, blockOffset int64, layout blobLayout, idxJSON []byte, blockIdx int64) ([]byte, error) {
+	r, err := ss.Bytes(fmt.Sprintf("blk%d/hdr", blockIdx), RandPrefixLen)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]byte, 0, blListOff+int(layout.stream))
 	out = append(out, r...)
@@ -694,19 +725,19 @@ func assembleBlockBlob(gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data 
 	binary.BigEndian.PutUint64(totalBuf[:], uint64(layout.stream))
 	out = append(out, totalBuf[:]...)
 	out = append(out, salt...)
-	out, err := sealBootSegment(gcm, out, layout.indexEncOff, layout.indexEncSize, layout.gaps[0])
+	out, err = sealBootSegment(ss, gcm, out, layout.indexEncOff, layout.indexEncSize, layout.gaps[0], blockIdx)
 	if err != nil {
 		return nil, err
 	}
 	for i, bl := range blocklets {
-		out, err = sealBlockletSegment(gcm, out, bl, data, blockOffset, layout.gaps[i+1])
+		out, err = sealBlockletSegment(ss, gcm, out, bl, data, blockOffset, layout.gaps[i+1], blockIdx, int64(i))
 		if err != nil {
 			return nil, err
 		}
 	}
-	indexNonce := make([]byte, NonceLen)
-	if _, err := rand.Read(indexNonce); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机 nonce 失败: %w", err)
+	indexNonce, err := ss.Bytes(fmt.Sprintf("blk%d/idx", blockIdx), NonceLen)
+	if err != nil {
+		return nil, err
 	}
 	out = append(out, indexNonce...)
 	out = append(out, gcm.Seal(nil, indexNonce, idxJSON, encodeBlockletAAD(BlockletTypeIndex, 0, int64(len(idxJSON))))...)
@@ -714,24 +745,28 @@ func assembleBlockBlob(gcm cipher.AEAD, salt []byte, blocklets []Blocklet, data 
 }
 
 // sealBootSegment 密封引导段并写入 out（AAD=[Boot][0][bootPlainLen]；明文 = 索引块位置），
-// 随后写入随机间隙。
-func sealBootSegment(gcm cipher.AEAD, out []byte, indexEncOff int, indexEncSize int64, gap int) ([]byte, error) {
+// 随后写入间隙（由 ss 提供）。
+func sealBootSegment(ss sealSource, gcm cipher.AEAD, out []byte, indexEncOff int, indexEncSize int64, gap int, blockIdx int64) ([]byte, error) {
 	bootPlain := make([]byte, bootPlainLen)
 	binary.BigEndian.PutUint64(bootPlain[0:8], uint64(indexEncOff))
 	binary.BigEndian.PutUint32(bootPlain[8:12], uint32(indexEncSize))
-	nonce := make([]byte, NonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机 nonce 失败: %w", err)
+	nonce, err := ss.Bytes(fmt.Sprintf("blk%d/boot", blockIdx), NonceLen)
+	if err != nil {
+		return nil, err
 	}
 	out = append(out, nonce...)
 	out = append(out, gcm.Seal(nil, nonce, bootPlain, encodeBlockletAAD(BlockletTypeBoot, 0, bootPlainLen))...)
-	return append(out, randomFill(int64(gap))...), nil
+	fill, ferr := randomFill(ss, fmt.Sprintf("blk%d/gapfill0", blockIdx), int64(gap))
+	if ferr != nil {
+		return nil, ferr
+	}
+	return append(out, fill...), nil
 }
 
 // sealBlockletSegment 密封单个 blocklet 段并写入 out（数据段取原文；padding/extra 段随机
-// 填充，均 GCM 认证），随后写入随机间隙。段明文本体优先取 bl.Data（nil=块内 data 切片，
+// 填充，均 GCM 认证），随后写入间隙。段明文本体优先取 bl.Data（nil=块内 data 切片，
 // 老路径；供错误段等自描述段）。均经 GCM 加密入密文，磁盘无明文。
-func sealBlockletSegment(gcm cipher.AEAD, out []byte, bl Blocklet, data []byte, blockOffset int64, gap int) ([]byte, error) {
+func sealBlockletSegment(ss sealSource, gcm cipher.AEAD, out []byte, bl Blocklet, data []byte, blockOffset int64, gap int, blockIdx, blIdx int64) ([]byte, error) {
 	if uint64(bl.Offset-blockOffset) > uint64(^uint32(0)) || uint64(bl.Size) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("shardseal: blocklet 偏移/大小超 uint32（off=%d len=%d，fail-closed）", bl.Offset, bl.Size)
 	}
@@ -745,15 +780,23 @@ func sealBlockletSegment(gcm cipher.AEAD, out []byte, bl Blocklet, data []byte, 
 	case blockletType(bl) == BlockletTypeData:
 		segment = data[bl.Offset-blockOffset : bl.Offset-blockOffset+bl.Size]
 	default:
-		segment = randomFill(bl.Size)
+		fill, ferr := randomFill(ss, fmt.Sprintf("blk%d/pad%d", blockIdx, blIdx), bl.Size)
+		if ferr != nil {
+			return nil, ferr
+		}
+		segment = fill
 	}
-	nonce := make([]byte, NonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机 nonce 失败: %w", err)
+	nonce, err := ss.Bytes(fmt.Sprintf("blk%d/b%d", blockIdx, blIdx), NonceLen)
+	if err != nil {
+		return nil, err
 	}
 	out = append(out, nonce...)
 	out = append(out, gcm.Seal(nil, nonce, segment, encodeBlockletAAD(blockletType(bl), bl.Offset-blockOffset, bl.Size))...)
-	return append(out, randomFill(int64(gap))...), nil
+	fill, gerr := randomFill(ss, fmt.Sprintf("blk%d/gapfill%d", blockIdx, blIdx+1), int64(gap))
+	if gerr != nil {
+		return nil, gerr
+	}
+	return append(out, fill...), nil
 }
 
 // decryptBlockletSegment 按索引条目解密块 blob 内单个段（错误段等非数据段也适用）。用
@@ -989,9 +1032,17 @@ func openBlock(key, blob []byte) ([]byte, error) {
 // （padTarget>0 时 padding 到「整块落盘总长 = padTarget」；0 = 不 padding；过小目标
 // 视为不 padding——padding 只往大里扩，绝不裁剪）。输出统一 [R][8B 密文长][salt]
 // [nonce][ct+tag]，长度头与文件大小线性一致（padding 在密文内、属 GCM 认证范围）。
-func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) {
+//
+// convergent（v2 收敛）：以**文件密钥为 HMAC key、salt 为内容标识**确定性派生 R/nonce/padding
+// （同文件同内容 ⇒ 逐字节相同 meta blob ⇒ 同 meta 名）；v1 传 false（crypto/rand 随机，
+// 行为逐字节不变）。收敛分支的 key 由卷密钥 scrypt 派生 ⇒ 仍满足设计 §10「派生绑定卷密钥」。
+func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int, convergent bool) ([]byte, error) {
 	if uint64(len(metaJSON)) > uint64(^uint32(0)) {
 		return nil, fmt.Errorf("shardseal: metaJSON 过长（len=%d）", len(metaJSON))
+	}
+	var ss sealSource = cryptoSealSource{}
+	if convergent {
+		ss = convSealSource{secret: key, cid: salt}
 	}
 	// 天然整块总长（无 padding）：R + 8B 长度头 + salt + nonce + (4B jsonLen 前缀 + json + GCM tag)；
 	// ctOff 已含 R+8B hdr+salt+nonce，+4 是明文内 jsonLen 前缀。
@@ -1005,13 +1056,13 @@ func EncryptMetaJSON(key, salt, metaJSON []byte, padTarget int) ([]byte, error) 
 	plain = append(plain, jsonLen[:]...)
 	plain = append(plain, metaJSON...)
 	if pad > 0 {
-		r := make([]byte, pad)
-		if _, err := rand.Read(r); err != nil {
-			return nil, fmt.Errorf("shardseal: 随机填充失败: %w", err)
+		r, err := ss.Bytes("meta/pad", pad)
+		if err != nil {
+			return nil, err
 		}
 		plain = append(plain, r...)
 	}
-	return sealBlock(key, salt, plain)
+	return sealBlock(ss, key, salt, plain)
 }
 
 // DecryptMetaJSON 解密 meta blob：跳 R → 长度头 → GCM → 读 4B jsonLen 截取真实
@@ -1031,11 +1082,8 @@ func DecryptMetaJSON(key, blob []byte) ([]byte, error) {
 	return plain[4 : 4+jsonLen], nil
 }
 
-// newSalt 生成文件级随机盐。
-func newSalt() ([]byte, error) {
-	s := make([]byte, SaltLen)
-	if _, err := rand.Read(s); err != nil {
-		return nil, fmt.Errorf("shardseal: 随机盐失败: %w", err)
-	}
-	return s, nil
+// fileSalt 生成文件级盐：v1 随机（crypto/rand），v2 收敛由 (卷密钥, CID) 确定性派生
+// （同内容同卷 ⇒ 同盐 ⇒ 同文件密钥 ⇒ 同密文）。
+func fileSalt(ss sealSource) ([]byte, error) {
+	return ss.Bytes("file-salt", SaltLen)
 }

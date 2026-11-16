@@ -66,7 +66,7 @@ func TestEncryptShardsReaderToChunks_SkipsMetaKeepsChunks(t *testing.T) {
 	if jerr != nil {
 		t.Fatalf("marshal meta: %v", jerr)
 	}
-	metaBlob, berr := EncryptMetaJSON(key, salt, metaJSON, 1<<20)
+	metaBlob, berr := EncryptMetaJSON(key, salt, metaJSON, 1<<20, false)
 	if berr != nil {
 		t.Fatalf("EncryptMetaJSON: %v", berr)
 	}

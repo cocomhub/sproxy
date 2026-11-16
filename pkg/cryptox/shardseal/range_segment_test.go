@@ -21,7 +21,7 @@ func TestDecryptBlockletSegmentStandalone(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, data, AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, data, AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestDecryptBlockletSegmentStandalone_Tamper(t *testing.T) {
 	key := bytes.Repeat([]byte{0x33}, KeyLen)
 	salt := bytes.Repeat([]byte{0x44}, SaltLen)
 	blocklets := []Blocklet{{Offset: 0, Size: 100}}
-	blob, entries, err := encryptBlocklets(key, salt, blocklets, bytes.Repeat([]byte{7}, 100), AlgoV1GCM)
+	blob, entries, err := encryptBlocklets(cryptoSealSource{}, key, salt, blocklets, bytes.Repeat([]byte{7}, 100), AlgoV1GCM, 0)
 	if err != nil {
 		t.Fatalf("encryptBlocklets: %v", err)
 	}
