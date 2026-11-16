@@ -411,6 +411,68 @@ func TestApplyConfigSet_XferTLSParams(t *testing.T) {
 	}
 }
 
+// TestApplyConfigSet_TLSPolicyAliases：config set 支持 TLS 策略键 insecure / ca_file
+// （用户免传 --insecure/--ca-file）。二者与 xfer_insecure / xfer_ca_file 是**同一底层
+// 开关的别名**（同写 XferInsecure / XferCAFile），非法 bool 值报错，ca_file 允许清空。
+func TestApplyConfigSet_TLSPolicyAliases(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	cfg := DefaultConfig()
+
+	if err := ApplyConfigSet(cfg, "insecure", "true"); err != nil {
+		t.Fatalf("insecure set: %v", err)
+	}
+	if !cfg.XferInsecure {
+		t.Fatal("insecure=true 应置位 XferInsecure")
+	}
+	if err := ApplyConfigSet(cfg, "insecure", "false"); err != nil {
+		t.Fatalf("insecure 复位: %v", err)
+	}
+	if cfg.XferInsecure {
+		t.Fatal("insecure=false 应复位 XferInsecure")
+	}
+	if err := ApplyConfigSet(cfg, "insecure", "yes"); err == nil {
+		t.Fatal("非法 insecure 值应报错")
+	}
+
+	if err := ApplyConfigSet(cfg, "ca_file", "/etc/sproxy/ca.pem"); err != nil {
+		t.Fatalf("ca_file set: %v", err)
+	}
+	if cfg.XferCAFile != "/etc/sproxy/ca.pem" {
+		t.Fatalf("ca_file 应写 XferCAFile, got %q", cfg.XferCAFile)
+	}
+	if err := ApplyConfigSet(cfg, "ca_file", ""); err != nil {
+		t.Fatalf("ca_file 清空应成功: %v", err)
+	}
+	if cfg.XferCAFile != "" {
+		t.Fatalf("ca_file 清空后应为空, 实际 %q", cfg.XferCAFile)
+	}
+}
+
+// TestHandleConfigShow_TLSPolicyLabels：config show 以 Insecure / CAFile 展示 TLS 策略
+// （不再出现 XferInsecure / XferCAFile 旧标签）。
+func TestHandleConfigShow_TLSPolicyLabels(t *testing.T) {
+	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.XferInsecure = true
+	cfg.XferCAFile = "/etc/sproxy/ca.pem"
+
+	var buf bytes.Buffer
+	HandleConfigShow(cfg, &buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "Insecure:        true") {
+		t.Errorf("show 应以 Insecure 展示策略, got: %s", out)
+	}
+	if !strings.Contains(out, "CAFile:          /etc/sproxy/ca.pem") {
+		t.Errorf("show 应以 CAFile 展示策略, got: %s", out)
+	}
+	if strings.Contains(out, "XferInsecure") || strings.Contains(out, "XferCAFile") {
+		t.Errorf("show 不应再出现旧 Xfer* 标签, got: %s", out)
+	}
+}
+
 // TestLoadConfig_XferTLSParams（阶段5 PR-4）：YAML 中 xfer_ca_file / xfer_insecure
 // 正确解码。
 func TestLoadConfig_XferTLSParams(t *testing.T) {

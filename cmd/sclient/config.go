@@ -20,7 +20,7 @@ func NewCmdConfig(factory clientfactory.Factory, ios cli.IOStreams, cfgFile *str
 	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "config [show|set <key> <value>|remote]",
 		Short: "配置管理",
-		Long:  "查看或修改 sclient 配置（统一 context 模型 config.yaml）。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  access_key      SproxySig 认证 AccessKey（服务端凭据 Ring 登记了该 AK/SK 时需要）\n  access_key_secret  SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线）\n  access_key_id   SproxySig SK 条目 ID（可选；trust renew 成功后自动回填）\n  timeout         HTTP 超时秒数\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)\n  hub_url         mesh/relay/p2p 共用的 hub 地址 (如 wss://hub.example.com/ws)\n  node_id         本节点默认 ID (mesh/relay/p2p 信令来源；为空回落主机名)\n  peer_fingerprints  对端身份指纹 pinning 列表（逗号分隔，64 hex 或 sha256:<64 hex>；配置后 xfer 隧道握手 fail-closed 校验对端身份）\n\n统一 context 后所有读写都在 config.yaml（environments/users/contexts 三件套）。",
+		Long:  "查看或修改 sclient 配置（统一 context 模型 config.yaml）。\n\n可用配置项:\n  server_url      服务器地址 (如 https://127.0.0.1:18083)\n  access_key      SproxySig 认证 AccessKey（服务端凭据 Ring 登记了该 AK/SK 时需要）\n  access_key_secret  SproxySig 认证 AccessKeySecret（本地密钥，仅计算签名，永不上线）\n  access_key_id   SproxySig SK 条目 ID（可选；trust renew 成功后自动回填）\n  timeout         HTTP 超时秒数\n  chunk_size      分块上传/下载块大小 (字节)\n  max_chunk_size  最大分块大小 (字节)\n  hub_url         mesh/relay/p2p 共用的 hub 地址 (如 wss://hub.example.com/ws)\n  node_id         本节点默认 ID (mesh/relay/p2p 信令来源；为空回落主机名)\n  peer_fingerprints  对端身份指纹 pinning 列表（逗号分隔，64 hex 或 sha256:<64 hex>；配置后 xfer 隧道握手 fail-closed 校验对端身份）\n  insecure        跳过 TLS 证书校验（等效 --insecure；配置一次即持久生效）\n  ca_file         受信 CA 文件路径（PEM；等效 --ca-file；与 insecure 互斥，更安全做法）\n\n统一 context 后所有读写都在 config.yaml（environments/users/contexts 三件套）。",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 统一 context：config.yaml（context 模型）是唯一配置源。无配置/损坏 → fail-closed。
 			cc, err := loadContextConfig(*cfgFile)
@@ -95,6 +95,9 @@ func loadContextConfig(cfgPath string) (*contextcfg.Config, error) {
 //   - access_key / access_key_secret / access_key_id → 当前 user 段；
 //   - volume → 当前 context 段；
 //   - 其它键 → 报错指引 `sclient context set`。
+//
+// TLS 策略键 insecure / ca_file（免传 --insecure/--ca-file）写当前 env 段；
+// xfer_insecure / xfer_ca_file 是它们的别名（同一底层开关）。
 func applyConfigSetContext(cc *contextcfg.Config, key, value string) error {
 	if cc == nil {
 		return fmt.Errorf("当前 context 无可写配置（请先 sclient context use <name>）")
@@ -137,6 +140,10 @@ func applyConfigSetContext(cc *contextcfg.Config, key, value string) error {
 		resolved.User.AccessKeyID = view.AccessKeyID
 	case "volume":
 		resolved.Volume = strings.TrimSpace(value)
+	case "insecure", "xfer_insecure":
+		resolved.Environment.Insecure = view.XferInsecure
+	case "ca_file", "xfer_ca_file":
+		resolved.Environment.CAFile = view.XferCAFile
 	default:
 		return fmt.Errorf("config set 不支持 context 键 %q（用 sclient context set 管理；或查看 config show）", key)
 	}
