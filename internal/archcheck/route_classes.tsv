@@ -12,6 +12,10 @@
 # 格式：<mux>	<pattern>	<class>	<file>:<line>
 localMux	GET /api/volumes/{name}/explain	tunnel	pkg/server/routes_files.go
 localMux	GET /api/volumes/{name}/trace	tunnel	pkg/server/routes_files.go
+# /metrics 与 /debug/pprof/ 的隧道内层裸注册（隧道加密即认证）：使 `sclient perf metrics`
+# / `sclient perf profile`（默认走传统 /tunnel 隧道）可达（此前只挂 srvMux ⇒ 404）。
+localMux	GET /metrics	tunnel	pkg/server/routes.go
+localMux	GET /debug/pprof/	tunnel	pkg/server/pprof_handlers.go
 localMux	POST /upload	tunnel	pkg/server/routes.go:222
 localMux	GET /download	tunnel	pkg/server/routes.go:223
 localMux	POST /delete	tunnel	pkg/server/routes.go:224

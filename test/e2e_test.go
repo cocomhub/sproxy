@@ -13,6 +13,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/certmgr"
 	"github.com/cocomhub/sproxy/pkg/client"
 	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/sproxysig"
@@ -258,6 +260,30 @@ func startSPROXY(t *testing.T) (string, func()) {
 // 供磁盘残留断言（507 后无文件落盘）。extraConfig 为空时行为与 startSPROXY 完全一致。
 func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) {
 	t.Helper()
+	baseURL, uploadsDir, _, cleanup := startSPROXYServe(t, sproxyServeOpts{extra: extraConfig})
+	return baseURL, uploadsDir, cleanup
+}
+
+// startSPROXYTLS 启动启用**自签 TLS** 的 sproxy 子进程（healthz 探测走 https + 跳过
+// 校验客户端），返回 baseURL（https://...）、存储根、自签证书 PEM 路径（供 --ca-file 用）
+// 与 cleanup。用于验证 --insecure / 配置 insecure 在真实 TLS 服务端上的覆盖。
+func startSPROXYTLS(t *testing.T, extraConfig string) (string, string, string, func()) {
+	t.Helper()
+	return startSPROXYServe(t, sproxyServeOpts{tls: true, extra: extraConfig})
+}
+
+// sproxyServeOpts 是 startSPROXYServe 的服务端启停选项。
+//   - tls: true 时生成自签证书并启用 TLS（返回 certFile）；false 时纯 HTTP。
+//   - extra: 追加到临时配置文件的额外 YAML 段（如 owner_quotas / hub 段）。
+type sproxyServeOpts struct {
+	tls   bool
+	extra string
+}
+
+// startSPROXYServe 是 E2E 服务端启停的**统一实现**：写临时配置（HTTP 或自签 TLS）、
+// 种子凭据、启动真实 sproxy 子进程并以正确 scheme 轮询 /healthz 就绪。
+func startSPROXYServe(t *testing.T, o sproxyServeOpts) (baseURL, uploadsDir, certFile string, cleanup func()) {
+	t.Helper()
 
 	tmpDir := t.TempDir()
 	// 二进制统一经 e2eBinPath 构造（test/sproxy_test 包共享：sync.Once + os.Stat
@@ -272,23 +298,34 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 	addr := l.Addr().String()
 	l.Close() //nolint:staticcheck // close before starting server is fine for tests
 
-	uploadsDir := filepath.Join(tmpDir, "uploads")
+	uploadsDir = filepath.Join(tmpDir, "uploads")
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		t.Fatalf("create uploads dir: %v", err)
 	}
 
 	// Start server
-	// 写入临时配置文件，禁用 TLS（E2E 测试使用纯 HTTP 连接）。
+	// 写入临时配置文件；默认禁用 TLS（E2E 测试使用纯 HTTP 连接），o.tls 时启用自签 TLS。
 	// 认证驱动：配置 access_keys（fail-fast 要求），客户端统一用 e2eTestAK/e2eTestSK 签名。
 	configPath := filepath.Join(tmpDir, "sproxy.yaml")
 	// e2eTestAK 为 ak-<hex>（2 段），accessKeyMesh 解析 mesh_id 为空字符串；
 	// 服务端 access_keys 不配 mesh_id（默认空）→ 两端 HKDF 派生参数一致。
-	configContent := fmt.Sprintf("tls:\n  enabled: false\ncloud_download_allow_private: true\naccess_keys:\n  - key: %q\n    secret: %q\n", e2eTestAK, e2eTestSK)
-	if extraConfig != "" {
-		configContent += extraConfig
+	tlsSection := "tls:\n  enabled: false\n"
+	scheme := "http"
+	if o.tls {
+		certFile = filepath.Join(tmpDir, "cert.pem")
+		keyFile := filepath.Join(tmpDir, "key.pem")
+		if gerr := certmgr.GenerateSelfSignedCert(certFile, keyFile); gerr != nil {
+			t.Fatalf("生成自签证书: %v", gerr)
+		}
+		tlsSection = fmt.Sprintf("tls:\n  enabled: true\n  cert_file: %q\n  key_file: %q\n", certFile, keyFile)
+		scheme = "https"
 	}
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("write temp config: %v", err)
+	configContent := tlsSection + fmt.Sprintf("cloud_download_allow_private: true\naccess_keys:\n  - key: %q\n    secret: %q\n", e2eTestAK, e2eTestSK)
+	if o.extra != "" {
+		configContent += o.extra
+	}
+	if werr := os.WriteFile(configPath, []byte(configContent), 0644); werr != nil {
+		t.Fatalf("write temp config: %v", werr)
 	}
 	// 凭据 store 化装配：服务端凭据表 = Ring（来自 <storage_root>/anonymous/meta/credentials.json，
 	// 取代 yaml access_keys）。首启（ring 空）生成 anonymous 随机凭据，导致 e2eTestAK
@@ -311,12 +348,18 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 		t.Fatalf("start sproxy: %v", err)
 	}
 
-	baseURL := fmt.Sprintf("http://%s", addr)
+	baseURL = fmt.Sprintf("%s://%s", scheme, addr)
 
-	// Poll healthz until ready (up to 5s)
+	// Poll healthz until ready (up to 5s)；https 场景用跳过校验的探测客户端（自签证书）。
+	healthClient := http.DefaultClient
+	if o.tls {
+		tr := netutil.IsolatedTransport()
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // 测试自签证书探测
+		healthClient = &http.Client{Transport: tr}
+	}
 	healthOK := false
 	testutil.WaitFor(t, 30*time.Second, func() bool {
-		resp, err := http.Get(baseURL + "/healthz")
+		resp, err := healthClient.Get(baseURL + "/healthz")
 		if err != nil {
 			return false
 		}
@@ -336,7 +379,7 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 		t.Fatalf("sproxy did not become ready within 5s")
 	}
 
-	cleanup := func() {
+	cleanup = func() {
 		// 使用 sync.Once 保证 cmd.Wait() 只被调用一次，避免 data race
 		var waitOnce sync.Once
 		// Try graceful shutdown on Unix; Windows only supports Kill.
@@ -360,7 +403,7 @@ func startSPROXYImpl(t *testing.T, extraConfig string) (string, string, func()) 
 		}
 	}
 
-	return baseURL, uploadsDir, cleanup
+	return baseURL, uploadsDir, certFile, cleanup
 }
 
 // ---- E2E tests ----

@@ -621,8 +621,8 @@ config.yaml 的 user 段（不再有平铺形态）。
 | `relay_token` | string | (空) | **已废除**（不再有该配置键）：hub 注册准入由服务端凭据 Ring 的 SproxySig AK+HMAC proof 提供；配置该键不生效 |
 | `node_id` | string | (空) | 本节点默认 ID（mesh/p2p/relay 信令来源与寻址目标；为空回落主机名） |
 | `peer_fingerprints` | []string | (空) | 对端身份指纹 pinning 列表（64 hex 或 `sha256:<64 hex>`，逗号分隔）。仅 `sclient tunnel --xfer <name>`（xfer/mux 隧道）消费：握手时 fail-closed 校验对端 Ed25519 身份指纹，防 MITM。对端指纹取 `sclient identity fingerprint` 带外固化；本端身份由 `sclient identity generate` 生成（XDG 目录 `sproxy/identity.json`）。需配置 `access_key`/`access_key_secret`（派生隧道密钥使握手执行；缺 key 但配置了身份/指纹时 fail-closed 报错）。传统隧道/文件直连命令不走 xfer 握手，配置此项会 fail-closed 报错（指引使用 `--xfer`），不静默跳过 |
-| `xfer_ca_file` | string | (空) | xfer `tcp+tls` 传输的受信 CA 文件路径（PEM；等价 `--ca-file`）。为空时用系统根池严格校验——服务端为自签证书（auto_tls）时握手报 `x509: certificate signed by unknown authority`，需配置此项或 `xfer_insecure` |
-| `xfer_insecure` | bool | `false` | 跳过 xfer `tcp+tls` 传输的证书校验（等价 `--insecure`）。**仅限 loopback hub**（远程 hub + insecure fail-closed 拒绝，需改用 `xfer_ca_file`）；与 `xfer_ca_file` 互斥 |
+| `xfer_ca_file` | string | (空) | 受信 CA 文件路径（PEM；等价 `--ca-file`；来自环境 `ca_file`）。**统一 TLS 策略**：经 `rootPreRunE` 回落注入全局 `--ca-file`，覆盖 HTTP 直连/传统 `/tunnel` 隧道/xfer `tcp+tls` 以及 mesh/relay/p2p/trust 等全部出站 TLS 面。为空时用系统根池严格校验（服务端自签证书时报 `x509: certificate signed by unknown authority`） |
+| `xfer_insecure` | bool | `false` | 跳过 TLS 证书校验（等价 `--insecure`；来自环境 `insecure`）。**统一 TLS 策略**：经 `rootPreRunE` 回落注入全局 `--insecure`，覆盖全部出站 TLS 面（HTTP 直连/传统隧道/xfer 及 mesh/relay/p2p/trust）。xfer `tcp+tls` 面**仅限 loopback hub**（远程 fail-closed 拒绝，需改用 `xfer_ca_file`）；与 `xfer_ca_file` 互斥 |
 
 > **TURN 中继配置（CLI flag，非配置键）**：TURN 凭据只在 sclient 发起 webrtc 打洞时
 > 本地使用，**服务端无 TURN 配置**。动态 TURN REST 短期凭证（coturn 标准）通过 CLI

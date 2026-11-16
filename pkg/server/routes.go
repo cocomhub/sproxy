@@ -506,9 +506,12 @@ func RegisterRoutes(ctx context.Context, opts RegisterRoutesOpts) *Handlers {
 	srvMux.HandleFunc("GET /healthz", h.healthz)
 	srvMux.HandleFunc("GET /version", h.versionHandler)
 	srvMux.Handle("GET /metrics", h.MetricsAuth(http.HandlerFunc(h.MetricsHandler)))
+	// 隧道内层（localMux）裸注册 /metrics：隧道加密 + SproxySig 已提供认证，使
+	// `sclient perf metrics`（默认走传统隧道）可用。
+	localMux.HandleFunc("GET /metrics", h.MetricsHandler)
 	// 受认证保护 /debug/pprof（roadmap 6.3 P2 内存观测）：DebugPprofEnabled
 	// 显式开关默认关；开启才挂载（关闭 = 404 零回归），且经 authMiddleware。
-	h.registerPprofRoutes(srvMux)
+	h.registerPprofRoutes(srvMux, localMux)
 	// /tunnel 走 authMiddleware：SproxySig 验签成功后按 AK 查 SK 派生隧道密钥
 	// （SetTunnelKey 放入 ctx），隧道 handler 用 ctx 密钥解密 metadata/body、加密响应。
 	// 未验签的请求 401；隧道内层 localMux 请求（解密后转发）由隧道加密本身提供认证。

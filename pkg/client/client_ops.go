@@ -1006,10 +1006,14 @@ type BatchRenameOp struct {
 }
 
 // BatchDelete 批量删除文件。继续处理模式：单条失败不影响其余。
+//
+// checksum 缺失时经 Stat 逐条补齐（删除前身份校验，防 TOCTOU 误删；与单条 Delete
+// 同契约）。补齐失败保持空值 ⇒ 服务端按「缺少 checksum」拒删（逐条失败，可观测）。
 func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) ([]BatchOperationResult, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("批量删除: 文件列表为空")
 	}
+	files = c.resolveBatchDeleteChecksums(ctx, files)
 	req := BatchDeleteRequest{Files: files}
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -1034,6 +1038,22 @@ func (c *FileClient) BatchDelete(ctx context.Context, files []BatchDeleteFile) (
 		return nil, fmt.Errorf(errFmtParseResponse, err)
 	}
 	return result.Results, nil
+}
+
+// resolveBatchDeleteChecksums 返回补齐 checksum 后的副本（不修改入参）：仅对空
+// checksum 的条目经 Stat 取远端摘要；Stat 失败保持空（由服务端拒删并逐条回报）。
+func (c *FileClient) resolveBatchDeleteChecksums(ctx context.Context, files []BatchDeleteFile) []BatchDeleteFile {
+	out := make([]BatchDeleteFile, len(files))
+	copy(out, files)
+	for i := range out {
+		if out[i].Checksum != "" {
+			continue
+		}
+		if info, err := c.Stat(ctx, out[i].Filename); err == nil {
+			out[i].Checksum = info.Checksum
+		}
+	}
+	return out
 }
 
 // BatchRename 批量重命名文件。继续处理模式：单条失败不影响其余。
