@@ -57,10 +57,37 @@ func WithHTTPClient(hc *http.Client) Option {
 				Transport:     netutil.IsolatedTransport(),
 				ClientTimeout: 30 * time.Second,
 			})
+			c.syncTunnelHTTPClient()
 			return
 		}
 		c.httpClient = hc
+		c.syncTunnelHTTPClient()
 	}
+}
+
+// syncTunnelHTTPClient 使**传统隧道外层 HTTP 客户端**复用直连面（c.httpClient）的
+// Transport 与 Timeout：TLS 策略（--insecure / --ca-file / mTLS）与代理/拨号配置由
+// 单一份 Transport 承载，从而对 /tunnel 隧道路径同样生效。
+//
+// 背景（缺陷）：tunnel.NewClient 自建独立 Transport 且不接收 TLS 配置，导致「有凭据
+// 且未显式 --server」时（默认走传统隧道）所有命令忽略 --insecure/--ca-file，报
+// `tls: failed to verify certificate: x509: certificate signed by unknown authority`。
+//
+// 顺序无关：WithTunnel 与 TLS/HTTP 选项（WithInsecureTLS / WithCAFile / WithClientCert /
+// WithHTTPClient / WithTimeout）任一先应用都会调用本方法重建隧道客户端。
+// tunnelClient 未装配（nil）时为空操作。
+func (c *FileClient) syncTunnelHTTPClient() {
+	if c.tunnelClient == nil || c.httpClient == nil {
+		return
+	}
+	base := c.httpClient.Transport
+	if base == nil {
+		base = defaultTransportIsolated()
+	}
+	hc := httpc.NewHTTPClient(httpc.Options{Transport: base, ClientTimeout: c.httpClient.Timeout})
+	// 外层 /tunnel 请求注入 SproxySig 签名（与直连面共用一个 per-instance Transport）。
+	hc.Transport = &sigRoundTripper{base: base, c: c}
+	c.tunnelClient.HTTPClient = hc
 }
 
 // WithTunnel 启用加密隧道传输（access-key 驱动）：
@@ -86,8 +113,9 @@ func WithTunnel(ak, sk string) Option {
 			c.initError = fmt.Errorf("创建隧道客户端失败: %w", err)
 			return
 		}
-		tc.HTTPClient.Transport = &sigRoundTripper{base: tc.HTTPClient.Transport, c: c}
 		c.tunnelClient = tc
+		// 复用直连面 Transport（TLS 策略的一致性来源），并注入 SproxySig 签名。
+		c.syncTunnelHTTPClient()
 	}
 }
 
@@ -134,6 +162,7 @@ func WithPeerFingerprints(fps []string) Option {
 func WithTimeout(d time.Duration) Option {
 	return func(c *FileClient) {
 		c.httpClient.Timeout = d
+		c.syncTunnelHTTPClient()
 	}
 }
 
@@ -179,6 +208,7 @@ func WithInsecureTLS() Option {
 			Transport:     transport,
 			ClientTimeout: c.httpClient.Timeout,
 		})
+		c.syncTunnelHTTPClient()
 	}
 }
 
@@ -188,7 +218,8 @@ func WithInsecureTLS() Option {
 // （auto_tls）或私有 CA 签发时，把该证书/CA PEM 作为受信根，代替 `--insecure` 跳过
 // 校验的安全做法（fail-closed：文件不存在/无有效 PEM 时报错并记入 InitError，不静默
 // 回退系统根池）。与 WithInsecureTLS 互斥由调用方（factory）保证；两者顺序无关。
-// 仅影响直连面（doRequest 的 httpClient）；隧道/xfer 面的 TLS 由各自传输装配。
+// 影响面：直连面与传统 /tunnel 隧道外层（隧道客户端复用同一 Transport）；xfer 面的
+// TLS 由各自传输装配（clientfactory 按 --ca-file/--insecure 注入）。
 func WithCAFile(caFile string) Option {
 	return func(c *FileClient) {
 		pool, err := loadCAFilePool(caFile)
@@ -209,6 +240,7 @@ func WithCAFile(caFile string) Option {
 			Transport:     transport,
 			ClientTimeout: c.httpClient.Timeout,
 		})
+		c.syncTunnelHTTPClient()
 	}
 }
 
@@ -267,6 +299,7 @@ func WithClientCert(certFile, keyFile string, strict bool) Option {
 			Transport:     transport,
 			ClientTimeout: c.httpClient.Timeout,
 		})
+		c.syncTunnelHTTPClient()
 	}
 }
 

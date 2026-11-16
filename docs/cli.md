@@ -89,8 +89,8 @@ export LANG=en_US.UTF-8            # 影响后续所有调用
 
 | 选项 | 默认值 | 说明 |
 |---|---|---|
-| `--insecure` | false | 跳过 TLS 证书校验。**双语义**：HTTP 直连面不限地址；xfer tcp+tls 面**仅限 loopback hub**（远程必须改用 `--ca-file`，fail-closed） |
-| `--ca-file` | (空) | xfer tcp+tls 的受信 CA 文件（PEM）；服务端自签证书时使用，与 `--insecure` 互斥 |
+| `--insecure` | false | 跳过 TLS 证书校验。覆盖**所有出站 TLS 面**：HTTP 直连面与传统 `/tunnel` 隧道不限地址；xfer tcp+tls 面**仅限 loopback hub**（远程必须改用 `--ca-file`，fail-closed）。配置 `insecure: true` 等效（对所有命令生效，包括 mesh/relay/p2p/trust） |
+| `--ca-file` | (空) | 受信 CA 文件（PEM）；服务端自签证书时使用，与 `--insecure` 互斥。覆盖 HTTP 直连/传统隧道/xfer tcp+tls。配置 `ca_file` 等效 |
 | `--protocol-salt-key` | (空) | 协议域分离盐自定义密钥（64 hex）；派生替换默认 sproxy 盐防协议指纹识别。⚠️ 必须与握手对端使用相同 key（stealth 部署配合加密内嵌派生盐） |
 | `--client-cert` | (空) | mTLS 客户端证书路径（PEM），需与 `--client-key` 成对 |
 | `--client-key` | (空) | mTLS 客户端私钥路径（PEM） |
@@ -450,6 +450,22 @@ xfer/mux 隧道（如 `tcp`、`tcp+tls`、`ws`）。该模式在 ECDH 握手时�
   身份/指纹时 fail-closed 报错，不静默降级）；
 - fail-closed：pin 不匹配或对端无身份即拒绝；传统隧道（未加 `--xfer`）与文件直连
   命令不做身份交换，配置 `peer_fingerprints` 会 fail-closed 报错并指引使用 `--xfer`。
+
+**TLS 策略的覆盖面（2026-11-16 修复）**：`--insecure` / `--ca-file` 以及配置
+`insecure: true` / `ca_file` 覆盖 sclient 的**全部出站 TLS 面**：
+
+- **HTTP 直连面**（显式 `--server`）——`FileClient` 的 http client；
+- **传统 `/tunnel` 隧道**（有凭据且未显式 `--server` 时的默认路径）——隧道外层 client
+  复用直连面同一个 Transport（此前它自建独立 Transport ⇒ 忽略 TLS 策略，导致
+  `sclient --insecure perf profile heap` 报 `x509: certificate signed by unknown authority`）；
+- **xfer `tcp+tls`**——经 `builtin.SetDefaultTLSConfig`；
+- **mesh / relay / p2p / socks / udp / http-proxy** 的 hub 面——经 `meshconn.Conn.Insecure`
+  与 `mesh.AutoRegister` / `mesh.HubWSDial`。
+
+配置回落是**全局**的：`rootPreRunE` 把环境配置的 `insecure`/`ca_file` 注入到全局
+`--insecure`/`--ca-file` flag（显式 flag 优先），使只读 flag 的 mesh/relay/p2p/trust
+等命令也受配置控制。E2E：`test/e2e_insecure_coverage_test.go` 以真实自签 TLS 服务端
+逐命令跑通三种入口（配置 insecure / CLI `--insecure` / 配置 `ca_file`）。
 
 **`tcp+tls` 传输的客户端 TLS 配置（阶段5 工作项1）**：`tcp+tls` 对服务端证书做标准
 TLS 校验，按 `--ca-file` / `--insecure`（或配置 `xfer_ca_file` / `xfer_insecure`）装配：

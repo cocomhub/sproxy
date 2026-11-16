@@ -160,8 +160,9 @@ func NewRootCmd() *cobra.Command {
 	// 审查 M-1：--insecure 双语义——HTTP 直连面（WithInsecureTLS）无 loopback 限制
 	// （既有）；xfer tcp+tls 面（buildXferClientTLSConfig）**仅限 loopback hub**
 	// （fail-closed，远程需 --ca-file）。文案区分两者避免误导。
-	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证：HTTP 直连面不限地址；xfer tcp+tls 面仅限 loopback hub（远程需 --ca-file 信任其证书）")
-	root.PersistentFlags().String("ca-file", "", "xfer tcp+tls 传输的受信 CA 文件路径（PEM；服务端为自签证书时使用，与 --insecure 互斥）")
+	// 传统 /tunnel 隧道复用直连面 Transport ⇒ 同样受此开关约束（配置 insecure: true 等效）。
+	root.PersistentFlags().Bool("insecure", false, "跳过 TLS 证书验证：HTTP 直连面与传统隧道不限地址；xfer tcp+tls 面仅限 loopback hub（远程需 --ca-file）。配置 insecure: true 等效")
+	root.PersistentFlags().String("ca-file", "", "受信 CA 文件路径（PEM；替代 --insecure 的安全做法，覆盖 HTTP 直连/传统隧道/xfer tcp+tls，与 --insecure 互斥）。配置 ca_file 等效")
 	root.PersistentFlags().String("protocol-salt-key", "", "协议域分离盐自定义密钥（64 hex；派生替换默认 sproxy 盐防协议指纹识别。⚠️ 必须与握手对端使用相同 key，否则握手失败；stealth 部署配合加密内嵌的派生盐）")
 	root.PersistentFlags().String("client-cert", "", "mTLS 客户端证书路径（PEM 格式）")
 	root.PersistentFlags().String("client-key", "", "mTLS 客户端私钥路径（PEM 格式）")
@@ -270,7 +271,39 @@ func rootPreRunE(cmd *cobra.Command, currentDir *string, cliState *state.State) 
 
 	verbose, _ := cmd.Flags().GetBool("verbose")
 	initLogger(verbose)
+	// 统一 TLS 策略回落（环境配置 → 全局 flag）：使 mesh/relay/p2p/trust 等
+	// 仅读 --insecure / --ca-file flag 的命令在配置层面同样生效。
+	if resolvedContext != nil {
+		applyEnvTLSFlags(cmd, resolvedContext.Environment)
+	}
 	return nil
+}
+
+// applyEnvTLSFlags 把 context 环境配置的 TLS 策略（insecure / ca_file）回落注入到
+// 全局 --insecure / --ca-file flag，使用户未显式传 flag 时，所有命令（包括只读 flag
+// 的 mesh / relay / p2p / trust 等路径）都能从配置获得一致的 TLS 策略。
+//
+// 显式 flag 优先：仅在 flag 未被用户设置时注入，不覆盖显式值。
+// cmd 未注册对应 flag（如某些子命令无此 flag）时跳过。env 为 nil 时为空操作。
+func applyEnvTLSFlags(cmd *cobra.Command, env *contextcfg.Environment) {
+	if env == nil {
+		return
+	}
+	if env.Insecure {
+		setFlagIfUnset(cmd, "insecure", "true")
+	}
+	if env.CAFile != "" {
+		setFlagIfUnset(cmd, "ca-file", env.CAFile)
+	}
+}
+
+// setFlagIfUnset 在 flag 存在且用户未显式设置时写值；错误（不存在的 flag）忽略。
+func setFlagIfUnset(cmd *cobra.Command, name, value string) {
+	f := cmd.Flags().Lookup(name)
+	if f == nil || f.Changed {
+		return
+	}
+	_ = cmd.Flags().Set(name, value)
 }
 
 // resolveDefaultConfigPath 返回统一后的默认配置文件路径（XDG sproxy/config.yaml）。
