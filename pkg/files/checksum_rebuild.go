@@ -19,6 +19,7 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/checksum"
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -27,6 +28,13 @@ import (
 
 // ErrChecksumStoreUnavailable 表示台账未装配（未注入 ChecksumLedger）。装配层据此回 503。
 var ErrChecksumStoreUnavailable = errors.New("checksum 台账不可用")
+
+// checksumRebuildConcurrency 是重建期 sidecar 读的**有界并发**数（性能项 P0.4）。
+//
+// 为何并行：重建是「全卷遍历 + 逐文件读 sidecar」，原实现**串行**（实测 ≈27 µs/文件 ⇒ 10 万文件≈2.7 s）。
+// 与 P0（volumestate 冷填充自报）同一读模式 ⇒ 有界并发后同量级加速（≈4.6×，实测 N=2000：54.4→11.7 ms）。
+// 为何有界：避免超大卷瞬时爆发 goroutine / 压垮卷后端 IO（与 sidecar 读同口径）。
+const checksumRebuildConcurrency = 8
 
 // RebuildChecksums 从对象 meta sidecar 重建 owner 的 checksum 台账（一次性导入）。
 //
@@ -56,8 +64,7 @@ func (s *Service) RebuildChecksums(ctx context.Context, owner string) (int, erro
 			continue
 		}
 		// **按卷收集、按卷写入**（§15.1.1）：跨卷收进一个 map 会让同名文件互相覆盖。
-		found := make(map[string]string)
-		collectMetaChecksums(ctx, policy, root, owner, found)
+		found := collectMetaChecksums(ctx, policy, root, owner)
 		if len(found) == 0 {
 			continue
 		}
@@ -68,8 +75,20 @@ func (s *Service) RebuildChecksums(ctx context.Context, owner string) (int, erro
 }
 
 // collectMetaChecksums 遍历**卷根命名空间**里的 `<owner>/user/` 子树，把每个文件的 sidecar
-// `TotalSHA256` 收进 out（键 = 用户桶相对路径 `user/<rel>`，与写内核/旁路写登记的台账键空间一致）。
-func collectMetaChecksums(ctx context.Context, policy FileMetaPolicy, root *storage.Root, owner string, out map[string]string) {
+// `TotalSHA256` 收进返回值（键 = 用户桶相对路径 `user/<rel>`，与写内核/旁路写登记的台账键空间一致）。
+//
+// 两阶段：① 串行遍历收集候选（目录列举是元数据操作，顺序确定）；② **有界并发**读 sidecar
+// （每 worker 自有 map ⇒ 免锁；按下标顺序合并 ⇒ 结果确定、不丢条目）。
+func collectMetaChecksums(ctx context.Context, policy FileMetaPolicy, root *storage.Root, owner string) map[string]string {
+	return readSidecarChecksums(ctx, policy, root, owner, collectMetaCandidates(root, owner))
+}
+
+// metaCandidate 是一条待读 sidecar 的用户文件（rel 已含 owner 前缀，name 为基名）。
+type metaCandidate struct{ rel, name string }
+
+// collectMetaCandidates 串行遍历 `<owner>/user/` 子树，收集非 sidecar 的用户文件（顺序确定）。
+func collectMetaCandidates(root *storage.Root, owner string) []metaCandidate {
+	var cands []metaCandidate
 	stack := []string{owner + "/" + userBucket}
 	for len(stack) > 0 {
 		dir := stack[len(stack)-1]
@@ -84,9 +103,44 @@ func collectMetaChecksums(ctx context.Context, policy FileMetaPolicy, root *stor
 				stack = append(stack, rel)
 				continue
 			}
-			collectOneMetaChecksum(ctx, policy, root, owner, rel, e.Name(), out)
+			if meta.IsMetaName(e.Name()) {
+				continue // sidecar 自身不是用户内容
+			}
+			cands = append(cands, metaCandidate{rel: rel, name: e.Name()})
 		}
 	}
+	return cands
+}
+
+// readSidecarChecksums **有界并发**读取候选的 sidecar 并合并为一张表。
+func readSidecarChecksums(ctx context.Context, policy FileMetaPolicy, root *storage.Root,
+	owner string, cands []metaCandidate) map[string]string {
+	parts := make([]map[string]string, len(cands))
+	work := make(chan int)
+	var wg sync.WaitGroup
+	for range min(checksumRebuildConcurrency, len(cands)) {
+		wg.Go(func() {
+			for i := range work {
+				m := make(map[string]string, 1)
+				collectOneMetaChecksum(ctx, policy, root, owner, cands[i].rel, cands[i].name, m)
+				parts[i] = m
+			}
+		})
+	}
+	for i := range cands {
+		work <- i
+	}
+	close(work)
+	wg.Wait()
+
+	// 按下标顺序合并 ⇒ 顺序确定（每候选一个 rel，不会重复）。
+	out := make(map[string]string, len(cands))
+	for _, m := range parts {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // collectOneMetaChecksum 读取单个文件的 sidecar 并写入 out（非内容文件/无 sidecar/损坏均跳过）。
