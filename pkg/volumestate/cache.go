@@ -61,11 +61,15 @@ type Cache struct {
 	mu sync.Mutex
 	// hits/misses 是可观测计数（`/metrics`；审计 2026-10-29 P2-5）：命中率是判断「缓存是否
 	// 真正生效 / 是否被进程外改动打穿」的唯一现场证据。
-	hits     atomic.Int64
-	misses   atomic.Int64
-	lru      *list.List               // 元素为 *cacheEntry；Front = 最近使用
-	items    map[string]*list.Element // key = volume + "\x00" + fsPath
-	maxItems int
+	hits   atomic.Int64
+	misses atomic.Int64
+	// sidecarReads/sidecarErrors：本地卷列举时「读 sidecar 补 checksum」的尝试数与失败数
+	// （可观测面；用于评估并发批量读的收益与 sidecar 缺失率）。
+	sidecarReads  atomic.Int64
+	sidecarErrors atomic.Int64
+	lru           *list.List               // 元素为 *cacheEntry；Front = 最近使用
+	items         map[string]*list.Element // key = volume + "\x00" + fsPath
+	maxItems      int
 	// totalEntries 是当前所有快照 entries 之和（内存占用上界的计量口径）。
 	totalEntries    int
 	maxTotalEntries int
@@ -389,6 +393,14 @@ func (c *Cache) Stats() (hits, misses int64, entries int) {
 	entries = c.lru.Len()
 	c.mu.Unlock()
 	return c.hits.Load(), c.misses.Load(), entries
+}
+
+// SidecarStats 返回「本地卷列举读 sidecar」的计数（尝试 / 失败）；nil ⇒ (0,0)。
+func (c *Cache) SidecarStats() (reads, errs int64) {
+	if c == nil {
+		return 0, 0
+	}
+	return c.sidecarReads.Load(), c.sidecarErrors.Load()
 }
 
 // Len 返回当前内存快照数（测试/指标用）。

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -58,15 +59,25 @@ func (f *CacheFS) ListDir(ctx context.Context, path string) ([]syncpkg.Entry, er
 	})
 }
 
+// sidecarReadConcurrency 是「列举补 checksum」并发读 sidecar 的**有界**工作池大小。
+//
+// 为何有界（实测，见 docs/designs/2026-11-12-checksum-single-source-options.md §3）：顺序读 N 个
+// sidecar 在 N=2000 时约 54 ms；固定 8 路并发约 12 ms（≈4.6×）。用**固定 worker 池**而非
+// 「每条目一个 goroutine + 信号量」：后者在超大目录会瞬时创建 N 个阻塞 goroutine（每个 ≳2KB
+// 栈）⇒ 内存峰值与调度开销不可接受。
+const sidecarReadConcurrency = 8
+
 // fillLocalChecksums 为**本地卷**的列举条目补齐 sidecar 明文 `TotalSHA256`（设计
-// docs/archive/2026-11-11-checksum-ledger-read-path.md §S2；读口径见 §4）。
+// docs/archive/2026-11-11-checksum-ledger-read-path.md 口径；并发批量读见
+// docs/designs/2026-11-12-checksum-single-source-options.md P0）。
 //
 // 边界（为什么这样设计）：
 //   - **仅本地卷**：远端卷（s3/baidupcs/…）的 sidecar 读是每文件一次网络往返 ⇒
 //     N 条目 = N 往返，属性能回归；本地卷读本地小文件，且**随目录快照缓存**
 //     （每目录每代际一次）。
+//   - **有界并发**（固定 worker 池 8）：实测 4.6×，且不因超大目录爆发 goroutine。
 //   - 已有 `Checksum` 的条目（secretdata/s3 自报）与目录条目跳过。
-//   - sidecar 缺失/损坏/解析失败 ⇒ 留空（不报错、不伪造），由消费方 `stat` 兜底。
+//   - sidecar 缺失/损坏/解析失败 ⇒ 留空（不报错、不伪造），由消费方 `stat` 兜底；仅计数。
 func (f *CacheFS) fillLocalChecksums(ctx context.Context, dirPath string, entries []syncpkg.Entry) {
 	if !f.IsLocalVolume() {
 		return
@@ -76,6 +87,12 @@ func (f *CacheFS) fillLocalChecksums(ctx context.Context, dirPath string, entrie
 		return
 	}
 	dir := strings.Trim(dirPath, "/")
+	// 先收集待补条目：每项只写**自己的下标** ⇒ 不同元素并发写安全，且结果顺序不变。
+	type job struct {
+		idx int
+		rel string
+	}
+	jobs := make([]job, 0, len(entries))
 	for i := range entries {
 		e := &entries[i]
 		if e.IsDir || e.Checksum != "" {
@@ -85,17 +102,49 @@ func (f *CacheFS) fillLocalChecksums(ctx context.Context, dirPath string, entrie
 		if dir != "" {
 			rel = dir + "/" + e.Name
 		}
-		fm, err := pv.FileMeta(ctx, rel)
-		if err != nil || fm == nil || fm.TotalSHA256 == "" {
-			continue
-		}
-		if e.Checksums == nil {
-			e.Checksums = make(map[string]string, 1)
-		}
-		e.Checksum = fm.TotalSHA256
-		e.ChecksumType = "sha256"
-		e.Checksums["sha256"] = fm.TotalSHA256
+		jobs = append(jobs, job{idx: i, rel: rel})
 	}
+	if len(jobs) == 0 {
+		return
+	}
+
+	work := make(chan job)
+	var wg sync.WaitGroup
+	workers := sidecarReadConcurrency
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range work {
+				f.readOneSidecar(ctx, pv, entries, j.idx, j.rel)
+			}
+		}()
+	}
+	for _, j := range jobs {
+		work <- j
+	}
+	close(work)
+	wg.Wait()
+}
+
+// readOneSidecar 读单个 sidecar 并把 sha256 写入对应条目（缺失/失败仅计数，不报错）。
+func (f *CacheFS) readOneSidecar(ctx context.Context, pv meta.Provider, entries []syncpkg.Entry, idx int, rel string) {
+	f.cache.sidecarReads.Add(1)
+	fm, err := pv.FileMeta(ctx, rel)
+	if err != nil || fm == nil || fm.TotalSHA256 == "" {
+		f.cache.sidecarErrors.Add(1)
+		return
+	}
+	e := &entries[idx]
+	if e.Checksums == nil {
+		e.Checksums = make(map[string]string, 1)
+	}
+	e.Checksum = fm.TotalSHA256
+	e.ChecksumType = "sha256"
+	e.Checksums["sha256"] = fm.TotalSHA256
 }
 
 // Stat 恒回源（A 类：尺寸/checksum 的安全判定必须新鲜；单对象成本远低于目录列举）。

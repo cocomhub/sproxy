@@ -61,6 +61,8 @@ func TestMetrics_IndexCacheStats(t *testing.T) {
 		"sproxy_volume_cache_hits_total",
 		"sproxy_volume_cache_misses_total",
 		"sproxy_volume_cache_entries",
+		"sproxy_volume_sidecar_reads_total",
+		"sproxy_volume_sidecar_errors_total",
 		"sproxy_search_index_owners",
 		"sproxy_search_index_entries",
 		"sproxy_search_index_rebuilds_total",
