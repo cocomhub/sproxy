@@ -128,6 +128,82 @@ func TestConfigCmd_Set(t *testing.T) {
 	}
 }
 
+// TestConfigCmd_SetTLSPolicyKeys：config set insecure/ca_file 写当前 context 的 env 段
+// （Environment.Insecure / Environment.CAFile），并可在不带 flag 时经 applyEnvTLSFlags
+// 回落注入到全局 --insecure / --ca-file flag（一次配置即持久生效）。非法值必须报错。
+func TestConfigCmd_SetTLSPolicyKeys(t *testing.T) {
+	t.Parallel()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "https://sg:18083"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, &cfgPath, &cliConfigProvider{cfgFile: cfgPath})
+
+	if err := cmd.RunE(cmd, []string{"set", "insecure", "true"}); err != nil {
+		t.Fatalf("config set insecure: %v", err)
+	}
+	if err := cmd.RunE(cmd, []string{"set", "ca_file", "/tmp/ca.pem"}); err != nil {
+		t.Fatalf("config set ca_file: %v", err)
+	}
+	if err := cmd.RunE(cmd, []string{"set", "insecure", "yes"}); err == nil {
+		t.Fatal("非法 insecure 值应报错")
+	}
+
+	cc, cerr := contextcfg.Load(cfgPath)
+	if cerr != nil {
+		t.Fatalf("Load config.yaml: %v", cerr)
+	}
+	env := cc.FindEnvironment("sg")
+	if env == nil || !env.Insecure || env.CAFile != "/tmp/ca.pem" {
+		t.Fatalf("env 段未持久化 TLS 策略: %+v", env)
+	}
+
+	// 免 flag 生效：applyEnvTLSFlags 从 env 回落注入全局 flag。
+	fcmd := newTLSFlagCmd()
+	applyEnvTLSFlags(fcmd, env)
+	if v, _ := fcmd.Flags().GetBool("insecure"); !v {
+		t.Error("配置 insecure: true 应回落注入 --insecure")
+	}
+	if v, _ := fcmd.Flags().GetString("ca-file"); v != "/tmp/ca.pem" {
+		t.Errorf("配置 ca_file 应回落注入 --ca-file，实际 %q", v)
+	}
+}
+
+// TestConfigCmd_ShowTLSPolicyKeys：config show 以 Insecure / CAFile 展示当前 context
+// env 段的 TLS 策略（不再出现旧 Xfer* 标签）。
+func TestConfigCmd_ShowTLSPolicyKeys(t *testing.T) {
+	t.Parallel()
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	ccfg := contextcfg.NewDefault()
+	ccfg.CurrentContext = "sg"
+	ccfg.Environments = append(ccfg.Environments, &contextcfg.Environment{Name: "sg", ServerURL: "https://sg:18083", Insecure: true, CAFile: "/tmp/ca.pem"})
+	ccfg.Users = append(ccfg.Users, &contextcfg.User{Name: "sg"})
+	ccfg.Contexts = append(ccfg.Contexts, &contextcfg.Context{Name: "sg", Environment: "sg", User: "sg"})
+	if err := contextcfg.Save(ccfg, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: &buf, ErrOut: io.Discard}, &cfgPath, &cliConfigProvider{cfgFile: cfgPath})
+	if err := cmd.RunE(cmd, []string{"show"}); err != nil {
+		t.Fatalf("config show: %v", err)
+	}
+	o := buf.String()
+	if !strings.Contains(o, "Insecure:        true") {
+		t.Errorf("show 应以 Insecure 展示, got: %s", o)
+	}
+	if !strings.Contains(o, "CAFile:          /tmp/ca.pem") {
+		t.Errorf("show 应以 CAFile 展示, got: %s", o)
+	}
+	if strings.Contains(o, "XferInsecure") || strings.Contains(o, "XferCAFile") {
+		t.Errorf("show 不应再出现旧 Xfer* 标签, got: %s", o)
+	}
+}
+
 func TestConfigCmd_SetMissingArgs(t *testing.T) {
 	cfgSvc := &testConfigProvider{cfg: client.DefaultConfig()}
 	cmd := NewCmdConfig(clientfactory.NewMock(nil, nil), cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}, new(string), cfgSvc)
