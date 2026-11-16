@@ -50,10 +50,10 @@ func (a *binaryAdapter) runBinaryOutput(ctx context.Context, args ...string) ([]
 	if bin == "" {
 		bin = "BaiduPCS-Go"
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, a.cfg.BinaryTimeout)
+	// 有界执行：超时到点必须真正返回（见 exec_bound.go：WaitDelay + Unix 进程组终止）。
+	cmd, cancel := newBoundedCmd(ctx, a.cfg.BinaryTimeout, bin, args...)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, bin, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

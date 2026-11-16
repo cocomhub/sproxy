@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -117,11 +116,10 @@ func (a *binaryAdapter) runBinary(ctx context.Context, args ...string) (bool, er
 	if bin == "" {
 		bin = "BaiduPCS-Go"
 	}
-	timeout := a.cfg.BinaryTimeout
-	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	// 有界执行：超时到点必须真正返回（见 exec_bound.go：WaitDelay + Unix 进程组终止）。
+	cmd, cancel := newBoundedCmd(ctx, a.cfg.BinaryTimeout, bin, args...)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		a.logger().Info("baidupcs 二进制执行失败，回退库",
