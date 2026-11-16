@@ -981,6 +981,15 @@ type stagedUpload struct {
 // 4MiB 对齐——秒传 block 列表须与上传块一致才能命中索引）。
 const uploadBlockSize = 4 * 1024 * 1024
 
+// 编译期断言：上传分块大小必须等于 `syncpkg.BlockMD5Size`（`VerifyItem.BlockMD5s` 的对账分块）
+// ——否则生产方按 BlockMD5Size 切出的本地分块列表与远端 `block_list` 不同构，逐块对账会全量不等
+// 或不可判定（假失败/空转）。比值必须为 1 ⇒ 索引 0 合法；不等则编译报错。
+var _ = [1]struct{}{}[uploadBlockSize/syncpkg.BlockMD5Size-1]
+
+// md5ReliableMaxSize 是「远端 `md5` 字段可作为**通过判据**」的对象大小上限（= BlockMD5Size）。
+// 百度对 ≥4 MiB 的分片上传，`md5` 字段是分片组合值或标注「可能不正确」⇒ 不得据以判定一致。
+const md5ReliableMaxSize = int64(syncpkg.BlockMD5Size)
+
 // copyCtx 在拷贝过程中检查 ctx（取消/超时即返回，避免已取消仍整文件复制）。
 func copyCtx(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
 	buf := make([]byte, 64<<10)
@@ -1630,6 +1639,18 @@ func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.
 		}
 	}
 	res.RemoteETag, res.RemoteSize = meta.ETag, meta.Size
+	// **判据按对象大小分派**（2026-11-17 用户裁定）：远端 `md5` 字段对 ≥4 MiB 的分片上传不可靠
+	// （分片组合值 / 标注「可能不正确」）⇒ 大对象不以 md5 相等作为通过判据；改以远端 `block_list`
+	// 逐块对账（见 verifyBigObject）。小对象 md5 字段可靠，仍走 md5/size（见 verifySmallObject）。
+	if it.Size >= md5ReliableMaxSize {
+		return s.verifyBigObject(ctx, it, meta)
+	}
+	return s.verifySmallObject(ctx, it, res, meta)
+}
+
+// verifySmallObject 是**小对象**（< md5ReliableMaxSize）的判据（拆出以控 gocognit）：
+// 远端 md5 字段可靠 ⇒ 摘要不一致时先试「秒传刷新」（零传输）自愈并复验，再以 md5/size 判定。
+func (s *Storage) verifySmallObject(ctx context.Context, it syncpkg.VerifyItem, res syncpkg.VerifyResult, meta *ObjectMeta) syncpkg.VerifyResult {
 	// **后端自愈（不再让使用方编排）**：摘要不一致时先试「秒传刷新」（零传输）并复验；
 	// 命中即视为 OK（Refreshed=true）。这是百度「分片上传后 md5 不可靠」的标准修复
 	// （docs/external-dependencies.md §7.6），必须内置在上传/校验能力里。
@@ -1657,6 +1678,39 @@ func (s *Storage) verifyOne(ctx context.Context, it syncpkg.VerifyItem) syncpkg.
 		res.State = syncpkg.VerifyOK
 		res.Reason = "无可判定摘要/大小信息，存在即视为可见"
 	}
+	return res
+}
+
+// verifyBigObject 校验**大对象**（≥ md5ReliableMaxSize）：远端 `md5` 字段不可靠，不得据以判定一致。
+//
+// 判据（按可靠性降序）：
+//   - 有本地分块 md5 列表（`it.BlockMD5s`）⇒ 取远端 `block_list` **逐块对账**（复用
+//     `reconcileBlockList` 单一实现，见 PR #1139）：一致 ⇒ OK；不一致 ⇒ Mismatch；
+//   - 不可判定（无 block_list / 长度不符 / 含非法值）⇒ **存在 + size 近似即通过**：内容完整性
+//     由 secretdata 的内容寻址块名 + 读取期 AES-GCM 校验保证，上传后复核只是额外防线；
+//     **绝不**以不可靠的 md5 字段硬判失败（否则大对象必然假失败 + 无谓重传）。
+func (s *Storage) verifyBigObject(ctx context.Context, it syncpkg.VerifyItem, meta *ObjectMeta) syncpkg.VerifyResult {
+	res := syncpkg.VerifyResult{Item: it, RemoteETag: meta.ETag, RemoteSize: meta.Size}
+	if len(it.BlockMD5s) > 0 {
+		remote := s.fetchBlockList(ctx, it.Key)
+		if equal, decidable := reconcileBlockList(remote, it.BlockMD5s); decidable {
+			if equal {
+				res.State = syncpkg.VerifyOK
+				res.Reason = fmt.Sprintf("大对象 block_list 逐块一致（%d 块）", len(it.BlockMD5s))
+			} else {
+				res.State = syncpkg.VerifyMismatch
+				res.Reason = "大对象远端 block_list 与本地分块 md5 不一致"
+			}
+			return res
+		}
+	}
+	if it.Size > 0 && meta.Size > 0 && !sizeNear(it.Size, meta.Size) {
+		res.State = syncpkg.VerifyMismatch
+		res.Reason = "大对象远端 size 超出容差"
+		return res
+	}
+	res.State = syncpkg.VerifyOK
+	res.Reason = "大对象（md5 字段不可靠且 block_list 不可判定）：存在且大小近似即通过"
 	return res
 }
 
