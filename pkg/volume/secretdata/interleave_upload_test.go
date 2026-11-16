@@ -288,8 +288,13 @@ func TestWriteFile_StagedPathAliveAcrossInnerReads(t *testing.T) {
 	t.Logf("实测：内层写 %d 次（其中分块 %d 次全部经本地路径，每块被内层读 3 遍）", writes, stagedWrites)
 }
 
-// newStagingUnavailableFS 构造「本地临时目录不可用」的卷：NewFS 后删除 temp 目录
-// ⇒ 交错上传所需的本地分块目录无法创建（跨平台确定性触发；权限/ENOSPC 走同一错误分支）。
+// newStagingUnavailableFS 构造「本地临时目录**真实**不可用」的卷：NewFS 后把 temp 根
+// **替换为一个普通文件** ⇒ 其下任何叶子目录都无法创建，且错误**非** fs.ErrNotExist
+// （Linux: 路径中间成分是文件 ⇒ ENOTDIR；Windows: 同样无法在文件下建目录）
+// ⇒ 与「只读 / 权限不足 / 磁盘满」同一失败分支（走回退链 ②/③），是**不可恢复**的不可用。
+//
+// 为什么不再用「删除 temp 目录」模拟：那正是 2026-11-16 回归修复要**恢复**的形态
+// （进程临时根缺失 ⇒ 补建父链后可用）——用旧缺陷行为当期望会把写路径钉死在降级链上 ✗。
 func newStagingUnavailableFS(t *testing.T) (*SecretdataFS, *syncpkg.LocalFS, string) {
 	t.Helper()
 	tempDir := t.TempDir()
@@ -303,8 +308,13 @@ func newStagingUnavailableFS(t *testing.T) (*SecretdataFS, *syncpkg.LocalFS, str
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
+	// NewFS 已消费完 temp 根（MkdirAll + 清理陈旧读缓存）⇒ 此后用普通文件占位即可：
+	// 叶子路径的父级不是目录 ⇒ Mkdir/MkdirAll 一律失败且**不可由补建父链恢复**。
 	if err := os.RemoveAll(tempDir); err != nil {
 		t.Fatalf("移除 temp 目录: %v", err)
+	}
+	if err := os.WriteFile(tempDir, []byte("occupied-by-file"), 0o600); err != nil {
+		t.Fatalf("用普通文件占用 temp 路径: %v", err)
 	}
 	return sfs, loc, tempDir
 }
@@ -342,7 +352,10 @@ func TestWriteFile_LocalStagingUnavailable_ReplayableSourceSucceeds(t *testing.T
 // （对照组，docs/roadmap.md ①-附 §2）：源**不可重读**（内存 reader = 一次性源）且本地产物
 // 无法落盘 ⇒ 必须 **fail-closed**（明确错误 + 无半态残留），绝不静默接受不可重试/不可校验的写。
 //
-// 变异验证：去掉 `sourceReplayable` 门槛（任何源都降级内存交付）⇒ 本用例必红。
+// 夹具为「真实不可用」（temp 根被普通文件占用 ⇒ 错误非 fs.ErrNotExist，补建不可恢复）。
+// 变异验证：
+//   - 去掉 `sourceReplayable` 门槛（任何源都降级内存交付）⇒ 本用例必红；
+//   - 把非 fs.ErrNotExist 的失败也当作可恢复（补建父链后仍失败也返回 nil）⇒ 本用例必红。
 func TestWriteFile_LocalStagingUnavailable_NonReplayableSourceFailsClosed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
