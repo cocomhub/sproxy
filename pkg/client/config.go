@@ -206,10 +206,10 @@ func HandleConfigShow(cfg *Config, w io.Writer) {
 		fmt.Fprintf(w, "PeerFingerprints: %s\n", strings.Join(cfg.PeerFingerprints, ","))
 	}
 	if cfg.XferCAFile != "" {
-		fmt.Fprintf(w, "XferCAFile:      %s\n", cfg.XferCAFile)
+		fmt.Fprintf(w, "CAFile:          %s\n", cfg.XferCAFile)
 	}
 	if cfg.XferInsecure {
-		fmt.Fprintf(w, "XferInsecure:    %v\n", cfg.XferInsecure)
+		fmt.Fprintf(w, "Insecure:        %v\n", cfg.XferInsecure)
 	}
 	if cfg.Volume != "" {
 		fmt.Fprintf(w, "Volume:          %s\n", cfg.Volume)
@@ -224,7 +224,7 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return fmt.Errorf("无效的服务器地址: %s", value)
 		}
 		cfg.ServerURL = value
-	case "access_key", "access_key_secret", "access_key_id", "xfer_ca_file", "volume":
+	case "access_key", "access_key_secret", "access_key_id", "xfer_ca_file", "ca_file", "volume":
 		applyConfigDirect(cfg, key, value)
 	case "timeout", "chunk_size", "max_chunk_size":
 		return applyConfigNumeric(cfg, key, value)
@@ -244,10 +244,12 @@ func ApplyConfigSet(cfg *Config, key, value string) error {
 			return err
 		}
 		cfg.PeerFingerprints = fps
-	case "xfer_insecure":
+	// insecure 是 xfer_insecure 的别名（同一底层开关，即 config show 的 Insecure）；
+	// 二者写同一字段，避免出现「写一侧另一侧不生效」的静默不一致。
+	case "xfer_insecure", "insecure":
 		b, err := strconv.ParseBool(value)
 		if err != nil {
-			return fmt.Errorf("无效的 xfer_insecure: %w（应为 true/false）", err)
+			return fmt.Errorf("无效的 %s: %w（应为 true/false）", key, err)
 		}
 		cfg.XferInsecure = b
 	default:
@@ -265,7 +267,7 @@ func applyConfigDirect(cfg *Config, key, value string) {
 		cfg.AccessKeySecret = value
 	case "access_key_id":
 		cfg.AccessKeyID = value
-	case "xfer_ca_file":
+	case "xfer_ca_file", "ca_file":
 		cfg.XferCAFile = value
 	case "volume":
 		cfg.Volume = strings.TrimSpace(value)

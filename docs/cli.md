@@ -464,7 +464,8 @@ xfer/mux 隧道（如 `tcp`、`tcp+tls`、`ws`）。该模式在 ECDH 握手时�
 
 配置回落是**全局**的：`rootPreRunE` 把环境配置的 `insecure`/`ca_file` 注入到全局
 `--insecure`/`--ca-file` flag（显式 flag 优先），使只读 flag 的 mesh/relay/p2p/trust
-等命令也受配置控制。E2E：`test/e2e_insecure_coverage_test.go` 以真实自签 TLS 服务端
+等命令也受配置控制（写入用 `sclient config set insecure|ca_file <值>`，见上节 `config`）。
+E2E：`test/e2e_insecure_coverage_test.go` 以真实自签 TLS 服务端
 逐命令跑通三种入口（配置 insecure / CLI `--insecure` / 配置 `ca_file`）。
 
 **`tcp+tls` 传输的客户端 TLS 配置（阶段5 工作项1）**：`tcp+tls` 对服务端证书做标准
@@ -821,7 +822,14 @@ sclient config show
 sclient config set server_url http://proxy:18083
 sclient config set access_key_secret <64hex>   # SproxySig Secret（本地凭据）
 sclient config set access_key_id <sk-...>      # 多 SK 时可选（SK 条目 ID；trust renew 回填）
+sclient config set insecure true              # 跳过 TLS 证书校验（等效 --insecure，一次配置即持久生效）
+sclient config set ca_file ./sproxy-cert.pem  # 受信 CA（PEM；等效 --ca-file，更安全做法）
 ```
+
+**TLS 策略配置键 `insecure` / `ca_file`**：与全局 `--insecure` / `--ca-file` **等效**（二选一；
+配置后所有命令无需再传 flag，含 mesh/relay/p2p/trust），写入当前 context 的 env 段。
+与 `--insecure` / `--ca-file` 同样**互斥**；`ca_file` 是更安全做法（严格校验自签证书），
+`insecure` 仅用于开发/自签场景。`config show` 以 `Insecure` / `CAFile` 展示。
 
 ### trust
 
