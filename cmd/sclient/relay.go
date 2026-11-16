@@ -416,9 +416,11 @@ func relayStartFromFlags(cmd *cobra.Command, cfgSvc ConfigProvider) *relayStartP
 	p.dialAllow, _ = cmd.Flags().GetBool("dial-allow")
 	p.services, _ = cmd.Flags().GetStringArray("service")
 	p.dialAllowCIDRs, _ = cmd.Flags().GetStringArray("dial-allow-cidr")
+	// 先补齐配置回落（CLI > 配置文件），再建动态凭据容器：否则配置提供的 AK/SK
+	// 不会进入轮换容器（注册 proof 用空 SK 计算 ⇒ 注册失败）。
+	p.applyConfigFallback(cfgSvc)
 	// 动态凭据容器（运行中自动轮换支持）。
 	p.creds = credrotate.NewCredentials(p.accessKey, p.accessKeySecret, p.accessKeyID)
-	p.applyConfigFallback(cfgSvc)
 	return p
 }
 
