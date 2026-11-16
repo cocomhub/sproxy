@@ -9,7 +9,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -35,6 +35,10 @@ const indexSnapshotVersion = 1
 
 // snapshotGzipMagic 标记 gzip 压缩的快照（旧格式无该前缀，向后兼容）。
 const snapshotGzipMagic = "SDIS2"
+
+// snapshotNonceLabel 是快照 GCM nonce 的派生域标签（设计 §9.1：nonce = DeriveBytes(卷密钥,
+// "snapnonce", 快照明文, NonceSize)）。
+const snapshotNonceLabel = "snapnonce"
 
 // indexSnapshot 是装配期索引的**加密快照**：避免每次进程启动都重新下载并解密全部
 // 文件 meta blob（外部卷上 272 个文件 ≈ 544 次 `BaiduPCS-Go download`，实测 20-30 分钟）。
@@ -341,12 +345,22 @@ func (s *SecretdataFS) writeIndexSnapshot(snap *indexSnapshot) {
 	if gerr != nil {
 		return
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, rerr := rand.Read(nonce); rerr != nil {
+	// 确定性的 GCM nonce（设计 §9.1）：由**卷密钥 + 快照明文内容标识**派生 ⇒ 明文未变则
+	// nonce 与密文逐字节相同（可跳过重写 / 可复用，本地不再堆多份快照）。
+	// 明文变化 ⇒ CID 变 ⇒ nonce 变 ⇒ 无 GCM nonce 复用风险（§4 同论证）；派生绑定卷密钥
+	// ⇒ 不同卷同明文 nonce 必不同（§10，跨卷不可关联）。
+	nonce, derr := shardseal.DeriveBytes(s.secret, snapshotNonceLabel, plain, gcm.NonceSize())
+	if derr != nil {
+		slog.Warn("secretdata: 索引快照 nonce 派生失败（忽略）", "path", p, "error", derr)
 		return
 	}
 	out := gcm.Seal(nonce, nonce, plain, nil)
 	out = append([]byte(snapshotGzipMagic), out...)
+	// 内容未变（确定性 nonce ⇒ 字节恒等）⇒ 不重写：避免每次启动都重写数十 MB 快照。
+	if existing, rerr := os.ReadFile(p); rerr == nil && bytes.Equal(existing, out) {
+		slog.Debug("secretdata: 索引快照内容未变，跳过重写", "path", p)
+		return
+	}
 	if merr := os.MkdirAll(filepath.Dir(p), 0o700); merr != nil {
 		slog.Warn("secretdata: 索引快照目录创建失败（忽略）", "path", p, "error", merr)
 		return
