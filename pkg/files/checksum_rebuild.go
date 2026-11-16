@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"path"
 	"strings"
 	"sync"
@@ -136,9 +137,7 @@ func readSidecarChecksums(ctx context.Context, policy FileMetaPolicy, root *stor
 	// 按下标顺序合并 ⇒ 顺序确定（每候选一个 rel，不会重复）。
 	out := make(map[string]string, len(cands))
 	for _, m := range parts {
-		for k, v := range m {
-			out[k] = v
-		}
+		maps.Copy(out, m)
 	}
 	return out
 }
