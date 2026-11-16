@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -138,7 +139,7 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 		}
 	}()
 	key := shardseal.Hash256(wc.data) // 整文件内容完整 SHA-256（256-bit，== 单分块 Chunks[0].OrigSHA256，重启后可重建）
-	dir, err := s.ensureDedupDir()
+	dir, err := s.ensureDedupDir(ctx)
 	if err != nil {
 		return err
 	}
@@ -156,19 +157,79 @@ func (s *SecretdataFS) writeFileDedup(ctx context.Context, wc writeCtx) (err err
 	return s.writeFileDedupHit(ctx, wc, key, dir, mt, tpl)
 }
 
+// dedupDirLogicalPath 是卷级去重容器的**固定逻辑路径**（用作确定性容器名的派生输入）。
+// 它不是用户目录（无目录 meta，不进索引），仅用于派生一个稳定的物理容器名（设计 §9 第 8 项）。
+const dedupDirLogicalPath = ".dedup"
+
 // ensureDedupDir 确保卷级去重容器存在（懒创建一次），返回其容器名。
-func (s *SecretdataFS) ensureDedupDir() (string, error) {
+//
+// 容器名**确定性派生**（2026-11-16 修复，设计 §9 第 8 项）：原为 shardseal.RandDirName()（随机）
+// ⇒ 每次重启 / 索引缓存丢失都会新建一个去重容器、旧容器数据成孤儿（与 2026-11-06「重复容器」
+// 事故同型）。确定性派生让「重复创建」天然幂等（同名复用）；s.dedupDir 仅内存字段、不持久化，
+// **非确定性就无法跨重启找回同一容器**。
+//
+// 兼容：老版本的**随机名**去重容器（卷根下、无目录 meta 的目录）若存在 ⇒ 「采用」其名（不移名、
+// 不丢弃）——池内 blob 的引用（meta.Extra["dedup"] 存的就是容器名）随之继续有效；改名会打断
+// 已落 meta 的引用，故这里只采用不改名。新卷（无遗留容器）用确定性名。
+func (s *SecretdataFS) ensureDedupDir(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dedupDir != "" {
 		return s.dedupDir, nil
 	}
-	c, err := shardseal.RandDirName()
+	want, werr := shardseal.DirNameFor(s.secret, "", dedupDirLogicalPath)
+	if werr != nil {
+		return "", werr
+	}
+	// 确定性目录已存在 ⇒ 直接复用（重启/缓存丢失后仍命中同一容器）。
+	if ent, serr := s.inner.Stat(ctx, want); serr == nil && ent != nil {
+		s.dedupDir = want
+		return want, nil
+	}
+	// 兼容既有随机名去重容器：卷根下、无目录 meta 的目录（去重池无 dir meta）。
+	if legacy, lerr := s.legacyDedupDir(ctx, want); lerr == nil && legacy != "" {
+		slog.Warn("secretdata: 采用既有随机名去重容器（老版本遗留）；如需规范名请手工迁移",
+			"volume", s.opts.VolumeName, "container", legacy, "canonical", want)
+		s.dedupDir = legacy
+		return legacy, nil
+	}
+	s.dedupDir = want
+	return want, nil
+}
+
+// legacyDedupDir 在卷根寻找「老版本随机名去重容器」：卷根下**没有目录 meta** 的目录。
+// 去重池容器不含目录 meta（它是非逻辑目录）；嵌套布局下卷根只应有根容器（含 dir meta）。
+// 返回除 canonical 之外的首个候选（无则空串）。
+func (s *SecretdataFS) legacyDedupDir(ctx context.Context, canonical string) (string, error) {
+	entries, err := s.inner.ListDir(ctx, "")
 	if err != nil {
 		return "", err
 	}
-	s.dedupDir = c
-	return c, nil
+	for _, e := range entries {
+		if !e.IsDir || e.Name == canonical {
+			continue
+		}
+		if hasDirMetaName(ctx, s.inner, e.Name) {
+			continue // 逻辑目录容器（有 dir meta），不是去重池
+		}
+		return e.Name, nil
+	}
+	return "", nil
+}
+
+// hasDirMetaName 报告容器目录内是否含目录 meta blob（含则说明是逻辑目录容器）。
+// 列举失败保守返回 true（不把无法确认的目录当去重池采用）。
+func hasDirMetaName(ctx context.Context, inner syncpkg.FS, container string) bool {
+	entries, err := inner.ListDir(ctx, container)
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if !e.IsDir && shardseal.ClassifyName(e.Name) == shardseal.KindDirMeta {
+			return true
+		}
+	}
+	return false
 }
 
 // writeFileDedupHit 池命中（引用已预留）：克隆模板 meta（Salt/Chunks/Extra 随模板），

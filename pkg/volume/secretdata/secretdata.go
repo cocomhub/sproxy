@@ -4267,6 +4267,10 @@ func (s *SecretdataFS) ensureContainer(ctx context.Context, dirPath string, mtim
 // createContainerLocked 创建一层容器目录并写入其加密目录 meta，返回
 // (容器相对路径, dir_id, dir-meta blob 名, blob 落盘长度)。调用方持 s.mu。
 //
+// dirMetaSaltLabel 是目录 meta 盐的确定性派生域标签（见 shardseal.DeriveBytes）：
+// 盐 = DeriveBytes(卷密钥, dirMetaSaltLabel, meta 明文)，同明文同卷 ⇒ 同盐（设计 §9 第 7 项）。
+const dirMetaSaltLabel = "dir-meta"
+
 // **物理嵌套**（2026-10-14 用户口径）：子容器落在**父容器目录内** ⇒ 底层目录树与逻辑目录树同形
 // （此前所有容器都是卷根下的随机名兄弟目录 ⇒ 存储上看不出父子关系）。卷根容器（parentContainer==""）
 // 仍在卷根（顶层）——逻辑树根无父容器。**旧扁平布局不支持、无兼容**：加载侧校验卷根容器唯一
@@ -4292,19 +4296,21 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if iderr != nil {
 		return "", "", "", 0, iderr
 	}
-	salt, serr := shardseal.RandSalt()
+	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir",
+		Name: logicalDirName(dirPath), ParentDirID: parentID, DirID: dirID, MTime: mtimeString(mtime)}
+	dmJSON, merr := json.Marshal(dm)
+	if merr != nil {
+		return "", "", "", 0, merr
+	}
+	// 盐**确定性派生自 meta 明文 + 卷密钥**（2026-11-16，设计 §9 第 7 项）：原为 RandSalt
+	// （随机）⇒ 同一容器的 meta blob 字节/名随盐变化、无法复用。同明文同卷 ⇒ 同盐。
+	salt, serr := shardseal.DeriveBytes(s.secret, dirMetaSaltLabel, dmJSON, shardseal.SaltLen)
 	if serr != nil {
 		return "", "", "", 0, serr
 	}
 	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
 		return "", "", "", 0, kerr
-	}
-	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir",
-		Name: logicalDirName(dirPath), ParentDirID: parentID, DirID: dirID, MTime: mtimeString(mtime)}
-	dmJSON, merr := json.Marshal(dm)
-	if merr != nil {
-		return "", "", "", 0, merr
 	}
 	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
 	if berr != nil {
@@ -4904,19 +4910,20 @@ func findDirMetaBlob(ctx context.Context, inner syncpkg.FS, container string) (s
 	return "", nil, fmt.Errorf("secretdata: 容器 %s 无目录 meta，无法更新目录引用", container)
 }
 
-// writeDirMetaLocked 加密落盘目录 meta（新随机盐 + 新 blob 名，沿用原 mtime）。
+// writeDirMetaLocked 加密落盘目录 meta（盐确定性派生自 meta 明文 + 卷密钥 + 新 blob 名，沿用原 mtime）。
 func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string, dm *dirMeta) (string, error) {
-	salt, serr := shardseal.RandSalt()
+	dmJSON, merr := json.Marshal(dm)
+	if merr != nil {
+		return "", merr
+	}
+	// 盐派生自 meta 明文（设计 §9 第 7 项）——同明文同卷 ⇒ 同盐（不再是 RandSalt）。
+	salt, serr := shardseal.DeriveBytes(s.secret, dirMetaSaltLabel, dmJSON, shardseal.SaltLen)
 	if serr != nil {
 		return "", serr
 	}
 	key, kerr := shardseal.DeriveKey(s.secret, salt, s.algoVer)
 	if kerr != nil {
 		return "", kerr
-	}
-	dmJSON, merr := json.Marshal(dm)
-	if merr != nil {
-		return "", merr
 	}
 	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget())
 	if berr != nil {

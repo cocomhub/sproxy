@@ -23,7 +23,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -104,6 +103,10 @@ func compactKey(secret []byte) [32]byte {
 	return sum
 }
 
+// compactMetaNonceLabel 是精简缓存 GCM nonce 的确定性派生域标签（设计 §9 第 7 项）：
+// nonce = DeriveBytes(卷密钥, compactMetaNonceLabel, meta 明文)，同明文同卷 ⇒ 同 nonce。
+const compactMetaNonceLabel = "metacache-nonce"
+
 // putCompactMeta 把**已解密的 meta 明文 JSON** 加密（无 padding）写入缓存。
 // 失败静默忽略（缓存是加速器，绝不影响写路径）。
 func (s *SecretdataFS) putCompactMeta(rel string, plain []byte, blobLen int64) {
@@ -119,8 +122,10 @@ func (s *SecretdataFS) putCompactMeta(rel string, plain []byte, blobLen int64) {
 	if gerr != nil {
 		return
 	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, rerr := rand.Read(nonce); rerr != nil {
+	// nonce 确定性派生自 meta 明文 + 卷密钥（原为随机 rand.Read ⇒ 同明文每次字节不同、无法复用）：
+	// 同 key + 同 nonce 只可能出现在**完全相同的内容**上（CID 相同 ⇒ 明文相同），无 GCM nonce 复用风险。
+	nonce, nerr := shardseal.DeriveBytes(s.secret, compactMetaNonceLabel, plain, gcm.NonceSize())
+	if nerr != nil {
 		return
 	}
 	var lb [8]byte

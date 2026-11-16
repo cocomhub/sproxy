@@ -398,6 +398,33 @@ func alnumFromBytes(b []byte, n int) string {
 	return string(out)
 }
 
+// DeriveBytes 按 (卷密钥, 域标签, 内容) **确定性派生** n 字节（HMAC-SHA256）。
+//
+// 设计依据：docs/designs/2026-11-16-deterministic-blob-convergent-encryption.md §9 第 7 项、§10。
+// 派生输入：HMAC key = **卷密钥**（每卷独立 ⇒ 跨卷不可关联）；消息 = 域前缀 + 标签 + SHA-256(内容)
+// （内容标识 CID）。用途：把原先「每次随机」的落盘字节（meta 盐、紧凑缓存 nonce）改为
+// 「同内容 ⇒ 同结果」⇒ 同内容不再各自产生不同字节（否则重复 meta / 无法复用）。
+//
+// 安全（设计 §4）：确定性只改**盐/nonce 的来源**，不改 AES-GCM 认证语义；「同 key 同 nonce」
+// 只可能出现在**完全相同的内容**上（CID 相同 ⇒ 明文相同），不构成 nonce 复用攻击。
+// 空密钥/非法长度 fail-closed（空密钥会让多卷退化为同一派生源）。
+func DeriveBytes(secret []byte, label string, content []byte, n int) ([]byte, error) {
+	if len(secret) == 0 {
+		return nil, fmt.Errorf("shardseal: DeriveBytes 需要非空密钥")
+	}
+	if n <= 0 || n > sha256.Size {
+		return nil, fmt.Errorf("shardseal: DeriveBytes 长度非法（应 1..%d）: %d", sha256.Size, n)
+	}
+	mac := hmac.New(sha256.New, secret)
+	// 域分隔：前缀 + NUL + 标签 + NUL（标签与内容摘要都作为固定长度段拼接，无歧义）。
+	_, _ = mac.Write([]byte("sproxy/derive/v1" + string([]byte{0})))
+	_, _ = mac.Write([]byte(label))
+	_, _ = mac.Write([]byte{0})
+	cid := sha256.Sum256(content)
+	_, _ = mac.Write(cid[:])
+	return mac.Sum(nil)[:n], nil
+}
+
 // toBase64 编码字节段（供 meta 存 salt 等）。
 func toBase64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
