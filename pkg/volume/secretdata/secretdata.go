@@ -1988,7 +1988,11 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 	return func(name string, blob []byte) error {
 		// **块级并发**：sink 只做「落本地/拷内存 + 登记 + 投递」，上传由 worker 并行执行。
 		// 块级字段必须用**局部变量**（此前是 iu.chunkMD5 共享字段，并发下会串值）。
-		h := chunkHash{md5: md5HexOf(blob), crc32: strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)}
+		// 单一来源：块名（加密器给定）、摘要、大小、逐分块 md5 均取自**同一个**密文 blob ⇒
+		// 「写入名 / meta 记录名 / 校验名」三者恒同源（无第二处推导）。逐分块 md5 供大对象
+		// 与远端 block_list 逐块对账（syncpkg.BlockMD5Size）。
+		sum, blockMD5s := blobVerifyHashes(blob)
+		h := chunkHash{md5: sum, crc32: strconv.FormatUint(uint64(crc32.ChecksumIEEE(blob)), 10)}
 		// 密文拷一份交 worker（blob 由加密器复用缓冲区）；落盘在 worker 内，保证
 		// 本地临时副本峰值 = O(并发度) 而不是 O(队列深度)。
 		job := uploadJob{
@@ -2003,7 +2007,7 @@ func (s *SecretdataFS) interleavedChunkSink(ctx context.Context, iu *interleaved
 		iu.markUploaded(key)
 		// 登记待校验项（**不保留本地副本**：峰值保持 O(并发度)；校验失败时由上层
 		// 整文件重试——源文件可重读，见 writeFileOpt 的重试）。
-		iu.markVerify(syncpkg.VerifyItem{Key: key, MD5: h.md5, Size: int64(len(blob)), CRC32: h.crc32}, "")
+		iu.markVerify(syncpkg.VerifyItem{Key: key, MD5: h.md5, Size: int64(len(blob)), CRC32: h.crc32, BlockMD5s: blockMD5s}, "")
 		if serr := iu.submit(ctx, job); serr != nil {
 			return serr
 		}
@@ -2269,13 +2273,25 @@ func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
 // uploadLocalChunk 上传**一个已落本地的密文分块**（分块/blob 通用）到 container，并把已上传
 // 路径追加到 uploaded。
 //
-// verifyBatchAndRepair 批量校验 + **自动重传**（2026-11-04 用户设计：不一致重传而非直接失败）。
+// verifyBatchTimeout 是**每一次**批量校验的时间上界（用户纪律 2026-11-17：收敛尝试必须
+// **有界**，不得出现「几十轮重传 / 5 分钟无进展」）。正常（对象可见）远快于它；上界只用于
+// 兜住「新目录一致性延迟」的可见性等待（后端 `waitPutVisible` 默认 90s/项，会把整体拖到分钟级）。
+const verifyBatchTimeout = 15 * time.Second
+
+// verifyBatchAndRepair 批量校验（**有界**）：通过 ⇒ 清理本地副本且成功；未通过 ⇒ **快速**
+// 返回 `ErrBatchVerifyFailed`，由上层 `writeFileStreamEntryWithRetry` 执行**一次覆盖写重传**
+// （同路径再传，2026-11-17 用户实测：百度首次上传后远端元数据未收敛，再传一次即一致）后**再校验一次**。
 //
-// 语义：
+// 语义（2026-11-04 用户设计；2026-11-17 收敛纪律修订）：
 //   - 后端不支持 BatchVerifier ⇒ 跳过（Put 内部已逐块即时复核，零回归）；
-//   - 全部 VerifyOK ⇒ 清理本地副本，成功；
-//   - 不一致/不可见 ⇒ 用保留的本地副本**重传该块**（走即时复核路径）→ 再校验；
-//   - 轮次耗尽 ⇒ 返回错误（调用方回滚；**同命令重跑即可恢复**，源文件仍在）。
+//   - 校验**有界**（`verifyBatchTimeout`），避免后端可见性等待把耗时拖到分钟级；
+//   - 整体 ≤ **2 次上传**（首传 + 1 次覆盖写重传），每次都有时间上界；
+//   - 重传仍失败 ⇒ 返回错误（调用方回滚；**同命令重跑即可恢复**，源文件仍保留）。
+//
+// 为什么不再做本层多轮：本层**无本地密文副本可用**（交错路径本地峰值 O(1 块)；且单块重建与
+// 写侧格式不同构——`EncryptChunkStandalone` 产物按 meta 读会解密失败，2026-11-04 实测）⇒ 多轮
+// 只是**重复同一份 VerifyMany 结果**并各带一次可见性等待，把耗时放大到分钟级（实测 ~5 分钟）
+// 却没有任何真实重传。故改为「快速失败 + 上层整文件覆盖写重传」。
 func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleavedUpload, meta *shardseal.Meta, wc writeCtx) error {
 	items := iu.snapshotVerify()
 	if len(items) == 0 {
@@ -2286,40 +2302,32 @@ func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleaved
 		iu.cleanupLocals()
 		return nil
 	}
-	const rounds = 3
-	for round := 1; round <= rounds; round++ {
-		results := bv.VerifyMany(ctx, items)
-		if len(results) != len(items) {
-			// 后端返回长度不符（不支持逐项校验）⇒ 无法判定，跳过批量校验（上传阶段已带
-			// DeferVerify 的前提是 putDeferredIfRequested 的双断言，这里只是防御）。
-			iu.cleanupLocals()
-			return nil
-		}
-		bad := collectVerifyFailures(results)
-		if len(bad) == 0 {
-			iu.cleanupLocals()
-			if round > 1 {
-				slog.Info("secretdata: 批量校验在重传后通过", "chunks", len(items), "round", round)
-			}
-			return nil
-		}
-		if round == rounds {
-			return fmt.Errorf("%w: %d/%d 块（重传 %d 轮仍不一致）: %s",
-				ErrBatchVerifyFailed, len(bad), len(items), rounds, summarizeVerifyFailures(bad))
-		}
-		// 注意：**秒传刷新自愈已内置在后端**（BatchVerifier 契约，见 docs/external-dependencies.md
-		// §7.6）——此处拿到的 bad 都是「刷不回来」的真不一致，才需要重传兜底。
-		// 使用方不编排刷新逻辑，避免每个消费方各写一遍。
-		slog.Warn("secretdata: 批量校验发现不一致（无本地副本 ⇒ 记录并等待整文件重试）", "round", round, "bad", len(bad), "of", len(items))
-		retried := s.repairFailedChunks(ctx, iu, wc, meta, bad)
-		items = retried
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(round) * 2 * time.Second):
-		}
+	results := s.verifyManyBounded(ctx, bv, items)
+	if len(results) != len(items) {
+		// 后端返回长度不符（不支持逐项校验）⇒ 无法判定，跳过批量校验（上传阶段已带
+		// DeferVerify 的前提是 putDeferredIfRequested 的双断言，这里只是防御）。
+		iu.cleanupLocals()
+		return nil
 	}
-	return nil
+	bad := collectVerifyFailures(results)
+	if len(bad) == 0 {
+		iu.cleanupLocals()
+		return nil
+	}
+	// 快速失败：保留本地产物（若有）供上层整文件覆盖写重传；重传后再由本函数校验一轮。
+	// 秒传刷新自愈已内置在后端（BatchVerifier 契约，见 docs/external-dependencies.md §7.6）——
+	// 此处拿到的 bad 都是「刷不回来」的真不一致/不可见，才需覆盖写重传。
+	slog.Warn("secretdata: 批量校验未通过 ⇒ 交由上层覆盖写重传一次",
+		"bad", len(bad), "of", len(items), "chunks", len(meta.Chunks), "rel", wc.rel)
+	return fmt.Errorf("%w: %d/%d 块: %s",
+		ErrBatchVerifyFailed, len(bad), len(items), summarizeVerifyFailures(bad))
+}
+
+// verifyManyBounded 以**有界** ctx 调后端批量校验（避免后端可见性等待把耗时拖到分钟级）。
+func (s *SecretdataFS) verifyManyBounded(ctx context.Context, bv syncpkg.BatchVerifier, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
+	vctx, cancel := context.WithTimeout(ctx, verifyBatchTimeout)
+	defer cancel()
+	return bv.VerifyMany(vctx, items)
 }
 
 // collectVerifyFailures 过滤出非 OK 的校验结果（拆出以控 gocognit）。
@@ -2331,22 +2339,6 @@ func collectVerifyFailures(results []syncpkg.VerifyResult) []syncpkg.VerifyResul
 		}
 	}
 	return bad
-}
-
-// repairFailedChunks 处理校验失败的块（当前仅原样返回，等待整文件重试）。
-//
-// **不做单块重建**（2026-11-04 实测结论）：`ChunkInfo` 已记录 Offset/OrigSize，
-// `EncryptChunkStandalone` 也能按源区间重加密，但重建的 blob 与写侧格式**不同构**
-// （写侧含 Windows 缓冲窗口布局）⇒ 按 meta 读取会解密失败（实测读回 0 字节）。
-// 单块重建需要 shardseal 提供「与写侧同构的重建 API」（后续工作）；
-// 在此之前统一走**整文件重试**（源可重读，见 writeFileStreamEntryWithRetry），
-// 保证正确性优先——绝不让不可读的 blob 落盘。
-func (s *SecretdataFS) repairFailedChunks(_ context.Context, _ *interleavedUpload, _ writeCtx, _ *shardseal.Meta, bad []syncpkg.VerifyResult) []syncpkg.VerifyItem {
-	out := make([]syncpkg.VerifyItem, 0, len(bad))
-	for _, r := range bad {
-		out = append(out, r.Item)
-	}
-	return out
 }
 
 // summarizeVerifyFailures 生成校验失败摘要（日志/错误用，限 3 条）。
@@ -2362,29 +2354,45 @@ func summarizeVerifyFailures(bad []syncpkg.VerifyResult) string {
 	return strings.Join(parts, "; ")
 }
 
-// ErrBatchVerifyFailed 表示批量校验后仍有块不一致（已重传；源文件保留 ⇒ 重跑可恢复）。
+// ErrBatchVerifyFailed 表示批量校验后仍有块不一致（已覆盖写重传一次；源文件保留 ⇒ 重跑可恢复）。
 var ErrBatchVerifyFailed = errors.New("secretdata: 批量校验失败")
 
-// writeFileStreamEntryWithRetry 在**批量校验失败**时自动整文件重试一次（用户要求：不一致
-// 自动重试而非直接失败）。前提：源可重读（本地文件/已暂存路径）——校验失败通常是远端索引
-// 延迟/瞬时不一致，重写一次即成功；重试仍失败 ⇒ ErrBatchVerifyFailed（源保留，重跑可恢复）。
+// writeFileStreamEntryWithRetry 在**批量校验失败**时自动**覆盖写重传一次**（用户要求：不一致
+// 自动重试而非直接失败；2026-11-17 用户实测：百度首次上传后远端元数据未收敛，**同路径再传一次
+// 即一致** ⇒ 把“二次覆盖写”作为首选收敛手段）。
+//
+// 前提：源可重读——本入口的调用前提（`writeFileOpt` 仅在 `canStream(r)` 时路由到流式路径）
+// 已保证 `r` 可重读：`io.ReaderAt` 按**绝对偏移**读、`io.Seeker` 可 Seek 回起点
+// ⇒ 即使源不是本地可重打开路径（如 HTTP multipart 的**内存** seekable 源）也能自动重传。
+// 重传后仍失败 ⇒ `ErrBatchVerifyFailed`（源保留，重跑可恢复）。
 func (s *SecretdataFS) writeFileStreamEntryWithRetry(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
 	err := s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
 	if err == nil || !errors.Is(err, ErrBatchVerifyFailed) {
 		return err
 	}
-	src := replayableSourcePath(r)
-	if src == "" {
-		return err // 源不可重读 ⇒ 无法自动重试（调用方重跑）
+	// 优先按**路径**重开（本地文件/调用方暂存路径），否则复用**可重读的同一源**（Seek 回起点）。
+	retry := r
+	source := ""
+	if src := replayableSourcePath(r); src != "" {
+		f, oerr := os.Open(src)
+		if oerr == nil {
+			defer func() { _ = f.Close() }()
+			retry, source = f, src
+		}
 	}
-	f, oerr := os.Open(src)
-	if oerr != nil {
-		return err
+	if source == "" {
+		sk, sok := r.(io.Seeker)
+		if !sok {
+			return err // 源不可重读 ⇒ 无法自动重试（调用方重跑）
+		}
+		if _, serr := sk.Seek(0, io.SeekStart); serr != nil {
+			return err
+		}
+		source = "same-source"
 	}
-	defer func() { _ = f.Close() }()
-	slog.Warn("secretdata: 批量校验失败 ⇒ 自动整文件重试一次（源可重读）", "rel", rel, "source", src, "error", err)
-	if rerr := s.writeFileStreamEntry(ctx, rel, f, size, mtime, expected, ifAbsent); rerr != nil {
-		return fmt.Errorf("%w（已自动重试一次仍失败；源保留，重跑可恢复）: %w", ErrBatchVerifyFailed, rerr)
+	slog.Warn("secretdata: 批量校验失败 ⇒ 自动覆盖写重传一次（源可重读）", "rel", rel, "source", source, "error", err)
+	if rerr := s.writeFileStreamEntry(ctx, rel, retry, size, mtime, expected, ifAbsent); rerr != nil {
+		return fmt.Errorf("%w（已自动覆盖写重传一次仍失败；源保留，重跑可恢复）: %w", ErrBatchVerifyFailed, rerr)
 	}
 	return nil
 }
@@ -5265,6 +5273,26 @@ type chunkHash struct{ md5, crc32 string }
 func md5HexOf(b []byte) string {
 	h := md5.Sum(b) //nolint:gosec // 见函数头注释
 	return hex.EncodeToString(h[:])
+}
+
+// blobVerifyHashes **单遍**计算密文块的（整块 md5, 逐分块 md5 列表）——分块大小 = syncpkg.BlockMD5Size。
+//
+// 为什么一起算：大对象批量校验时远端 `md5` 字段不可靠，改以远端 `block_list` 与本列表逐块对账
+// （见 syncpkg.VerifyItem.BlockMD5s）；两个摘要来自**同一遍**扫描，避免为对账再整块重扫一遍。
+func blobVerifyHashes(blob []byte) (string, []string) {
+	if len(blob) == 0 {
+		return md5HexOf(nil), nil
+	}
+	bs := syncpkg.BlockMD5Size
+	full := md5.New() //nolint:gosec // 密文随机内容，非安全用途（同 md5HexOf）
+	blocks := make([]string, 0, (len(blob)+bs-1)/bs)
+	for off := 0; off < len(blob); off += bs {
+		seg := blob[off:min(off+bs, len(blob))]
+		_, _ = full.Write(seg)
+		h := md5.Sum(seg) //nolint:gosec // 见上
+		blocks = append(blocks, hex.EncodeToString(h[:]))
+	}
+	return hex.EncodeToString(full.Sum(nil)), blocks
 }
 
 // defaultBlockPolicyFor 返回未显式配置时的**默认分块策略**（按底层本地性分流，2026-10-21
