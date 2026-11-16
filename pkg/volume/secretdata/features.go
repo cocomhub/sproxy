@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
-	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -269,7 +268,7 @@ func (s *SecretdataFS) writeFileDedupHit(ctx context.Context, wc writeCtx, key, 
 func (s *SecretdataFS) writeFileDedupMiss(ctx context.Context, wc writeCtx, key, dir string, mt int64) error {
 	// 本地 staging：单分块密文目录（自管记账，与主写路径同口径）——去重池 blob 先落本地再上传
 	// （与常规分块同口径：经 uploadLocalChunk 复用调用方暂存路径）。
-	tmp, cleanup, terr := s.dedupStagingDir(ctx, int64(len(wc.data)))
+	tmp, cleanup, terr := s.dedupStagingDir(ctx, wc.rel, int64(len(wc.data)))
 	if terr != nil {
 		return terr
 	}
@@ -384,18 +383,18 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 }
 
 // dedupStagingDir 为去重写路径准备本地临时目录（自管 staging 配额记账），返回释放函数
-// （幂等：释放配额 + 删目录）。
-func (s *SecretdataFS) dedupStagingDir(ctx context.Context, size int64) (string, func(), error) {
+// （幂等：释放配额 + 删目录）。目录名确定性派生自逻辑 rel（设计 §9.2）。
+func (s *SecretdataFS) dedupStagingDir(ctx context.Context, rel string, size int64) (string, func(), error) {
 	release, rerr := s.stagingReserve(ctx, size)
 	if rerr != nil {
 		return "", nil, rerr
 	}
-	tmp, terr := os.MkdirTemp(s.temp, "chunks-dedup-*")
+	tmp, tmpRelease, terr := s.newChunkTempDir(dedupTempPrefix, rel)
 	if terr != nil {
 		release()
 		return "", nil, fmt.Errorf("secretdata: 创建去重临时目录失败: %w", terr)
 	}
-	return tmp, func() { release(); _ = os.RemoveAll(tmp) }, nil
+	return tmp, func() { release(); tmpRelease() }, nil
 }
 
 // encryptAndUploadDedupChunk 把去重整文件内容按单分块加密（落 tmp）并上传到池容器 dir
