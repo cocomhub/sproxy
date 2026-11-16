@@ -260,7 +260,16 @@ func (s *Service) collectVolumeViewEntries(ctx context.Context, lister VolumeVie
 // 不对外可见——与索引/回退路径同一语义）。
 func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, entries []ExternalEntry,
 	volName, subdir string, seenDirs map[string]bool) []FileInfo {
-	csAt := checksumGetter(s.checksumStoreReady(ctx, owner), volName)
+	// 台账**惰性**获取（性能）：`checksumStoreReady` 在台账为空时会触发 `RebuildChecksums`——
+	// 那是**全卷遍历 + 逐文件读 sidecar** 级开销。条目已自报 checksum（S2 本地卷 / secretdata /
+	// s3）时**不应**再触达台账，否则一次列表白跑一次全卷重建。
+	var csAt func(string) string
+	ledger := func() func(string) string {
+		if csAt == nil {
+			csAt = checksumGetter(s.checksumStoreReady(ctx, owner), volName)
+		}
+		return csAt
+	}
 	out := make([]FileInfo, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir {
@@ -285,7 +294,7 @@ func (s *Service) fileInfosFromViewEntries(ctx context.Context, owner string, en
 		if e.Checksum != "" {
 			fi.Checksum = e.Checksum
 		} else {
-			fi.Checksum = csAt(relName)
+			fi.Checksum = ledger()(relName)
 		}
 		out = append(out, fi)
 	}
