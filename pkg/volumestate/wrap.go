@@ -110,18 +110,13 @@ func (f *CacheFS) fillLocalChecksums(ctx context.Context, dirPath string, entrie
 
 	work := make(chan job)
 	var wg sync.WaitGroup
-	workers := sidecarReadConcurrency
-	if workers > len(jobs) {
-		workers = len(jobs)
-	}
+	workers := min(sidecarReadConcurrency, len(jobs))
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for j := range work {
 				f.readOneSidecar(ctx, pv, entries, j.idx, j.rel)
 			}
-		}()
+		})
 	}
 	for _, j := range jobs {
 		work <- j

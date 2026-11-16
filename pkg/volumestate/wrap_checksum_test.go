@@ -257,7 +257,7 @@ func TestCacheFS_LocalChecksumReadsConcurrently(t *testing.T) {
 		gate:    newSyncGate(2), // 前 2 次调用必须同时在场 ⇒ 峰值 ≥2
 		sidecar: make(map[string]string, n),
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := fmt.Sprintf("f%02d.txt", i)
 		f.entries = append(f.entries, syncpkg.Entry{Name: name, Path: "dir/" + name})
 		f.sidecar["alice/user/dir/"+name] = fmt.Sprintf("sha-%02d", i)
