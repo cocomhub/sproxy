@@ -42,13 +42,18 @@ func pprofMux() *http.ServeMux {
 
 // registerPprofRoutes 装配受认证保护的 /debug/pprof 端点（仅 DebugPprofEnabled
 // 开启时挂载；关闭 = 404 零回归）。启用状态日志可观测（安全开关铁律）。
-func (h *Handlers) registerPprofRoutes(srvMux *http.ServeMux) {
+//
+// 双 mux：srvMux 经 authMiddleware（SproxySig/APIKey）；localMux 供**隧道内层**
+// 裸注册（隧道加密 + SproxySig 已提供认证）——否则 `sclient perf`（默认走
+// access-key 驱动的传统 /tunnel 隧道）会得到 404（非 TLS 问题但同样使命令不可用）。
+func (h *Handlers) registerPprofRoutes(srvMux, localMux *http.ServeMux) {
 	cfg := h.cfgPtr.Load()
 	if cfg == nil || !cfg.DebugPprofEnabled {
 		return
 	}
 	h.logger.Info("pprof 端点已启用（受认证保护）", "path", "/debug/pprof/")
 	srvMux.Handle("GET /debug/pprof/", h.authMiddleware(pprofMux().ServeHTTP))
+	localMux.Handle("GET /debug/pprof/", http.HandlerFunc(pprofMux().ServeHTTP))
 }
 
 // heapMetricsSamples 采样 runtime.MemStats 并追加到 metrics 输出（进程级分配指标）。
