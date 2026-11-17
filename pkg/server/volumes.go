@@ -722,6 +722,33 @@ func (h *Handlers) externalSinkFor(owner, volName string) files.UploadSink {
 	return &externalUploadSink{fs: fsys, v: v, owner: normalizeOwner(owner)}
 }
 
+// contentLocator 实现 files.VolumeContentLocator：按**内容 sha256** 反查卷内路径。
+//
+// 为什么要它（2026-11-17 实测）：上传结果/manifest 的 rel 是**快照**，文件事后可能被
+// **改名纠正**（`CODE.ext` → `CODE <标题>.ext`）或**目录搬移**（`<桶>/<目录>/…` → `<卷内基准>/<桶>/<目录>/…`）
+// ⇒ 调用方用旧 rel 做 Stat 会 `not found`，只能保守拒绝（如"删除本地原件"的重入校验）✗。
+//
+// 实现：经统一卷视图（与读/写同一装饰链，R27）断言 `LookupByChecksum` 能力；
+// 未装配卷集合 / 卷不支持该能力 ⇒ 返回 supported=false（调用方按"不支持"处理，**不得**当成无命中 ✗）。
+type contentLocator struct{ h *Handlers }
+
+func (c contentLocator) LocateByChecksum(_ context.Context, volumeName, _ /*owner*/, checksum string) ([]string, bool) {
+	if c.h == nil || c.h.volSet == nil || volumeName == "" || checksum == "" {
+		return nil, false
+	}
+	fsys, ok := c.h.volSet.VolumeView(volumeName, registry.ViewUser)
+	if !ok || fsys == nil {
+		return nil, false
+	}
+	lk, ok := fsys.(interface {
+		LookupByChecksum(checksum string) []string
+	})
+	if !ok {
+		return nil, false
+	}
+	return lk.LookupByChecksum(checksum), true
+}
+
 // externalVolumeTransferFS 是外部卷**转存/写目标** FS 的解析出口（可信卷语义）：
 // 裸后端 FS → trusted.Guard(trusted.Wrap(...))（meta 恒生成 + meta 桶隔离）。
 //

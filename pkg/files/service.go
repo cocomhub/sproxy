@@ -229,6 +229,18 @@ type VolumeViewLister interface { // NOSONAR: S8196 — 能力接口（非 -er �
 	ListDirView(ctx context.Context, volName, owner, subdir string) (entries []ExternalEntry, supported bool, err error)
 }
 
+// VolumeContentLocator 是「按内容哈希反查卷内路径」能力（可选注入，2026-11-17）。
+//
+// 为什么需要：上传结果/manifest 记录的是**上传当时**的 rel，文件事后可能被**改名纠正**或
+// **目录搬移**（`docs/` 里 #42/#47 都是既有能力）⇒ 用旧 rel 做 Stat 会 `not found`，调用方只能
+// 保守拒绝（如"删除本地原件"的重入校验）✗。按**内容哈希**反查即可解耦路径变化。
+//
+// 语义：返回该卷内与 checksum 匹配的**全部** rel（卷内相对路径，不含 owner 前缀）；无命中 ⇒ 空。
+// 只读索引/元数据，**不下载内容**。未注入 ⇒ 上层按"不支持"处理（不得当成无命中 ✗）。
+type VolumeContentLocator interface { // NOSONAR: S8196 — 能力接口（非 -er 角色命名），设计保留
+	LocateByChecksum(ctx context.Context, volumeName, owner, checksum string) ([]string, bool)
+}
+
 // ExternalDeleter 是外部卷删除能力（C2，2026-10-06）：files 域用它在不 import pkg/sync
 // 的前提下删除外部卷文件（secretdata 等无 *storage.Tenant 的后端）。rel 为用户桶内相对
 // 路径（如 user/videos/x）——实现侧负责 owner 前缀/键空间适配（ResolveUserPath）。

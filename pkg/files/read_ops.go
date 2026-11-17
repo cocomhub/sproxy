@@ -476,6 +476,19 @@ func (s *Service) appendExternalVolumeHits(ctx context.Context, owner, qLower, t
 // 那属装配层策略，领域侧只消费结果（见包文档「只读面的分工」）。
 //
 // 错误语义：`*HTTPError{404}` 不存在；`*HTTPError{500}` 其他 IO 错。
+// LocateByChecksum 按**内容 sha256** 反查卷内路径（供"重入校验/删除本地原件"等场景解耦改名/搬移）。
+//
+// rel 为用户桶内相对路径以外的**卷内 rel**（不含 owner 前缀，与卷索引一致）。
+// 返回 (paths, supported)：supported=false 表示**未注入该能力**（调用方必须按"不支持"处理，
+// 不得当作"无命中"✗，否则会误删/误判）。
+func (s *Service) LocateByChecksum(ctx context.Context, volumeName, owner, checksum string) ([]string, bool) {
+	l := s.rt.contentLocatorFor()
+	if l == nil {
+		return nil, false
+	}
+	return l.LocateByChecksum(ctx, volumeName, owner, checksum)
+}
+
 func (s *Service) StatPath(ctx context.Context, dp DownloadPath) (FileStat, error) {
 	// **外部卷读源（2026-10-05）**：dp.Source 非 nil → 经装配层服务端读取源 Stat。
 	if dp.Source != nil {

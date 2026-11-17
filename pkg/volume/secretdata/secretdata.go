@@ -2384,6 +2384,37 @@ func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleaved
 		ErrBatchVerifyFailed, len(realBad), len(items), summarizeVerifyFailures(realBad))
 }
 
+// LookupByChecksum 按**整文件明文 sha256**在卷索引里反查文件当前路径（返回卷内 rel 列表）。
+//
+// 为什么需要（2026-11-17 实测）：上传结果 manifest 记录的是**上传当时**的 rel，而文件事后会被
+// **改名纠正**（`CODE.ext` → `CODE <标题>.ext`）或**目录搬移**（`<桶>/<目录>/…` → `<卷内基准>/<桶>/<目录>/…`）
+// ⇒ 用旧 rel 做 Stat 必然 `not found` ⇒ 上层（如"删除本地原件"的重入校验）只能拒绝并转人工 ✗。
+// 用**内容哈希**做身份即可解耦"路径变化"（本方法命中即证明是同一内容）。
+//
+// 语义：
+//   - 纯**索引内**查找（`Checksum` 是热字段，不下载任何数据、不加载冷 meta）⇒ O(条目数)；
+//   - 返回**全部**同内容路径（并集去重；同内容多副本时不为调用方选一个，由调用方决策）；
+//   - checksum 为空/非法长度 ⇒ 返回错误（不得把"没有校验器"当成"找得到"✗）。
+func (s *SecretdataFS) LookupByChecksum(checksum string) []string {
+	want := strings.ToLower(strings.TrimSpace(checksum))
+	if want == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, 0, 1)
+	for rel, e := range s.index {
+		if e == nil {
+			continue
+		}
+		if strings.EqualFold(e.hotOrigSHA256(), want) {
+			out = append(out, rel)
+		}
+	}
+	slices.Sort(out) // 确定性顺序（调用方/测试可复现）
+	return out
+}
+
 // ReverifyEntry 按卷内相对路径**重新校验**一个文件的全部块（含 meta blob）是否在远端可见且一致。
 //
 // 用途：`pkg/server/issues` 的 `KindBlobPendingVerify` 执行器（2026-11-17 缺口修复）——

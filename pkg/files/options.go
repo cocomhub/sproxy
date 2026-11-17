@@ -251,30 +251,31 @@ type Option func(*config)
 
 // config 是 Option 的累积结果；零值字段在 newRuntime 中回落默认实现。
 type config struct {
-	logger        func() *slog.Logger
-	actor         ActorResolver
-	volumes       VolumeRouter
-	quota         QuotaScopeProvider
-	ledger        ChecksumLedgerProvider
-	chunkSize     func() int64
-	metaLimit     func() int64
-	uploadLimit   func() int64
-	versioning    Versioning
-	chunked       ChunkedUploads
-	downloadPaths DownloadPathResolver
-	locks         FileLocks
-	metrics       Metrics
-	audit         Auditor
-	eventSink     EventListener
-	dedup         DedupPolicy
-	bandwidth     BandwidthLimiter
-	contentIndex  bool
-	fileMeta      FileMetaPolicy
-	externalOps   ExternalVolumeOps
-	phys          VolumePhysFootprinter
-	volTypes      VolumeTypeClassifier
-	retrySleep    func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
-	quotaWait     func() time.Duration // 配额排队等待上限（nil = DefaultWaitTimeout 30s）
+	logger         func() *slog.Logger
+	actor          ActorResolver
+	volumes        VolumeRouter
+	quota          QuotaScopeProvider
+	ledger         ChecksumLedgerProvider
+	chunkSize      func() int64
+	metaLimit      func() int64
+	uploadLimit    func() int64
+	versioning     Versioning
+	chunked        ChunkedUploads
+	downloadPaths  DownloadPathResolver
+	locks          FileLocks
+	metrics        Metrics
+	audit          Auditor
+	eventSink      EventListener
+	dedup          DedupPolicy
+	bandwidth      BandwidthLimiter
+	contentIndex   bool
+	fileMeta       FileMetaPolicy
+	externalOps    ExternalVolumeOps
+	phys           VolumePhysFootprinter
+	volTypes       VolumeTypeClassifier
+	contentLocator VolumeContentLocator
+	retrySleep     func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入：可 0 化/可推进假时钟）
+	quotaWait      func() time.Duration // 配额排队等待上限（nil = DefaultWaitTimeout 30s）
 }
 
 // WithRetrySleep 注入外部卷转存重试的退避等待函数（默认 time.Sleep）。
@@ -322,6 +323,12 @@ func WithVolumeTypeClassifier(tc VolumeTypeClassifier) Option {
 
 func WithVolumes(v VolumeRouter) Option {
 	return func(c *config) { c.volumes = v }
+}
+
+// WithVolumeContentLocator 注入「按内容哈希反查卷内路径」能力（见 VolumeContentLocator）。
+// 默认：未注入 ⇒ 该能力不可用（调用方按"不支持"处理，绝不当作"无命中"✗）。
+func WithVolumeContentLocator(l VolumeContentLocator) Option {
+	return func(c *config) { c.contentLocator = l }
 }
 
 // WithQuota 注入配额能力。默认：不记账。

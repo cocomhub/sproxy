@@ -41,31 +41,32 @@ var errTenantsRequired = errors.New("files.New: TenantResolver 不能为 nil")
 
 // runtime 是解析后的能力集合。零值不可用——必须经 New(tenants, opts...) 构造。
 type runtime struct {
-	tenants       TenantResolver
-	loggerFn      func() *slog.Logger
-	actor         ActorResolver
-	volumes       VolumeRouter
-	quota         QuotaScopeProvider
-	ledger        ChecksumLedgerProvider
-	chunkSizeFn   func() int64
-	uploadLimit   func() int64
-	metaLimit     func() int64
-	versioning    Versioning
-	chunked       ChunkedUploads
-	downloadPaths DownloadPathResolver
-	dedup         DedupPolicy
-	locks         FileLocks
-	metrics       Metrics
-	audit         Auditor
-	bandwidth     BandwidthLimiter
-	eventSink     EventListener
-	contentIndex  bool
-	fileMeta      FileMetaPolicy
-	externalOps   ExternalVolumeOps
-	phys          VolumePhysFootprinter
-	volTypes      VolumeTypeClassifier
-	retrySleep    func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入 0 等待）
-	quotaWait     func() time.Duration // 配额排队等待上限（nil = quota.DefaultWaitTimeout 30s）
+	tenants        TenantResolver
+	loggerFn       func() *slog.Logger
+	actor          ActorResolver
+	volumes        VolumeRouter
+	quota          QuotaScopeProvider
+	ledger         ChecksumLedgerProvider
+	chunkSizeFn    func() int64
+	uploadLimit    func() int64
+	metaLimit      func() int64
+	versioning     Versioning
+	chunked        ChunkedUploads
+	downloadPaths  DownloadPathResolver
+	dedup          DedupPolicy
+	locks          FileLocks
+	metrics        Metrics
+	audit          Auditor
+	bandwidth      BandwidthLimiter
+	eventSink      EventListener
+	contentIndex   bool
+	fileMeta       FileMetaPolicy
+	externalOps    ExternalVolumeOps
+	phys           VolumePhysFootprinter
+	volTypes       VolumeTypeClassifier
+	contentLocator VolumeContentLocator
+	retrySleep     func(time.Duration)  // 外部卷转存重试退避 sleep（测试注入 0 等待）
+	quotaWait      func() time.Duration // 配额排队等待上限（nil = quota.DefaultWaitTimeout 30s）
 }
 
 // waitTimeout 返回配额排队等待上限（注入的 fn 优先；nil = quota.DefaultWaitTimeout 30s）。
@@ -184,29 +185,30 @@ func New(tenants TenantResolver, opts ...Option) (*Service, error) {
 // newRuntime 把 config 折叠为 runtime，并为未注入项装配默认实现。
 func newRuntime(tenants TenantResolver, cfg config) runtime {
 	rt := runtime{
-		tenants:      tenants,
-		loggerFn:     cfg.logger,
-		actor:        cfg.actor,
-		volumes:      cfg.volumes,
-		quota:        cfg.quota,
-		ledger:       cfg.ledger,
-		chunkSizeFn:  cfg.chunkSize,
-		uploadLimit:  cfg.uploadLimit,
-		versioning:   cfg.versioning,
-		chunked:      cfg.chunked,
-		dedup:        cfg.dedup,
-		locks:        cfg.locks,
-		metrics:      cfg.metrics,
-		audit:        cfg.audit,
-		bandwidth:    cfg.bandwidth,
-		eventSink:    cfg.eventSink,
-		contentIndex: cfg.contentIndex,
-		fileMeta:     cfg.fileMeta,
-		externalOps:  cfg.externalOps,
-		phys:         cfg.phys,
-		volTypes:     cfg.volTypes,
-		retrySleep:   cfg.retrySleep,
-		quotaWait:    cfg.quotaWait,
+		tenants:        tenants,
+		loggerFn:       cfg.logger,
+		actor:          cfg.actor,
+		volumes:        cfg.volumes,
+		quota:          cfg.quota,
+		ledger:         cfg.ledger,
+		chunkSizeFn:    cfg.chunkSize,
+		uploadLimit:    cfg.uploadLimit,
+		versioning:     cfg.versioning,
+		chunked:        cfg.chunked,
+		dedup:          cfg.dedup,
+		locks:          cfg.locks,
+		metrics:        cfg.metrics,
+		audit:          cfg.audit,
+		bandwidth:      cfg.bandwidth,
+		eventSink:      cfg.eventSink,
+		contentIndex:   cfg.contentIndex,
+		fileMeta:       cfg.fileMeta,
+		externalOps:    cfg.externalOps,
+		phys:           cfg.phys,
+		volTypes:       cfg.volTypes,
+		contentLocator: cfg.contentLocator,
+		retrySleep:     cfg.retrySleep,
+		quotaWait:      cfg.quotaWait,
 	}
 	if rt.loggerFn == nil {
 		rt.loggerFn = slog.Default
@@ -281,6 +283,9 @@ func (r *runtime) externalVolOps() ExternalVolumeOps { return r.externalOps }
 
 // volTypeClassifier 返回卷类型分类能力（未注入 → nil，调用方回落内置基线名单）。
 func (r *runtime) volTypeClassifier() VolumeTypeClassifier { return r.volTypes }
+
+// contentLocatorFor 返回「按内容哈希反查」能力（未注入 ⇒ nil，调用方按不支持处理）。
+func (r *runtime) contentLocatorFor() VolumeContentLocator { return r.contentLocator }
 
 func (r *runtime) volumeTenant(volName, owner string) *storage.Tenant {
 	return r.volumes.Tenant(volName, owner)
