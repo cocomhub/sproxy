@@ -118,7 +118,7 @@
 | 行为 | 说明 | 锁定测试 |
 |---|---|---|
 | `meta` 输出字段（类型/文件大小/md5/mtime） | 解析精确字节数（忽略人类可读近似列）与 md5（标签含“可能不正确/截图请打码”变体） | `TestParseBinaryMeta_File` / `_Dir` / `TestParseBinaryMetaBlocks_Two` |
-| `ls` 输出表格 | 枚举名称 + 目录标记 + mtime；size 近似值由批量 `meta` 覆盖 | `TestParseBinaryList` / `TestParseHumanSize` |
+| `ls` 输出表格 | 枚举名称 + 目录标记 + mtime；size 为**人类可读近似值**（2 位小数，**不是**字节精确值）⇒ 由批量 `meta` 覆盖；确需用于比较时必须带**显示舍入误差上界**（见 §7.8.6） | `TestParseBinaryList` / `TestParseHumanSize` / `TestParseHumanSize_DisplaySlack` |
 | 二进制失败回退库 adpater / 无兜底 fail-closed（不落回全量下载） | 与既有 binary→library 回退同构 | `TestBinaryAdapter_Meta_Fallback` / `_NoFallback` / `_List_Fallback` |
 | 子 module e2e 测试不被 CI 编译（`//go:build e2e`）→ `make vet-e2e-submodules` 编译门 | 防外部依赖/接口变更后静默腐化 | CI `Test Sub-Modules` job 内 `make vet-e2e-submodules` |
 
@@ -473,3 +473,31 @@ GOWORK=off go test -tags=e2e -run TestE2E_CompareUploadPaths -count=1 -v -timeou
 **验证工具**：`pkg/volume/ext/baidupcs/blocklist_authority_e2e_test.go`（`//go:build e2e`）；
   验证用例（**入库、可复核**）：`pkg/volume/ext/baidupcs/blocklist_authority_e2e_test.go`。
   （原始响应抓取与分页对比当时用一次性 shell 探针，**未入库**。）
+
+### 7.8.6 ★ **`ls -l` 的文件大小是「人类可读」值 ⇒ 不得当字节精确值比较**（2026-11-17 实测，已修）
+
+> **必读结论（不要重复踩）**：`BaiduPCS-Go ls -l` 的「文件大小」列是**人类可读**串（`1.72MB`/`1.00MB`/`21B`），
+> **只保留 2 位小数** ⇒ 解析出的字节数只是真实值的**四舍五入**结果，误差可达**半个最小刻度**：
+> `0.005 × 单位`（**MB ⇒ ±5242B**、KB ⇒ ±5B、GB ⇒ ±5368709B）；**`B`/空单位才是精确值**。
+> ⇒ **任何以该值做「字节精确」比较的判据都必须计入该误差界**，否则会把「显示四舍五入」误判为
+> 「内容不一致」✗。精确来源只有三类：库 `FilesDirectoriesMeta`、binary `meta` 的「文件大小 4712617」列、
+> 以及 `ls` 里 `B` 单位的值。
+
+**生产症状（修复前，1 MB 写入百度加密卷）**：
+```
+WARN 上传后远端 ETag 不可用且 size 超出容差（重传）  want_size=1432234 got_size=1436549 ×3
+ERROR 上传 meta 失败: baidupcs: transient error: 上传后内容复核不匹配超过 3 次（远端 ETag=）  ⇒ HTTP 500
+```
+**判定依据（一眼可辨）**：`got_size=1436549` **恰好等于** `int64(1.37 × 1<<20)` —— 即显示串 `1.37MB`
+被 `parseHumanSize` 解析回来的值；差值 4315B > 复核容差 `max(4KiB, 0.1%)=4096B`。
+取整方向决定是否超界 ⇒ 症状**时好时坏**（同文件轮 2 常恰好通过）⇒ 极难定位。
+
+| 行为 | 说明 | 锁定测试 |
+|---|---|---|
+| `ls -l` size 列 = 2 位小数人类可读 | 解析值带 `0.005 × 单位` 的舍入界；`B`/空 ⇒ 界为 0（精确） | `TestParseHumanSize_DisplaySlack` |
+| 判据必须**精度感知** | `slack<=0`（精确来源）⇒ **必须严格相等**（fail-closed 不放宽 ✗）；`slack>0` ⇒ 允许「显示舍入界 + 既有近似容差」 | `TestSizeMatches_ExactSourceStaysStrict` |
+| 列举回落路径不得因显示舍入误判 | 列举给出的人类可读 size 与本地精确 size 必须判**一致** | `TestPut_HumanRoundedListSizeIsNotMismatch` |
+| 实现落点 | `ObjectMeta.SizeSlack` 携带误差界；**唯一判据入口 `sizeMatches`/`sizeNear`**（4 处调用点收敛，防再有遗漏） | 同上 + `TestSizeNear` |
+
+**验证工具/修复 PR**：`pkg/volume/ext/baidupcs/put_human_size_test.go`、`binary_meta_test.go`、`visibility_list_fallback_test.go`；
+修复 = sproxy **#1184**（`fix(baidupcs): 人类可读大小不再当字节精确值比较`）。
