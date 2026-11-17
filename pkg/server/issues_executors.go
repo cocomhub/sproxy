@@ -72,6 +72,11 @@ type ExecutorDeps struct {
 	// 返回 nil ⇒ 已收敛（`RunDue` 会 markResolved）；返回错误 ⇒ 退避重试，达上限转人工。
 	// 未注入（nil）⇒ 该类型不注册（转人工）。
 	ReconcileBlobMD5 func(ctx context.Context, volume, rel string) error
+	// ReverifyPendingBlob 执行一次「写入时远端不可见」的重新校验（`KindBlobPendingVerify`）：
+	// 参数 volume=卷名、rel=卷内相对路径。返回 nil ⇒ 已确认可见（`RunDue` 会 markResolved）；
+	// 返回错误 ⇒ 退避重试，达上限**转人工**（真丢块绝不静默）。
+	// 未注入（nil）⇒ 该类型不注册（转人工）。
+	ReverifyPendingBlob func(ctx context.Context, volume, rel string) error
 }
 
 func (d ExecutorDeps) log() *slog.Logger {
@@ -97,6 +102,9 @@ func NewIssuesExecutors(d ExecutorDeps) map[issues.Kind]issues.RetryFunc {
 		issues.KindBlobMD5Unconverged: func(ctx context.Context, it issues.Item) error {
 			return runBlobMD5Reconcile(ctx, d, it)
 		},
+		issues.KindBlobPendingVerify: func(ctx context.Context, it issues.Item) error {
+			return runPendingVerify(ctx, d, it)
+		},
 	}
 }
 
@@ -118,6 +126,23 @@ func runBlobMD5Reconcile(ctx context.Context, d ExecutorDeps, it issues.Item) er
 		return fmt.Errorf("未注入 blob md5 重试执行器（ReconcileBlobMD5 为空），无法执行")
 	}
 	return d.ReconcileBlobMD5(ctx, it.Volume, it.Path)
+}
+
+// runPendingVerify 执行一次「写入时远端不可见」的重新校验（`KindBlobPendingVerify`）。
+//
+// 契约：`Volume`/`Path` 缺一即返回错误（转人工，不静默成功）；未注入能力同样返回错误。
+// 返回 nil ⇒ 已确认（事项 resolve）；返回错误 ⇒ 退避重试，达上限转人工。
+func runPendingVerify(ctx context.Context, d ExecutorDeps, it issues.Item) error {
+	if it.Volume == "" {
+		return fmt.Errorf("事项缺少卷名，无法定位卷（需人工处理）")
+	}
+	if it.Path == "" {
+		return fmt.Errorf("事项缺少卷内路径 rel，无法定位重校验目标（需人工处理）")
+	}
+	if d.ReverifyPendingBlob == nil {
+		return fmt.Errorf("未注入待复核重校验执行器（ReverifyPendingBlob 为空），无法执行")
+	}
+	return d.ReverifyPendingBlob(ctx, it.Volume, it.Path)
 }
 
 // runDirMetaCleanup 执行一次「清理非权威目录 meta」重试。

@@ -46,6 +46,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	issuespkg "github.com/cocomhub/sproxy/pkg/server/issues"
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tempclean"
@@ -323,7 +324,7 @@ const (
 	// issueKindBlobPendingVerify：块已按 inner 成功落盘，但**远端可见性尚未收敛**（百度新目录树
 	// Stat 延迟 5–10 分钟，见 uploadLocalChunk 内注释）⇒ 无法在写路径内确认。属「待复核」，
 	// 交后台机制复核（**不是内容错误**，不得回 500 —— 用户 2026-11-17 实测口径）。
-	issueKindBlobPendingVerify = "blob_pending_verify"
+	issueKindBlobPendingVerify = string(issuespkg.KindBlobPendingVerify)
 )
 
 // reportStorageIssue 是 nil-safe 的上报封装（未装配 reporter ⇒ 静默 no-op，零回归）。
@@ -2382,6 +2383,56 @@ func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleaved
 		"bad", len(bad), "of", len(items), "chunks", len(meta.Chunks), "rel", wc.rel)
 	return fmt.Errorf("%w: %d/%d 块: %s",
 		ErrBatchVerifyFailed, len(realBad), len(items), summarizeVerifyFailures(realBad))
+}
+
+// ReverifyEntry 按卷内相对路径**重新校验**一个文件的全部块（含 meta blob）是否在远端可见且一致。
+//
+// 用途：`pkg/server/issues` 的 `KindBlobPendingVerify` 执行器（2026-11-17 缺口修复）——
+// 写入时「远端可见性未收敛」会登记待复核事项；本方法即其**自动重试**动作。
+//
+// 语义（与写入期批量校验**同一套判据**，不造第二份实现）：
+//   - 全部 `VerifyOK` ⇒ 返回 nil（事项 resolve）；
+//   - 含 `VerifyInvisible`（仍未可见）⇒ 返回错误 ⇒ 事项**退避重试**，达上限**转人工** ✗ 不静默；
+//   - 含真不一致（Mismatch/未知态）⇒ 返回错误（同上；真丢块/坏块必须人工可见）。
+//
+// 后端不支持 `BatchVerifier` ⇒ 返回错误（无法判定，不得当作通过 ✗）。
+func (s *SecretdataFS) ReverifyEntry(ctx context.Context, rel string) error {
+	key := strings.TrimPrefix(rel, "/")
+	s.mu.RLock()
+	e, ok := s.index[key]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("secretdata: %q 不在卷索引中（无法重校验，需人工处理）: %w", rel, os.ErrNotExist)
+	}
+	if e.meta == nil {
+		if merr := s.ensureEntryMeta(ctx, e); merr != nil {
+			return fmt.Errorf("secretdata: 加载 %q 的 meta 失败（无法重校验）: %w", rel, merr)
+		}
+	}
+	bv, bok := syncpkg.AssertBatchVerifier(s.inner)
+	if !bok {
+		return fmt.Errorf("secretdata: 后端不支持批量校验，无法重校验 %q（需人工处理）", rel)
+	}
+	items := make([]syncpkg.VerifyItem, 0, len(e.meta.Chunks)+1)
+	for _, ci := range e.meta.Chunks {
+		items = append(items, syncpkg.VerifyItem{
+			Key: path.Join(e.dirSeg, ci.FileName), MD5: ci.EncSHA256, Size: ci.EncSize,
+		})
+	}
+	// meta blob：条目里**不持久化**其 md5/size（设计如此——meta 是冷结构，见 index_snapshot 注释）
+	// ⇒ 这里只做**可见性**判据（Size 留空 = 不校验大小，MD5 留空 = 不校验内容）。
+	// 内容正确性由读路径的解密校验（AES-GCM tag）+ 卷级巡检兜底，与本事项「待复核」语义一致。
+	items = append(items, syncpkg.VerifyItem{Key: path.Join(e.dirSeg, e.metaName)})
+	results := s.verifyManyBounded(ctx, bv, items)
+	if len(results) != len(items) {
+		return fmt.Errorf("secretdata: 重校验 %q 返回条数不符（%d != %d，需人工处理）", rel, len(results), len(items))
+	}
+	bad := collectVerifyFailures(results)
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("secretdata: 重校验 %q 仍有 %d/%d 项未通过（%s）",
+		rel, len(bad), len(items), summarizeVerifyFailures(bad))
 }
 
 // verifyManyBounded 以**有界** ctx 调后端批量校验（避免后端可见性等待把耗时拖到分钟级）。
