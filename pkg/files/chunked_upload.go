@@ -1550,6 +1550,16 @@ func (s *Service) completeExternalTransfer(ctx context.Context, w http.ResponseW
 		s.sendJSON(w, ChunkCompleteResponse{Success: false, Message: errMsgInvalidPath}, http.StatusBadRequest)
 		return "", false
 	}
+	// **服务端写入阶段进度（2026-11-17 实测缺口修复）**：外部卷写面
+	// （`pkg/server/external_upload.go` 的 `externalUploadSink.WriteFile`）**直连卷 FS**，绕过了
+	// `write_ops.go` 里唯一的两处 `withUploadProgress` 注入点 ⇒ 此前 ctx 里从未装配回调
+	// ⇒ 卷层 `ReportUploadProgress`（secretdata 加密 / baidupcs 远端）**全为 no-op** ⇒ 客户端
+	// 进度页在**长尾转存**期间恒显示「分块上传 100% / 疑似停滞」✗（实测 5.9GB 转存 **16–20 分钟**
+	// 无任何阶段可见）。键口径与读侧 `progressRel` **同源**（两侧都经 `tnt.UserRel`）⇒ complete
+	// 期间客户端即可按 `/upload/status` 看到「加密/远端卷上传」阶段。
+	// inject-if-absent：上层已装配更细回调时不覆盖（`withUploadProgress` 自身语义）；未装配
+	// 注册表时一切上报仍是 no-op（零回归）。
+	ctx = s.withUploadProgress(ctx, rel)
 	// 读取 staging 整临时文件（已在 complete 前全文件校验通过，此处单遍流式转存）。
 	abs, aok := s.resolveExternalTransferSrc(w, session, tnt)
 	if !aok {
