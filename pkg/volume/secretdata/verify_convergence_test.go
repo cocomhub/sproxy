@@ -6,7 +6,6 @@ package secretdata
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path"
@@ -53,11 +52,17 @@ func (f *countingInvisibleFS) stats() (calls int, allBounded bool) {
 
 // TestVerifyBatch_BoundedSinglePassPerAttempt 锁定批量校验的**有界 + 每轮一次**语义
 // （2026-11-17 用户纪律：不得出现「几十轮重传 / 5 分钟无进展」）：
-//   - 后端恒「不可见」⇒ 每次写入尝试只调 **1 次** VerifyMany（旧实现固定 3 轮，把耗时放大到分钟级）；
-//   - 整文件 **覆盖写重传一次**（源可重读）⇒ 共 **2 次** 上传 / 2 次校验；
+//   - 后端恒「不可见」⇒ **不重传**（可见性滞后不是内容错误，见 `verifyBatchAndRepair`）：
+//     全程只调 **1 次** VerifyMany、只传 **1 次** 上传；
+//   - 写入**成功**（对象已由 inner 落盘确认）并把「待复核」上报（`IssueReporter`，retryable）；
 //   - 每次 VerifyMany 的 ctx 都带**有界** deadline（`verifyBatchTimeout`）。
 //
-// 变异：把单次校验改回 `rounds=3` 循环 ⇒ 调用次数变 6（本用例红）；删掉 `verifyManyBounded`
+// 语义修订（2026-11-17）：本用例原断言"恒不可见 ⇒ ErrBatchVerifyFailed"，那是把
+// 「百度新目录树 5–10 分钟可见性延迟」当成了失败（实测症状 `(:etag=,size=0)` + HTTP 500）✗。
+// 依 `pkg/sync/batchverify.go:63`「VerifyInvisible ⇒ 应重试或入待恢复清单」修正为上述语义；
+// 「**真不一致仍必须失败**」由 `TestWriteFile_MismatchStillFails` 单独锁定。
+//
+// 变异：把单次校验改回 `rounds=3` 循环 ⇒ 调用次数变 3（本用例红）；删掉 `verifyManyBounded`
 // 的 `WithTimeout` ⇒ allBounded=false（红）。
 func TestVerifyBatch_BoundedSinglePassPerAttempt(t *testing.T) {
 	t.Parallel()
@@ -84,12 +89,13 @@ func TestVerifyBatch_BoundedSinglePassPerAttempt(t *testing.T) {
 	}
 
 	werr := sfs.WriteFile(context.Background(), syncpkg.LogicalKey{}, "d/f.bin", src, int64(len(payload)), 0)
-	if !errors.Is(werr, ErrBatchVerifyFailed) {
-		t.Fatalf("恒不可见应返回 ErrBatchVerifyFailed，got %v", werr)
+	// 可见性滞后 ⇒ 计入待复核并**成功**（不是内容错误，不得回失败）。
+	if werr != nil {
+		t.Fatalf("恒不可见应计入待复核并成功（不得判失败），got %v", werr)
 	}
 	calls, allBounded := inner.stats()
-	if calls != 2 {
-		t.Fatalf("期望恰好 2 次 VerifyMany（首传 + 覆盖写重传各 1 次），got %d（旧实现为 3 轮/次）", calls)
+	if calls != 1 {
+		t.Fatalf("可见性滞后不需重传：期望恰好 1 次 VerifyMany，got %d", calls)
 	}
 	if !allBounded {
 		t.Fatalf("每次 VerifyMany 必须带**有界** deadline（批量校验不得被后端可见性等待拖到分钟级）")
