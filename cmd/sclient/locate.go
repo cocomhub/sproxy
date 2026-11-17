@@ -20,10 +20,15 @@ func NewCmdLocate(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Comma
 		Short: "按内容 sha256 反查卷内路径（解耦改名/搬移）",
 		Args:  cobra.ExactArgs(1),
 	}
+	// --volume 指定反查的卷（不带时由 client 的卷上下文决定；两者都空 ⇒ 服务端 400）。
+	cmd.Flags().String("volume", "", "要反查的卷名（如 baidu；缺省用当前卷上下文）")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		c, cerr := factory.NewClient(cmd)
 		if cerr != nil {
 			return cerr
+		}
+		if v, _ := cmd.Flags().GetString("volume"); v != "" {
+			c.SetVolume(v)
 		}
 		paths, supported, lerr := c.LocateByChecksum(cmd.Context(), args[0])
 		if lerr != nil {
