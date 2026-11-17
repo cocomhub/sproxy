@@ -46,7 +46,6 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
-	issuespkg "github.com/cocomhub/sproxy/pkg/server/issues"
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tempclean"
@@ -324,7 +323,7 @@ const (
 	// issueKindBlobPendingVerify：块已按 inner 成功落盘，但**远端可见性尚未收敛**（百度新目录树
 	// Stat 延迟 5–10 分钟，见 uploadLocalChunk 内注释）⇒ 无法在写路径内确认。属「待复核」，
 	// 交后台机制复核（**不是内容错误**，不得回 500 —— 用户 2026-11-17 实测口径）。
-	issueKindBlobPendingVerify = string(issuespkg.KindBlobPendingVerify)
+	issueKindBlobPendingVerify = "blob_pending_verify"
 )
 
 // reportStorageIssue 是 nil-safe 的上报封装（未装配 reporter ⇒ 静默 no-op，零回归）。
