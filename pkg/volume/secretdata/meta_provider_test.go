@@ -175,14 +175,17 @@ func TestSecretdata_OriginalCTime_Recorded(t *testing.T) {
 		t.Fatalf("FileMeta: %v", fmErr)
 	}
 	if fm.CTime == "" {
-		t.Fatal("CTime 未记录（应为创建时间 UTC RFC3339）")
+		t.Fatal("CTime 未记录（调用方给了 mtime ⇒ 应作为创建时间回退写入）")
 	}
 	created, perr := time.Parse(time.RFC3339Nano, fm.CTime)
 	if perr != nil {
 		t.Fatalf("CTime 不是 RFC3339: %q err=%v", fm.CTime, perr)
 	}
-	if time.Since(created) > time.Hour {
-		t.Fatalf("CTime 不是当前时间: %v", created)
+	// ★ 语义订正（2026-11-18 用户裁定）：ctime **必须来自源文件时间**，不得写 wall clock
+	// （否则同一内容两次写入的 meta 字节不同 ⇒ 派生不稳定，两卷产物无法逐字节一致 ✗）。
+	// 调用方只给 mtime ⇒ ctime 以 mtime 回退。
+	if !created.Equal(mtime) {
+		t.Fatalf("CTime 应回退为源文件 mtime（%v），实际 %v", mtime, created)
 	}
 	// mtime 应为调用方传入值（纳秒正确解读）
 	mt, _ := time.Parse(time.RFC3339Nano, fm.MTime)
