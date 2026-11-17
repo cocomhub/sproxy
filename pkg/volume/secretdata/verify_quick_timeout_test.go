@@ -18,10 +18,16 @@ import (
 type blockingInvisibleFS struct {
 	*hintVerifyRecorder
 	calls int
+	// window 记录本次校验拿到的 **ctx 窗口**（= verifyBatchTimeout 实际生效值）。
+	// 用它断言「窗口被调小」是**确定性**的，不依赖 CI 机器速度（墙钟断言在慢机上会假红）。
+	window time.Duration
 }
 
 func (f *blockingInvisibleFS) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
 	f.calls++
+	if dl, ok := ctx.Deadline(); ok {
+		f.window = time.Until(dl)
+	}
 	<-ctx.Done() // 阻塞到校验窗口结束（= 真实 waitPutVisible 的行为）
 	out := make([]syncpkg.VerifyResult, len(items))
 	for i, it := range items {
@@ -51,10 +57,15 @@ func TestWriteFile_InvisibleDefersWithoutSyncWait(t *testing.T) {
 		t.Fatalf("不可见属待复核，写入应成功：%v", err)
 	}
 	elapsed := time.Since(start)
-	// 旧实现会阻塞 verifyBatchTimeout(15s)；新实现应在「一次即时校验」后立即返回。
-	if elapsed > 5*time.Second {
-		t.Fatalf("不可见场景不应同步等待（实测 %v；旧值为 verifyBatchTimeout=15s 同步阻塞）"+
-			"——等到的结论仍是「计入待复核」，等待纯属浪费 ✗", elapsed)
+	// ① **确定性断言**：校验窗口必须是「即时判定」级别（旧值 15s ⇒ 等到结论仍是待复核，纯浪费 ✗）。
+	//    用 ctx 窗口而非墙钟，避免 CI 慢机假红。
+	if fsy.window > 3*time.Second {
+		t.Fatalf("批量校验窗口 = %v（应 ≤3s；旧值 verifyBatchTimeout=15s）——不可见已知必然发生，"+
+			"同步等待换来的结论仍是「计入待复核」，纯属浪费 ✗", fsy.window)
+	}
+	// ② 兜底墙钟上界（宽松）：确保没有别处又引入长时间同步等待。
+	if elapsed > 12*time.Second {
+		t.Fatalf("不可见场景整体耗时 %v 过长（应远小于旧的 15s 窗口）", elapsed)
 	}
 	if fsy.calls == 0 {
 		t.Fatal("仍必须做**一次**校验（可见/不一致仍要判）——只是不阻塞等待")
