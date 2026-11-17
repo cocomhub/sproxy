@@ -320,6 +320,10 @@ type IssueReporter interface {
 // 上报用的稳定类型码（与 pkg/server/issues.Kind 对齐）。
 const (
 	issueKindDirMetaCleanupFailed = "dir_meta_cleanup_failed"
+	// issueKindBlobPendingVerify：块已按 inner 成功落盘，但**远端可见性尚未收敛**（百度新目录树
+	// Stat 延迟 5–10 分钟，见 uploadLocalChunk 内注释）⇒ 无法在写路径内确认。属「待复核」，
+	// 交后台机制复核（**不是内容错误**，不得回 500 —— 用户 2026-11-17 实测口径）。
+	issueKindBlobPendingVerify = "blob_pending_verify"
 )
 
 // reportStorageIssue 是 nil-safe 的上报封装（未装配 reporter ⇒ 静默 no-op，零回归）。
@@ -2329,13 +2333,37 @@ func (s *SecretdataFS) verifyBatchAndRepair(ctx context.Context, iu *interleaved
 		iu.cleanupLocals()
 		return nil
 	}
+	// **可见性滞后 ≠ 内容错误**（2026-11-17 用户实测 + 仓库既有状态语义，见 docs/external-dependencies.md）：
+	// 百度**新目录树**的远端 Stat 延迟 **5–10 分钟** ⇒ 写路径内的校验**必然**拿到 VerifyInvisible
+	// （等待窗口不可能覆盖该量级）。而 `VerifyInvisible` 的官方语义是「**应重试或入待恢复清单**」
+	// （pkg/sync/batchverify.go:63）—— 对象的写入本身已由 `inner.WriteFile` 返回 nil 确认。
+	// ⇒ 只含 invisible 时：**不失败**，上报「待复核」（retryable）交后台复核后直接成功；
+	//    含**真不一致**（Mismatch/未知态）时：**仍失败**（走重传，语义不放宽）。
+	realBad := make([]syncpkg.VerifyResult, 0, len(bad))
+	invisible := 0
+	for _, r := range bad {
+		if r.State == syncpkg.VerifyInvisible {
+			invisible++
+			continue
+		}
+		realBad = append(realBad, r)
+	}
+	if len(realBad) == 0 && invisible > 0 {
+		iu.cleanupLocals()
+		s.reportStorageIssue(issueKindBlobPendingVerify, wc.rel,
+			fmt.Sprintf("块已落盘但远端可见性未在写窗口内收敛（%d 块不可见）：百度新目录树 Stat 延迟可达 5–10 分钟；"+
+				"已入待复核清单，后台复核一致后即完成；若持续不可见请按卷核查远端对象", invisible), true)
+		slog.Info("secretdata: 批量校验遇远端可见性滞后 ⇒ 计入待复核（写入成功）",
+			"invisible", invisible, "of", len(items), "rel", wc.rel)
+		return nil
+	}
 	// 快速失败：保留本地产物（若有）供上层整文件覆盖写重传；重传后再由本函数校验一轮。
 	// 秒传刷新自愈已内置在后端（BatchVerifier 契约，见 docs/external-dependencies.md §7.6）——
 	// 此处拿到的 bad 都是「刷不回来」的真不一致/不可见，才需覆盖写重传。
 	slog.Warn("secretdata: 批量校验未通过 ⇒ 交由上层覆盖写重传一次",
 		"bad", len(bad), "of", len(items), "chunks", len(meta.Chunks), "rel", wc.rel)
 	return fmt.Errorf("%w: %d/%d 块: %s",
-		ErrBatchVerifyFailed, len(bad), len(items), summarizeVerifyFailures(bad))
+		ErrBatchVerifyFailed, len(realBad), len(items), summarizeVerifyFailures(realBad))
 }
 
 // verifyManyBounded 以**有界** ctx 调后端批量校验（避免后端可见性等待把耗时拖到分钟级）。
