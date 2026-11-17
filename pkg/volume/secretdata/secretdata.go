@@ -2278,6 +2278,21 @@ func (s *SecretdataFS) retainPoolEntry(mm *shardseal.Meta) {
 // 兜住「新目录一致性延迟」的可见性等待（后端 `waitPutVisible` 默认 90s/项，会把整体拖到分钟级）。
 const verifyBatchTimeout = 15 * time.Second
 
+// verifyConvergeWait 是**覆盖写重传之前**的收敛等待（有界）。
+//
+// 依据（用户 2026-11-17 实测经验）：
+//
+//	"连续两次 `BaiduPCS-Go u --policy overwrite {文件} {目标目录}` 上传后，`ls -l` 检查 md5
+//	 大概率就一致了"。
+//
+// ⇒ 百度侧**首次上传后的远端元数据/可见性未立即收敛**，需要"再过一次上传（或两次之间的时间
+// 窗口）"才一致。手工操作时两次命令之间天然有间隔；**自动重试若立即复查 ⇒ 必然仍不可见** ✗
+// （实测症状：`1/1 块: …(:etag=,size=0)`，随后整文件重传仍失败 ⇒ HTTP 500）。
+//
+// 取值：足够覆盖常见收敛窗口，同时满足"收敛尝试必须**有界**、不得把耗时拖到分钟级"的纪律
+// （1 MB 写整体仍在几十秒内；大文件的重传本身耗时，此等待可忽略）。
+const verifyConvergeWait = 3 * time.Second
+
 // verifyBatchAndRepair 批量校验（**有界**）：通过 ⇒ 清理本地副本且成功；未通过 ⇒ **快速**
 // 返回 `ErrBatchVerifyFailed`，由上层 `writeFileStreamEntryWithRetry` 执行**一次覆盖写重传**
 // （同路径再传，2026-11-17 用户实测：百度首次上传后远端元数据未收敛，再传一次即一致）后**再校验一次**。
@@ -2365,6 +2380,22 @@ var ErrBatchVerifyFailed = errors.New("secretdata: 批量校验失败")
 // 已保证 `r` 可重读：`io.ReaderAt` 按**绝对偏移**读、`io.Seeker` 可 Seek 回起点
 // ⇒ 即使源不是本地可重打开路径（如 HTTP multipart 的**内存** seekable 源）也能自动重传。
 // 重传后仍失败 ⇒ `ErrBatchVerifyFailed`（源保留，重跑可恢复）。
+// waitConverge 等待 d（有界、ctx 感知）：给远端可见性/元数据收敛留窗口。
+// ctx 取消 ⇒ 立即返回错误（调用方按"重跑可恢复"处理）；d<=0 ⇒ 不等待。
+func waitConverge(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("secretdata: 等待远端收敛被取消: %w", ctx.Err())
+	case <-t.C:
+		return nil
+	}
+}
+
 func (s *SecretdataFS) writeFileStreamEntryWithRetry(ctx context.Context, rel string, r io.Reader, size, mtime, expected int64, ifAbsent bool) error {
 	err := s.writeFileStreamEntry(ctx, rel, r, size, mtime, expected, ifAbsent)
 	if err == nil || !errors.Is(err, ErrBatchVerifyFailed) {
@@ -2389,6 +2420,12 @@ func (s *SecretdataFS) writeFileStreamEntryWithRetry(ctx context.Context, rel st
 			return err
 		}
 		source = "same-source"
+	}
+	// **收敛等待（有界、ctx 感知）**：给远端元数据/可见性留出收敛窗口，再执行覆盖写重传。
+	// 不做这一等 ⇒ 立即复查必然仍「不可见」（实测：百度首次上传后元数据未立即收敛；见
+	// verifyConvergeWait 的用户实测依据）⇒ 重传也无意义 ✗。
+	if werr := waitConverge(ctx, verifyConvergeWait); werr != nil {
+		return werr // ctx 取消：直接返回（调用方决定重跑），不静默成功
 	}
 	slog.Warn("secretdata: 批量校验失败 ⇒ 自动覆盖写重传一次（源可重读）", "rel", rel, "source", source, "error", err)
 	if rerr := s.writeFileStreamEntry(ctx, rel, retry, size, mtime, expected, ifAbsent); rerr != nil {
