@@ -297,3 +297,8 @@ func (h *Handlers) download(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) stat(w http.ResponseWriter, r *http.Request) {
 	h.fileService().Stat(w, r)
 }
+
+// locateByChecksum 是 GET /api/files/locate 的薄适配（实体：files.Service.LocateByChecksumHTTP）。
+func (h *Handlers) locateByChecksum(w http.ResponseWriter, r *http.Request) {
+	h.fileService().LocateByChecksumHTTP(w, r)
+}

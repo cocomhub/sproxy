@@ -39,6 +39,7 @@ func fileDomainRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *htt
 		{Method: "POST", Path: "/rename", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).rename},
 		{Method: "GET", Path: "/api/files", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).listFiles},
 		{Method: "HEAD", Path: "/api/files/stat", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).stat},
+		{Method: "GET", Path: "/api/files/locate", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).locateByChecksum},
 		{Method: "GET", Path: "/api/du", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).duHandler},
 		{Method: "POST", Path: "/upload/init", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).uploadInit},
 		{Method: "POST", Path: "/upload/chunk", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).uploadChunk},

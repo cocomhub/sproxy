@@ -516,6 +516,30 @@ func (f *firstErrReadSeeker) Seek(offset int64, whence int) (int64, error) {
 // 通过响应头 X-File-Size、X-File-Checksum、X-File-MTime（UnixNano）返回元信息。
 // kind 为空走普通文件路径；kind=cloud_archive 解析归档目录（供分块下载前 stat）。
 // 文件不存在返回 404；不返回响应体。
+// LocateByChecksumHTTP 是 GET /api/files/locate 的实体：按**内容 sha256** 反查卷内路径。
+//
+// 用途（2026-11-17）：上传结果/manifest 里的 rel 是**快照**，文件事后可能被改名纠正或目录搬移
+// ⇒ 调用方（如"重入校验后删除本地原件"）用旧 rel 会 not found。按内容反查可稳定判定"同一内容在哪"。
+//
+// 参数：`volume`（必填）、`checksum`（必填，sha256 hex）。返回 `{paths:[...]}`；
+// 能力未装配 ⇒ 501（**不得**当成"无命中"✗）；无命中 ⇒ `{paths:[]}`（200）。
+func (s *Service) LocateByChecksumHTTP(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	volume := strings.TrimSpace(q.Get("volume"))
+	checksum := strings.TrimSpace(q.Get("checksum"))
+	if volume == "" || checksum == "" {
+		s.sendJSON(w, map[string]any{"success": false, "message": "缺少 volume 或 checksum"}, http.StatusBadRequest)
+		return
+	}
+	paths, supported := s.LocateByChecksum(r.Context(), volume, normalizeOwner(s.rt.actorOf(r)), checksum)
+	if !supported {
+		s.sendJSON(w, map[string]any{"success": false,
+			"message": "本服务未装配按内容反查能力（不支持，非无命中）"}, http.StatusNotImplemented)
+		return
+	}
+	s.sendJSON(w, map[string]any{"success": true, "paths": paths}, http.StatusOK)
+}
+
 func (s *Service) Stat(w http.ResponseWriter, r *http.Request) {
 	dp, err := s.rt.resolveDownloadPath(r)
 	if err != nil {

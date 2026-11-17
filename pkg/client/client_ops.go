@@ -839,6 +839,39 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 // Stat 通过 HEAD /api/files/stat?filename=<name> 获取远端单个文件元信息。
 // 响应来源于 X-File-Size、X-File-Checksum、X-File-MTime 三个响应头；不返回 body。
 // 文件不存在时返回错误（HTTP 404 包装为 error）。
+// LocateByChecksum 按**内容 sha256** 反查卷内路径（返回卷内 rel 列表；无命中 ⇒ 空）。
+//
+// 用途（2026-11-17）：上传结果/manifest 里的 rel 是**快照**，文件事后可能被改名纠正或目录搬移
+// ⇒ 用旧 rel 做 Stat 会 not found。本方法让调用方按**内容**定位（同内容即同一文件）。
+// 语义：服务端未装配该能力 ⇒ 返回 (nil, false)（调用方须按"不支持"处理，**不得**当作无命中 ✗）。
+func (c *FileClient) LocateByChecksum(ctx context.Context, checksum string) ([]string, bool, error) {
+	if checksum == "" {
+		return nil, true, fmt.Errorf("checksum 不能为空")
+	}
+	q := url.Values{"checksum": {checksum}}
+	c.appendVolumeQuery(q)
+	resp, err := c.doRequest(ctx, "GET", "/api/files/locate?"+q.Encode(), nil, nil)
+	if err != nil {
+		return nil, true, fmt.Errorf(errFmtRequestFailed, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotImplemented {
+		return nil, false, nil // 服务端未装配该能力（不是无命中）
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, true, fmt.Errorf("按内容反查失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		Success bool     `json:"success"`
+		Paths   []string `json:"paths"`
+	}
+	if derr := json.NewDecoder(resp.Body).Decode(&out); derr != nil {
+		return nil, true, fmt.Errorf("解析按内容反查响应: %w", derr)
+	}
+	return out.Paths, true, nil
+}
+
 func (c *FileClient) Stat(ctx context.Context, filename string) (*FileInfo, error) {
 	if filename == "" {
 		return nil, fmt.Errorf("filename 不能为空")
