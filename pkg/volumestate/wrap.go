@@ -324,6 +324,18 @@ func (f *CacheFS) Link(ctx context.Context, from, to string) error {
 }
 
 // ReserveSpace 委托 inner（容量预检，不涉及状态缓存）。
+// LookupByChecksum 委托 inner（可选能力 `syncpkg.ContentLocator`；未实现 ⇒ 返回 nil）。
+//
+// 转发理由（R21）：本装饰器是**透明**的（只加读缓存/写失效，不改内容身份语义）⇒ 若它不转发，
+// 上层 `syncpkg.AssertContentLocator` 会在装饰后恒为 nil ⇒ "按内容反查"在装配链上永远不可用 ✗。
+// 反查是**只读**动作 ⇒ 不需要缓存参与（不命中/不失效都不影响正确性）。
+func (f *CacheFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := f.inner.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
 func (f *CacheFS) ReserveSpace(ctx context.Context, path string, size int64) error {
 	if rs, ok := f.inner.(syncpkg.ReserveSpace); ok {
 		return rs.ReserveSpace(ctx, path, size)
@@ -507,4 +519,9 @@ var (
 // ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
 var (
 	_ syncpkg.DecoratorCapabilities = (*CacheFS)(nil)
+)
+
+// 编译期断言：CacheFS 必须转发「按内容反查」（R21/R24）。
+var (
+	_ syncpkg.ContentLocator = (*CacheFS)(nil)
 )

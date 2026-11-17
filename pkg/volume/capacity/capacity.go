@@ -994,3 +994,16 @@ var (
 var (
 	_ syncpkg.DecoratorCapabilities = (*CapacityFS)(nil)
 )
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24：透明装饰器必须转发，否则装配链上断言恒失败 ⇒ 功能静默不可用 ✗）。
+func (c *CapacityFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := c.inner.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
+// 编译期断言：CapacityFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ syncpkg.ContentLocator = (*CapacityFS)(nil)
+)

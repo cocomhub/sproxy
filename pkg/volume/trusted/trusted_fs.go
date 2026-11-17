@@ -390,6 +390,18 @@ func (t *TrustedVolumeFS) DirectURL(ctx context.Context, relPath string) (string
 	return "", false, fmt.Errorf("trusted: 底层卷未实现 DirectURL: %w", syncpkg.ErrUnsupported)
 }
 
+// LookupByChecksum 委托 inner（可选能力 `syncpkg.ContentLocator`；未实现 ⇒ 返回 nil）。
+//
+// 转发理由（R21）：本装饰器为**透明**（只增删 sidecar meta，不改内容身份语义）⇒ 不转发会让
+// `syncpkg.AssertContentLocator` 在装饰后恒 nil ⇒ "按内容反查"在装配链上永远不可用 ✗。
+// 反查是**只读**动作 ⇒ 不需要 sidecar 参与。
+func (t *TrustedVolumeFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := t.inner.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
 // Move 委托 inner（同卷移动；inner 未实现 → ErrUnsupported，调用方回落复制）。
 // 成功后联动移动 sidecar（C1 修复：与 Rename 一致，防目标无 meta、源 meta 成孤儿）。
 func (t *TrustedVolumeFS) Move(ctx context.Context, from, to string) error {
@@ -988,4 +1000,9 @@ var (
 // ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
 var (
 	_ syncpkg.DecoratorCapabilities = (*TrustedVolumeFS)(nil)
+)
+
+// 编译期断言：TrustedVolumeFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ syncpkg.ContentLocator = (*TrustedVolumeFS)(nil)
 )

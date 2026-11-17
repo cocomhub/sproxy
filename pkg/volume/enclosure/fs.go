@@ -166,3 +166,17 @@ var (
 var (
 	_ syncpkg.DecoratorCapabilities = (*FS)(nil)
 )
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24：透明装饰器必须转发，否则装配链上断言恒失败 ⇒ 功能静默不可用 ✗）。
+func (f *FS) LookupByChecksum(checksum string) []string {
+	// 嵌入 *syncpkg.PrefixFS（具体类型）⇒ 它自身已转发该能力（含键空间剥离）。
+	if f.PrefixFS == nil {
+		return nil
+	}
+	return f.PrefixFS.LookupByChecksum(checksum)
+}
+
+// 编译期断言：FS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ syncpkg.ContentLocator = (*FS)(nil)
+)
