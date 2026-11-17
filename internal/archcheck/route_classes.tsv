@@ -22,6 +22,7 @@ localMux	POST /delete	tunnel	pkg/server/routes.go:224
 localMux	POST /rename	tunnel	pkg/server/routes.go:225
 localMux	GET /api/files	tunnel	pkg/server/routes.go:226
 localMux	HEAD /api/files/stat	tunnel	pkg/server/routes.go:227
+localMux	GET /api/files/locate	tunnel	pkg/server/routes_files.go
 localMux	GET /api/du	tunnel	pkg/server/routes.go:228
 localMux	POST /mkdir	tunnel	pkg/server/routes.go:229
 localMux	POST /rmdir	tunnel	pkg/server/routes.go:230
@@ -102,6 +103,7 @@ srvMux	POST /delete	user	pkg/server/routes.go:366
 srvMux	POST /rename	user	pkg/server/routes.go:367
 srvMux	GET /api/files	reader	pkg/server/routes.go:368
 srvMux	HEAD /api/files/stat	reader	pkg/server/routes.go:369
+srvMux	GET /api/files/locate	reader	pkg/server/routes_files.go
 srvMux	GET /api/du	reader	pkg/server/routes.go:370
 srvMux	POST /upload/init	user	pkg/server/routes.go:371
 srvMux	POST /upload/chunk	user	pkg/server/routes.go:372
