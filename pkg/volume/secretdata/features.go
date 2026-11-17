@@ -475,7 +475,9 @@ func (s *SecretdataFS) encryptContentSingle(data []byte, rel, tmp string) (*shar
 	}
 	bmin := min(int64(len(data)), int64(16))
 	policy := shardseal.BlockPolicy{Mode: "random", Min: int64(len(data)), Max: int64(len(data)), BlockletMin: bmin, BlockletMax: int64(len(data))}
-	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTarget(), s.algoVer)
+	// 注：这里产生的 meta 会被调用方**重新加密**（`encryptMetaBlob`，MTime/CTime/版本已定稿）
+	// ⇒ padTarget 只影响一个**丢弃**的 meta；用确定性基准值（不引入随机）。
+	out, err := shardseal.EncryptShardsBytes(data, sanitizeName(rel), tmp, s.secret, policy, s.metaPadTargetFor(nil), s.algoVer)
 	if err != nil {
 		return nil, "", fmt.Errorf("secretdata: 单块分块加密失败: %w", err)
 	}
@@ -497,7 +499,7 @@ func (s *SecretdataFS) encryptMetaBlob(m *shardseal.Meta) (string, []byte, error
 	if jerr != nil {
 		return "", nil, jerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, metaJSON, s.metaPadTarget(), s.convergent)
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, metaJSON, s.metaPadTargetFor(metaJSON), s.convergent)
 	if berr != nil {
 		return "", nil, berr
 	}

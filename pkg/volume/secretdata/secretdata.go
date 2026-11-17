@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5" //nolint:gosec // 密文块 md5（baidupcs ETag 复核/秒传基准），非安全用途
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -4487,7 +4489,9 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if merr := s.inner.MakeDir(ctx, c); merr != nil {
 		return "", "", "", 0, fmt.Errorf("secretdata: 创建容器目录 %s 失败: %w", c, merr)
 	}
-	dirID, iderr := shardseal.RandID62()
+	// 确定性 dir_id（2026-11-18）：同一密钥 + 同一逻辑目录 ⇒ 同一 ID（否则目录 meta 字节/名字
+	// 每次不同 ⇒ 两卷产物不一致 ✗）。dir_id 只存于**加密**的目录 meta 内，HMAC 派生无泄露。
+	dirID, iderr := shardseal.DirIDFor(s.secret, dirPath)
 	if iderr != nil {
 		return "", "", "", 0, iderr
 	}
@@ -4507,7 +4511,7 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	if kerr != nil {
 		return "", "", "", 0, kerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget(), s.convergent)
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTargetFor(dmJSON), s.convergent)
 	if berr != nil {
 		return "", "", "", 0, berr
 	}
@@ -5120,7 +5124,7 @@ func (s *SecretdataFS) writeDirMetaLocked(ctx context.Context, container string,
 	if kerr != nil {
 		return "", kerr
 	}
-	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTarget(), s.convergent)
+	blob, berr := shardseal.EncryptMetaJSON(key, salt, dmJSON, s.metaPadTargetFor(dmJSON), s.convergent)
 	if berr != nil {
 		return "", berr
 	}
@@ -5153,7 +5157,10 @@ func dirMetaMTime(s string) int64 {
 // metaPadTarget 返回文件/目录 meta 加密 pad 目标（整块落盘总长），默认 = Block.Min
 // 抖动态：[base, 2×base)，受统一格式 R 地板（8B 长度头：128+8+32+12+16=196B）约束向下钳制到 ≥196。
 // MetaPadBytes 为 sizex.ByteSize，内部按 int64 计算（显式转换）。
-func (s *SecretdataFS) metaPadTarget() int {
+func (s *SecretdataFS) metaPadTarget() int { return s.metaPadTargetFor(nil) }
+
+// metaPadBase 返回 padding 的**下界基准**（= MetaPadBytes，退化到 Block.Min，最后 196）。
+func (s *SecretdataFS) metaPadBase() int64 {
 	base := int64(s.opts.MetaPadBytes)
 	if base <= 0 {
 		base = s.opts.Block.Min
@@ -5161,8 +5168,32 @@ func (s *SecretdataFS) metaPadTarget() int {
 	if base <= 0 {
 		base = 196
 	}
-	t := max(base+shardseal.RandN(base), 196)
-	return int(t)
+	return base
+}
+
+// metaPadTargetFor 返回某个 meta 明文对应的 **确定性** padding 目标长度。
+//
+// ★ 为什么必须确定性（2026-11-18 用户裁定）：设计目标是「**同一密钥 + 同一内容 + 同一路径 ⇒
+// 产物逐字节相同**」（本地卷与远端卷一致、两个独立卷一致）。此前用 `RandN(base)` 随机化 padding
+// ⇒ 同一文件两次写入的 **meta 密文字节与名字都不同** ✗（实测两卷对比：chunk blob 相同，
+// meta blob 大小 2.03MB vs 1.40MB ⇒ 名字随之不同）。
+//
+// 隐私目标不变：目标长度由**明文摘要**派生 ⇒ 不同内容仍落在 [base, 2*base) 区间内分散，
+// 不暴露 meta 真实长度。
+func (s *SecretdataFS) metaPadTargetFor(plain []byte) int {
+	base := s.metaPadBase()
+	var off int64
+	if len(plain) > 0 {
+		sum := sha256.Sum256(plain)
+		off = int64(binary.BigEndian.Uint64(sum[:8]) % uint64(base))
+	}
+	return int(max(base+off, 196))
+}
+
+// metaPadTargetMax 是 padding 的**上界**（容量/预留估算用；实际值 ∈ [base, 2*base)）。
+func (s *SecretdataFS) metaPadTargetMax() int {
+	base := s.metaPadBase()
+	return int(max(2*base, 196))
 }
 
 // mtimeString 把 UnixNano 转 RFC3339Nano（目录 meta 的 mtime 字段）。
@@ -5185,7 +5216,13 @@ func (s *SecretdataFS) applyOriginalCTime(key string, m *shardseal.Meta) {
 		m.Original.CTime = e.meta.Original.CTime // 覆盖写：保留创建时间
 		return
 	}
-	m.Original.CTime = time.Now().UTC().Format(time.RFC3339Nano)
+	// ★ 确定性（2026-11-18 用户裁定）：ctime **必须来自源文件时间**（既有规则），而调用方
+	// 只提供 mtime 时就用它作创建时间（同一输入 ⇒ 同一 ctime）。**绝不写 wall clock**：
+	// 否则同一内容两次写入的 meta 字节不同 ⇒ 派生不稳定 ✗（实测两卷对比 meta 名不一致）。
+	// 都没给 ⇒ 留空（调用方/展示层按 mtime 回退），同样确定性。
+	if m.Original.MTime != "" {
+		m.Original.CTime = m.Original.MTime
+	}
 }
 
 func mtimeString(mtime int64) string {
@@ -5233,7 +5270,7 @@ func (s *SecretdataFS) stagingReserve(ctx context.Context, size int64) (func(), 
 	// （内存写路径 / 去重）经 `EncryptShardsBytes` 的落盘形态产出 meta ⇒ temp 内确有 1 份
 	// meta blob（大小 ≈ metaPadTarget）⇒ 记 2×（1× 实际 + 1× 抖动/实现余量）。
 	// （块级交错路径的 meta 才是内存态直传，见 stagingReserveInterleaved。）
-	need := cipherPeak(max(size, 0)) + s.erasureParityPeak() + 2*int64(s.metaPadTarget())
+	need := cipherPeak(max(size, 0)) + s.erasureParityPeak() + 2*int64(s.metaPadTargetMax())
 	return s.stagingReserveBytes(ctx, need)
 }
 

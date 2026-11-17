@@ -427,7 +427,11 @@ func randomLowerAlnum(n int) (string, error) {
 }
 
 // dirNameLen 是**确定性**目录容器名的长度（落在 RandDirName 的 5..30 区间内，外观一致）。
-const dirNameLen = 16
+const (
+	dirNameLen = 16
+	// dirIDLen 是目录 ID 长度（与 RandID62 的 9 字符一致，保持存储格式不变）。
+	dirIDLen = 9
+)
 
 // DirNameFor 按 (卷密钥, 父容器, 逻辑目录路径) **确定性派生**容器目录名。
 //
@@ -455,6 +459,26 @@ func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) 
 	_, _ = mac.Write([]byte(string([]byte{0})))
 	_, _ = mac.Write([]byte(dirPath))
 	return alnumFromBytes(mac.Sum(nil), dirNameLen), nil
+}
+
+// DirIDFor 派生**确定性**目录 ID（base62 9 字符，与 `RandID62` 同字符集/同长度）。
+//
+// ★ 为什么必须确定性（2026-11-18 用户裁定）：设计目标是「**同一密钥 + 同一输入 ⇒ 产物逐字节
+// 相同**」——两个独立卷（甚至本地卷与远端卷）用同一密钥写入同一目录树，产物应完全一致。
+// 此前 dir_id 用 `RandID62()` 随机 ⇒ **目录 meta 字节每次不同 ⇒ meta 名也随之不同** ✗
+// （实测两卷对比：chunk 与 file meta 已一致，唯独目录 meta 大小/名字不同）。
+//
+// 安全性：dir_id 只出现在**加密的**目录 meta 内（不外泄），由卷密钥 HMAC 派生 ⇒ 无信息泄露，
+// 且跨卷/跨路径可复现（同一逻辑目录恒得同一 ID，迁移/恢复更稳定）。
+// 域分隔与 `DirNameFor` 同构（前缀 + NUL）⇒ 两套派生互不干扰。
+func DirIDFor(secret []byte, dirPath string) (string, error) {
+	if len(secret) == 0 {
+		return "", fmt.Errorf("shardseal: DirIDFor 需要非空密钥")
+	}
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte("sproxy/dir-id/v1" + string([]byte{0})))
+	_, _ = mac.Write([]byte(dirPath))
+	return alnumFromBytes(mac.Sum(nil), dirIDLen), nil
 }
 
 // alnumFromBytes 把字节流映射为 n 字符名（字符域与 randomLowerAlnum 一致）。
