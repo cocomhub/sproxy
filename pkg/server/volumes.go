@@ -740,10 +740,9 @@ func (c contentLocator) LocateByChecksum(_ context.Context, volumeName, _ /*owne
 	if !ok || fsys == nil {
 		return nil, false
 	}
-	lk, ok := fsys.(interface {
-		LookupByChecksum(checksum string) []string
-	})
-	if !ok {
+	// 断言可选能力（**不穿透装饰链**：装饰器已按 R21 转发该能力；断言失败即说明漏转发）。
+	lk := syncpkg.AssertContentLocator(fsys)
+	if lk == nil {
 		return nil, false
 	}
 	return lk.LookupByChecksum(checksum), true

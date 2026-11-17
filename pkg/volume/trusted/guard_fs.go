@@ -432,3 +432,17 @@ var (
 var (
 	_ syncpkg.DecoratorCapabilities = (*MetaBucketGuard)(nil)
 )
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24：透明装饰器必须转发，否则装配链上
+// 断言恒失败 ⇒ 功能静默不可用 ✗）。只是键空间守卫，不改内容身份语义 ⇒ 直接委托 inner。
+func (m *MetaBucketGuard) LookupByChecksum(checksum string) []string {
+	if cl, ok := m.inner.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
+// 编译期断言：MetaBucketGuard 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ syncpkg.ContentLocator = (*MetaBucketGuard)(nil)
+)

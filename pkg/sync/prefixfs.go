@@ -208,6 +208,22 @@ func (p *PrefixFS) OpenRangeRead(ctx context.Context, path string, offset, size 
 	return rr.OpenRangeRead(ctx, p.Key(path), offset, size)
 }
 
+// LookupByChecksum 转发「按内容反查」（R21/R24），并把命中路径**剥回调用方键空间**
+// （底层返回桶键空间路径；与 DirectURL 的 `Key()` 正向映射成对）。
+// 底层未实现该能力 ⇒ 返回 nil（调用方按"不支持"处理，不得当作无命中）。
+func (p *PrefixFS) LookupByChecksum(checksum string) []string {
+	cl, ok := p.FS.(ContentLocator)
+	if !ok {
+		return nil
+	}
+	paths := cl.LookupByChecksum(checksum)
+	out := make([]string, 0, len(paths))
+	for _, r := range paths {
+		out = append(out, p.strip(r))
+	}
+	return out
+}
+
 // DirectURL 转发直链（加前缀）；底层未实现 → ErrUnsupported（调用方回落服务端转发）。
 func (p *PrefixFS) DirectURL(ctx context.Context, relPath string) (string, bool, error) {
 	d, ok := p.FS.(DirectURLProvider)
@@ -385,4 +401,9 @@ var (
 // ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
 var (
 	_ DecoratorCapabilities = (*PrefixFS)(nil)
+)
+
+// 编译期断言：PrefixFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ ContentLocator = (*PrefixFS)(nil)
 )

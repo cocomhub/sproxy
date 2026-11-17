@@ -204,6 +204,14 @@ func (g *StagingQuotaGateFS) ReserveSpace(ctx context.Context, path string, size
 	return fmt.Errorf("sync: 底层未实现 ReserveSpace: %w", ErrUnsupported)
 }
 
+// LookupByChecksum 转发「按内容反查」（R21/R24；只读，不涉及配额记账）。
+func (g *StagingQuotaGateFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := g.inner.(ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
 // IsLocalVolume 委托 inner（本地性自述不涉及路径）。
 func (g *StagingQuotaGateFS) IsLocalVolume() bool {
 	if lv, ok := g.inner.(LocalVolume); ok {
@@ -410,4 +418,9 @@ var (
 // ⇒ 新增可选能力（加入该聚合接口）会**在此处编译失败**，强制补齐转发。
 var (
 	_ DecoratorCapabilities = (*StagingQuotaGateFS)(nil)
+)
+
+// 编译期断言：StagingQuotaGateFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ ContentLocator = (*StagingQuotaGateFS)(nil)
 )

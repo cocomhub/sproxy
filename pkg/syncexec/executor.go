@@ -740,3 +740,16 @@ func (q *quotaLocalFS) RapidRefresh(ctx context.Context, item syncpkg.VerifyItem
 	}
 	return rr.RapidRefresh(ctx, item)
 }
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24：透明装饰器必须转发，否则装配链上断言恒失败 ⇒ 功能静默不可用 ✗）。
+func (q *quotaLocalFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := q.inner.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
+// 编译期断言：quotaLocalFS 必须转发「按内容反查」（R21/R24）。
+var (
+	_ syncpkg.ContentLocator = (*quotaLocalFS)(nil)
+)

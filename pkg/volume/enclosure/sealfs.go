@@ -517,3 +517,16 @@ var (
 var (
 	_ syncpkg.DecoratorCapabilities = (*SealFS)(nil)
 )
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24）。
+func (s *SealFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := s.FS.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
+// 编译期断言：SealFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+var (
+	_ syncpkg.ContentLocator = (*SealFS)(nil)
+)

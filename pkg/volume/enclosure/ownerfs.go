@@ -561,3 +561,16 @@ var (
 var (
 	_ syncpkg.DecoratorCapabilities = (*ownerFS)(nil)
 )
+
+// LookupByChecksum 转发「按内容反查」可选能力（R21/R24）。
+func (f *ownerFS) LookupByChecksum(checksum string) []string {
+	if cl, ok := f.FS.(syncpkg.ContentLocator); ok {
+		return cl.LookupByChecksum(checksum)
+	}
+	return nil
+}
+
+// 编译期断言：ownerFS 必须转发「按内容反查」（R21/R24）。
+var (
+	_ syncpkg.ContentLocator = (*ownerFS)(nil)
+)
