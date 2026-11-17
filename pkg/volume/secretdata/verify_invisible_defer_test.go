@@ -66,7 +66,7 @@ func (f *invisibleOnlyFS) VerifyMany(_ context.Context, items []syncpkg.VerifyIt
 func TestWriteFile_InvisibleIsDeferredNotFailed(t *testing.T) {
 	t.Parallel()
 	base := syncpkg.NewLocalFS(t.TempDir(), nil)
-	inner := &invisibleOnlyFS{verifiableFS: verifiableFS{FS: base}}
+	inner := &invisibleOnlyFS{FS: base}
 	rep := &recordingReporter{}
 	sfs, err := NewFS(inner, Options{
 		Secret:        []byte("test-secret-key-32bytes-abcdefgh"),
@@ -122,7 +122,7 @@ func (f *mismatchFS) VerifyMany(_ context.Context, items []syncpkg.VerifyItem) [
 func TestWriteFile_MismatchStillFails(t *testing.T) {
 	t.Parallel()
 	base := syncpkg.NewLocalFS(t.TempDir(), nil)
-	inner := &mismatchFS{verifiableFS: verifiableFS{FS: base}}
+	inner := &mismatchFS{FS: base}
 	sfs, err := NewFS(inner, Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
 	if err != nil {
 		t.Fatal(err)
