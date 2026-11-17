@@ -619,9 +619,10 @@ func TestDifferential_RapidUploadConvergence(t *testing.T) {
 	if hits != uploads {
 		t.Fatalf("秒传刷新命中 %d != 真实传输 %d ⇒ 存在未刷新/重复传输 ✗", hits, uploads)
 	}
-	if uploads != len(rapidFS.index["d/f.bin"].meta.Chunks) {
-		t.Fatalf("真实传输次数 %d != 分块数 %d ⇒ 有分块未上传/重复传输 ✗",
-			uploads, len(rapidFS.index["d/f.bin"].meta.Chunks))
+	// 传输次数 = 数据分块数 + meta blob 1 次（2026-11-17 性能修复：meta 亦经暂存路径上传）。
+	if want := len(rapidFS.index["d/f.bin"].meta.Chunks) + 1; uploads != want {
+		t.Fatalf("真实传输次数 %d != 期望 %d（分块 %d + meta 1）⇒ 有分块未上传/重复传输 ✗",
+			uploads, want, len(rapidFS.index["d/f.bin"].meta.Chunks))
 	}
 	// 块级并发上传后本地峰值 = O(并发度)（串行时为 1）。
 	if maxLocalFiles > DefaultUploadConcurrency+1 {

@@ -218,9 +218,23 @@ func TestWriteFile_VerifyKeyEqualsMetaChunkName(t *testing.T) {
 	if !ok {
 		t.Fatal("索引无条目 d/f.bin")
 	}
-	items := inner.snapshot()
+	all := inner.snapshot()
+	// 校验项 = 全部数据分块 **+ meta blob**（2026-11-17 性能修复：meta 改走暂存+延迟上传后，
+	// **必须**纳入同一次批量校验，否则延迟等于放弃校验 ✗）。此处按类型分组后逐一核对同源。
+	items := make([]syncpkg.VerifyItem, 0, len(all))
+	metaItems := 0
+	for _, it := range all {
+		if shardseal.ClassifyName(path.Base(it.Key)) == shardseal.KindFileMeta {
+			metaItems++
+			continue
+		}
+		items = append(items, it)
+	}
 	if len(items) != len(chunkNames) {
-		t.Fatalf("校验项数 %d != meta 分块数 %d", len(items), len(chunkNames))
+		t.Fatalf("数据分块校验项数 %d != meta 分块数 %d", len(items), len(chunkNames))
+	}
+	if metaItems != 1 {
+		t.Fatalf("meta blob 应恰好被批量校验覆盖 1 项，实际 %d（延迟上传不得等于放弃校验 ✗）", metaItems)
 	}
 	for i, it := range items {
 		want := path.Join(container, chunkNames[i])

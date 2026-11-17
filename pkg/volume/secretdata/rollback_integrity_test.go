@@ -194,10 +194,14 @@ func TestCipherPeak_CoversObservedCipherBlock(t *testing.T) {
 	if err := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d/f.bin", bytes.NewReader(payload), int64(len(payload)), 0); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	// 只统计**数据分块**（staged 交付 = 密文分块；meta 为内存态交付且其 pad 上界另计）。
+	// 只统计**数据分块**（按类型判定；2026-11-17 起 meta 亦经暂存路径交付，其 pad 上界另计，
+	// 故**不得**再用「staged ⇒ 数据分块」这一等价假设）。
 	var maxObserved int64
 	for _, rec := range probe.recordsSnapshot() {
-		if rec.staged && rec.size > maxObserved {
+		if shardseal.ClassifyName(path.Base(rec.path)) != shardseal.KindChunk {
+			continue
+		}
+		if rec.size > maxObserved {
 			maxObserved = rec.size
 		}
 	}
