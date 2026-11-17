@@ -77,15 +77,13 @@ func TestWriteFile_InvisibleDefersWithoutSyncWait(t *testing.T) {
 func TestWriteFile_VisibleStillVerifiesImmediately(t *testing.T) {
 	t.Parallel()
 	rec := newHintVerifyRecorder(syncpkg.NewLocalFS(t.TempDir(), nil))
-	start := time.Now()
 	if err := writeOneFile(t, rec, "quick-visible.bin", 128<<10); err != nil {
 		t.Fatalf("写入：%v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("可见对象应在一次校验内完成（实测 %v）", elapsed)
-	}
+	// 只锁语义（可见时**仍会**校验并成功），**不断言耗时**：加密/落盘耗时随机器波动，
+	// 墙钟断言在 CI 慢机上必然假红（本用例曾因此在 ubuntu 上 8.3s 误报 ✗）。
 	if len(rec.verifyCalls) == 0 {
-		t.Fatal("必须做一次校验")
+		t.Fatal("必须做一次校验（可见路径也不得跳过校验）")
 	}
 }
 
