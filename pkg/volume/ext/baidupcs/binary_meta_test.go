@@ -145,9 +145,65 @@ func TestParseHumanSize(t *testing.T) {
 		"2GB":      2 << 30,
 	}
 	for in, want := range cases {
-		if got := parseHumanSize(in); got != want {
+		if got, _ := parseHumanSize(in); got != want {
 			t.Errorf("parseHumanSize(%q) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+// TestParseHumanSize_DisplaySlack 钉住**显示舍入误差上界**（2026-11-17 实测根因）：
+// `ls -l` 只给 2 位小数的**人类可读**大小 ⇒ 解析值只是真实值的四舍五入结果，误差可达
+// **半个刻度**；`B`/空单位是精确值 ⇒ 上界必须为 0（调用方据此保留严格相等语义）。
+//
+// 变异：把非字节单位的上界也返回 0（或不返回）⇒ 生产症状必复现（1 MB 写入恒 500 ✗），
+// 且下方 TestSizeMatches_* / TestPut_HumanRoundedSizeIsNotMismatch 用例会红。
+func TestParseHumanSize_DisplaySlack(t *testing.T) {
+	t.Parallel()
+	mib := 1 << 20
+	cases := []struct {
+		in        string
+		wantSize  int64
+		wantSlack int64
+	}{
+		{"123B", 123, 0}, // 字节显示无小数 ⇒ 精确
+		{"", 0, 0},       // 无法解析
+		{"-", 0, 0},      // 目录/未知
+		{"1.37MB", int64(1.37 * float64(mib)), 5242}, // 0.005 × 1 MiB = 5242
+		{"1KB", 1 << 10, 5},                          // 0.005 × 1 KiB = 5
+		{"2GB", 2 << 30, 5368709},                    // 0.005 × 1 GiB
+	}
+	for _, c := range cases {
+		gotSize, gotSlack := parseHumanSize(c.in)
+		if gotSize != c.wantSize || gotSlack != c.wantSlack {
+			t.Errorf("parseHumanSize(%q) = (%d, %d), want (%d, %d)",
+				c.in, gotSize, gotSlack, c.wantSize, c.wantSlack)
+		}
+	}
+}
+
+// TestSizeMatches_ExactSourceStaysStrict 钉住「**精确来源不得放宽**」：
+// SizeSlack==0 ⇒ 必须严格相等（既有 fail-closed 语义不削弱 ✗）。
+// 同时钉住近似来源（SizeSlack>0）按显示界容纳 —— 这正是生产误判的修复点。
+func TestSizeMatches_ExactSourceStaysStrict(t *testing.T) {
+	t.Parallel()
+	// 精确来源：差 1 字节也必须判不一致（fail-closed ✗ 不得静默接受）。
+	if sizeMatches(1000, &ObjectMeta{Size: 999, SizeSlack: 0}) {
+		t.Error("精确来源（slack=0）差 1 字节必须判不一致（不得放宽 ✗）")
+	}
+	if !sizeMatches(1000, &ObjectMeta{Size: 1000, SizeSlack: 0}) {
+		t.Error("精确来源相等必须判一致")
+	}
+	// 近似来源：生产实测数值必须判**一致**（1432234 本地 vs 1436549 = int64(1.37*1<<20)）。
+	if !sizeMatches(1432234, &ObjectMeta{Size: 1436549, SizeSlack: 5242}) {
+		t.Error("人类可读显示值（带 5242B 舍入界）与本地 1432234 必须判一致 —— 这正是 1MB 写入恒 500 的根因")
+	}
+	// 近似来源但**超出**显示能解释的范围 ⇒ 仍判不一致（不得变成任意放行 ✗）。
+	if sizeMatches(1432234, &ObjectMeta{Size: 1436549 + 6000, SizeSlack: 5242}) {
+		t.Error("超出显示舍入界的差异必须仍判不一致（不得静默接受错误内容 ✗）")
+	}
+	// nil meta 安全。
+	if sizeMatches(1, nil) {
+		t.Error("nil meta 必须判不一致")
 	}
 }
 
