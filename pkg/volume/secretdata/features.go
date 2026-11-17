@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"log/slog"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -352,6 +353,50 @@ func (s *SecretdataFS) releasePoolRef(key string) {
 // versionConflictErr 构造版本冲突错误（哨兵包装）。
 func versionConflictErr(sv, expected int64) error {
 	return fmt.Errorf("secretdata: 版本冲突：卷当前 %d，调用方期望 %d: %w", sv, expected, ErrVersionConflict)
+}
+
+// uploadBlobStagedDeferred 把**内存 blob**（meta）经「**暂存文件 + DeferVerify**」上传。
+//
+// 为什么必须这样（2026-11-17 实测）：baidupcs 的「延迟上传」是**双断言**——
+// `UploadHints.DeferVerify` **且** ctx 带**暂存本地路径**（`putDeferredIfRequested`）。
+// 内存直传只满足前者 ⇒ 仍走 `Put` 的即时复核 ⇒ `waitPutVisible` 每次 90s × `maxPutAttempts`
+// 3 次 = **270s** ✗（实测 1 MB 写入百度卷总耗时 **300.5s**，其中 ~278s 全在此；同期数据分块
+// 走暂存路径，仅 22s ✓）。
+//
+// 契约：本函数**只负责上传**，调用方**必须**把该 blob 登记进随后的**有界批量校验**
+// （`iu.markVerify` + `verifyBatchAndRepair`）——延迟上传**不等于放弃校验** ✗。
+// 语义与分块完全一致：不可见 ⇒ 待复核（成功）；真不一致 ⇒ 失败并由上层覆盖写重传。
+func (s *SecretdataFS) uploadBlobStagedDeferred(ctx context.Context, rel, container, name string, data []byte, mt int64) error {
+	dir, release, terr := s.newChunkTempDir(metaTempPrefix, rel)
+	if terr != nil {
+		// **本地 staging 不可用 ⇒ 回退内存直传**（旧行为，零回归）：功能正确性优先。
+		// 该次写入的 meta 会落回 `Put` 的即时复核（可能慢，但**不失败** ✗）；
+		// 与「本地 staging 不可用 ⇒ 内存交付」的既有降级链同口径。
+		slog.Warn("secretdata: meta 暂存不可用 ⇒ 回退内存直传（meta 复核走即时校验）",
+			"rel", rel, "error", terr)
+		return s.uploadBlob(ctx, path.Join(container, name), data, mt)
+	}
+	defer release()
+	tmp := filepath.Join(dir, "blob")
+	if werr := os.WriteFile(tmp, data, 0o600); werr != nil {
+		return fmt.Errorf("secretdata: 写 meta 暂存文件失败: %w", werr)
+	}
+	f, oerr := os.Open(tmp)
+	if oerr != nil {
+		return fmt.Errorf("secretdata: 打开 meta 暂存文件失败: %w", oerr)
+	}
+	defer f.Close()
+	// 双断言：DeferVerify + 暂存路径；未装配延迟能力的后端自行忽略（零回归）。
+	wctx := syncpkg.WithStagedLocalPath(ctx, tmp)
+	wctx = syncpkg.WithUploadHints(wctx, &syncpkg.UploadHints{
+		RandomContent: true,
+		Size:          int64(len(data)),
+		MD5:           md5HexOf(data),
+		CRC32:         strconv.FormatUint(uint64(crc32.ChecksumIEEE(data)), 10),
+		Path:          tmp,
+		DeferVerify:   true,
+	})
+	return s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, path.Join(container, name), f, int64(len(data)), mt)
 }
 
 // uploadBlob 上传数据/元数据字节到底层（mtime 打散由调用方给定 mt）。

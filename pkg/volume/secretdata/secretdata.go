@@ -1626,13 +1626,19 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 分块上传失败: %w", uerr)
 	}
+	// **分块暂存物先回收**（2026-11-17）：交错不变式要求「meta 上传时本地已无分块副本」
+	// （本地峰值 O(1)）；分块本地物只服务内层上传读，**不参与**校验修复（交错路径
+	// `markVerify` 一律不带 local 路径，见 verifyBatchAndRepair 说明）⇒ 此处提前回收安全。
+	// `cleanupLocals` 幂等，随后 verifyBatchAndRepair 内的调用为 no-op。
+	iu.cleanupLocals()
 	// **批量延迟校验**（ctx 标记，2026-11-04 用户设计）：全部块写完后统一 Stat+md5 校验
 	// （此时远端索引已建立）；不一致／不可见 ⇒ 用保留的本地副本**自动重传**（多轮），
 	// 重传耗尽才失败（可重跑恢复）。
-	if verr := s.verifyBatchAndRepair(ctx, iu, out.Meta, wc); verr != nil {
-		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
-		return verr
-	}
+	// **次序（2026-11-17 性能修复）**：meta 的「元数据补全 → 加密 → 上传 → 登记待校验」必须
+	// 排在**批量校验之前**，meta 才能与分块**共用同一次有界批量校验**（见 verifyBatchAndRepair）。
+	// 此前 meta 在批量校验**之后**单独走 `uploadBlob`（内存直传）⇒ 缺「暂存路径」⇒ 延迟上传
+	// 双断言不成立 ⇒ 落回 baidupcs `Put` 的即时复核 ⇒ `waitPutVisible` 90s × 3 次 = 270s ✗
+	// （实测 1 MB 写入百度卷总 300.5s，其中 ~278s 全在此；数据块仅 22s ✓）。
 	out.Meta.Original.MTime = mtimeString(wc.mtime)
 	s.applyOriginalCTime(strings.TrimPrefix(wc.rel, "/"), out.Meta)
 	out.Meta.BaseVersion = wc.newVer
@@ -1652,7 +1658,9 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return merr
 	}
-	// meta 为**内存态**（无本地路径，设计如此）：以内存 blob 直接上传（无需本地临时物）。
+	// meta 为**内存态**（无本地路径，设计如此）：经**暂存文件 + DeferVerify**上传（延迟条件
+	// 需 `DeferVerify` **与** ctx 暂存路径**双断言**；内存直传没有暂存路径 ⇒ 延迟不生效 ⇒
+	// 落回即时复核 ⇒ 270s ✗）。
 	mt := s.blobMTime(wc.mtime)
 	metaPath := path.Join(wc.container, metaName)
 	// **先登记后上传**（P2 修复，2026-10-19）：内层可能「写成功但复核失败」返回错误
@@ -1660,11 +1668,21 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 	// 才登记，回滚集合漏掉它 ⇒ 远端孤儿。块名含随机 salt/nonce ⇒ 提前登记即使上传未真正
 	// 发生，回滚删除也只是 no-op（不会误删他人内容）。
 	iu.markUploaded(metaPath)
-	if werr := s.uploadBlob(ctx, metaPath, metaBlob, mt); werr != nil {
+	// **纳入批量校验**：延迟上传**不放弃校验**——本项由随后的 `verifyBatchAndRepair` 统一确认
+	// （语义与分块完全一致：不可见 ⇒ 待复核成功；真不一致 ⇒ 失败并整文件覆盖写重传）。
+	iu.markVerify(syncpkg.VerifyItem{
+		Key: metaPath, MD5: md5HexOf(metaBlob), Size: int64(len(metaBlob)),
+	}, "")
+	if werr := s.uploadBlobStagedDeferred(ctx, wc.rel, wc.container, metaName, metaBlob, mt); werr != nil {
 		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
 		return fmt.Errorf("secretdata: 上传 meta 失败: %w", werr)
 	}
 	cipherBytes = physBytesOf(out.Meta, int64(len(metaBlob)), false)
+	// **一次有界批量校验**覆盖「分块 + meta」（含不可见 ⇒ 待复核 / 真不一致 ⇒ 失败重传的语义）。
+	if verr := s.verifyBatchAndRepair(ctx, iu, out.Meta, wc); verr != nil {
+		s.rollbackWrite(ctx, iu.snapshotUploaded(), wc.created)
+		return verr
+	}
 	return s.commitEntry(ctx, wc, &metaEntry{
 		size: wc.size, mtime: wc.mtime, dirSeg: wc.container, metaName: metaName, meta: out.Meta,
 		phys: cipherBytes,
@@ -5430,6 +5448,9 @@ func (s *SecretdataFS) walkContainerChild(ctx context.Context, p string, depth i
 const (
 	chunkTempPrefix = "sd-ch-"
 	dedupTempPrefix = "sd-dd-"
+	// metaTempPrefix 是 **meta blob 暂存文件**的工作目录前缀（延迟上传需要真实暂存路径，
+	// 见 features.go uploadBlobStagedDeferred）。
+	metaTempPrefix = "sd-mt-"
 )
 
 // chunkTempDirName 返回确定性临时目录**名**（不含父路径）。key 为逻辑 rel。

@@ -228,22 +228,27 @@ func TestWriteFile_InterleavedChunkUploadLocalPeakO1Block(t *testing.T) {
 	if e == nil {
 		t.Fatal("夹具异常：无索引条目")
 	}
-	// 每个数据分块都经暂存复用交付（本地路径），数量与 meta 记录的分块数一致。
-	if stagedWrites != len(e.meta.Chunks) {
-		t.Fatalf("分块未全部经 WithStagedLocalPath 交付（staged %d / 分块 %d）✗", stagedWrites, len(e.meta.Chunks))
+	// 每个数据分块都经暂存复用交付（本地路径），数量 = meta 记录的分块数 **+ meta blob 本身 1 次**
+	// （2026-11-17 性能修复：meta 亦经暂存+延迟上传，见 uploadBlobStagedDeferred）。
+	if wantStaged := len(e.meta.Chunks) + 1; stagedWrites != wantStaged {
+		t.Fatalf("交付形态不一致（staged %d / 期望 %d = 分块 %d + meta 1）✗",
+			stagedWrites, wantStaged, len(e.meta.Chunks))
 	}
-	// meta：**内存态**（staged=false）且此刻本地分块副本数 == 0（meta 未落本地）。
+	// meta：**经暂存路径**（2026-11-17 起，延迟上传双断言所需）且此刻本地分块副本数 == 0。
 	found := false
 	for _, rec := range probe.recordsSnapshot() {
 		if !strings.HasSuffix(rec.path, "/"+e.metaName) {
 			continue
 		}
 		found = true
-		if rec.staged {
-			t.Fatalf("meta 走了本地路径交付（应恒为内存态）✗: %+v", rec)
+		if !rec.staged {
+			t.Fatalf("meta 未走本地路径交付 ⇒ 延迟上传双断言不成立 ⇒ 落回即时复核（90s×3）✗: %+v", rec)
 		}
-		if rec.localFiles != 0 {
-			t.Fatalf("meta 上传时刻本地仍有 %d 份分块副本 ⇒ 未交错 ✗", rec.localFiles)
+		// meta 上传时刻本地至多 1 个临时文件 = **meta 自身的暂存文件**（2026-11-17 起 meta 经
+		// 暂存路径交付）；**分块副本必须已全部回收**（否则说明未交错/峰值不再是 O(1)）。
+		if rec.localFiles > 1 {
+			t.Fatalf("meta 上传时刻本地仍有 %d 个临时文件（>1 = 除自身暂存外还有分块副本）⇒ 未交错 ✗",
+				rec.localFiles)
 		}
 	}
 	if !found {
@@ -280,10 +285,14 @@ func TestWriteFile_StagedPathAliveAcrossInnerReads(t *testing.T) {
 	if e == nil {
 		t.Fatal("夹具异常：无索引条目")
 	}
-	// 每个数据分块都必须经本地路径交付（内层共读 %d 遍）；meta / 目录 meta 为内存态（设计如此）。
-	if stagedWrites != len(e.meta.Chunks) {
-		t.Fatalf("分块交付形态不一致（staged %d / 分块 %d；总写 %d）⇒ 有分块退化为二次 staging ✗",
-			stagedWrites, len(e.meta.Chunks), writes)
+	// 每个**数据分块**都必须经本地路径交付（内层共读 %d 遍）。
+	// 注（2026-11-17 性能修复）：meta blob **也**改为经暂存路径交付（延迟上传需要暂存路径双断言，
+	// 否则落回即时复核 ⇒ 每次 90s × 3 = 270s）⇒ 此处只对**数据分块**计数（判据未放宽）。
+	// staged 写 = 每个数据分块 1 次 + meta blob 1 次（2026-11-17 性能修复：meta 也经暂存路径交付）。
+	wantStaged := len(e.meta.Chunks) + 1
+	if stagedWrites != wantStaged {
+		t.Fatalf("交付形态不一致（staged %d / 期望 %d = 分块 %d + meta 1；总写 %d）⇒ 有数据分块被二次 staging 或未经暂存 ✗",
+			stagedWrites, wantStaged, len(e.meta.Chunks), writes)
 	}
 	t.Logf("实测：内层写 %d 次（其中分块 %d 次全部经本地路径，每块被内层读 3 遍）", writes, stagedWrites)
 }
