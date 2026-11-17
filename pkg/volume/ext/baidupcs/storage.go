@@ -89,6 +89,12 @@ type ObjectMeta struct {
 	// 用途：上传后用 `reconcileBlockList` 与本地 `stagedUpload.blockMD5s` **逐块对账**
 	// （`docs/external-dependencies.md` §7.8.5 实测：与本地 4 MiB 分块同构、**T+0 可用**）。
 	BlockList []string
+	// SizeSlack 是 Size 的**显示舍入误差上界**（0 = Size 为精确字节值）。
+	// binary `ls -l` 只给 2 位小数的**人类可读**大小（如 `1.37MB`）⇒ 解析值与真实值可差
+	// 半个刻度（MB ⇒ ±5242B）⇒ 一切以 Size 做**字节精确**比较的判据必须计入本界，否则会
+	// 把「显示四舍五入」误判为「内容不一致」（实测 2026-11-17：1 MB 写入恒 500 ✗）。
+	// 精确来源（库 `FilesDirectoriesMeta` / binary `meta` 的「文件大小 4712617」）⇒ 0。
+	SizeSlack int64
 }
 
 // Storage 是百度网盘存储后端。
@@ -829,7 +835,7 @@ func (s *Storage) verifyAfterUpload(ctx context.Context, key, localMD5 string,
 		// got=91593113）⇒ 不能要求精确相等，改用**相对容差**（max(4KiB, 0.1%)）判定「同一个
 		// 对象且大小量级一致」。内容完整性仍由 secretdata 的块名（内容哈希）+ AES-GCM tag 在
 		// 读取时保证；上传后复核是额外防线。
-		if st.size > 0 && sizeNear(st.size, meta.Size) {
+		if st.size > 0 && sizeNear(st.size, meta.Size, meta.SizeSlack) {
 			s.log.Warn("上传后远端 ETag 暂不可用（新目录一致性延迟），按列举 size 容差通过",
 				"key", key, "want_size", st.size, "got_size", meta.Size, "attempt", attempt)
 			return meta, true, nil
@@ -900,7 +906,7 @@ func (s *Storage) verifyUnreliableMD5Size(key string, st *stagedUpload, meta *Ob
 	// （P2 修复，2026-10-19）：上传后存在最终一致窗口，窗口内远端可能先报未刷新的元数据；
 	// 直接 fail-closed 会误判合法上传（且绕过既有退避重试）。重试耗尽仍不符 ⇒ putRetryLoop
 	// 返回 ErrTransient（**仍然 fail-closed，绝不静默接受错误内容**）。
-	if meta.Size > 0 && meta.Size != st.size {
+	if meta.Size > 0 && !sizeMatches(st.size, meta) {
 		return errSizeMismatchRetry
 	}
 	return nil
@@ -1469,9 +1475,10 @@ const DefaultStatVisibleMaxWait = 90 * time.Second
 // DefaultVerifyConcurrency 是批量校验（VerifyMany）的并发度。
 const DefaultVerifyConcurrency = 4
 
-// sizeNear 判断两个大小是否「同一对象的近似表示」：容差 = max(4KiB, 0.1%)。
+// sizeNear 判断两个大小是否「同一对象的近似表示」：容差 = max(4KiB, 0.1%) + got 的
+// **显示舍入误差上界**（slack，见 `ObjectMeta.SizeSlack`）。
 // 用于列举（`ls`）给出的近似 size（大文件以 MB/KB 显示）与本地精确字节数比对。
-func sizeNear(want, got int64) bool {
+func sizeNear(want, got, slack int64) bool {
 	if want == got {
 		return true
 	}
@@ -1480,7 +1487,26 @@ func sizeNear(want, got int64) bool {
 		diff = -diff
 	}
 	tol := max(want/1000, 4096)
+	if slack > 0 {
+		tol += slack // 比较对象本身带舍入误差 ⇒ 界必须计入，否则是**错误**比较
+	}
 	return diff <= tol
+}
+
+// sizeMatches 是「远端 size 与本地一致」的唯一判据入口（**精度感知**）：
+//   - slack <= 0（精确来源：库 meta / binary `meta` 的字节列）⇒ **必须严格相等**（不放宽 ✗）；
+//   - slack > 0（人类可读显示解析而来）⇒ 只允许**显示舍入误差 + 既有近似容差**（见 sizeNear）。
+//
+// 抽成单一入口的原因：同一语义此前散落在 4 处（verifyAfterUpload / verifyUnreliableMD5Size /
+// verifySmallObject ×2），任一处漏了 slack 都会重现「显示四舍五入 ⇒ 误判不一致 ⇒ 恒 500」✗。
+func sizeMatches(want int64, meta *ObjectMeta) bool {
+	if meta == nil {
+		return false
+	}
+	if meta.SizeSlack <= 0 {
+		return want == meta.Size
+	}
+	return sizeNear(want, meta.Size, meta.SizeSlack)
 }
 
 // visibleViaList 用**父目录列举**判断对象是否可见（Stat 一致性延迟窗口的可靠回落）。
@@ -1490,8 +1516,11 @@ func (s *Storage) visibleViaList(ctx context.Context, dir, base string) (*Object
 		return nil, false
 	}
 	// **轻量列举**（`ls`，不逐条 meta）：新目录树里 meta 本身不可见，逐条补精确 size 会
-	// 拿不到 ETag 且把 size 退化成近似值 ⇒ 后续 size 兜底判据失效。`ls` 输出的字节数是
-	// 精确值（实测 `21B`），足以支撑 size 校验。
+	// 拿不到 ETag。
+	// ⚠️ 订正（2026-11-17 实测）：`ls -l` 的文件大小列是**人类可读**串（`1.72MB`/`1.00MB`），
+	// 只有 2 位小数 ⇒ 解析值带**半个刻度的舍入误差**（MB ⇒ ±5242B），**不是**精确字节数
+	// （此前注释称「精确值（实测 21B）」只对 `B` 单位成立）。该误差已由 `ObjectMeta.SizeSlack`
+	// 携带，并由 `sizeMatches`/`sizeNear` 计入，不得直接做相等比较 ✗。
 	entries, err := s.list(ctx, dir, false)
 	if err != nil {
 		return nil, false
@@ -1668,7 +1697,7 @@ func (s *Storage) verifySmallObject(ctx context.Context, it syncpkg.VerifyItem, 
 		res.State = syncpkg.VerifyMismatch
 		res.Reason = "远端 ETag 与期望 md5 不一致"
 	case it.Size > 0 && meta.Size > 0:
-		if sizeNear(it.Size, meta.Size) {
+		if sizeNear(it.Size, meta.Size, meta.SizeSlack) {
 			res.State = syncpkg.VerifyOK
 			return res
 		}
@@ -1704,7 +1733,7 @@ func (s *Storage) verifyBigObject(ctx context.Context, it syncpkg.VerifyItem, me
 			return res
 		}
 	}
-	if it.Size > 0 && meta.Size > 0 && !sizeNear(it.Size, meta.Size) {
+	if it.Size > 0 && meta.Size > 0 && !sizeNear(it.Size, meta.Size, meta.SizeSlack) {
 		res.State = syncpkg.VerifyMismatch
 		res.Reason = "大对象远端 size 超出容差"
 		return res

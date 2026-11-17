@@ -100,18 +100,21 @@ func (a *disabledListAdapter) Meta(ctx context.Context, remotePath string) (*Obj
 func TestSizeNear(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		want, got int64
-		ok        bool
+		want, got, slack int64
+		ok               bool
 	}{
-		{91593425, 91593113, true},   // 实测差值 312B（0.0003%）
-		{262144, 262144, true},       // 精确
-		{262144, 258048, true},       // 差 4KiB（边界内）
-		{262144, 200000, false},      // 差 62KiB > 4KiB 容差
-		{100 << 20, 99 << 20, false}, // 差 1MiB > 0.1%(105KB)
+		{91593425, 91593113, 0, true},   // 实测差值 312B（0.0003%）
+		{262144, 262144, 0, true},       // 精确
+		{262144, 258048, 0, true},       // 差 4KiB（边界内）
+		{262144, 200000, 0, false},      // 差 62KiB > 4KiB 容差
+		{100 << 20, 99 << 20, 0, false}, // 差 1MiB > 0.1%(105KB)
+		// 人类可读显示（slack>0）⇒ 舍入界必须计入（2026-11-17 根因；MB 显示界 = 5242B）。
+		{1432234, 1436549, 5242, true}, // 实测：差值 4315B 全由「1.37MB」四舍五入解释
+		{1432234, 1436549, 0, false},   // 无 slack 时按精确值比较 ⇒ 判不一致（旧行为，即生产 500）
 	}
 	for _, c := range cases {
-		if got := sizeNear(c.want, c.got); got != c.ok {
-			t.Fatalf("sizeNear(%d,%d)=%v，want %v", c.want, c.got, got, c.ok)
+		if got := sizeNear(c.want, c.got, c.slack); got != c.ok {
+			t.Fatalf("sizeNear(%d,%d,slack=%d)=%v，want %v", c.want, c.got, c.slack, got, c.ok)
 		}
 	}
 }

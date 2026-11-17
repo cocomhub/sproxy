@@ -398,7 +398,8 @@ func parseBinaryListLine(line string) (ObjectMeta, bool, bool) {
 	name = strings.TrimSuffix(name, "/")
 	entry := ObjectMeta{Key: name, IsDir: isDir}
 	if m[2] != "-" {
-		entry.Size = parseHumanSize(m[2])
+		// **必须同时带上显示舍入误差上界**：该值来自人类可读串 ⇒ 不可当字节精确值用。
+		entry.Size, entry.SizeSlack = parseHumanSize(m[2])
 	}
 	if ts, err := time.ParseInLocation(binaryModTimeLayout, m[3]+" "+m[4], time.Local); err == nil {
 		entry.ModTime = ts
@@ -406,12 +407,21 @@ func parseBinaryListLine(line string) (ObjectMeta, bool, bool) {
 	return entry, true, false
 }
 
-// parseHumanSize 解析 `ls` 的近似大小（如 `353.75MB`/`4.49MB`/`123B`）——**仅近似**，
-// 精确值由后续 `meta` 覆盖；无法解析返回 0。
-func parseHumanSize(s string) int64 {
+// parseHumanSize 解析 `ls` 的**人类可读**大小（如 `353.75MB`/`4.49MB`/`123B`），返回
+// (字节值, 显示舍入误差上界)；无法解析返回 (0, 0)。
+//
+// ★ **误差上界（2026-11-17 实测教训）**：`ls -l` 只保留 **2 位小数** ⇒ 解析值只是真实值的
+// **四舍五入**结果，两者之差可达**半个最小刻度**（`1.37MB` ⇒ ≤ 0.005 MiB = **5242B**）。
+// 任何拿该值做**字节精确**比较的判据都必须把这个界计入 —— 否则会**误判为内容不一致**：
+// 实测 1 MB 文件写入百度卷时 `want_size=1432234, got_size=1436549`（差值 4315B = 显示舍入
+// 误差，恰好 `int64(1.37 * 1<<20)`）> 复核容差 4096B ⇒ 有界重传 3 轮后 `ErrTransient`
+// ⇒ **整个写入 HTTP 500**（且因取整方向不同而**时好时坏**，极难复现定位）✗
+//
+// 单位为 `B`/空 时是精确值 ⇒ 上界 0（调用方据此保留严格相等语义）。
+func parseHumanSize(s string) (size, slack int64) {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "-" {
-		return 0
+		return 0, 0
 	}
 	i := 0
 	for i < len(s) && (s[i] == '.' || (s[i] >= '0' && s[i] <= '9')) {
@@ -419,7 +429,7 @@ func parseHumanSize(s string) int64 {
 	}
 	num, err := strconv.ParseFloat(s[:i], 64)
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	unit := strings.ToUpper(strings.TrimSpace(s[i:]))
 	var mult float64
@@ -435,9 +445,13 @@ func parseHumanSize(s string) int64 {
 	case "TB", "T":
 		mult = 1 << 40
 	default:
-		return 0
+		return 0, 0
 	}
-	return int64(num * mult)
+	if mult == 1 {
+		return int64(num), 0 // 字节显示无小数 ⇒ 精确
+	}
+	// 2 位小数 ⇒ 半刻度 = 0.005 × 单位
+	return int64(num * mult), int64(0.005 * mult)
 }
 
 // 编译期断言：binaryAdapter 实现 metadataProvider（binary-only 元信息走 meta/ls）。
