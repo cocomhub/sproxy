@@ -51,6 +51,16 @@ const (
 	// 是为让事项 ID（Kind+Volume+Path 派生）**稳定**，同文件重复上报自动合并为一条。
 	// 上传时保留的本地副本由执行器按 (volume, rel) 反查（见 cmd/sproxy/blob_reconcile_wiring.go）。
 	KindBlobMD5Unconverged Kind = "blob_md5_unconverged"
+	// KindBlobPendingVerify 块已由后端写入调用返回成功，但**远端可见性在写窗口内未收敛**
+	// （百度新目录树 Stat 延迟 5–10 分钟，见 docs/external-dependencies.md §7.8）——
+	// **可自动重试**：按 (卷, owner) 重新巡检；仍不可见 ⇒ 退避重试；达上限转人工。
+	//
+	// 为什么必须有执行器（2026-11-17 实测缺口）：此前该类型**只登记不重试** ⇒ 若块实际未落盘
+	// （远端 31066），写入仍报成功，直到**读取时**才 500 ✗。有执行器后：重试可自愈（延迟收敛），
+	// 真丢块则**达上限转人工**（绝不静默）。
+	//
+	// 登记约定：`Volume`=卷名、**`Path`=卷内 rel**（稳定，重复上报合并为一条）。
+	KindBlobPendingVerify Kind = "blob_pending_verify"
 	// KindOther 其它（兜底，登记时必须写明确 Detail）。
 	KindOther Kind = "other"
 )

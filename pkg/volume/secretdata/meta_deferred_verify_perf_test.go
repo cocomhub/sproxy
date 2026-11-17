@@ -45,6 +45,10 @@ type hintVerifyRecorder struct {
 	invisibleMeta bool
 	// mismatchMeta 为 true 时，批量校验把 meta 项报为「真不一致」。
 	mismatchMeta bool
+	// hideAll 为 true 时，批量校验把**所有**项报为「不可见」（模拟远端 blob 缺失）。
+	hideAll bool
+	// created 是构造出的卷（供 ReverifyEntry 用例复用，避免重复 NewFS）。
+	created *SecretdataFS
 }
 
 func newHintVerifyRecorder(inner syncpkg.FS) *hintVerifyRecorder {
@@ -61,6 +65,17 @@ func (r *hintVerifyRecorder) WriteFile(ctx context.Context, key syncpkg.LogicalK
 	return r.FS.WriteFile(ctx, key, p, rd, size, mtime)
 }
 
+// fs 返回写入时构造的卷（供 ReverifyEntry 用例复用）。
+func (r *hintVerifyRecorder) fs(t *testing.T) *SecretdataFS {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.created == nil {
+		t.Fatal("夹具未记录卷实例")
+	}
+	return r.created
+}
+
 func (r *hintVerifyRecorder) VerifyMany(ctx context.Context, items []syncpkg.VerifyItem) []syncpkg.VerifyResult {
 	cp := append([]syncpkg.VerifyItem(nil), items...)
 	r.mu.Lock()
@@ -69,6 +84,12 @@ func (r *hintVerifyRecorder) VerifyMany(ctx context.Context, items []syncpkg.Ver
 	out := make([]syncpkg.VerifyResult, len(items))
 	for i, it := range items {
 		res := syncpkg.VerifyResult{Item: it, RemoteSize: it.Size, RemoteETag: it.MD5}
+		if r.hideAll {
+			res.State = syncpkg.VerifyInvisible
+			res.Reason = "夹具：远端 blob 不存在"
+			out[i] = res
+			continue
+		}
 		switch {
 		case r.mismatchMeta && shardseal.ClassifyName(path.Base(it.Key)) == shardseal.KindFileMeta:
 			res.State = syncpkg.VerifyMismatch
@@ -91,6 +112,9 @@ func writeOneFile(t *testing.T, rec *hintVerifyRecorder, rel string, size int) e
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
+	rec.mu.Lock()
+	rec.created = fs
+	rec.mu.Unlock()
 	payload := bytes.Repeat([]byte("m"), size)
 	return fs.WriteFile(context.Background(), syncpkg.LogicalKey{}, rel,
 		bytes.NewReader(payload), int64(len(payload)), time.Now().Unix())

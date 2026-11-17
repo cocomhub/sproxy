@@ -1250,6 +1250,8 @@ func (rt *runServerRuntime) setupServerCore() error {
 		ReconcileBlobMD5: func(ctx context.Context, volume, rel string) error {
 			return reconcileWiring.retry(ctx, volume, rel)
 		},
+		// 「写入时远端不可见」待复核（KindBlobPendingVerify）重试（见 reverifyPendingBlob）。
+		ReverifyPendingBlob: reverifyPendingBlob(h.Volumes()),
 	})
 	if rerr := h.RegisterIssuesRetryTask(issuesExecs); rerr != nil {
 		logger.Warn("注册待处理事项重试任务失败（不影响启动）", "error", rerr.Error())
@@ -1664,4 +1666,25 @@ func (rt *runServerRuntime) boot(cancel context.CancelFunc) error {
 	<-shutdownDone
 	slog.Info("downserver exit")
 	return nil
+}
+
+// reverifyPendingBlob 返回「写入时远端不可见」待复核事项的重试实现
+// （`pkg/server/issues` 的 `KindBlobPendingVerify` 执行器，2026-11-17）。
+//
+// 语义：按卷名取**已装饰**的卷视图（与读/写同一装饰链，R27），断言 `ReverifyEntry` 能力后重校验。
+// 未装配卷 / 视图不可用 / 卷不支持该能力 ⇒ **返回错误**（事项退避重试、达上限**转人工** ✗ 绝不静默）。
+func reverifyPendingBlob(vols *registry.Set) func(ctx context.Context, volume, rel string) error {
+	return func(ctx context.Context, volume, rel string) error {
+		fsys, ok := vols.VolumeView(volume, registry.ViewUser)
+		if !ok || fsys == nil {
+			return fmt.Errorf("卷 %q 的视图不可用（需人工处理）", volume)
+		}
+		rv, ok := fsys.(interface {
+			ReverifyEntry(ctx context.Context, rel string) error
+		})
+		if !ok {
+			return fmt.Errorf("卷 %q 不支持重校验能力（需人工处理）", volume)
+		}
+		return rv.ReverifyEntry(ctx, rel)
+	}
 }
