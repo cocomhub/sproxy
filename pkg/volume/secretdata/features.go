@@ -365,6 +365,13 @@ func (s *SecretdataFS) uploadBlob(ctx context.Context, p string, data []byte, mt
 			Size:          int64(len(data)),
 			MD5:           md5HexOf(data),
 			CRC32:         strconv.FormatUint(uint64(crc32.ChecksumIEEE(data)), 10),
+			// **延迟校验**（与分块路径同口径，见 uploadLocalChunk 的 DeferVerify）：百度**新目录树**
+			// 的远端可见性延迟 **5–10 分钟**（见 uploadLocalChunk 内既有注释）⇒ 上传后的即时
+			// ETag/Stat 复核必然拿不到（实测 `远端 ETag=`）⇒ 硬重试 3 次后报 ErrTransient ⇒
+			// **整个写入 500**（实测症状：`上传 meta 失败: … 上传后内容复核不匹配超过 3 次`）✗。
+			// meta blob 的正确性由**读路径解密校验**与卷级巡检（`pkg/server/verify`）兜底，
+			// 与分块路径的既有取舍一致。
+			DeferVerify: true,
 		})
 	}
 	if werr := s.inner.WriteFile(wctx, storagepkg.LogicalKey{}, p, bytes.NewReader(data), int64(len(data)), mt); werr != nil {
