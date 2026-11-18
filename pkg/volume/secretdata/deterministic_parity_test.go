@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -449,9 +450,7 @@ func TestDeterministic_MoveDoesNotRenameContainers(t *testing.T) {
 		vol.mu.RLock()
 		defer vol.mu.RUnlock()
 		out := map[string]string{}
-		for rel, c := range vol.dirSegs {
-			out[rel] = c
-		}
+		maps.Copy(out, vol.dirSegs)
 		return out
 	}
 	before := snap()
