@@ -11,11 +11,11 @@ import "testing"
 func TestDirNameFor_Deterministic(t *testing.T) {
 	t.Parallel()
 	secret := []byte("test-secret-key-000")
-	a, err := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-A")
+	a, err := DirNameFor(secret, "EXAMPLE-A")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
-	b, err := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-A")
+	b, err := DirNameFor(secret, "EXAMPLE-A")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
@@ -31,18 +31,17 @@ func TestDirNameFor_Deterministic(t *testing.T) {
 			t.Fatalf("字符 %q 不在容器名域内", ch)
 		}
 	}
-	// 不同父 / 不同路径 / 不同密钥 ⇒ 必须不同名
+	// 不同目录名 / 不同密钥 ⇒ 必须不同名（同名不同父 ⇒ 同名，见 dirname_independence_test）
 	diff := []string{}
-	d2, _ := DirNameFor(secret, "P2", "jav/makers/EXAMPLE-A")
-	d3, _ := DirNameFor(secret, "P1", "jav/makers/EXAMPLE-B")
-	d4, _ := DirNameFor([]byte("other-secret-key-01"), "P1", "jav/makers/EXAMPLE-A")
-	for _, d := range []string{d2, d3, d4} {
+	d3, _ := DirNameFor(secret, "EXAMPLE-B")
+	d4, _ := DirNameFor([]byte("other-secret-key-01"), "EXAMPLE-A")
+	for _, d := range []string{d3, d4} {
 		if d == a {
 			diff = append(diff, d)
 		}
 	}
 	if len(diff) > 0 {
-		t.Fatalf("不同父/路径/密钥必须派生不同名，冲突: %v", diff)
+		t.Fatalf("不同类型/密钥必须派生不同名，冲突: %v", diff)
 	}
 }
 
@@ -50,11 +49,11 @@ func TestDirNameFor_Deterministic(t *testing.T) {
 func TestDirNameFor_AnonymityAcrossVolumeKeys(t *testing.T) {
 	t.Parallel()
 	path := "a/b/c"
-	x, err := DirNameFor([]byte("volume-key-A-0123456789"), "root", path)
+	x, err := DirNameFor([]byte("volume-key-A-0123456789"), path)
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
-	y, err := DirNameFor([]byte("volume-key-B-0123456789"), "root", path)
+	y, err := DirNameFor([]byte("volume-key-B-0123456789"), path)
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
@@ -66,7 +65,7 @@ func TestDirNameFor_AnonymityAcrossVolumeKeys(t *testing.T) {
 // TestDirNameFor_EmptySecretFails 空密钥必须 fail-closed（否则退化为可枚举）。
 func TestDirNameFor_EmptySecretFails(t *testing.T) {
 	t.Parallel()
-	if _, err := DirNameFor(nil, "p", "d"); err == nil {
+	if _, err := DirNameFor(nil, "x"); err == nil {
 		t.Fatal("空密钥必须报错（fail-closed）")
 	}
 }
@@ -86,22 +85,24 @@ func containsRune(s string, r rune) bool {
 // 本用例用**金值**钉死 (密钥, 父容器, 路径) → 名字的映射：任何未配套迁移的改动都会红。
 const (
 	// 金值（2026-11-07 记录）：改动派生映射会让这两个值变化 ⇒ 必须配套迁移。
-	dirNameGoldenRoot  = "mUXAaghZRQMM9Xyt"
-	dirNameGoldenChild = "JlF9piLLVMPOqibl"
+	dirNameGoldenRoot  = "PMIWXxWpbnAwOOZC"
+	dirNameGoldenChild = "iC3rtixA82Ta9Dxc"
 )
 
 func TestDirNameFor_DerivationFrozen(t *testing.T) {
 	t.Parallel()
 	secret := []byte("test-secret-key-000")
 	// 金值由首版实现记录；**若失败说明映射被改动**，必须走迁移而不是改这里。
-	got, err := DirNameFor(secret, "", "")
+	// 2026-11-18 有意变更：派生输入由「父容器 + 逻辑路径」改为**自身目录名**（域前缀 v2）⇒
+	// 金值随之更新；该变更需一次性迁移（脚本不入库，迁移后无历史数据）。
+	got, err := DirNameFor(secret, "")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
 	if got != dirNameGoldenRoot {
 		t.Fatalf("DirNameFor 派生映射已变更（got %q want %q）——名字是**存储格式**，必须走「新版本前缀 + 全量重命名迁移」，不得就地改（详见 alnumFromBytes 告警）", got, dirNameGoldenRoot)
 	}
-	got2, err := DirNameFor(secret, "ParentX", "jav/makers/EXAMPLE-A")
+	got2, err := DirNameFor(secret, "EXAMPLE-A")
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}

@@ -54,7 +54,7 @@ func TestDedupDir_DeterministicAcrossInstances(t *testing.T) {
 	t.Parallel()
 	inner := syncpkg.NewLocalFS(t.TempDir(), nil)
 	secret := []byte("test-secret-key-000")
-	want, err := shardseal.DirNameFor(secret, "", dedupDirLogicalPath)
+	want, err := shardseal.DirNameFor(secret, dirNameOf(dedupDirLogicalPath))
 	if err != nil {
 		t.Fatalf("DirNameFor: %v", err)
 	}
