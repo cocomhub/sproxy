@@ -735,7 +735,7 @@ func (s *SecretdataFS) resolveChildContainer(ctx context.Context, container stri
 		if derr != nil {
 			return nil, false
 		}
-		ref := &syncpkg.ContainerRef{RealPath: container, DirID: dm.DirID, ParentID: dm.ParentDirID}
+		ref := &syncpkg.ContainerRef{RealPath: container, DirID: dm.DirID}
 		if rel, ok := s.resolveDirByID(dm.DirID); ok {
 			ref.LogicalDir = rel
 		}
@@ -898,7 +898,6 @@ func (s *SecretdataFS) resolveContainer(ctx context.Context, container, dirMetaN
 		return ref, nil
 	}
 	ref.DirID = dm.DirID
-	ref.ParentID = dm.ParentDirID
 	rel, ok := s.resolveDirByID(dm.DirID)
 	if !ok {
 		ex.Anomalies = append(ex.Anomalies, syncpkg.Anomaly{
@@ -909,11 +908,12 @@ func (s *SecretdataFS) resolveContainer(ctx context.Context, container, dirMetaN
 	}
 	ref.LogicalDir = rel
 	evidence := []string{"dir-meta 解密成功 dir_id=" + dm.DirID + " name=" + dm.Name}
-	if dm.ParentDirID != "" {
-		if _, parentOK := s.resolveDirByID(dm.ParentDirID); !parentOK {
+	// 父级由**物理嵌套**确定（不再有 parent_dir_id）：容器物理父必须是已知容器，否则异常。
+	if physParent := parentDirOf(container); physParent != "" {
+		if _, parentOK := s.resolveDirByContainer(physParent); !parentOK {
 			ex.Anomalies = append(ex.Anomalies, syncpkg.Anomaly{
 				Code: syncpkg.AnomalyParentUnresolved, RealPath: container,
-				Detail: "dir-meta 的 parent_dir_id 在索引中缺失: " + dm.ParentDirID,
+				Detail: "容器的物理父目录不是已知容器: " + physParent,
 			})
 		}
 	}
@@ -1084,6 +1084,18 @@ func (s *SecretdataFS) dirOfContainer(container string) (string, bool) {
 }
 
 // resolveDirByID 反查「dir_id → 逻辑目录 rel」。
+// resolveDirByContainer 反查「物理容器 → 逻辑目录」（父级判定用；容器物理嵌套即树结构）。
+func (s *SecretdataFS) resolveDirByContainer(container string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for rel, c := range s.dirSegs {
+		if c == container {
+			return rel, true
+		}
+	}
+	return "", false
+}
+
 func (s *SecretdataFS) resolveDirByID(id string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

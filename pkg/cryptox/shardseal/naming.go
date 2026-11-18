@@ -447,17 +447,18 @@ const (
 //
 // 匿名性：以**卷密钥**作 HMAC key ⇒ 无密钥者无法枚举或关联容器名（与随机名等价）；
 // 不同卷（不同密钥）派生不同名 ⇒ 跨卷不可关联；同卷同路径恒同名（这正是幂等所需）。
-func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) {
+func DirNameFor(secret []byte, dirName string) (string, error) {
 	if len(secret) == 0 {
 		return "", fmt.Errorf("shardseal: DirNameFor 需要非空密钥")
 	}
 	mac := hmac.New(sha256.New, secret)
-	// 域分隔：前缀 + NUL + 父容器 + NUL + 逻辑路径。父容器名与逻辑路径都**不含 NUL**
-	// （容器名是 alnum；路径被 ValidateFilePath 拒绝空字节）⇒ 拼接无歧义。
-	_, _ = mac.Write([]byte("sproxy/dir-name/v1" + string([]byte{0})))
-	_, _ = mac.Write([]byte(parentContainer))
-	_, _ = mac.Write([]byte(string([]byte{0})))
-	_, _ = mac.Write([]byte(dirPath))
+	// ★ 只依赖**自身目录名**（2026-11-18 用户裁定，取代 v1 的「父容器 + 逻辑路径」）：
+	// v1 把父容器名纳入派生 ⇒ 父目录改名/移动必须**级联重命名全部子孙容器**，且无法直接 `mv`
+	// 目录（移动后还得按新父重算）✗。只依赖自身名后：父改名/移动 ⇒ 子容器名不变；
+	// 同名目录在不同父下得到同一 base 名（物理路径不同，无冲突）。
+	// 域升级 v2（存储格式变更，一次性迁移；迁移脚本不入库）。
+	_, _ = mac.Write([]byte("sproxy/dir-name/v2" + string([]byte{0})))
+	_, _ = mac.Write([]byte(dirName))
 	return alnumFromBytes(mac.Sum(nil), dirNameLen), nil
 }
 
@@ -471,13 +472,16 @@ func DirNameFor(secret []byte, parentContainer, dirPath string) (string, error) 
 // 安全性：dir_id 只出现在**加密的**目录 meta 内（不外泄），由卷密钥 HMAC 派生 ⇒ 无信息泄露，
 // 且跨卷/跨路径可复现（同一逻辑目录恒得同一 ID，迁移/恢复更稳定）。
 // 域分隔与 `DirNameFor` 同构（前缀 + NUL）⇒ 两套派生互不干扰。
-func DirIDFor(secret []byte, dirPath string) (string, error) {
+func DirIDFor(secret []byte, dirName string) (string, error) {
 	if len(secret) == 0 {
 		return "", fmt.Errorf("shardseal: DirIDFor 需要非空密钥")
 	}
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte("sproxy/dir-id/v1" + string([]byte{0})))
-	_, _ = mac.Write([]byte(dirPath))
+	// ★ 只依赖**自身目录名**（同上，2026-11-18）：同一目录名在任何父/位置得到同一 ID
+	// ⇒ 同目录在不同父下**完全一致**；移动无需重算。同级不可重名 ⇒ 局部唯一性足够
+	// （目录树由**物理嵌套**表达，不再靠全局 ID 反查父级）。
+	_, _ = mac.Write([]byte("sproxy/dir-id/v2" + string([]byte{0})))
+	_, _ = mac.Write([]byte(dirName))
 	return alnumFromBytes(mac.Sum(nil), dirIDLen), nil
 }
 

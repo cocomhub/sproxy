@@ -177,7 +177,7 @@ func (s *SecretdataFS) ensureDedupDir(ctx context.Context) (string, error) {
 	if s.dedupDir != "" {
 		return s.dedupDir, nil
 	}
-	want, werr := shardseal.DirNameFor(s.secret, "", dedupDirLogicalPath)
+	want, werr := shardseal.DirNameFor(s.secret, dirNameOf(dedupDirLogicalPath))
 	if werr != nil {
 		return "", werr
 	}

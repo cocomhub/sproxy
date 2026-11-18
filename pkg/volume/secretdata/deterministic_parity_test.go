@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -299,12 +300,14 @@ func TestDeterministic_BackendIndependent(t *testing.T) {
 //
 // 输入：secret=paritySecret、rel=`golden/f.bin`、内容=pattern(300KiB)、mtime=parityMTime。
 var goldenTree = map[string]string{
-	"7wUAxwtRXEjFHBu7/": "<dir>",
-	"7wUAxwtRXEjFHBu7/ACA7PtAIiabrLI1v92G3ltubBHqtpfVBGfxR":                      "bd03f74adbd12e11cfcc6ff888b8f8aa31d6f476743bb8eccf46b88a5126cbc9",
-	"7wUAxwtRXEjFHBu7/QNO07dSYF0VHF5xK/":                                         "<dir>",
-	"7wUAxwtRXEjFHBu7/QNO07dSYF0VHF5xK/AIAWb6TCkiaMrmorFMP2fgF3pB1FFq4g3bvSzKnJ": "4773113c1a587f29113131fffc1905715859379135ab47be274cb319cf6bcd97",
-	"7wUAxwtRXEjFHBu7/QNO07dSYF0VHF5xK/BAAAGoptbndYOZPzKIyMB4ongrGDLj7Nfrcx":     "c8b5b85f8d4108104df6c373be08418314a79e53206eb02bf47e38430ff14cd1",
-	"7wUAxwtRXEjFHBu7/QNO07dSYF0VHF5xK/BABEOogtUnDlD6FZ9w6vy2BD6DS7azTojZdf3Ox":  "d5186f72763508a63bfe7e671bbd370cf47e52563138bbdbfa232bcf915b0dcd",
+	// 注（2026-11-18 有意变更）：容器名与 dir_id 改为**只依赖自身名** ⇒ 容器目录名与目录 meta
+	// 的密文/名字都变了；**chunk 与 file meta 未变**（它们本就只依赖内容/自身文件名）。
+	"d6QA13lG1Mh0QE6T/": "<dir>",
+	"d6QA13lG1Mh0QE6T/A0AYrNZ8zbt9oBLPYUKnbuQgGUPqcWfQhzKEDt":                   "4e2c72245f46dceed70e093bfbe7a0da8c61084c4b1550ac28bdb784679ff00e",
+	"d6QA13lG1Mh0QE6T/IGDljGcAUnkzxNjF/":                                        "<dir>",
+	"d6QA13lG1Mh0QE6T/IGDljGcAUnkzxNjF/AvA2p3MGcRyKsdqOsCJEswEDn0UaN0ro0yPAu5v": "ad9cddb2de7af92b640067b0c627a36884c444801cef17dacaea40ea53ce82e2",
+	"d6QA13lG1Mh0QE6T/IGDljGcAUnkzxNjF/BAAAGoptbndYOZPzKIyMB4ongrGDLj7Nfrcx":    "c8b5b85f8d4108104df6c373be08418314a79e53206eb02bf47e38430ff14cd1",
+	"d6QA13lG1Mh0QE6T/IGDljGcAUnkzxNjF/BABEOogtUnDlD6FZ9w6vy2BD6DS7azTojZdf3Ox": "d5186f72763508a63bfe7e671bbd370cf47e52563138bbdbfa232bcf915b0dcd",
 }
 
 // TestDeterministic_GoldenTree 锁定整棵产物树（任一派生或密文变化 ⇒ 红）。
@@ -429,4 +432,86 @@ func TestDeterministic_DedupPoolParity(t *testing.T) {
 	writeParity(t, volA, "d/two.bin", content)
 	writeParity(t, volB, "d/two.bin", content)
 	diffParity(t, snapshotTree(t, dirA), snapshotTree(t, dirB))
+}
+
+// TestDeterministic_MoveDoesNotRenameContainers 锁定用户核心诉求（2026-11-18）：
+// **移动目录不得重算容器名**（v1 把父容器纳入派生 ⇒ 移动要按新父级联改名 ✗）。
+// 移动后：容器名不变、子树容器名不变、只有被移动目录自己的 dir meta 可能改写（若改名）。
+func TestDeterministic_MoveDoesNotRenameContainers(t *testing.T) {
+	t.Parallel()
+	vol := newParityVolume(t, filepath.Join(t.TempDir(), "v"), paritySecret)
+	ctx := context.Background()
+	content := bytes.Repeat([]byte("mv"), 60<<10)
+	writeParity(t, vol, "src/a/f.bin", content)
+	writeParity(t, vol, "dst/keep.txt", []byte("x"))
+
+	snap := func() map[string]string {
+		vol.mu.RLock()
+		defer vol.mu.RUnlock()
+		out := map[string]string{}
+		for rel, c := range vol.dirSegs {
+			out[rel] = c
+		}
+		return out
+	}
+	before := snap()
+	// 移动 src/a → dst/moved（父变、名变）
+	if err := vol.Rename(ctx, "src/a", "dst/moved"); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	after := snap()
+	// 自身容器名（basename）必须不变
+	oldSelf := path.Base(before["src/a"])
+	newSelf := path.Base(after["dst/moved"])
+	if oldSelf != newSelf {
+		t.Fatalf("移动后容器名必须不变（只依赖自身名）：%q → %q", oldSelf, newSelf)
+	}
+	// 父容器不变（dst 的容器没动）
+	if before["dst"] != after["dst"] {
+		t.Fatalf("父容器不应变化：%q → %q", before["dst"], after["dst"])
+	}
+	// 文件仍可读（数据零改动）
+	if _, err := vol.Stat(ctx, "dst/moved/f.bin"); err != nil {
+		t.Fatalf("移动后文件应可读: %v", err)
+	}
+}
+
+// TestDeterministic_SameNameDifferentParentsIdentical 锁定「同一目录在不同父下**完全一致**」：
+// 容器名 + 目录 meta（含 dir_id）都必须相同（去掉 parent_dir_id 后才能成立）。
+func TestDeterministic_SameNameDifferentParentsIdentical(t *testing.T) {
+	t.Parallel()
+	dirA, dirB := filepath.Join(t.TempDir(), "A"), filepath.Join(t.TempDir(), "B")
+	volA := newParityVolume(t, dirA, paritySecret)
+	volB := newParityVolume(t, dirB, paritySecret)
+	// 两个卷里各建「同名目录但在不同父下」
+	writeParity(t, volA, "p1/same/f.bin", []byte("data"))
+	writeParity(t, volB, "p2/same/f.bin", []byte("data"))
+
+	get := func(v *SecretdataFS, rel string) (string, string) {
+		v.mu.RLock()
+		defer v.mu.RUnlock()
+		return path.Base(v.dirSegs[rel]), v.dirIDs[rel]
+	}
+	cA, idA := get(volA, "p1/same")
+	cB, idB := get(volB, "p2/same")
+	if cA != cB {
+		t.Fatalf("同名目录在不同父下容器名必须相同：%q vs %q", cA, cB)
+	}
+	if idA != idB {
+		t.Fatalf("同名目录在不同父下 dir_id 必须相同：%q vs %q", idA, idB)
+	}
+	// 目录 meta 的**密文**也必须一致：比较该容器内 dir-meta blob 的字节
+	metaOf := func(v *SecretdataFS, rel string) string {
+		v.mu.RLock()
+		seg := v.dirSegs[rel]
+		v.mu.RUnlock()
+		_, blob, err := findDirMetaBlob(context.Background(), v.inner, seg)
+		if err != nil {
+			t.Fatalf("findDirMetaBlob(%s): %v", rel, err)
+		}
+		return string(blob)
+	}
+	if metaOf(volA, "p1/same") != metaOf(volB, "p2/same") {
+		t.Fatal("同名目录在不同父下的目录 meta 密文必须完全一致（父无关）")
+	}
 }

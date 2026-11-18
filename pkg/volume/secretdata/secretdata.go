@@ -292,14 +292,15 @@ type dedupBlob struct {
 // 仅重写本容器 meta 的 Name/ParentDirID 一个文件，子树零改动——目录间完全解耦）。
 // 旧格式（存完整逻辑 path，耦合父目录）loadIndex fail-closed（未上线，见 decryptDirMeta）。
 type dirMeta struct {
-	Version     int    `json:"version"`
-	Algorithm   string `json:"algorithm"`
-	KDF         string `json:"kdf"`
-	Type        string `json:"type"`                    // "dir"
-	Name        string `json:"name"`                    // 本目录逻辑名（不含路径；根容器为空串）
-	ParentDirID string `json:"parent_dir_id,omitempty"` // 父目录 dir_id（根为空）
-	DirID       string `json:"dir_id"`                  // 本目录唯一 ID（base62 9 字符，与文件名中段同字符集）
-	MTime       string `json:"mtime"`
+	Version   int    `json:"version"`
+	Algorithm string `json:"algorithm"`
+	KDF       string `json:"kdf"`
+	Type      string `json:"type"` // "dir"
+	Name      string `json:"name"` // 本目录逻辑名（不含路径；根容器为空串）
+	// DirID 由**自身目录名**派生（父无关）。**不再有 parent_dir_id**：
+	// 目录树由**物理嵌套**表达（容器目录即父子）⇒ 移动 = 纯物理 mv，同目录在任何父下完全一致。
+	DirID string `json:"dir_id"`
+	MTime string `json:"mtime"`
 }
 
 // dirCreation 是一次写路径新建容器的记录（失败回滚按空目录回收；含叶子与祖先链）。
@@ -2871,7 +2872,7 @@ func (s *SecretdataFS) loadIndex(ctx context.Context) error {
 	// validateNestedContainers 直接 fail-closed ⇒ 整卷拒绝挂载 = **服务启动失败** ✗（数据不丢：
 	// 容器 rename 是原子步；但可用性阻塞）。修复必须在 Phase 2 登记 dirSegs **之前**做——修复会
 	// 改变容器的物理路径，后登记才能拿到正确路径。
-	if rerr := s.repairInterruptedDirMoves(ctx, scans); rerr != nil {
+	if rerr := error(nil); rerr != nil { // 树=物理嵌套 ⇒ 无需按 meta 位置修复「被中断的移动」
 		return rerr
 	}
 	res := s.resolveContainerPaths(ctx, byID, scans)
@@ -2964,107 +2965,6 @@ func (s *SecretdataFS) listSubContainer(ctx context.Context, p string) ([]syncpk
 		return nil, false, fmt.Errorf("列容器 %q 失败: %w", p, err)
 	}
 	return sub, false, nil
-}
-
-// repairInterruptedDirMoves 修复「被中断的目录移动」。
-//
-// 目录移动是**两步**（重写目录 meta 的 Name/ParentDirID + 物理搬容器目录），崩在两步之间会留下
-// 「物理位置 ≠ meta 声明位置」的中间态。修复方向**恒为「向 meta 收敛」**（meta 是逻辑树的持久
-// 声明 ⇒ 逻辑位置、目录名、父引用全部来自它，信息不丢）：
-//   - 移动的新序（先写 meta、后搬容器，见 renameDirLocked）下崩溃 ⇒ 修复 = **完成**该移动；
-//   - 旧序遗留的中间态（先搬容器、后写 meta）⇒ 修复 = **回滚**该移动。
-//
-// 两种崩溃窗口都收敛到自洽状态，且**数据零改动**（只搬容器目录 = 原子步，内容与 meta 一起走）。
-//
-// **不削弱旧扁平布局的拒绝**：判据是「物理父目录是否为**已识别的容器**」——旧扁平布局把容器全
-// 放在**卷根**（物理父 = ""，不是容器）⇒ 仍由 validateNestedContainers fail-closed 拒绝；只有
-// 「物理父是容器、但 ≠ meta 声明的父」才判定为被中断的移动。父引用缺失/成环不在此修（交给既有
-// resolveContainerPaths 的 fail-closed 跳过）。
-//
-// 调用时机：必须在 Phase 2（resolveContainerPaths 登记 dirSegs）**之前**（修复会改物理路径）。
-// scans 为递归**前序**（父先于子）⇒ 先修父容器，后代路径随搬移整体 rebase。
-func (s *SecretdataFS) repairInterruptedDirMoves(ctx context.Context, scans []dirScan) error {
-	for i := range scans {
-		dst, ok := interruptedMoveTarget(scans, i)
-		if !ok {
-			continue
-		}
-		from := scans[i].container
-		if rerr := s.inner.Rename(ctx, from, dst); rerr != nil {
-			return fmt.Errorf("secretdata: 修复被中断的目录移动失败（容器 %s → %s）: %w", from, dst, rerr)
-		}
-		slog.Warn("secretdata: 检测到被中断的目录移动，已按目录 meta 声明的位置修复（完成或回滚该移动）",
-			"container_from", from, "container_to", dst)
-		rebaseScanContainer(scans, from, dst)
-	}
-	return nil
-}
-
-// interruptedMoveTarget 判定 scans[i] 是否处于「被中断的目录移动」，返回应搬到的目标容器路径
-// （ok=false ⇒ 不属于该类，交回既有 fail-closed 校验）。判定规则见 repairInterruptedDirMoves 注释。
-func interruptedMoveTarget(scans []dirScan, i int) (string, bool) {
-	sc := scans[i]
-	if sc.dm == nil {
-		return "", false
-	}
-	// 每轮按**当前**（可能已被 rebase 的）路径重建两张表，避免用陈旧键判定。
-	isContainer, byID := dirScanTables(scans)
-	physParent := parentDirOf(sc.container)
-	// 物理父不是容器（含卷根 ""）⇒ 不是「被中断的移动」⇒ 交给既有 fail-closed 校验（旧扁平布局）。
-	if physParent == "" || !isContainer[physParent] {
-		return "", false
-	}
-	want := ""
-	if sc.dm.ParentDirID != "" {
-		w, ok := byID[sc.dm.ParentDirID]
-		if !ok {
-			return "", false // 父引用缺失 ⇒ 交给既有 fail-closed 处置
-		}
-		want = w
-	}
-	if want == physParent {
-		return "", false // 物理位置与 meta 声明一致
-	}
-	// **自指/成环守卫**：父引用成环（A 的父是 A，或父落在 A 的子树内）时 want 会等于本容器或位于
-	// 本容器之内 ⇒ 搬移会把自己嵌套进自己（实测：成环用例会直接挂载失败）。此类**畸形元数据**
-	// 不属于「被中断的移动」⇒ 交回既有 fail-closed 处置，本函数不猜。
-	if want == sc.container || strings.HasPrefix(want, sc.container+"/") {
-		return "", false
-	}
-	dst := path.Base(sc.container)
-	if want != "" {
-		dst = path.Join(want, path.Base(sc.container))
-	}
-	if dst == sc.container {
-		return "", false
-	}
-	return dst, true
-}
-
-// dirScanTables 按当前扫描记录重建「容器集合」与「DirID → 容器路径」两张表。
-func dirScanTables(scans []dirScan) (map[string]bool, map[string]string) {
-	isContainer := make(map[string]bool, len(scans))
-	byID := make(map[string]string, len(scans))
-	for _, o := range scans {
-		isContainer[o.container] = true
-		if o.dm != nil && o.dm.DirID != "" {
-			byID[o.dm.DirID] = o.container
-		}
-	}
-	return isContainer, byID
-}
-
-// rebaseScanContainer 把扫描记录中「被搬走的容器及其后代」的路径前缀同步更新（与
-// rebaseContainerPathsLocked 同口径；Phase 2 尚未登记 dirSegs，故此处只改扫描记录）。
-func rebaseScanContainer(scans []dirScan, oldC, newC string) {
-	for i := range scans {
-		switch c := scans[i].container; {
-		case c == oldC:
-			scans[i].container = newC
-		case strings.HasPrefix(c, oldC+"/"):
-			scans[i].container = newC + c[len(oldC):]
-		}
-	}
 }
 
 // validateNestedContainers 校验**只支持嵌套布局**（用户口径 2026-10-14：不支持旧格式目录、无兼容）。
@@ -3274,13 +3174,22 @@ func (s *SecretdataFS) resolveContainerPaths(ctx context.Context, byID map[strin
 	res := make([]dirRes, len(scans))
 	// byRel：逻辑路径 → 声明它的容器索引（>1 即重复容器）；rels：每个 scan 的逻辑路径。
 	byRel := make(map[string][]int, len(scans))
+	// 物理嵌套 → 逻辑路径（容器目录即父子；不再依赖 parent_dir_id）。
+	byContainer := make(map[string]*dirMeta, len(scans))
+	for _, sc := range scans {
+		if sc.dm != nil {
+			byContainer[sc.container] = sc.dm
+		}
+	}
+	pathMemo := make(map[string]string, len(scans))
+	_ = byID
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, sc := range scans {
 		if sc.dm == nil {
 			continue
 		}
-		rel, rok := resolveDirMetaPath(byID, sc.dm)
+		rel, rok := logicalPathByPhysical(sc.container, byContainer, pathMemo)
 		if !rok {
 			if sc.hasFiles {
 				slog.Warn("secretdata: 容器目录 meta 父引用断裂或成环，跳过恢复其中文件（fail-closed）",
@@ -3700,7 +3609,7 @@ func segmentOf(segs, newSegs map[string]string, rel string) string {
 
 // targetContainerPath 计算 rel 在父容器 pc 下的**确定性**目标容器路径。
 func (s *SecretdataFS) targetContainerPath(pc, rel string) (string, error) {
-	base, err := shardseal.DirNameFor(s.secret, pc, rel)
+	base, err := shardseal.DirNameFor(s.secret, dirNameOf(rel))
 	if err != nil {
 		return "", err
 	}
@@ -4159,32 +4068,36 @@ func hasFileMeta(entries []syncpkg.Entry) bool {
 // resolveDirMetaPath 沿 parent 链重算逻辑路径（根 → … → name）。根容器（ParentDirID 空、
 // Name 空）→ ""。父引用缺失（悬挂）或成环（含自环）→ ok=false（调用方 fail-closed 跳过，
 // 不崩溃——Imp-B：未信任底层存储上损坏/篡改的父引用环不得导致挂载无限递归栈溢出）。
-func resolveDirMetaPath(byID map[string]*dirMeta, dm *dirMeta) (string, bool) {
-	return resolveDirMetaPathVisited(byID, dm, map[string]bool{})
-}
-
-// resolveDirMetaPathVisited 是带 visited 集的递归实现：沿 parent 链上溯时记录已访问 dir_id，
-// 再次遇到（环/自环）→ fail-closed 返回 false（不无限递归）。
-func resolveDirMetaPathVisited(byID map[string]*dirMeta, dm *dirMeta, visited map[string]bool) (string, bool) {
+// logicalPathByPhysical 由**物理嵌套**推导逻辑路径（容器目录即父子；不再有 parent_dir_id）。
+//
+// 规则：logical(容器) = join(logical(物理父容器), 本容器 meta.Name)；根容器 Name="" ⇒ ""。
+// 物理父不是已知容器（旧扁平布局/异常）⇒ fail-closed (false)，与既有语义一致。
+// memo 缓存已算结果（容器数可达上千，避免重复上溯）。
+func logicalPathByPhysical(container string, byContainer map[string]*dirMeta, memo map[string]string) (string, bool) {
+	if container == "" {
+		return "", true
+	}
+	if v, ok := memo[container]; ok {
+		return v, true
+	}
+	dm := byContainer[container]
 	if dm == nil {
 		return "", false
 	}
-	if dm.ParentDirID == "" {
-		return dm.Name, true // 根容器 Name="" → 根路径 ""
+	if dm.Name == "" { // 根容器
+		memo[container] = ""
+		return "", true
 	}
-	if visited[dm.DirID] {
-		return "", false // 环（含自环）→ fail-closed
-	}
-	visited[dm.DirID] = true
-	parent, ok := byID[dm.ParentDirID]
+	pp, ok := logicalPathByPhysical(parentDirOf(container), byContainer, memo)
 	if !ok {
 		return "", false
 	}
-	p, ok := resolveDirMetaPathVisited(byID, parent, visited)
-	if !ok {
-		return "", false
+	full := dm.Name
+	if pp != "" {
+		full = path.Join(pp, dm.Name)
 	}
-	return path.Join(p, dm.Name), true
+	memo[container] = full
+	return full, true
 }
 
 // logicalDirName 返回逻辑目录名（根为空串；非根 = 路径末段）。
@@ -4472,12 +4385,12 @@ const dirMetaSaltLabel = "dir-meta"
 // （此前所有容器都是卷根下的随机名兄弟目录 ⇒ 存储上看不出父子关系）。卷根容器（parentContainer==""）
 // 仍在卷根（顶层）——逻辑树根无父容器。**旧扁平布局不支持、无兼容**：加载侧校验卷根容器唯一
 // （`validateNestedContainers`），违反即 fail-closed 拒绝挂载。
-func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer, parentID string, mtime int64) (string, string, string, int64, error) {
+func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, parentContainer string, mtime int64) (string, string, string, int64, error) {
 	// **确定性容器名**（2026-11-06 修复「重复容器」）：原为 RandDirName（随机）⇒ 同一逻辑目录
 	// 被创建两次（中断重试/并发/缓存丢失）会得到两个容器、同时声明同一逻辑路径 ⇒ 装配期
 	// dirSegs 静默覆盖 ⇒ 卷拒绝挂载。确定性派生使重复创建天然幂等（同名复用）。
 	// 详见 shardseal.DirNameFor 注释。
-	c, cerr := shardseal.DirNameFor(s.secret, parentContainer, dirPath)
+	c, cerr := shardseal.DirNameFor(s.secret, dirNameOf(dirPath))
 	if cerr != nil {
 		return "", "", "", 0, cerr
 	}
@@ -4491,12 +4404,12 @@ func (s *SecretdataFS) createContainerLocked(ctx context.Context, dirPath, paren
 	}
 	// 确定性 dir_id（2026-11-18）：同一密钥 + 同一逻辑目录 ⇒ 同一 ID（否则目录 meta 字节/名字
 	// 每次不同 ⇒ 两卷产物不一致 ✗）。dir_id 只存于**加密**的目录 meta 内，HMAC 派生无泄露。
-	dirID, iderr := shardseal.DirIDFor(s.secret, dirPath)
+	dirID, iderr := shardseal.DirIDFor(s.secret, dirNameOf(dirPath))
 	if iderr != nil {
 		return "", "", "", 0, iderr
 	}
 	dm := dirMeta{Version: 1, Algorithm: s.opts.Algorithm, KDF: "scrypt", Type: "dir",
-		Name: logicalDirName(dirPath), ParentDirID: parentID, DirID: dirID, MTime: mtimeString(mtime)}
+		Name: logicalDirName(dirPath), DirID: dirID, MTime: mtimeString(mtime)}
 	dmJSON, merr := json.Marshal(dm)
 	if merr != nil {
 		return "", "", "", 0, merr
@@ -4534,7 +4447,7 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 		return c, nil, nil
 	}
 	var created []dirCreation
-	var parentID, parentContainer string
+	var parentContainer string
 	if dirPath != "" {
 		parent := parentDirOf(dirPath)
 		pc, pcreated, perr := s.ensureContainerLocked(ctx, parent, mtime)
@@ -4543,12 +4456,8 @@ func (s *SecretdataFS) ensureContainerLocked(ctx context.Context, dirPath string
 		}
 		created = append(created, pcreated...)
 		parentContainer = pc
-		parentID = s.dirIDs[parent]
-		if parentID == "" {
-			return "", nil, fmt.Errorf("secretdata: 父目录 %q 无 dir_id，无法建立父子引用", parent)
-		}
 	}
-	c, dirID, name, blobLen, cerr := s.createContainerLocked(ctx, dirPath, parentContainer, parentID, mtime)
+	c, dirID, name, blobLen, cerr := s.createContainerLocked(ctx, dirPath, parentContainer, mtime)
 	if cerr != nil {
 		return "", nil, cerr
 	}
@@ -4601,7 +4510,7 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 	// meta 里** ⇒ 既无法完成、也无法保住改名意图，而旧实现直接 fail-closed ⇒ **整卷拒绝挂载 =
 	// 服务启动失败** ✗（确定性用例
 	// TestRenameDir_InterruptedMove_CrashAtAnyStep_MountsAndKeepsData 逐崩溃点实证）。
-	if werr := s.rewriteDirMetaRef(ctx, oldContainer, toName, toParentID, from, to); werr != nil {
+	if werr := s.rewriteDirMetaRef(ctx, oldContainer, toName, from, to); werr != nil {
 		return werr // meta 未变 ⇒ 物理未动 ⇒ 无中间态（无需回滚）
 	}
 	// 容器名是**随机名**（与逻辑 basename 无关）⇒ 同父改名时目标容器路径**与源相同**，此时不得
@@ -4623,10 +4532,10 @@ func (s *SecretdataFS) renameDirLocked(ctx context.Context, from, to string) err
 	return nil
 }
 
-// rewriteDirMetaRef 重写容器内目录 meta 的 Name/ParentDirID（目录移动/改名；一个文件，
-// 子树其它目录/文件 blob 零改动）。内容变化 → 目录 meta 名内嵌哈希变化，故生成新随机盐
+// rewriteDirMetaRef 重写容器内目录 meta 的 **Name**（改名；一个文件，子树零改动）。
+// 移动（同名）**无需重写**：父级由物理嵌套表达（2026-11-18）。内容变化 → 目录 meta 名内嵌哈希变化，故生成新随机盐
 // 与新 blob 名：先写新、后删旧（同容器内，无半态）。无变化则跳过（目标同名同父）。
-func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName, newParentID, srcRel, dstRel string) error {
+func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName, srcRel, dstRel string) error {
 	oldName, oldBlob, err := findDirMetaBlob(ctx, s.inner, container)
 	if err != nil {
 		return err
@@ -4635,11 +4544,10 @@ func (s *SecretdataFS) rewriteDirMetaRef(ctx context.Context, container, newName
 	if derr != nil {
 		return derr
 	}
-	if dm.Name == newName && dm.ParentDirID == newParentID {
+	if dm.Name == newName {
 		return nil
 	}
 	dm.Name = newName
-	dm.ParentDirID = newParentID
 	// **版本单调递增**（P1 修复，2026-10-21）：改名/移动会给同一目录写**新** meta 并删旧 meta；
 	// 若删旧失败，容器内并存两个 meta（同一 DirID、不同 Name/Parent）。仲裁需要「哪个更新」的
 	// 权威信号——文件系统 mtime 在不同后端分辨率/精度不可靠（本地卷实测可出现相等，退化成按
@@ -5722,4 +5630,14 @@ func metaCacheBudget(cfg int64) int64 {
 		return defaultMetaCacheBytes
 	}
 	return cfg // <0 原样传递 = 关闭
+}
+
+// dirNameOf 返回逻辑目录的**自身名**（容器名与 dir_id 派生的唯一输入；根目录返回 ""）。
+// 只依赖自身名 ⇒ 父改名/移动无需级联，同一目录在任何父下完全一致（2026-11-18 用户裁定）。
+func dirNameOf(dirPath string) string {
+	p := strings.Trim(dirPath, "/")
+	if p == "" {
+		return ""
+	}
+	return path.Base(p)
 }
