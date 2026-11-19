@@ -104,6 +104,12 @@ type Options struct {
 	// 上限 MaxUploadConcurrency（防下游限流/本地磁盘压力）。
 	UploadConcurrency int
 
+	// OrphanAuditConcurrency 是**孤儿审计**（`OrphanChunks`）的并发度（≤0 = 默认 16）。
+	//
+	// 审计需要逐容器列举 + 读/解密每个 file meta（生产卷约 1800 次远端往返）；
+	// 串行会超过客户端超时（曾有 30 分钟未返回的实测）⇒ 默认有界并发。
+	OrphanAuditConcurrency int
+
 	// IssueReporter 上报**无法自主决策或需要重试**的存储问题（可选；nil = 不上报，零回归）。
 	//
 	// 为什么需要（用户裁定 2026-11-10）：「记录失败事件审计重试能力，后续定期重试处理，最终必须
