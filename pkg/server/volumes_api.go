@@ -1130,11 +1130,8 @@ func (h *Handlers) orphansHandler(w http.ResponseWriter, r *http.Request) {
 		sendJSONResponse(w, map[string]any{"success": false, "message": "卷不存在或视图不可用"}, http.StatusNotFound)
 		return
 	}
-	type auditor interface {
-		OrphanChunks(ctx context.Context) (any, error)
-	}
-	a, ok := fsys.(auditor)
-	if !ok {
+	a := syncpkg.AssertOrphanAuditor(fsys)
+	if a == nil {
 		sendJSONResponse(w, map[string]any{"success": false,
 			"message": "该卷不支持孤儿审计（不支持，非无孤儿）"}, http.StatusNotImplemented)
 		return

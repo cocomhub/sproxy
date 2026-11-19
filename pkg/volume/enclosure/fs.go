@@ -180,3 +180,16 @@ func (f *FS) LookupByChecksum(checksum string) []string {
 var (
 	_ syncpkg.ContentLocator = (*FS)(nil)
 )
+
+// OrphanChunks 转发「孤儿审计」（嵌入 *syncpkg.PrefixFS，其自身已转发该能力）。
+func (f *FS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, error) {
+	if f.PrefixFS == nil {
+		return syncpkg.OrphanReport{}, fmt.Errorf("enclosure.FS: 未装配底层: %w", syncpkg.ErrUnsupported)
+	}
+	return f.PrefixFS.OrphanChunks(ctx)
+}
+
+// 编译期断言：必须转发「孤儿审计」能力（R21/R24）。
+var (
+	_ syncpkg.OrphanAuditor = (*FS)(nil)
+)
