@@ -252,3 +252,46 @@ func TestOrphanChunks_UsesIndexKeysWithoutListing(t *testing.T) {
 		t.Fatalf("索引键路径应只列举一遍容器（want %d，got %d；2 遍即回退到树推导）", nc, delta)
 	}
 }
+
+// TestOrphanChunks_ReportsOwnerRel 锁定 owner 展示：孤儿必须带上「所属文件 rel」，
+// 以便人工先验证该文件完好再删除（2026-11-20 用户要求）。
+func TestOrphanChunks_ReportsOwnerRel(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	rel := "d5/owned.bin"
+	payload := bytes.Repeat([]byte("owner-"), 900)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(payload),
+		int64(len(payload)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	sfs.mu.RLock()
+	container := sfs.dirSegs["d5"]
+	sfs.mu.RUnlock()
+	if container == "" {
+		t.Fatal("夹具异常：无容器")
+	}
+	orphan := "AAAownerTestChunkName000000000000000"
+	if werr := sfs.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(container, orphan),
+		bytes.NewReader([]byte("x")), 1, time.Now().Unix()); werr != nil {
+		t.Fatalf("写孤儿块: %v", werr)
+	}
+	rep, rerr := sfs.OrphanChunks(ctx)
+	if rerr != nil {
+		t.Fatalf("OrphanChunks: %v", rerr)
+	}
+	for _, b := range rep.Chunks {
+		if b.Name != orphan {
+			continue
+		}
+		if b.Owner != rel {
+			t.Fatalf("owner 应为 %q，got %q", rel, b.Owner)
+		}
+		return
+	}
+	t.Fatal("未报告孤儿块")
+}

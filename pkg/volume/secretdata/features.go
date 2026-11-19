@@ -880,6 +880,7 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 		return syncpkg.OrphanReport{}, fmt.Errorf("secretdata: 存在在途写入，拒绝孤儿审计（避免把未提交块误判为孤儿）")
 	}
 	containers := s.gcContainersLocked()
+	owners := s.containerOwnersLocked()
 	poolRefs := s.gcPoolNamesLocked()
 	referenced := map[string]struct{}{}
 	s.gcMarkIndex(ctx, referenced) // 内存索引（可能不完整）
@@ -913,7 +914,8 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 		n := s.gcSweepOrphanChunksCounted(ctx, c, referenced, poolRefs, &kills)
 		totalChunks += n
 		for _, k := range kills {
-			rep.Chunks = append(rep.Chunks, syncpkg.OrphanBlob{Container: k.container, Name: k.name})
+			rep.Chunks = append(rep.Chunks, syncpkg.OrphanBlob{
+				Container: k.container, Name: k.name, Owner: owners[k.container]})
 		}
 	}
 	// fail-closed 自检：引用集合不可信 ⇒ 拒绝返回清单（宁可不出，也不给错误清单）。
@@ -1183,4 +1185,20 @@ feed:
 	close(ch)
 	wg.Wait()
 	return firstErr
+}
+
+// containerOwnersLocked 返回 `容器 → 所属文件 rel`（来自内存索引；同容器多文件时取任一，
+// 仅用于人工评审展示）。调用方须持 s.mu。
+func (s *SecretdataFS) containerOwnersLocked() map[string]string {
+	out := make(map[string]string, len(s.index))
+	for rel, e := range s.index {
+		if e == nil || e.dirSeg == "" {
+			continue
+		}
+		if _, ok := out[e.dirSeg]; ok {
+			continue
+		}
+		out[e.dirSeg] = rel
+	}
+	return out
 }

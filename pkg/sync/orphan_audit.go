@@ -11,6 +11,9 @@ type OrphanBlob struct {
 	Container string `json:"container"`
 	// Name 是 blob 文件名。
 	Name string `json:"name"`
+	// Owner 是该容器**当前所属文件**的逻辑相对路径（来自内存索引；未知则空）。
+	// 用途：人工评审时一眼看出「这些残留块属于哪个文件」，便于先验证该文件完好再删除。
+	Owner string `json:"owner,omitempty"`
 }
 
 // OrphanReport 是只读孤儿审计结果。
