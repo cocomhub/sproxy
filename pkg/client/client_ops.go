@@ -839,30 +839,38 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 // Stat 通过 HEAD /api/files/stat?filename=<name> 获取远端单个文件元信息。
 // 响应来源于 X-File-Size、X-File-Checksum、X-File-MTime 三个响应头；不返回 body。
 // 文件不存在时返回错误（HTTP 404 包装为 error）。
-// VolumeOrphans 只读获取卷内未被引用的分块清单（原始 JSON 透传）。
+// VolumeOrphans 触发/查询卷的**孤儿审计后台任务**（异步）。
 //
-// 返回 (raw, supported, err)：服务端未实现该能力 ⇒ supported=false（**不得**当作"无孤儿"✗）。
-func (c *FileClient) VolumeOrphans(ctx context.Context, volume string) ([]byte, bool, error) {
+// 返回 (raw, statusCode, err)：
+//   - 202 ⇒ 任务进行中（`{"state":"running"}`）；
+//   - 200 ⇒ 完成（`{"state":"done","report":{...}}`）；
+//   - 501 ⇒ 该卷不支持审计（**不得**当作"无孤儿"✗）；
+//   - 503 ⇒ 任务失败（可 `refresh=true` 重试）。
+func (c *FileClient) VolumeOrphans(ctx context.Context, volume string, refresh bool) ([]byte, int, error) {
 	if volume == "" {
-		return nil, true, fmt.Errorf("volume 不能为空")
+		return nil, 0, fmt.Errorf("volume 不能为空")
 	}
 	path := "/api/volumes/" + url.PathEscape(volume) + "/orphans"
+	if refresh {
+		path += "?refresh=1"
+	}
 	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 	if err != nil {
-		return nil, true, fmt.Errorf(errFmtRequestFailed, err)
+		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotImplemented {
-		return nil, false, nil
-	}
-	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if rerr != nil {
-		return nil, true, fmt.Errorf("读取孤儿审计响应: %w", rerr)
+		return nil, resp.StatusCode, fmt.Errorf("读取孤儿审计响应: %w", rerr)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, true, fmt.Errorf("孤儿审计失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusAccepted:
+		return body, resp.StatusCode, nil
+	case http.StatusNotImplemented:
+		return nil, resp.StatusCode, nil
+	default:
+		return nil, resp.StatusCode, fmt.Errorf("孤儿审计失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-	return body, true, nil
 }
 
 // LocateByChecksum 按**内容 sha256** 反查卷内路径（返回卷内 rel 列表；无命中 ⇒ 空）。
