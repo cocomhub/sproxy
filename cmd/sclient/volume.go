@@ -48,6 +48,8 @@ func NewCmdVolume(factory clientfactory.Factory, ios cli.IOStreams, st *state.St
 		Args: cobra.NoArgs,
 	}
 	cmd.AddCommand(newCmdVolumeCreate(factory, ios))
+	// 只读孤儿审计（用户 2026-11-18：清理前先出清单，不删除）
+	cmd.AddCommand(NewCmdVolumeOrphans(factory, ios))
 	cmd.AddCommand(newCmdVolumeList(factory, ios))
 	cmd.AddCommand(newCmdVolumeDelete(factory, ios))
 	cmd.AddCommand(newCmdVolumeCopy(factory, ios, st))
