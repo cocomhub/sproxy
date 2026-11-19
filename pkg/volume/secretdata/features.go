@@ -888,7 +888,16 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 	// **权威引用来源 = 真实目录树**（2026-11-19 生产事故修复）：
 	// 生产卷按设计启动跳过全量扫描 ⇒ 内存索引可能为空 ⇒ 仅凭索引会把全部分块判为孤儿。
 	// 这里逐容器重读并解密 file meta 来重建引用集合（与 GC 的 `gcReconfirmContainer` 同一判据）。
-	stats, terr := s.collectTreeReferences(ctx, containers, referenced)
+	// 快照命中时索引条目**无 meta（冷结构惰性）**⇒ 引用集合仍为空，但条目自带
+	// `dirSeg`/`metaName`，可直接按名读取 meta——**省掉 895 次容器列举**（生产实测那是主要耗时）。
+	work := s.orphanAuditTargets()
+	var stats treeRefStats
+	var terr error
+	if len(work) > 0 {
+		stats, terr = s.collectIndexedReferences(ctx, work, referenced)
+	} else {
+		stats, terr = s.collectTreeReferences(ctx, containers, referenced)
+	}
 	if terr != nil {
 		return syncpkg.OrphanReport{}, terr
 	}
@@ -1069,4 +1078,109 @@ func (s *SecretdataFS) collectContainerReferences(
 		mu.Unlock()
 	}
 	return st, nil
+}
+
+// orphanTarget 是「待读 meta」的工作项（容器 + meta blob 名 + 是否已由索引登记引用）。
+type orphanTarget struct {
+	container string
+	name      string
+}
+
+// orphanAuditTargets 从内存索引取「需要读 meta 才能得到分块列表」的条目
+// （`meta == nil` 的快照条目；已加载 meta 的条目由 gcMarkIndex 覆盖）。
+// 返回空 ⇒ 索引不可用，调用方回退到容器列举（旧路径）。
+func (s *SecretdataFS) orphanAuditTargets() []orphanTarget {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]orphanTarget, 0, len(s.index))
+	for _, e := range s.index {
+		if e == nil || e.metaName == "" || e.dirSeg == "" {
+			continue
+		}
+		if e.meta != nil {
+			continue // gcMarkIndex 已登记
+		}
+		out = append(out, orphanTarget{container: e.dirSeg, name: e.metaName})
+	}
+	return out
+}
+
+// collectIndexedReferences 按索引给出的 (container, metaName) 并读/解密 meta 建引用。
+// 与 collectTreeReferences 判据一致（同一个 gcProtectLiveMeta），只是**不需要容器列举**。
+func (s *SecretdataFS) collectIndexedReferences(
+	ctx context.Context, targets []orphanTarget, referenced map[string]struct{},
+) (treeRefStats, error) {
+	var st treeRefStats
+	var muRef, muSt sync.Mutex
+	run := func(ctx context.Context, t orphanTarget) error {
+		return s.applyIndexedTarget(ctx, t, referenced, &st, &muSt, &muRef)
+	}
+	if err := s.runOrphanWorkers(ctx, len(targets), targets, run); err != nil {
+		return treeRefStats{}, err
+	}
+	return st, nil
+}
+
+// applyIndexedTarget 处理单个工作项：读/解密 meta → 统计 → 存活则登记引用。
+func (s *SecretdataFS) applyIndexedTarget(
+	ctx context.Context, t orphanTarget, referenced map[string]struct{},
+	st *treeRefStats, muSt, muRef *sync.Mutex,
+) error {
+	mm, merr := s.gcConfirmFileMeta(ctx, t.container, t.name)
+	if merr != nil {
+		return fmt.Errorf("%w: 读取/解密 file meta 失败 %s/%s: %v",
+			ErrOrphanAuditUnsafe, t.container, t.name, merr)
+	}
+	muSt.Lock()
+	st.fileMetas++
+	if mm.Deleted {
+		st.tombstones++
+	} else {
+		st.live++
+	}
+	muSt.Unlock()
+	if mm.Deleted {
+		return nil // 墓碑：分块无引用 ⇒ 交给清扫判孤儿
+	}
+	muRef.Lock()
+	s.gcProtectLiveMeta(referenced, t.container, t.name, mm)
+	muRef.Unlock()
+	return nil
+}
+
+// runOrphanWorkers 用有界并发执行 work（首个错误即取消全局并返回）。
+func (s *SecretdataFS) runOrphanWorkers[T any](
+	ctx context.Context, total int, work []T, run func(context.Context, T) error,
+) error {
+	workers := min(s.orphanAuditConcurrency(), total)
+	if workers <= 0 {
+		workers = 1
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var firstErr error
+	var once sync.Once
+	var wg sync.WaitGroup
+	ch := make(chan T)
+	for range workers {
+		wg.Go(func() {
+			for item := range ch {
+				if err := run(ctx, item); err != nil {
+					once.Do(func() { firstErr = err; cancel() })
+					return
+				}
+			}
+		})
+	}
+feed:
+	for _, item := range work {
+		select {
+		case ch <- item:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(ch)
+	wg.Wait()
+	return firstErr
 }
