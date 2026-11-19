@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
@@ -922,6 +923,9 @@ const orphanAuditMaxRatio = 0.30
 // orphanAuditMinChunks 是启用「孤儿占比」判定的最小分块数（小卷不适用比例判据）。
 const orphanAuditMinChunks = 20
 
+// defaultOrphanAuditConcurrency 是孤儿审计的默认并发度（远端往返型任务，串行会超时）。
+const defaultOrphanAuditConcurrency = 16
+
 // checkReferenceCoverage 校验引用集合自洽：索引必须非空，且孤儿占比不得超阈值。
 //
 // 为什么（2026-11-19 实测事故）：`gcMarkIndex` 只从**内存索引**取引用；生产卷按设计**启动跳过全量扫描**，
@@ -970,29 +974,104 @@ type treeRefStats struct {
 func (s *SecretdataFS) collectTreeReferences(
 	ctx context.Context, containers []string, referenced map[string]struct{},
 ) (treeRefStats, error) {
-	var st treeRefStats
+	// **有界并发**（2026-11-19）：生产卷 895 容器 + 921 个 file meta ⇒ 串行要 1800+ 次远端往返
+	// （>30 分钟，客户端必超时）。这里按容器并行（每容器列举 + 读 meta），默认并发 16。
+	workers := s.orphanAuditConcurrency()
+	if workers > len(containers) {
+		workers = len(containers)
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+
+	var (
+		mu   sync.Mutex
+		st   treeRefStats
+		muEq sync.Mutex
+	)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var firstErr error
+	var errOnce sync.Once
+	fail := func(err error) {
+		errOnce.Do(func() { firstErr = err; cancel() })
+	}
+
+	var wg sync.WaitGroup
+	ch := make(chan string)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range ch {
+				one, err := s.collectContainerReferences(ctx, c, referenced, &mu)
+				if err != nil {
+					fail(err)
+					return
+				}
+				muEq.Lock()
+				st.fileMetas += one.fileMetas
+				st.live += one.live
+				st.tombstones += one.tombstones
+				muEq.Unlock()
+			}
+		}()
+	}
+feed:
 	for _, c := range containers {
-		entries, lerr := s.listInner(ctx, c)
-		if lerr != nil {
-			return st, fmt.Errorf("%w: 列举容器失败 %s: %v", ErrOrphanAuditUnsafe, c, lerr)
+		select {
+		case ch <- c:
+		case <-ctx.Done():
+			break feed
 		}
-		for _, f := range entries {
-			if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
-				continue
-			}
-			st.fileMetas++
-			mm, merr := s.gcConfirmFileMeta(ctx, c, f.Name)
-			if merr != nil {
-				return st, fmt.Errorf("%w: 读取/解密 file meta 失败 %s/%s: %v",
-					ErrOrphanAuditUnsafe, c, f.Name, merr)
-			}
-			if mm.Deleted {
-				st.tombstones++
-				continue
-			}
-			st.live++
-			s.gcProtectLiveMeta(referenced, c, f.Name, mm)
+	}
+	close(ch)
+	wg.Wait()
+	if firstErr != nil {
+		return treeRefStats{}, firstErr
+	}
+	return st, nil
+}
+
+// orphanAuditConcurrency 返回孤儿审计的并发度（默认 16；可经 Options 覆盖，<=0 视为默认）。
+func (s *SecretdataFS) orphanAuditConcurrency() int {
+	if n := s.opts.OrphanAuditConcurrency; n > 0 {
+		return n
+	}
+	return defaultOrphanAuditConcurrency
+}
+
+// collectContainerReferences 处理单个容器：轻量列举 → 读/解密全部 file meta → 登记引用。
+// 引用写入经 mu 串行化（map 非并发安全）。
+func (s *SecretdataFS) collectContainerReferences(
+	ctx context.Context, c string, referenced map[string]struct{}, mu *sync.Mutex,
+) (treeRefStats, error) {
+	var st treeRefStats
+	entries, lerr := s.listInner(ctx, c)
+	if lerr != nil {
+		return st, fmt.Errorf("%w: 列举容器失败 %s: %v", ErrOrphanAuditUnsafe, c, lerr)
+	}
+	for _, f := range entries {
+		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+			continue
 		}
+		if ctx.Err() != nil {
+			return st, ctx.Err()
+		}
+		st.fileMetas++
+		mm, merr := s.gcConfirmFileMeta(ctx, c, f.Name)
+		if merr != nil {
+			return st, fmt.Errorf("%w: 读取/解密 file meta 失败 %s/%s: %v",
+				ErrOrphanAuditUnsafe, c, f.Name, merr)
+		}
+		if mm.Deleted {
+			st.tombstones++
+			continue
+		}
+		st.live++
+		mu.Lock()
+		s.gcProtectLiveMeta(referenced, c, f.Name, mm)
+		mu.Unlock()
 	}
 	return st, nil
 }

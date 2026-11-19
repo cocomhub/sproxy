@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"path"
 	"testing"
 	"time"
@@ -146,5 +147,56 @@ func TestOrphanChunks_FailsClosedOnCorruptFileMeta(t *testing.T) {
 	}
 	if _, rerr := sfs.OrphanChunks(ctx); !errors.Is(rerr, ErrOrphanAuditUnsafe) {
 		t.Fatalf("meta 损坏时必须返回 ErrOrphanAuditUnsafe（实际 %v）", rerr)
+	}
+}
+
+// TestOrphanChunks_ParallelTreeWalk 锁定「有界并发」正确性：多容器多文件并发重建引用后，
+// 存活文件的分块一个都不得判为孤儿（并发 map 写入必须有锁，-race 下若缺失即报竞态）。
+func TestOrphanChunks_ParallelTreeWalk(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh"), OrphanAuditConcurrency: 8})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	for i := range 12 {
+		for j := range 2 {
+			rel := fmt.Sprintf("pd%d/f%d.bin", i, j)
+			body := bytes.Repeat([]byte(rel), 700)
+			if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
+				int64(len(body)), time.Now().Unix()); werr != nil {
+				t.Fatalf("WriteFile %s: %v", rel, werr)
+			}
+		}
+	}
+	// 索引清空：强制走磁盘树（并发路径）。
+	sfs.mu.Lock()
+	sfs.index = map[string]*metaEntry{}
+	sfs.mu.Unlock()
+
+	rep, rerr := sfs.OrphanChunks(ctx)
+	if rerr != nil {
+		t.Fatalf("OrphanChunks: %v", rerr)
+	}
+	if len(rep.Chunks) != 0 {
+		t.Fatalf("并发重建引用后不得有孤儿，got %d", len(rep.Chunks))
+	}
+}
+
+// TestOrphanAuditConcurrencyDefault 锁定并发度默认值与覆盖规则。
+func TestOrphanAuditConcurrencyDefault(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	if got := sfs.orphanAuditConcurrency(); got != defaultOrphanAuditConcurrency {
+		t.Fatalf("默认并发度应为 %d，got %d", defaultOrphanAuditConcurrency, got)
+	}
+	sfs.opts.OrphanAuditConcurrency = 5
+	if got := sfs.orphanAuditConcurrency(); got != 5 {
+		t.Fatalf("覆盖后应为 5，got %d", got)
 	}
 }
