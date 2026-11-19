@@ -417,9 +417,10 @@ func TestGC_ReusesIndex_NoMetaReread(t *testing.T) {
 // countingFS 包装底层 FS，统计 GC 期间对「文件 meta blob」（文件名含 z 标记、
 // shardseal.ClassifyName == KindFileMeta）的 OpenRead 次数——Imp-3 断言用。
 type countingFS struct {
-	mu   sync.Mutex
-	read map[string]int // container/name → 文件 meta blob OpenRead 次数
-	wrap syncpkg.FS
+	mu        sync.Mutex
+	read      map[string]int // container/name → 文件 meta blob OpenRead 次数
+	listCalls int            // ListDir 调用次数（孤儿审计「禁止容器列举」断言用）
+	wrap      syncpkg.FS
 }
 
 // resetCounts 清零统计（GC 前调用）。
@@ -437,7 +438,17 @@ func (c *countingFS) metaReads() int {
 }
 
 func (c *countingFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, error) {
+	c.mu.Lock()
+	c.listCalls++
+	c.mu.Unlock()
 	return c.wrap.ListDir(ctx, p)
+}
+
+// listCount 返回 ListDir 累计调用次数。
+func (c *countingFS) listCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.listCalls
 }
 func (c *countingFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	return c.wrap.Stat(ctx, p)

@@ -200,3 +200,55 @@ func TestOrphanAuditConcurrencyDefault(t *testing.T) {
 		t.Fatalf("覆盖后应为 5，got %d", got)
 	}
 }
+
+// TestOrphanChunks_UsesIndexKeysWithoutListing 锁定「快照条目无 meta 时按 dirSeg/metaName 直读」的路径：
+// 生产卷快照命中（895 容器 / 916 条目）但条目 meta 为 nil ⇒ 必须靠索引键读 meta 建引用，
+// **不能再做 895 次容器列举**（那是实测主要耗时）。
+//
+// 变异：`orphanAuditTargets` 恒返回空（回退旧列举路径）⇒ 本用例统计的「列举次数」断言变红。
+func TestOrphanChunks_UsesIndexKeysWithoutListing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfs := &countingFS{read: map[string]int{}, wrap: syncpkg.NewLocalFS(root, nil)}
+	sfs, err := NewFS(cfs,
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh"), OrphanAuditConcurrency: 4})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	for i := range 6 {
+		rel := fmt.Sprintf("ik%d/g.bin", i)
+		body := bytes.Repeat([]byte(rel), 600)
+		if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
+			int64(len(body)), time.Now().Unix()); werr != nil {
+			t.Fatalf("WriteFile %s: %v", rel, werr)
+		}
+	}
+	// 模拟快照命中：条目保留 dirSeg/metaName，但冷结构 meta 置空。
+	sfs.mu.Lock()
+	for _, e := range sfs.index {
+		if e != nil {
+			e.meta = nil
+		}
+	}
+	sfs.mu.Unlock()
+
+	targets := sfs.orphanAuditTargets() // 必须在释放写锁后取（其内部取 RLock）
+	if len(targets) != 6 {
+		t.Fatalf("应得到 6 个待读 meta 的工作项，got %d", len(targets))
+	}
+
+	// 断言「只做一遍容器列举」（索引键路径的特征）：
+	// 索引键路径 = 仅清扫阶段每容器 1 次列举；树推导路径 = 建引用 + 清扫 共 2 遍。
+	sfs.mu.RLock()
+	nc := len(sfs.gcContainersLocked())
+	sfs.mu.RUnlock()
+	before := cfs.listCount()
+	if _, rerr := sfs.OrphanChunks(ctx); rerr != nil {
+		t.Fatalf("OrphanChunks: %v", rerr)
+	}
+	delta := cfs.listCount() - before
+	if delta != nc {
+		t.Fatalf("索引键路径应只列举一遍容器（want %d，got %d；2 遍即回退到树推导）", nc, delta)
+	}
+}
