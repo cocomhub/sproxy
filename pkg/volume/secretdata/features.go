@@ -976,10 +976,7 @@ func (s *SecretdataFS) collectTreeReferences(
 ) (treeRefStats, error) {
 	// **有界并发**（2026-11-19）：生产卷 895 容器 + 921 个 file meta ⇒ 串行要 1800+ 次远端往返
 	// （>30 分钟，客户端必超时）。这里按容器并行（每容器列举 + 读 meta），默认并发 16。
-	workers := s.orphanAuditConcurrency()
-	if workers > len(containers) {
-		workers = len(containers)
-	}
+	workers := min(s.orphanAuditConcurrency(), len(containers))
 	if workers <= 0 {
 		workers = 1
 	}
@@ -1000,9 +997,7 @@ func (s *SecretdataFS) collectTreeReferences(
 	var wg sync.WaitGroup
 	ch := make(chan string)
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for c := range ch {
 				one, err := s.collectContainerReferences(ctx, c, referenced, &mu)
 				if err != nil {
@@ -1015,7 +1010,7 @@ func (s *SecretdataFS) collectTreeReferences(
 				st.tombstones += one.tombstones
 				muEq.Unlock()
 			}
-		}()
+		})
 	}
 feed:
 	for _, c := range containers {
