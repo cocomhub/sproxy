@@ -69,6 +69,7 @@ func fileDomainRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *htt
 		{Method: "GET", Path: "/api/volumes/export", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).exportVolumeHandler},
 		// 真实存储审查（只读；设计 docs/archive/2026-11-04-secretdata-storage-inspection.md）：
 		// 正向落点 + 反向解释。仅实现 StorageInspector 的卷可用（其它卷 501）。
+		{Method: "GET", Path: "/api/volumes/{name}/orphans", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).orphansHandler},
 		{Method: "GET", Path: "/api/volumes/{name}/trace", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeTraceHandler},
 		{Method: "GET", Path: "/api/volumes/{name}/explain", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeExplainHandler},
 		{Method: "POST", Path: "/api/volumes/import", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).importVolumeHandler},
