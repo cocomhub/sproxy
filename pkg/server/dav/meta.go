@@ -483,3 +483,17 @@ func (d *davMetaFS) LookupByChecksum(checksum string) []string {
 var (
 	_ syncpkg.ContentLocator = (*davMetaFS)(nil)
 )
+
+// OrphanChunks 转发「孤儿审计」可选能力（R21/R24：聚合接口强制，漏转发编译期失败）。
+// 只读、无副作用 ⇒ 直接委托；底层未实现 ⇒ ErrUnsupported（调用方按"不支持"处理）。
+func (d *davMetaFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, error) {
+	if a, ok := d.FS.(syncpkg.OrphanAuditor); ok {
+		return a.OrphanChunks(ctx)
+	}
+	return syncpkg.OrphanReport{}, fmt.Errorf("davMetaFS: 底层未实现孤儿审计: %w", syncpkg.ErrUnsupported)
+}
+
+// 编译期断言：必须转发「孤儿审计」能力（R21/R24）。
+var (
+	_ syncpkg.OrphanAuditor = (*davMetaFS)(nil)
+)

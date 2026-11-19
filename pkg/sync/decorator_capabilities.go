@@ -49,6 +49,8 @@ type DecoratorCapabilities interface {
 	// ContentLocator（按内容 sha256 反查路径）：**只读**能力，所有透明装饰器都应转发
 	// （否则装配链上永远断言失败 ⇒ 功能静默不可用 ✗）。
 	ContentLocator
+	// OrphanAuditor（只读孤儿审计）：同属透明可转发能力 ⇒ 纳入聚合接口，漏转发编译期失败。
+	OrphanAuditor
 
 	// —— 跨包能力（`pkg/files/meta`）：**正是历史漏网点** ——
 	meta.Provider
