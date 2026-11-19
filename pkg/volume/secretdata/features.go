@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"log/slog"
@@ -764,16 +765,23 @@ func (s *SecretdataFS) gcProtectLiveMeta(referenced map[string]struct{}, contain
 // gcSweepOrphanChunks 第二遍：删未引用且非池引用的孤立分块（墓碑分块因未引用归属此层删）。
 // 调用方保证本容器无未决 meta（gcReconfirmContainer 全 true）——否则其分块可能被未决
 // meta 引用，不得当孤儿清。目录 meta 恒保留。调用方持 s.mu.Lock。
-func (s *SecretdataFS) gcSweepOrphanChunks(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) {
+func (s *SecretdataFS) gcSweepOrphanChunks(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) int {
+	return s.gcSweepOrphanChunksCounted(ctx, c, referenced, poolRefs, kills)
+}
+
+// gcSweepOrphanChunksCounted 与 gcSweepOrphanChunks 等价，但**返回扫描到的分块总数**（供覆盖率自检）。
+func (s *SecretdataFS) gcSweepOrphanChunksCounted(ctx context.Context, c string, referenced, poolRefs map[string]struct{}, kills *[]gcKill) int {
+	seen := 0
 	// 只按名字分类 ⇒ 轻量列举（不补精确 size，外部卷不触发批量 meta）。
 	entries, err := s.listInner(ctx, c)
 	if err != nil {
-		return
+		return 0
 	}
 	for _, f := range entries {
 		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindChunk {
 			continue
 		}
+		seen++
 		if _, ok := referenced[c+"/"+f.Name]; ok {
 			continue
 		}
@@ -782,6 +790,7 @@ func (s *SecretdataFS) gcSweepOrphanChunks(ctx context.Context, c string, refere
 		}
 		*kills = append(*kills, gcKill{c, f.Name})
 	}
+	return seen
 }
 
 // gcContainersLocked 返回全部容器（调用方已持 s.mu）。
@@ -876,12 +885,50 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 	s.mu.RUnlock()
 
 	rep := syncpkg.OrphanReport{Containers: len(containers)}
+	totalChunks := 0
 	for _, c := range containers {
 		var kills []gcKill
-		s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
+		n := s.gcSweepOrphanChunksCounted(ctx, c, referenced, poolRefs, &kills)
+		totalChunks += n
 		for _, k := range kills {
 			rep.Chunks = append(rep.Chunks, syncpkg.OrphanBlob{Container: k.container, Name: k.name})
 		}
 	}
+	// fail-closed 自检：引用集合不可信 ⇒ 拒绝返回清单（宁可不出，也不给错误清单）。
+	if err := checkReferenceCoverage(len(referenced), len(rep.Chunks), totalChunks); err != nil {
+		return syncpkg.OrphanReport{}, err
+	}
 	return rep, nil
+}
+
+// ErrOrphanAuditUnsafe 表示引用集合不可信（索引未就绪/覆盖率异常）⇒ 拒绝出清单或执行 GC。
+var ErrOrphanAuditUnsafe = errors.New("secretdata: 引用集合不可信，拒绝孤儿审计/GC")
+
+// orphanAuditMaxRatio 是「孤儿 / 全部分块」的容忍上限：超过即判定引用集合不完整（而非真有大量孤儿）。
+const orphanAuditMaxRatio = 0.30
+
+// orphanAuditMinChunks 是启用「孤儿占比」判定的最小分块数（小卷不适用比例判据）。
+const orphanAuditMinChunks = 20
+
+// checkReferenceCoverage 校验引用集合自洽：索引必须非空，且孤儿占比不得超阈值。
+//
+// 为什么（2026-11-19 实测事故）：`gcMarkIndex` 只从**内存索引**取引用；生产卷按设计**启动跳过全量扫描**，
+// 索引未就绪时引用集合为空 ⇒ 全部 19,073 个分块都被判为「孤儿」。若据此删除即**清空整个卷** ✗。
+// 因此这里 fail-closed：宁可不出清单，也不能给出错误清单。
+func checkReferenceCoverage(indexLen, orphanCount, totalChunks int) error {
+	if indexLen == 0 {
+		return fmt.Errorf("%w: 内存索引为空（可能尚未完成扫描，启动默认跳过全量扫描）", ErrOrphanAuditUnsafe)
+	}
+	if totalChunks == 0 {
+		return nil
+	}
+	// 小卷（测试/新卷）孤儿占比天然可能很高，不做比例判定——只保留「索引非空」这条硬判据。
+	if totalChunks < orphanAuditMinChunks {
+		return nil
+	}
+	if float64(orphanCount)/float64(totalChunks) > orphanAuditMaxRatio {
+		return fmt.Errorf("%w: 孤儿占比 %d/%d 超过 %.0f%%（疑似引用集合不完整）",
+			ErrOrphanAuditUnsafe, orphanCount, totalChunks, orphanAuditMaxRatio*100)
+	}
+	return nil
 }

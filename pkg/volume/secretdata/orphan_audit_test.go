@@ -6,6 +6,7 @@ package secretdata
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path"
 	"testing"
 	"time"
@@ -77,4 +78,34 @@ func TestOrphanChunks_RefusesDuringInFlightWrite(t *testing.T) {
 	if _, rerr := sfs.OrphanChunks(context.Background()); rerr == nil {
 		t.Fatal("在途写入存在时必须拒绝审计（fail-closed）")
 	}
+}
+
+// TestOrphanChunks_RefusesWhenIndexEmpty 锁定 fail-closed（**2026-11-19 生产实测事故**）：
+// 内存索引为空时（生产卷启动跳过全量扫描），引用集合为 0 ⇒ 全部 19,073 个分块都会被判「孤儿」。
+// 必须**报错**，绝不能返回"全部孤儿"的清单。
+//
+// 变异：删掉 `checkReferenceCoverage` 的 indexLen==0 判断 ⇒ 本用例变红（返回全部孤儿而非错误）。
+func TestOrphanChunks_RefusesWhenIndexEmpty(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("idx-empty-"), 800)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d2/g.bin", bytes.NewReader(payload),
+		int64(len(payload)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	// 模拟「启动跳过全量扫描」：索引为空。
+	sfs.mu.Lock()
+	sfs.index = map[string]*metaEntry{}
+	sfs.mu.Unlock()
+
+	if _, rerr := sfs.OrphanChunks(ctx); !errors.Is(rerr, ErrOrphanAuditUnsafe) {
+		t.Fatalf("索引为空时必须返回 ErrOrphanAuditUnsafe（实际 %v）", rerr)
+	}
+	// 注：GC 的既有契约是「尽力而为」（引用集合为 0 时属合法的"卷内无存活文件"场景，
+	// 由 gcReconfirmContainer 重读确认后删除），不在此处加硬判据；**出清单**路径才 fail-closed。
 }
