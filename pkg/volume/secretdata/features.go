@@ -854,3 +854,50 @@ func gcCleanupCtx() context.Context {
 	c, _ := boundedCleanupCtx(context.Background())
 	return c
 }
+
+// OrphanBlob 是一条「未被引用」的 blob 记录（**只读审计**结果，不含删除动作）。
+type OrphanBlob struct {
+	// Container 是 blob 所在的容器目录（卷内相对路径）。
+	Container string
+	// Name 是 blob 文件名。
+	Name string
+}
+
+// OrphanReport 是只读孤儿审计结果。
+type OrphanReport struct {
+	// Containers 是本次扫描的容器数（便于判断覆盖面）。
+	Containers int
+	// Chunks 是「未被任何 meta 引用、且不属于去重池」的分块 blob。
+	Chunks []OrphanBlob
+}
+
+// OrphanChunks 只读列出**孤儿分块**（未被任何 meta 引用、且非去重池引用），**不删除任何数据**。
+//
+// 为什么需要（用户 2026-11-18）：`GC()` 会直接删除；清理生产卷时希望**先出清单、人工逐条判断**。
+// 本方法复用 GC 的**引用集合计算**（同一份逻辑，不造第二份判据），只是把「删除」换成「收集」。
+//
+// 安全：
+//   - **在途写入存在时拒绝**（fail-closed）：否则可能把「已落盘但 meta 尚未提交」的块误判为孤儿；
+//   - 只按名字分类（`KindChunk`），不补 size（外部卷避免批量 meta 调用）。
+func (s *SecretdataFS) OrphanChunks(ctx context.Context) (OrphanReport, error) {
+	s.mu.RLock()
+	if s.writesInFlight > 0 {
+		s.mu.RUnlock()
+		return OrphanReport{}, fmt.Errorf("secretdata: 存在在途写入，拒绝孤儿审计（避免把未提交块误判为孤儿）")
+	}
+	containers := s.gcContainersLocked()
+	poolRefs := s.gcPoolNamesLocked()
+	referenced := map[string]struct{}{}
+	s.gcMarkIndex(ctx, referenced)
+	s.mu.RUnlock()
+
+	rep := OrphanReport{Containers: len(containers)}
+	for _, c := range containers {
+		var kills []gcKill
+		s.gcSweepOrphanChunks(ctx, c, referenced, poolRefs, &kills)
+		for _, k := range kills {
+			rep.Chunks = append(rep.Chunks, OrphanBlob{Container: k.container, Name: k.name})
+		}
+	}
+	return rep, nil
+}
