@@ -80,12 +80,12 @@ func TestOrphanChunks_RefusesDuringInFlightWrite(t *testing.T) {
 	}
 }
 
-// TestOrphanChunks_RefusesWhenIndexEmpty 锁定 fail-closed（**2026-11-19 生产实测事故**）：
-// 内存索引为空时（生产卷启动跳过全量扫描），引用集合为 0 ⇒ 全部 19,073 个分块都会被判「孤儿」。
-// 必须**报错**，绝不能返回"全部孤儿"的清单。
+// TestOrphanChunks_TreeReferencesSurviveEmptyIndex 是本轮修复的**核心回归**（2026-11-19 生产事故）：
+// 生产卷按设计启动跳过全量扫描 ⇒ 内存索引为空。此时审计必须**以磁盘树为准**重建引用，
+// 报告「0 个孤儿」，而不是把全部分块当作孤儿（曾误报 19,073 个 = 全卷分块总数）。
 //
-// 变异：删掉 `checkReferenceCoverage` 的 indexLen==0 判断 ⇒ 本用例变红（返回全部孤儿而非错误）。
-func TestOrphanChunks_RefusesWhenIndexEmpty(t *testing.T) {
+// 变异：把 `collectTreeReferences` 调用删掉（退回纯索引）⇒ 本用例变红（返回 1 个孤儿）。
+func TestOrphanChunks_TreeReferencesSurviveEmptyIndex(t *testing.T) {
 	t.Parallel()
 	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
 		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
@@ -93,19 +93,58 @@ func TestOrphanChunks_RefusesWhenIndexEmpty(t *testing.T) {
 		t.Fatalf("NewFS: %v", err)
 	}
 	ctx := context.Background()
-	payload := bytes.Repeat([]byte("idx-empty-"), 800)
-	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d2/g.bin", bytes.NewReader(payload),
+	payload := bytes.Repeat([]byte("tree-ref-"), 1200)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d3/h.bin", bytes.NewReader(payload),
 		int64(len(payload)), time.Now().Unix()); werr != nil {
 		t.Fatalf("WriteFile: %v", werr)
 	}
-	// 模拟「启动跳过全量扫描」：索引为空。
+	// 模拟「启动跳过全量扫描」：内存索引清空。
 	sfs.mu.Lock()
 	sfs.index = map[string]*metaEntry{}
 	sfs.mu.Unlock()
 
-	if _, rerr := sfs.OrphanChunks(ctx); !errors.Is(rerr, ErrOrphanAuditUnsafe) {
-		t.Fatalf("索引为空时必须返回 ErrOrphanAuditUnsafe（实际 %v）", rerr)
+	rep, rerr := sfs.OrphanChunks(ctx)
+	if rerr != nil {
+		t.Fatalf("索引为空时审计应改用磁盘树（不应报错）: %v", rerr)
 	}
-	// 注：GC 的既有契约是「尽力而为」（引用集合为 0 时属合法的"卷内无存活文件"场景，
-	// 由 gcReconfirmContainer 重读确认后删除），不在此处加硬判据；**出清单**路径才 fail-closed。
+	if len(rep.Chunks) != 0 {
+		t.Fatalf("存活文件的分块不得判为孤儿，got %d 个", len(rep.Chunks))
+	}
+}
+
+// TestOrphanChunks_FailsClosedOnCorruptFileMeta 锁定 fail-closed：file meta 无法解密时
+// 无法判定分块死活 ⇒ 必须报错（不得给出可能误导的清单）。
+func TestOrphanChunks_FailsClosedOnCorruptFileMeta(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("corrupt-"), 900)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, "d4/i.bin", bytes.NewReader(payload),
+		int64(len(payload)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	// 找一个 file meta blob 并写坏它。
+	var cname, mname string
+	sfs.mu.RLock()
+	for k, e := range sfs.index {
+		if e != nil && e.metaName != "" {
+			cname, mname = e.dirSeg, e.metaName
+		}
+		_ = k
+	}
+	sfs.mu.RUnlock()
+	if cname == "" || mname == "" {
+		t.Skip("夹具未拿到 file meta 名称")
+	}
+	if werr := sfs.inner.WriteFile(ctx, syncpkg.LogicalKey{}, path.Join(cname, mname),
+		bytes.NewReader([]byte("not-a-valid-sealed-meta")), 24, time.Now().Unix()); werr != nil {
+		t.Fatalf("写坏 meta: %v", werr)
+	}
+	if _, rerr := sfs.OrphanChunks(ctx); !errors.Is(rerr, ErrOrphanAuditUnsafe) {
+		t.Fatalf("meta 损坏时必须返回 ErrOrphanAuditUnsafe（实际 %v）", rerr)
+	}
 }
