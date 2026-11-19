@@ -839,6 +839,32 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 // Stat 通过 HEAD /api/files/stat?filename=<name> 获取远端单个文件元信息。
 // 响应来源于 X-File-Size、X-File-Checksum、X-File-MTime 三个响应头；不返回 body。
 // 文件不存在时返回错误（HTTP 404 包装为 error）。
+// VolumeOrphans 只读获取卷内未被引用的分块清单（原始 JSON 透传）。
+//
+// 返回 (raw, supported, err)：服务端未实现该能力 ⇒ supported=false（**不得**当作"无孤儿"✗）。
+func (c *FileClient) VolumeOrphans(ctx context.Context, volume string) ([]byte, bool, error) {
+	if volume == "" {
+		return nil, true, fmt.Errorf("volume 不能为空")
+	}
+	path := "/api/volumes/" + url.PathEscape(volume) + "/orphans"
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, true, fmt.Errorf(errFmtRequestFailed, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotImplemented {
+		return nil, false, nil
+	}
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if rerr != nil {
+		return nil, true, fmt.Errorf("读取孤儿审计响应: %w", rerr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, true, fmt.Errorf("孤儿审计失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	return body, true, nil
+}
+
 // LocateByChecksum 按**内容 sha256** 反查卷内路径（返回卷内 rel 列表；无命中 ⇒ 空）。
 //
 // 用途（2026-11-17）：上传结果/manifest 里的 rel 是**快照**，文件事后可能被改名纠正或目录搬移

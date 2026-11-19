@@ -1114,3 +1114,35 @@ func (h *Handlers) auditVolumeRefresh(r *http.Request, volName, detail string) {
 		Action: "volume_refresh", ObjectType: "volume", Object: volName, Result: AuditResultSuccess, Detail: detail,
 	})
 }
+
+// orphansHandler 是 GET /api/volumes/{name}/orphans 的实体：**只读**列出卷内未被引用的分块。
+//
+// 用途（用户 2026-11-18）：清理生产卷前先出清单、人工逐条判断（`GC()` 会直接删除，不适合评审）。
+// 未实现该能力的卷 ⇒ **501**（不得当作"无孤儿"✗）。在途写入时卷侧 fail-closed 返回错误 ⇒ 503。
+func (h *Handlers) orphansHandler(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" || h.volSet == nil {
+		sendJSONResponse(w, map[string]any{"success": false, "message": "缺少卷名"}, http.StatusBadRequest)
+		return
+	}
+	fsys, ok := h.volSet.VolumeView(name, registry.ViewUser)
+	if !ok || fsys == nil {
+		sendJSONResponse(w, map[string]any{"success": false, "message": "卷不存在或视图不可用"}, http.StatusNotFound)
+		return
+	}
+	type auditor interface {
+		OrphanChunks(ctx context.Context) (any, error)
+	}
+	a, ok := fsys.(auditor)
+	if !ok {
+		sendJSONResponse(w, map[string]any{"success": false,
+			"message": "该卷不支持孤儿审计（不支持，非无孤儿）"}, http.StatusNotImplemented)
+		return
+	}
+	rep, err := a.OrphanChunks(r.Context())
+	if err != nil {
+		sendJSONResponse(w, map[string]any{"success": false, "message": err.Error()}, http.StatusServiceUnavailable)
+		return
+	}
+	sendJSONResponse(w, map[string]any{"success": true, "report": rep}, http.StatusOK)
+}

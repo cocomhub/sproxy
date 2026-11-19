@@ -239,6 +239,18 @@ BuildAt: 2026-06-01T12:00:00Z
 | `X-File-Checksum` | SHA-256 hex（目录不返回） |
 | `X-File-IsDir` | `true` 仅当目标为目录 |
 
+### GET /api/volumes/{name}/orphans
+
+**只读**列出卷内「未被任何 meta 引用、且非去重池引用」的分块 blob（用于清理前人工评审）。
+
+| 情况 | 响应 |
+|---|---|
+| 支持审计 | `200` + `{"success":true,"report":{"containers":N,"chunks":[{"container":"...","name":"..."}]}}` |
+| 卷不支持该能力 | `501`（**不得**当作"无孤儿"） |
+| 有在途写入（卷侧 fail-closed） | `503`（避免把未提交块误判为孤儿） |
+
+实现：复用 GC 的引用集合计算，仅收集不删除。注意：会遍历全部容器做列举，生产卷耗时较长。
+
 ### GET /api/files/locate?checksum=<sha256>&volume=<卷>
 
 按**内容 sha256** 反查卷内路径（返回 `{"paths":[...]}`，卷内相对路径列表）。
