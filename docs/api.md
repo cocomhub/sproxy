@@ -241,15 +241,22 @@ BuildAt: 2026-06-01T12:00:00Z
 
 ### GET /api/volumes/{name}/orphans
 
-**只读**列出卷内「未被任何 meta 引用、且非去重池引用」的分块 blob（用于清理前人工评审）。
+**只读**列出卷内「未被任何 meta 引用、且非去重池引用」的分块 blob（清理前人工评审）。
+**异步任务**：生产卷需约 1800 次外部往返（每容器列举 + 每个 file meta 读取解密），同步请求会超时。
 
 | 情况 | 响应 |
 |---|---|
-| 支持审计 | `200` + `{"success":true,"report":{"containers":N,"chunks":[{"container":"...","name":"..."}]}}` |
+| 首次调用 / `?refresh=1` | `202` `{"state":"running","started_at":"..."}`（后台开始审计） |
+| 进行中 | `202` `{"state":"running","started_at":"..."}` |
+| 完成 | `200` `{"success":true,"state":"done","started_at":..,"ended_at":..,"report":{"containers":N,"chunks":[{container,name}]}}` |
+| 任务失败 | `503` `{"success":false,"state":"failed","message":"..."}`（可 `?refresh=1` 重试） |
 | 卷不支持该能力 | `501`（**不得**当作"无孤儿"） |
-| 有在途写入（卷侧 fail-closed） | `503`（避免把未提交块误判为孤儿） |
 
-实现：复用 GC 的引用集合计算，仅收集不删除。注意：会遍历全部容器做列举，生产卷耗时较长。
+语义要点：
+- **同卷单飞**（运行中重复调用只返回状态，不会重复执行）；结果缓存到下次 `refresh=1`。
+- 后台任务用**独立 ctx**（客户端断开不中断审计），总时限 2h。
+- 引用集合以**磁盘树**为权威（逐 meta 解密），内存索引仅用于省去容器列举；
+  任一 meta 读/解密失败 ⇒ 整体 fail-closed（返回 `ErrOrphanAuditUnsafe`，不给可能误导的清单）。
 
 ### GET /api/files/locate?checksum=<sha256>&volume=<卷>
 
