@@ -881,8 +881,20 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 	containers := s.gcContainersLocked()
 	poolRefs := s.gcPoolNamesLocked()
 	referenced := map[string]struct{}{}
-	s.gcMarkIndex(ctx, referenced)
+	s.gcMarkIndex(ctx, referenced) // 内存索引（可能不完整）
 	s.mu.RUnlock()
+
+	// **权威引用来源 = 真实目录树**（2026-11-19 生产事故修复）：
+	// 生产卷按设计启动跳过全量扫描 ⇒ 内存索引可能为空 ⇒ 仅凭索引会把全部分块判为孤儿。
+	// 这里逐容器重读并解密 file meta 来重建引用集合（与 GC 的 `gcReconfirmContainer` 同一判据）。
+	stats, terr := s.collectTreeReferences(ctx, containers, referenced)
+	if terr != nil {
+		return syncpkg.OrphanReport{}, terr
+	}
+	if stats.fileMetas == 0 {
+		return syncpkg.OrphanReport{}, fmt.Errorf(
+			"%w: 未读到任何 file meta（容器 %d 个），无法建立权威引用集合", ErrOrphanAuditUnsafe, len(containers))
+	}
 
 	rep := syncpkg.OrphanReport{Containers: len(containers)}
 	totalChunks := 0
@@ -895,7 +907,7 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 		}
 	}
 	// fail-closed 自检：引用集合不可信 ⇒ 拒绝返回清单（宁可不出，也不给错误清单）。
-	if err := checkReferenceCoverage(len(referenced), len(rep.Chunks), totalChunks); err != nil {
+	if err := checkReferenceCoverage(stats.fileMetas, len(referenced), len(rep.Chunks), totalChunks); err != nil {
 		return syncpkg.OrphanReport{}, err
 	}
 	return rep, nil
@@ -915,9 +927,14 @@ const orphanAuditMinChunks = 20
 // 为什么（2026-11-19 实测事故）：`gcMarkIndex` 只从**内存索引**取引用；生产卷按设计**启动跳过全量扫描**，
 // 索引未就绪时引用集合为空 ⇒ 全部 19,073 个分块都被判为「孤儿」。若据此删除即**清空整个卷** ✗。
 // 因此这里 fail-closed：宁可不出清单，也不能给出错误清单。
-func checkReferenceCoverage(indexLen, orphanCount, totalChunks int) error {
-	if indexLen == 0 {
-		return fmt.Errorf("%w: 内存索引为空（可能尚未完成扫描，启动默认跳过全量扫描）", ErrOrphanAuditUnsafe)
+func checkReferenceCoverage(fileMetas, refCount, orphanCount, totalChunks int) error {
+	// 权威引用来自磁盘树：必须至少读到一个 file meta 才可能建立引用集合（调用方已先行检查）。
+	if fileMetas == 0 {
+		return fmt.Errorf("%w: 未读到任何 file meta，无法建立引用集合", ErrOrphanAuditUnsafe)
+	}
+	// 有存活文件时引用集合不得为空（否则说明登记逻辑失效）。
+	if refCount == 0 {
+		return fmt.Errorf("%w: 读到 %d 个 file meta 但引用集合为空", ErrOrphanAuditUnsafe, fileMetas)
 	}
 	if totalChunks == 0 {
 		return nil
@@ -931,4 +948,51 @@ func checkReferenceCoverage(indexLen, orphanCount, totalChunks int) error {
 			ErrOrphanAuditUnsafe, orphanCount, totalChunks, orphanAuditMaxRatio*100)
 	}
 	return nil
+}
+
+// treeRefStats 是「按真实目录树重建引用集合」的统计（供审计自检与日志）。
+type treeRefStats struct {
+	// fileMetas 是读到的 file meta blob 总数（含墓碑）。
+	fileMetas int
+	// live 是存活文件数。
+	live int
+	// tombstones 是墓碑数（其分块无引用 ⇒ 可作孤儿判删）。
+	tombstones int
+}
+
+// collectTreeReferences 遍历全部容器、重读并解密 file meta，把存活文件的
+// meta blob + 分块 + parity 登记进 referenced（**与 GC 的 gcReconfirmContainer 同一判据**）。
+//
+// 为什么（2026-11-19 生产实测）：`gcMarkIndex` 只依赖内存索引；生产卷启动跳过全量扫描时索引为空
+// ⇒ 19,073 个分块被 100% 误判为孤儿。差集审计必须以**磁盘真相**为准，索引只能作为加速。
+//
+// fail-closed：任一容器列举失败或任一 meta 读/解密失败 ⇒ 返回错误（不给出可能误导的清单）。
+func (s *SecretdataFS) collectTreeReferences(
+	ctx context.Context, containers []string, referenced map[string]struct{},
+) (treeRefStats, error) {
+	var st treeRefStats
+	for _, c := range containers {
+		entries, lerr := s.listInner(ctx, c)
+		if lerr != nil {
+			return st, fmt.Errorf("%w: 列举容器失败 %s: %v", ErrOrphanAuditUnsafe, c, lerr)
+		}
+		for _, f := range entries {
+			if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+				continue
+			}
+			st.fileMetas++
+			mm, merr := s.gcConfirmFileMeta(ctx, c, f.Name)
+			if merr != nil {
+				return st, fmt.Errorf("%w: 读取/解密 file meta 失败 %s/%s: %v",
+					ErrOrphanAuditUnsafe, c, f.Name, merr)
+			}
+			if mm.Deleted {
+				st.tombstones++
+				continue
+			}
+			st.live++
+			s.gcProtectLiveMeta(referenced, c, f.Name, mm)
+		}
+	}
+	return st, nil
 }
