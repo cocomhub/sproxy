@@ -207,7 +207,6 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(NewCmdTree(factory, ios, cliState))
 	root.AddCommand(NewCmdVolumes(factory, ios))
 	root.AddCommand(NewCmdVolume(factory, ios, cliState))
-	root.AddCommand(NewCmdVolumeOrphans(factory, ios))
 	root.AddCommand(NewCmdBackup(factory, ios))
 	root.AddCommand(NewCmdMigrate(factory, ios))
 	root.AddCommand(NewCmdSearch(factory, ios))
