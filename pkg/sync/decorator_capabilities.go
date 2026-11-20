@@ -51,6 +51,8 @@ type DecoratorCapabilities interface {
 	ContentLocator
 	// OrphanAuditor（只读孤儿审计）：同属透明可转发能力 ⇒ 纳入聚合接口，漏转发编译期失败。
 	OrphanAuditor
+	// MetaAuditor（只读元数据审计）：同属透明可转发能力 ⇒ 纳入聚合接口。
+	MetaAuditor
 
 	// —— 跨包能力（`pkg/files/meta`）：**正是历史漏网点** ——
 	meta.Provider
