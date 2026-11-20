@@ -36,6 +36,10 @@ type stubTasks struct {
 	cancelErr  error
 	deleteErr  error
 	resumeErr  error
+	retrySel   cloud.RetrySelector
+	retryIDs   []string
+	retryErrs  map[string]error
+	retryForce bool
 
 	// 入参取证
 	listOwner       string
@@ -101,6 +105,19 @@ func (s *stubTasks) DeleteTask(id, owner string) error {
 func (s *stubTasks) ResumeTask(id string, force bool, owner string) error {
 	s.resumeID, s.resumeForce, s.resumeOwner = id, force, owner
 	return s.resumeErr
+}
+
+// SelectRetryable 记录选择器并返回预设的可重试任务 ID（测试用）。
+func (s *stubTasks) SelectRetryable(sel cloud.RetrySelector) []string {
+	s.retrySel = sel
+	return s.retryIDs
+}
+
+// RetryTasks 记录调用并返回预设结果（测试用）。
+func (s *stubTasks) RetryTasks(sel cloud.RetrySelector, force bool) ([]string, map[string]error) {
+	s.retrySel = sel
+	s.retryForce = force
+	return s.retryIDs, s.retryErrs
 }
 
 // auditCall 是一次审计调用取证。

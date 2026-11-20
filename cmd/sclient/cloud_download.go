@@ -177,6 +177,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.AddCommand(NewCmdCloudDeleteTask(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudResume(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudResumeDownload(factory, ios, cfgSvc))
+	cmd.AddCommand(NewCmdCloudDownloadRetry(factory, ios))
 	cmd.AddCommand(NewCmdCloudList(factory, ios, cfgSvc))
 	cmd.AddCommand(NewCmdCloudCancel(factory, ios, cfgSvc))
 

@@ -35,6 +35,7 @@ POST /api/backends/{type}/presign/complete	action=backend_presign_complete
 POST /api/backup	action=backup	
 POST /api/cloud/groups	action=cloud_group_create	
 POST /api/cloud/tasks/{id}/cancel	action=cloud_cancel	
+POST /api/cloud/tasks/retry	action=cloud_task_retry	
 POST /api/secrets	action=secret_create	
 POST /api/shares	action=share_create	
 POST /api/sync/conflicts/{id}/resolve	action=sync_conflict_resolve	

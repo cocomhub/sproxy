@@ -53,6 +53,10 @@ type Tasks interface {
 	CancelTask(id, owner string) error
 	DeleteTask(id, owner string) error
 	ResumeTask(id string, force bool, owner string) error
+	// SelectRetryable 按条件选出可重试任务（2026-11-21：失败任务可跨存活期重试）。
+	SelectRetryable(sel cloud.RetrySelector) []string
+	// RetryTasks 按条件重试（复用 ResumeTask 内核），返回已提交与逐任务错误。
+	RetryTasks(sel cloud.RetrySelector, force bool) ([]string, map[string]error)
 }
 
 // Groups 是云任务组面（覆设计文档 §5.2）。

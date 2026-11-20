@@ -176,6 +176,7 @@ localMux	DELETE /api/cloud/tasks/{id}	tunnel	pkg/server/routes.go:457
 localMux	POST /api/cloud/tasks/{id}/archive	tunnel	pkg/server/routes.go:458
 localMux	POST /api/cloud/archive	tunnel	pkg/server/routes.go:459
 localMux	POST /api/cloud/tasks/{id}/resume	tunnel	pkg/server/routes.go:460
+localMux	POST /api/cloud/tasks/retry	tunnel	pkg/server/cloudtasks/routes.go
 localMux	POST /api/cloud/groups	tunnel	pkg/server/routes.go:461
 localMux	GET /api/cloud/groups	tunnel	pkg/server/routes.go:462
 localMux	GET /api/cloud/groups/{id}	tunnel	pkg/server/routes.go:463
@@ -192,6 +193,7 @@ srvMux	DELETE /api/cloud/tasks/{id}	auth	pkg/server/routes.go:474
 srvMux	POST /api/cloud/tasks/{id}/archive	auth	pkg/server/routes.go:475
 srvMux	POST /api/cloud/archive	auth	pkg/server/routes.go:476
 srvMux	POST /api/cloud/tasks/{id}/resume	auth	pkg/server/routes.go:477
+srvMux	POST /api/cloud/tasks/retry	auth	pkg/server/cloudtasks/routes.go
 srvMux	POST /api/cloud/groups	auth	pkg/server/routes.go:478
 srvMux	GET /api/cloud/groups	auth	pkg/server/routes.go:479
 srvMux	GET /api/cloud/groups/{id}	auth	pkg/server/routes.go:480

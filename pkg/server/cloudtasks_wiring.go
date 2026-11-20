@@ -78,6 +78,16 @@ func (a *cloudTasksAdapter) ResumeTask(id string, force bool, owner string) erro
 	return a.h.cloudMgr.ResumeTask(id, force, owner)
 }
 
+// SelectRetryable 按条件选出可重试任务（跨失败任务保留期，供 retry 端点与事项执行器共用）。
+func (a *cloudTasksAdapter) SelectRetryable(sel cloud.RetrySelector) []string {
+	return a.h.cloudMgr.SelectRetryable(sel)
+}
+
+// RetryTasks 按条件重试（复用 ResumeTask 内核）。
+func (a *cloudTasksAdapter) RetryTasks(sel cloud.RetrySelector, force bool) ([]string, map[string]error) {
+	return a.h.cloudMgr.RetryTasks(sel, force)
+}
+
 // ---- Groups ----
 
 func (a *cloudTasksAdapter) SubmitAndStartGroup(name string, urls []cloudfilename.Entry,

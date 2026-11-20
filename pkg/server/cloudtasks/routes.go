@@ -41,6 +41,7 @@ func Routes() []router.Route[Handler] {
 		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelTask, Mutating: true},
 		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteTask, Mutating: true},
 		{Method: "POST", Path: "/tasks/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeTask, Mutating: true},
+		{Method: "POST", Path: "/tasks/retry", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).RetryTasks, Mutating: true},
 		{Method: "POST", Path: "/tasks/{id}/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveTask, Mutating: true},
 		{Method: "POST", Path: "/archive", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ArchiveBatch, Mutating: true},
 		{Method: "POST", Path: "/groups", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateGroup, Mutating: true},
