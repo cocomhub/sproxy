@@ -197,13 +197,16 @@ type CloudDownloadConfig struct {
 	TransferConcurrency int
 	MaxBatchURLs        int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
 	TaskTTL             time.Duration // 完成任务保留时间，默认 24h
-	FailedTaskTTL       time.Duration // 失败任务保留时间，默认 7d（2026-11-21：1h 太短，失败后无从重试）
-	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
-	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
-	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
-	MaxRetries          int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
-	RetryDelay          time.Duration // 重试间隔，默认 10s
-	Downloader          string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// OnTaskFailed 是任务失败观察者（装配层注入：登记事项/告警）。nil = 不通知。
+	OnTaskFailed TaskFailureObserver
+
+	FailedTaskTTL   time.Duration // 失败任务保留时间，默认 7d（2026-11-21：1h 太短，失败后无从重试）
+	AllowPrivate    bool          // 允许私有 IP 下载（仅测试用）
+	DownloadTimeout time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
+	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
+	MaxRetries      int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
+	RetryDelay      time.Duration // 重试间隔，默认 10s
+	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
 	// 默认 512 MiB**——用户裁定 2026-10-07：0 处理成默认大小，配额治理默认生效）。
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验
@@ -410,9 +413,12 @@ type CloudDownloadManager struct {
 	dirtyMu     sync.Mutex
 	flushNow    chan struct{}
 	stopFlush   chan struct{}
-	stopCleanup chan struct{}  // 停止 cleanupExpired 后台 goroutine
-	wg          sync.WaitGroup // 追踪所有执行中的 goroutine
-	closeOnce   sync.Once      // 确保 Close 只执行一次
+	stopCleanup chan struct{} // 停止 cleanupExpired 后台 goroutine
+	// 失败观察者（装配层后置注入；见 task_failure_observer.go）。
+	failureMu       sync.RWMutex
+	failureObserver TaskFailureObserver
+	wg              sync.WaitGroup // 追踪所有执行中的 goroutine
+	closeOnce       sync.Once      // 确保 Close 只执行一次
 
 	// TaskGroup 支持
 	groups  map[string]*CloudTaskGroup

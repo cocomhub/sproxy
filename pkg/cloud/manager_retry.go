@@ -19,6 +19,8 @@ type RetrySelector struct {
 	URL string
 	// TransferPath 按转存目标路径精确匹配（修复场景最常用：按卷内 rel 重试）。
 	TransferPath string
+	// TransferVolume 按转存目标卷匹配（与 TransferPath 组合可唯一定位；空 = 不限制）。
+	TransferVolume string
 	// GroupID 按任务组匹配（整组重试）。
 	GroupID string
 	// Owner 限定归属（空 = 不限制，仅内部/管理调用方使用）。
@@ -31,30 +33,51 @@ type RetrySelector struct {
 
 // retryable 判断任务是否可被重试（终态里有救的那几种）。
 func (m *CloudDownloadManager) retryable(t *CloudTask, sel RetrySelector) bool {
-	if sel.Owner != "" && t.Owner != sel.Owner {
-		return false
-	}
+	return m.retryableStatus(t, sel) &&
+		m.retryableOwner(t, sel) &&
+		m.retryableTarget(t, sel)
+}
+
+// retryableStatus 判断状态是否可重试（failed/cancelled/pending，或 completed+damaged）。
+func (m *CloudDownloadManager) retryableStatus(t *CloudTask, sel RetrySelector) bool {
 	switch t.Status {
 	case "failed", "cancelled", "pending":
+		return true
 	case "completed":
-		if !sel.IncludeCompletedDamaged || t.IntegrityStatus != "damaged" {
-			return false
-		}
+		return sel.IncludeCompletedDamaged && t.IntegrityStatus == "damaged"
 	default:
 		return false
 	}
+}
+
+// retryableOwner 归属过滤（Owner 空 = 不限制）。
+func (m *CloudDownloadManager) retryableOwner(t *CloudTask, sel RetrySelector) bool {
+	return sel.Owner == "" || t.Owner == sel.Owner
+}
+
+// retryableTarget 按 URL/转存目标/组过滤（各条件为空即不限制）。
+func (m *CloudDownloadManager) retryableTarget(t *CloudTask, sel RetrySelector) bool {
 	if sel.URL != "" && !strings.Contains(t.URL, sel.URL) {
 		return false
-	}
-	if sel.TransferPath != "" {
-		if t.Transfer == nil || t.Transfer.Path != sel.TransferPath {
-			return false
-		}
 	}
 	if sel.GroupID != "" && t.GroupID != sel.GroupID {
 		return false
 	}
-	return true
+	return m.matchTransfer(t, sel.TransferVolume, sel.TransferPath)
+}
+
+// matchTransfer 匹配转存目标（空条件视为不限制）。
+func (m *CloudDownloadManager) matchTransfer(t *CloudTask, volume, path string) bool {
+	if volume == "" && path == "" {
+		return true
+	}
+	if t.Transfer == nil {
+		return false
+	}
+	if volume != "" && t.Transfer.Volume != volume {
+		return false
+	}
+	return path == "" || t.Transfer.Path == path
 }
 
 // SelectRetryable 返回匹配的任务 ID 列表（稳定顺序：创建时间升序），不修改任何状态。

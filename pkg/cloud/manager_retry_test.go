@@ -88,3 +88,23 @@ func TestDefaultFailedTaskTTL(t *testing.T) {
 		t.Fatalf("FailedTaskTTL 默认 = %v，期望 7d", cfg.FailedTaskTTL)
 	}
 }
+
+// TestObserveFailure_NotifiesObserver 锁定失败观察者（装配层据此登记事项；2026-11-21）。
+// 观察者必须收到：任务 ID、转存目标、失败归类与累计次数。
+func TestObserveFailure_NotifiesObserver(t *testing.T) {
+	t.Parallel()
+	var got TaskFailure
+	m := &CloudDownloadManager{}
+	m.SetTaskFailureObserver(func(f TaskFailure) { got = f })
+	task := &CloudTask{ID: "t9", Owner: "o", URL: "u",
+		Transfer: &TransferSpec{Volume: "v", Path: "a/b.mp4"}}
+	task.noteStage("downloading")
+	task.noteFailure("context deadline exceeded", 0, "")
+	m.observeFailure(task)
+	if got.TaskID != "t9" || got.Volume != "v" || got.Path != "a/b.mp4" {
+		t.Fatalf("观察者载荷错误: %+v", got)
+	}
+	if got.ErrorClass != ErrClassSourceUnreachable || got.Attempts != 1 {
+		t.Fatalf("类别/次数错误: %+v", got)
+	}
+}

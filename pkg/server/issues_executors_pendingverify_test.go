@@ -108,3 +108,25 @@ func TestIssuesExecutors_PendingVerifyMissingFieldsNeedsHuman(t *testing.T) {
 		t.Fatalf("失败原因应说明缺什么，got %q", it.LastError)
 	}
 }
+
+// TestRunCloudDownloadRetry 锁定「云端下载失败」执行器契约（2026-11-21）：
+// 缺卷/路径 ⇒ 报错转人工；未注入能力 ⇒ 报错；注入 ⇒ 按 (volume, rel) 调用一次。
+func TestRunCloudDownloadRetry(t *testing.T) {
+	t.Parallel()
+	it := issues.Item{Kind: issues.KindCloudDownloadFailed, Volume: "v", Path: "a/b.mp4"}
+	if err := runCloudDownloadRetry(t.Context(), ExecutorDeps{}, it); err == nil {
+		t.Fatal("未注入执行器必须报错（不静默成功）")
+	}
+	if err := runCloudDownloadRetry(t.Context(), ExecutorDeps{RetryCloudDownload: func(context.Context, string, string) error { return nil }},
+		issues.Item{Kind: issues.KindCloudDownloadFailed, Path: "x"}); err == nil {
+		t.Fatal("缺少卷名必须报错")
+	}
+	var gotV, gotR string
+	d := ExecutorDeps{RetryCloudDownload: func(_ context.Context, v, r string) error { gotV, gotR = v, r; return nil }}
+	if err := runCloudDownloadRetry(t.Context(), d, it); err != nil {
+		t.Fatalf("注入后应成功: %v", err)
+	}
+	if gotV != "v" || gotR != "a/b.mp4" {
+		t.Fatalf("参数透传错误: %s/%s", gotV, gotR)
+	}
+}
