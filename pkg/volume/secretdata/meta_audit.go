@@ -68,6 +68,7 @@ type metaAuditPart struct {
 	dirMetas      int
 	dirUnreadable int
 	missing       int
+	missingParity int
 	samples       []string
 	owners        []string
 	err           error
@@ -82,6 +83,7 @@ func mergeMetaAudit(rep *syncpkg.MetaAuditReport, p metaAuditPart) {
 	rep.DirMetas += p.dirMetas
 	rep.DirUnreadable += p.dirUnreadable
 	rep.MissingChunks += p.missing
+	rep.MissingParity += p.missingParity
 	for _, o := range p.owners {
 		if len(rep.MissingOwners) >= metaAuditSampleCap {
 			break
@@ -144,7 +146,7 @@ func (s *SecretdataFS) auditContainerMetas(
 	return p
 }
 
-// auditOneFileMeta 解密单个 file meta：统计存活/墓碑/损坏，并校验其分块引用是否齐全。
+// auditOneFileMeta 解密单个 file meta：统计存活/墓碑/损坏，并校验引用完整性。
 func (s *SecretdataFS) auditOneFileMeta(
 	ctx context.Context, c, name string, listings map[string]map[string]struct{},
 	owners map[string]string, p *metaAuditPart,
@@ -160,29 +162,53 @@ func (s *SecretdataFS) auditOneFileMeta(
 		return
 	}
 	p.live++
-	dir := c
+	dir := chunkDirOf(c, mm)
+	missChunk, missParity, samples := countMissingRefs(listings[dir], mm)
+	p.missing += missChunk
+	p.missingParity += missParity
+	p.samples = appendCapped(p.samples, samples...)
+	if missChunk > 0 {
+		p.owners = appendCapped(p.owners, owners[c])
+	}
+}
+
+// dedupDirOf 返回该 meta 的分块所在容器（去重引用文件在 Extra["dedup"]，否则本容器）。
+func chunkDirOf(container string, mm *shardseal.Meta) string {
 	if dd, ok := mm.Extra["dedup"].(string); ok && dd != "" {
-		dir = dd
+		return dd
 	}
-	refs := make([]string, 0, len(mm.Chunks)+1)
+	return container
+}
+
+// countMissingRefs 统计缺失引用：**数据分块**与 **parity 分开**（前者是数据缺口，后者仅冗余下降）。
+// listing 是该文件分块所在容器的名字集合（nil = 空容器）。
+func countMissingRefs(listing map[string]struct{}, mm *shardseal.Meta) (missing, missingParity int, samples []string) {
 	for _, ci := range mm.Chunks {
-		refs = append(refs, ci.FileName)
-	}
-	if mm.Parity != nil {
-		refs = append(refs, mm.Parity.FileName)
-	}
-	for _, ref := range refs {
-		if _, ok := listings[dir][ref]; ok {
+		if _, ok := listing[ci.FileName]; ok {
 			continue
 		}
-		p.missing++
-		if len(p.samples) < metaAuditSampleCap {
-			p.samples = append(p.samples, path.Join(dir, ref))
-		}
-		if owner := owners[c]; owner != "" && len(p.owners) < metaAuditSampleCap {
-			p.owners = append(p.owners, owner)
+		missing++
+		if len(samples) < metaAuditSampleCap {
+			samples = append(samples, ci.FileName)
 		}
 	}
+	if mm.Parity != nil {
+		if _, ok := listing[mm.Parity.FileName]; !ok {
+			missingParity++
+		}
+	}
+	return missing, missingParity, samples
+}
+
+// appendCapped 追加元素但不超过样例上限（跳过空串）。
+func appendCapped(dst []string, items ...string) []string {
+	for _, it := range items {
+		if it == "" || len(dst) >= metaAuditSampleCap {
+			continue
+		}
+		dst = append(dst, it)
+	}
+	return dst
 }
 
 // auditOneDirMeta 解密单个 dir meta（只统计可解密性；目录树由物理嵌套表达，无需交叉校验）。

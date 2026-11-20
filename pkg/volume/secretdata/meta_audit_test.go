@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -147,5 +148,70 @@ func TestAuditMeta_ReportsMissingOwner(t *testing.T) {
 	}
 	if rep.MissingOwners[0] != rel {
 		t.Fatalf("owner 应为 %q，got %q", rel, rep.MissingOwners[0])
+	}
+}
+
+// TestAuditMeta_SeparatesParity 锁定「数据块缺失」与「校验块缺失」的区分：
+// parity 缺失只影响冗余，不得计入 MissingChunks（否则会把可读文件误判为需重传）。
+func TestAuditMeta_SeparatesParity(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh"), Erasure: true})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	rel := "par0/p.bin"
+	body := bytes.Repeat([]byte("parity-check-"), 900)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
+		int64(len(body)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	sfs.mu.RLock()
+	var parity string
+	for _, e := range sfs.index {
+		if e != nil && e.meta != nil && e.meta.Parity != nil {
+			parity = path.Join(e.dirSeg, e.meta.Parity.FileName)
+			break
+		}
+	}
+	sfs.mu.RUnlock()
+	if parity == "" {
+		t.Skip("夹具未产生 parity")
+	}
+	if rerr := sfs.inner.Delete(ctx, parity); rerr != nil {
+		t.Fatalf("删除 parity: %v", rerr)
+	}
+	rep, aerr := sfs.AuditMeta(ctx)
+	if aerr != nil {
+		t.Fatalf("AuditMeta: %v", aerr)
+	}
+	if rep.MissingChunks != 0 {
+		t.Fatalf("parity 缺失不得计入 MissingChunks，got %d", rep.MissingChunks)
+	}
+	if rep.MissingParity != 1 {
+		t.Fatalf("应计入 MissingParity=1，got %d", rep.MissingParity)
+	}
+}
+
+// TestCountMissingRefs_SeparatesParity 锁定「数据块 vs 校验块」缺失的分类（纯函数，无需夹具）。
+func TestCountMissingRefs_SeparatesParity(t *testing.T) {
+	t.Parallel()
+	mm := &shardseal.Meta{
+		Chunks: []shardseal.ChunkInfo{{FileName: "c1"}, {FileName: "c2"}},
+		Parity: &shardseal.ParityInfo{FileName: "p1"},
+	}
+	// 容器里只有 c1：c2（数据）与 p1（校验）都缺。
+	miss, missP, samples := countMissingRefs(map[string]struct{}{"c1": {}}, mm)
+	if miss != 1 || missP != 1 {
+		t.Fatalf("应区分 missing=1 / parity=1，got %d/%d", miss, missP)
+	}
+	if len(samples) != 1 || samples[0] != "c2" {
+		t.Fatalf("样例应只含数据块 c2，got %v", samples)
+	}
+	// 全都在 ⇒ 0/0。
+	miss, missP, _ = countMissingRefs(map[string]struct{}{"c1": {}, "c2": {}, "p1": {}}, mm)
+	if miss != 0 || missP != 0 {
+		t.Fatalf("齐全时应为 0/0，got %d/%d", miss, missP)
 	}
 }

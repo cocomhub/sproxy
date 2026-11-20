@@ -23,8 +23,10 @@ type MetaAuditReport struct {
 	// DirMetas / DirUnreadable 是目录 meta 的总数与不可解密数。
 	DirMetas      int `json:"dir_metas"`
 	DirUnreadable int `json:"dir_unreadable"`
-	// MissingChunks 是「存活 meta 引用、但容器中不存在」的分块数（**数据缺失，危险**）。
+	// MissingChunks 是「存活 meta 引用的**数据分块**、但容器中不存在」的数量（**数据缺失，必须重传**）。
 	MissingChunks int `json:"missing_chunks"`
+	// MissingParity 是缺失的**校验块**数量（只影响冗余/自愈能力，数据仍可读）。
+	MissingParity int `json:"missing_parity"`
 	// MissingSamples 是缺失分块的样例（最多 200 条，`容器/名字`）。
 	MissingSamples []string `json:"missing_samples,omitempty"`
 	// MissingOwners 是缺失分块所属**文件**的逻辑 rel（来自索引；未知则跳过）——
