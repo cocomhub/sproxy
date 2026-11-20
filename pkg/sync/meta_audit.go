@@ -25,8 +25,11 @@ type MetaAuditReport struct {
 	DirUnreadable int `json:"dir_unreadable"`
 	// MissingChunks 是「存活 meta 引用、但容器中不存在」的分块数（**数据缺失，危险**）。
 	MissingChunks int `json:"missing_chunks"`
-	// MissingSamples 是缺失分块的样例（最多 20 条，`容器/名字`）。
+	// MissingSamples 是缺失分块的样例（最多 200 条，`容器/名字`）。
 	MissingSamples []string `json:"missing_samples,omitempty"`
+	// MissingOwners 是缺失分块所属**文件**的逻辑 rel（来自索引；未知则跳过）——
+	// 用于定位"需要重新上传哪些文件"。
+	MissingOwners []string `json:"missing_owners,omitempty"`
 }
 
 // MetaAuditor 是**可选能力接口**：只读审计卷的元数据层。

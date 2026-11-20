@@ -891,14 +891,10 @@ func (s *SecretdataFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 	// 这里逐容器重读并解密 file meta 来重建引用集合（与 GC 的 `gcReconfirmContainer` 同一判据）。
 	// 快照命中时索引条目**无 meta（冷结构惰性）**⇒ 引用集合仍为空，但条目自带
 	// `dirSeg`/`metaName`，可直接按名读取 meta——**省掉 895 次容器列举**（生产实测那是主要耗时）。
-	work := s.orphanAuditTargets()
-	var stats treeRefStats
-	var terr error
-	if len(work) > 0 {
-		stats, terr = s.collectIndexedReferences(ctx, work, referenced)
-	} else {
-		stats, terr = s.collectTreeReferences(ctx, containers, referenced)
-	}
+	// **必须覆盖全部 file meta**（2026-11-20 事故）：索引只含"已登记"条目，若索引不完整，
+	// 仅按索引读 meta ⇒ 漏读的 meta 引用的分块会被误判为孤儿（实测误删 38 个被引用分块）。
+	// 因此：索引键 + 逐容器列举的 meta 名 取**并集**，全部读取后才判定孤儿。
+	stats, terr := s.collectAllReferences(ctx, containers, referenced)
 	if terr != nil {
 		return syncpkg.OrphanReport{}, terr
 	}
@@ -975,111 +971,12 @@ type treeRefStats struct {
 	tombstones int
 }
 
-// collectTreeReferences 遍历全部容器、重读并解密 file meta，把存活文件的
-// meta blob + 分块 + parity 登记进 referenced（**与 GC 的 gcReconfirmContainer 同一判据**）。
-//
-// 为什么（2026-11-19 生产实测）：`gcMarkIndex` 只依赖内存索引；生产卷启动跳过全量扫描时索引为空
-// ⇒ 19,073 个分块被 100% 误判为孤儿。差集审计必须以**磁盘真相**为准，索引只能作为加速。
-//
-// fail-closed：任一容器列举失败或任一 meta 读/解密失败 ⇒ 返回错误（不给出可能误导的清单）。
-func (s *SecretdataFS) collectTreeReferences(
-	ctx context.Context, containers []string, referenced map[string]struct{},
-) (treeRefStats, error) {
-	// **有界并发**（2026-11-19）：生产卷 895 容器 + 921 个 file meta ⇒ 串行要 1800+ 次远端往返
-	// （>30 分钟，客户端必超时）。这里按容器并行（每容器列举 + 读 meta），默认并发 16。
-	workers := min(s.orphanAuditConcurrency(), len(containers))
-	if workers <= 0 {
-		workers = 1
-	}
-
-	var (
-		mu   sync.Mutex
-		st   treeRefStats
-		muEq sync.Mutex
-	)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var firstErr error
-	var errOnce sync.Once
-	fail := func(err error) {
-		errOnce.Do(func() { firstErr = err; cancel() })
-	}
-
-	var wg sync.WaitGroup
-	ch := make(chan string)
-	for range workers {
-		wg.Go(func() {
-			for c := range ch {
-				one, err := s.collectContainerReferences(ctx, c, referenced, &mu)
-				if err != nil {
-					fail(err)
-					return
-				}
-				muEq.Lock()
-				st.fileMetas += one.fileMetas
-				st.live += one.live
-				st.tombstones += one.tombstones
-				muEq.Unlock()
-			}
-		})
-	}
-feed:
-	for _, c := range containers {
-		select {
-		case ch <- c:
-		case <-ctx.Done():
-			break feed
-		}
-	}
-	close(ch)
-	wg.Wait()
-	if firstErr != nil {
-		return treeRefStats{}, firstErr
-	}
-	return st, nil
-}
-
 // orphanAuditConcurrency 返回孤儿审计的并发度（默认 16；可经 Options 覆盖，<=0 视为默认）。
 func (s *SecretdataFS) orphanAuditConcurrency() int {
 	if n := s.opts.OrphanAuditConcurrency; n > 0 {
 		return n
 	}
 	return defaultOrphanAuditConcurrency
-}
-
-// collectContainerReferences 处理单个容器：轻量列举 → 读/解密全部 file meta → 登记引用。
-// 引用写入经 mu 串行化（map 非并发安全）。
-func (s *SecretdataFS) collectContainerReferences(
-	ctx context.Context, c string, referenced map[string]struct{}, mu *sync.Mutex,
-) (treeRefStats, error) {
-	var st treeRefStats
-	entries, lerr := s.listInner(ctx, c)
-	if lerr != nil {
-		return st, fmt.Errorf("%w: 列举容器失败 %s: %v", ErrOrphanAuditUnsafe, c, lerr)
-	}
-	for _, f := range entries {
-		if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
-			continue
-		}
-		if ctx.Err() != nil {
-			return st, ctx.Err()
-		}
-		st.fileMetas++
-		mm, merr := s.gcConfirmFileMeta(ctx, c, f.Name)
-		if merr != nil {
-			return st, fmt.Errorf("%w: 读取/解密 file meta 失败 %s/%s: %v",
-				ErrOrphanAuditUnsafe, c, f.Name, merr)
-		}
-		if mm.Deleted {
-			st.tombstones++
-			continue
-		}
-		st.live++
-		mu.Lock()
-		s.gcProtectLiveMeta(referenced, c, f.Name, mm)
-		mu.Unlock()
-	}
-	return st, nil
 }
 
 // orphanTarget 是「待读 meta」的工作项（容器 + meta blob 名 + 是否已由索引登记引用）。
@@ -1201,4 +1098,49 @@ func (s *SecretdataFS) containerOwnersLocked() map[string]string {
 		out[e.dirSeg] = rel
 	}
 	return out
+}
+
+// collectAllReferences 建立**完整**引用集合：索引键 ∪ 逐容器列举到的 file meta 名。
+//
+// 为什么不只用索引（2026-11-20 生产事故）：索引（快照/懒加载）可能缺条目；仅按索引读 meta
+// 会把"索引里没有、但磁盘上存在且在用的文件"的分块误判为孤儿 ⇒ 误删活数据 ✗。
+// 也不只靠列举：索引能省一次列举的定位成本，故两者取并集（去重后每个 meta 只读一次）。
+func (s *SecretdataFS) collectAllReferences(
+	ctx context.Context, containers []string, referenced map[string]struct{},
+) (treeRefStats, error) {
+	seen := map[string]struct{}{}
+	work := make([]orphanTarget, 0, len(containers)*2)
+	add := func(c, name string) {
+		key := c + "|" + name
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		work = append(work, orphanTarget{container: c, name: name})
+	}
+	for _, t := range s.orphanAuditTargets() {
+		add(t.container, t.name)
+	}
+
+	// 逐容器列举补齐索引未覆盖的 meta（并发列举，与审计同并发度）。
+	var mu sync.Mutex
+	list := func(ctx context.Context, c string) error {
+		ents, err := s.listInner(ctx, c)
+		if err != nil {
+			return fmt.Errorf("%w: 列举容器失败 %s: %v", ErrOrphanAuditUnsafe, c, err)
+		}
+		mu.Lock()
+		for _, f := range ents {
+			if f.IsDir || shardseal.ClassifyName(f.Name) != shardseal.KindFileMeta {
+				continue
+			}
+			add(c, f.Name)
+		}
+		mu.Unlock()
+		return nil
+	}
+	if err := s.runOrphanWorkers(ctx, len(containers), containers, list); err != nil {
+		return treeRefStats{}, err
+	}
+	return s.collectIndexedReferences(ctx, work, referenced)
 }
