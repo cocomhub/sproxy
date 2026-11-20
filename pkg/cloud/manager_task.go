@@ -1424,6 +1424,8 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 			"task_id", task.ID, "error", err)
 	}
 	m.metrics.TasksFailed.Add(1)
+	// 失败事实通知装配层（登记事项 + 分类退避；2026-11-21）。回调不持锁。
+	m.observeFailure(task)
 
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
 	// keepFiles=true（转存失败场景）：已下载完整产物保留（Save 可取用/重试），不清理。

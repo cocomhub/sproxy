@@ -61,6 +61,16 @@ const (
 	//
 	// 登记约定：`Volume`=卷名、**`Path`=卷内 rel**（稳定，重复上报合并为一条）。
 	KindBlobPendingVerify Kind = "blob_pending_verify"
+	// KindCloudDownloadFailed 云端下载任务失败（源不可达/限流/内容不一致等）——**可自动重试**。
+	//
+	// 为什么需要（2026-11-21 实测）：任务失败后仅留一条日志，且默认 1h 即被清理 ⇒
+	// 用户「看不到、也无从重试」。接入事项中心后：按**错误类别**退避重试
+	// （source_unreachable/throttled 退避；content_mismatch 换源；disk_full/auth 直接转人工），
+	// 达上限转 needs_human，绝不静默放弃。
+	//
+	// 登记约定：`Volume`=转存目标卷、`Path`=转存目标 rel（稳定 ⇒ 同目标重复上报合并为一条）；
+	// `Detail` 写任务 ID、源 URL、错误类别与原文。
+	KindCloudDownloadFailed Kind = "cloud_download_failed"
 	// KindOther 其它（兜底，登记时必须写明确 Detail）。
 	KindOther Kind = "other"
 )

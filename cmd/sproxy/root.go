@@ -1237,6 +1237,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 	}()
 	// 把中枢与扫描实现交给 HTTP 面（/api/issues 列表/详情/人工解决/手动扫描）。
 	h.SetIssueCenter(issueCenter, scan)
+	// 云端下载失败 → 事项中心（2026-11-21）：失败任务此前只留日志且很快被清理，
+	// 用户既看不到也无从重试。注入后：失败按类别自动退避重试，达上限转人工。
+	h.SetCloudTaskFailureObserver()
 
 	// **定期重试**（用户裁定 2026-11-10：「后续定期重试处理，最终必须成功」）：
 	// 执行器把领域侧修复能力（当前：清理非权威目录 meta）按事项类型分流；未覆盖的类型由
@@ -1252,6 +1255,9 @@ func (rt *runServerRuntime) setupServerCore() error {
 		},
 		// 「写入时远端不可见」待复核（KindBlobPendingVerify）重试（见 reverifyPendingBlob）。
 		ReverifyPendingBlob: reverifyPendingBlob(h.Volumes()),
+		// 「云端下载失败」（KindCloudDownloadFailed）：按转存目标 (卷, rel) 定位任务并重试，
+		// 与人工 `cloud-download retry --transfer-path` 同一内核（2026-11-21）。
+		RetryCloudDownload: h.RetryCloudDownload,
 	})
 	if rerr := h.RegisterIssuesRetryTask(issuesExecs); rerr != nil {
 		logger.Warn("注册待处理事项重试任务失败（不影响启动）", "error", rerr.Error())

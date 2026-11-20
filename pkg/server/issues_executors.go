@@ -77,6 +77,11 @@ type ExecutorDeps struct {
 	// 返回错误 ⇒ 退避重试，达上限**转人工**（真丢块绝不静默）。
 	// 未注入（nil）⇒ 该类型不注册（转人工）。
 	ReverifyPendingBlob func(ctx context.Context, volume, rel string) error
+	// RetryCloudDownload 执行一次「云端下载失败」重试（`KindCloudDownloadFailed`）：
+	// 参数 volume=转存目标卷、rel=转存目标路径。返回 nil ⇒ 已提交重试（事项 resolve，
+	// 后续结果由新的失败上报重新登记）；返回错误 ⇒ 退避重试，达上限转人工。
+	// 未注入（nil）⇒ 该类型不注册（转人工）。
+	RetryCloudDownload func(ctx context.Context, volume, rel string) error
 }
 
 func (d ExecutorDeps) log() *slog.Logger {
@@ -104,6 +109,9 @@ func NewIssuesExecutors(d ExecutorDeps) map[issues.Kind]issues.RetryFunc {
 		},
 		issues.KindBlobPendingVerify: func(ctx context.Context, it issues.Item) error {
 			return runPendingVerify(ctx, d, it)
+		},
+		issues.KindCloudDownloadFailed: func(ctx context.Context, it issues.Item) error {
+			return runCloudDownloadRetry(ctx, d, it)
 		},
 	}
 }
@@ -177,4 +185,18 @@ func runDirMetaCleanup(ctx context.Context, d ExecutorDeps, it issues.Item) erro
 	d.log().Info("待处理事项重试成功：已清理非权威目录 meta",
 		"volume", it.Volume, "container", it.Path, "removed", removed, "kind", string(it.Kind))
 	return nil
+}
+
+// runCloudDownloadRetry 执行一次「云端下载失败」重试。
+//
+// 契约：`Volume`/`Path` 缺一 ⇒ 返回错误转人工（无法唯一定位目标）；
+// 未注入能力 ⇒ 返回错误（不静默成功）。
+func runCloudDownloadRetry(ctx context.Context, d ExecutorDeps, it issues.Item) error {
+	if it.Volume == "" || it.Path == "" {
+		return fmt.Errorf("事项缺少转存目标（卷或路径），无法自动重试（需人工处理）")
+	}
+	if d.RetryCloudDownload == nil {
+		return fmt.Errorf("未注入云端下载重试执行器（RetryCloudDownload 为空），无法执行")
+	}
+	return d.RetryCloudDownload(ctx, it.Volume, it.Path)
 }
