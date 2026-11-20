@@ -767,3 +767,16 @@ func (q *quotaLocalFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, 
 var (
 	_ syncpkg.OrphanAuditor = (*quotaLocalFS)(nil)
 )
+
+// AuditMeta 转发「元数据审计」可选能力（R21/R24：聚合接口强制）。
+func (q *quotaLocalFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, error) {
+	if a, ok := q.inner.(syncpkg.MetaAuditor); ok {
+		return a.AuditMeta(ctx)
+	}
+	return syncpkg.MetaAuditReport{}, fmt.Errorf("quotaLocalFS: 底层未实现元数据审计: %w", syncpkg.ErrUnsupported)
+}
+
+// 编译期断言：必须转发「元数据审计」能力（R21/R24）。
+var (
+	_ syncpkg.MetaAuditor = (*quotaLocalFS)(nil)
+)

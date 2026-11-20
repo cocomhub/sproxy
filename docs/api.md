@@ -239,6 +239,23 @@ BuildAt: 2026-06-01T12:00:00Z
 | `X-File-Checksum` | SHA-256 hex（目录不返回） |
 | `X-File-IsDir` | `true` 仅当目标为目录 |
 
+### GET /api/volumes/{name}/meta-audit
+
+**只读**审计元数据层（跑 GC 清理墓碑前确认健康）。异步任务，状态码语义与 `/orphans` 一致：
+
+| 情况 | 响应 |
+|---|---|
+| 首次 / `?refresh=1` / 进行中 | `202` `{"state":"running","started_at":"..."}` |
+| 完成 | `200` `{"state":"done","report":{...}}` |
+| 失败 | `503` |
+| 卷不支持 | `501`（**不得**当作"无异常"） |
+
+`report` 字段：`containers` / `file_metas` / `live` / `tombstones` / `unreadable` /
+`dir_metas` / `dir_unreadable` / `missing_chunks` / `missing_samples[]`。
+
+判据：`unreadable` 与 `dir_unreadable` > 0 ⇒ 密钥或数据损坏信号；`missing_chunks` > 0 ⇒ **存活文件缺块（数据缺口）**，
+此时**禁止**做任何清理。CLI：`sclient volume meta-audit --volume <卷> [--wait] [--refresh]`。
+
 ### GET /api/volumes/{name}/orphans
 
 **只读**列出卷内「未被任何 meta 引用、且非去重池引用」的分块 blob（清理前人工评审）。

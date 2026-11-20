@@ -1020,3 +1020,16 @@ func (t *TrustedVolumeFS) OrphanChunks(ctx context.Context) (syncpkg.OrphanRepor
 var (
 	_ syncpkg.OrphanAuditor = (*TrustedVolumeFS)(nil)
 )
+
+// AuditMeta 转发「元数据审计」可选能力（R21/R24：聚合接口强制）。
+func (t *TrustedVolumeFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, error) {
+	if a, ok := t.inner.(syncpkg.MetaAuditor); ok {
+		return a.AuditMeta(ctx)
+	}
+	return syncpkg.MetaAuditReport{}, fmt.Errorf("TrustedVolumeFS: 底层未实现元数据审计: %w", syncpkg.ErrUnsupported)
+}
+
+// 编译期断言：必须转发「元数据审计」能力（R21/R24）。
+var (
+	_ syncpkg.MetaAuditor = (*TrustedVolumeFS)(nil)
+)

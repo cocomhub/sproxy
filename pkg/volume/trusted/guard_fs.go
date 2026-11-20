@@ -460,3 +460,16 @@ func (m *MetaBucketGuard) OrphanChunks(ctx context.Context) (syncpkg.OrphanRepor
 var (
 	_ syncpkg.OrphanAuditor = (*MetaBucketGuard)(nil)
 )
+
+// AuditMeta 转发「元数据审计」可选能力（R21/R24：聚合接口强制）。
+func (m *MetaBucketGuard) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, error) {
+	if a, ok := m.inner.(syncpkg.MetaAuditor); ok {
+		return a.AuditMeta(ctx)
+	}
+	return syncpkg.MetaAuditReport{}, fmt.Errorf("MetaBucketGuard: 底层未实现元数据审计: %w", syncpkg.ErrUnsupported)
+}
+
+// 编译期断言：必须转发「元数据审计」能力（R21/R24）。
+var (
+	_ syncpkg.MetaAuditor = (*MetaBucketGuard)(nil)
+)

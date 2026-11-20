@@ -438,3 +438,16 @@ func (g *StagingQuotaGateFS) OrphanChunks(ctx context.Context) (OrphanReport, er
 var (
 	_ OrphanAuditor = (*StagingQuotaGateFS)(nil)
 )
+
+// AuditMeta 转发「元数据审计」可选能力（R21/R24：聚合接口强制）。
+func (g *StagingQuotaGateFS) AuditMeta(ctx context.Context) (MetaAuditReport, error) {
+	if a, ok := g.inner.(MetaAuditor); ok {
+		return a.AuditMeta(ctx)
+	}
+	return MetaAuditReport{}, fmt.Errorf("StagingQuotaGateFS: 底层未实现元数据审计: %w", ErrUnsupported)
+}
+
+// 编译期断言：必须转发「元数据审计」能力（R21/R24）。
+var (
+	_ MetaAuditor = (*StagingQuotaGateFS)(nil)
+)

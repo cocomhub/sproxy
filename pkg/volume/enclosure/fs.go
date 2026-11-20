@@ -193,3 +193,16 @@ func (f *FS) OrphanChunks(ctx context.Context) (syncpkg.OrphanReport, error) {
 var (
 	_ syncpkg.OrphanAuditor = (*FS)(nil)
 )
+
+// AuditMeta 转发「元数据审计」（嵌入 *syncpkg.PrefixFS）。
+func (f *FS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, error) {
+	if f.PrefixFS == nil {
+		return syncpkg.MetaAuditReport{}, fmt.Errorf("enclosure.FS: 未装配底层: %w", syncpkg.ErrUnsupported)
+	}
+	return f.PrefixFS.AuditMeta(ctx)
+}
+
+// 编译期断言：必须转发「元数据审计」能力（R21/R24）。
+var (
+	_ syncpkg.MetaAuditor = (*FS)(nil)
+)

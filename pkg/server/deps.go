@@ -201,10 +201,10 @@ type volumeDeps struct {
 	// 互斥保护；rebalanceVolumeHandler 循环内更新，/metrics 输出 sproxy_rebalance_progress
 	// gauge（按 from/to 维度，0-100 百分比）。nil = 未装配（进度不可观测，零回归）。
 	rebalanceProg *metrics.RebalanceProgress
-	// orphanJobs 是「孤儿审计」后台任务状态（按卷名，进程内单飞）；nil = 首次使用时惰性创建。
-	// 为什么异步见 orphan_audit_job.go 顶部注释（生产实测同步请求必超时）。
-	orphanJobs   map[string]*orphanAuditJob
-	orphanJobsMu sync.Mutex
+	// auditJobs 是卷审计（孤儿 / 元数据）后台任务状态，键 = 卷名+审计类型（进程内单飞）。
+	// 为什么异步见 audit_job.go 顶部注释（生产实测同步请求必超时）。
+	auditJobs   map[string]any
+	auditJobsMu sync.Mutex
 
 	// externalHealth 是外部卷健康探测缓存（roadmap 3.3 P1 后端健康探针）：
 	// map[卷名]{state, at}，30s TTL 内复用上次探测结果（惰性：列表触发，无后台 goroutine）。

@@ -839,6 +839,34 @@ func (c *FileClient) Rename(ctx context.Context, from, to, fromChecksum string) 
 // Stat 通过 HEAD /api/files/stat?filename=<name> 获取远端单个文件元信息。
 // 响应来源于 X-File-Size、X-File-Checksum、X-File-MTime 三个响应头；不返回 body。
 // 文件不存在时返回错误（HTTP 404 包装为 error）。
+// VolumeMetaAudit 触发/查询卷的**元数据审计后台任务**（异步；202/200 语义同 VolumeOrphans）。
+func (c *FileClient) VolumeMetaAudit(ctx context.Context, volume string, refresh bool) ([]byte, int, error) {
+	if volume == "" {
+		return nil, 0, fmt.Errorf("volume 不能为空")
+	}
+	p := "/api/volumes/" + url.PathEscape(volume) + "/meta-audit"
+	if refresh {
+		p += "?refresh=1"
+	}
+	resp, err := c.doRequest(ctx, "GET", p, nil, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(errFmtRequestFailed, err)
+	}
+	defer resp.Body.Close()
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if rerr != nil {
+		return nil, resp.StatusCode, fmt.Errorf("读取元数据审计响应: %w", rerr)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusAccepted:
+		return body, resp.StatusCode, nil
+	case http.StatusNotImplemented:
+		return nil, resp.StatusCode, nil
+	default:
+		return nil, resp.StatusCode, fmt.Errorf("元数据审计失败 (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+}
+
 // VolumeOrphans 触发/查询卷的**孤儿审计后台任务**（异步）。
 //
 // 返回 (raw, statusCode, err)：
