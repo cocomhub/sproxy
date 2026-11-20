@@ -26,8 +26,8 @@ const depsFieldTarget = 8
 // S4 收口：tar.gz 打包助手随实现迁入本包（archive_tar.go）⇒ Targets 去掉
 // CreateArchiveTar/CreateMultiArchiveTar 两个接缝。
 //
-// 计数：Tasks 9 + Groups 8 + Tenants 1 + Volumes 5 + Quota 9 + Targets 7 + Audit 1 = 40。
-const interfaceMethodTotal = 40
+// 计数：Tasks 11（+SelectRetryable/RetryTasks，2026-11-21）+ Groups 8 + Tenants 1 + Volumes 5 + Quota 9 + Targets 7 + Audit 1 = 40。
+const interfaceMethodTotal = 42
 
 // TestDepsFieldCap 锁 Deps 的入边宽度 ≤8，并锁字段名（防止改名后门禁仍数得清）。
 func TestDepsFieldCap(t *testing.T) {
@@ -56,7 +56,7 @@ func TestInterfaceMethodCounts(t *testing.T) {
 		iface reflect.Type
 		want  int
 	}{
-		{"Tasks", reflect.TypeFor[cloudtasks.Tasks](), 9},
+		{"Tasks", reflect.TypeFor[cloudtasks.Tasks](), 11},
 		{"Groups", reflect.TypeFor[cloudtasks.Groups](), 8},
 		{"Tenants", reflect.TypeFor[cloudtasks.Tenants](), 1},
 		{"Volumes", reflect.TypeFor[cloudtasks.Volumes](), 5},
@@ -94,6 +94,7 @@ func TestInterfaceMethodSets(t *testing.T) {
 			want: []string{
 				"AllowPrivate", "MaxBatchURLs", "SubmitAndStart", "SnapshotTask", "SnapshotTasks",
 				"ListTasks", "CancelTask", "DeleteTask", "ResumeTask",
+				"SelectRetryable", "RetryTasks",
 			},
 		},
 		{

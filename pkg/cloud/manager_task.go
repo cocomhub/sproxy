@@ -1408,6 +1408,13 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 	task.IntegrityStatus = ""
 	task.integritySames = 0
 	task.integrityLastChecksum = ""
+	// 诊断快照：失败归类 + 时间 + 原文 + 保留的部分产物（供"失败后仍可查/可决策重试"）。
+	if task.DownloadDone {
+		task.noteStage("transferring")
+	} else {
+		task.noteStage("downloading")
+	}
+	task.noteFailure(errMsg, actual, task.partialRelPath())
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 	m.mu.Unlock()

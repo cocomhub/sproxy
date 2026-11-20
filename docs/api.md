@@ -746,6 +746,25 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 取消下载任务（幂等）。
 
+### POST /api/cloud/tasks/retry
+
+按条件**重试云端下载任务**（2026-11-21）：不依赖任务存活期，失败任务只要仍在保留期内即可重试。
+
+请求体（至少给一个选择器，否则 `400`——拒绝无条件重试全部任务）：
+
+| 字段 | 说明 |
+|---|---|
+| `task_id` | 指定任务 |
+| `url` | 按源 URL 子串匹配 |
+| `transfer_path` | 按转存目标路径**精确**匹配（修复场景常用） |
+| `group_id` | 按任务组 |
+| `force` | 透传 `ResumeTask(force)` |
+| `limit` | 最多重试数量（0 = 不限） |
+| `include_completed_damaged` | 是否把 `completed` 且完整性 `damaged` 也纳入（重下自愈） |
+
+响应：`{"success":bool,"retried":["task-id"...],"errors":{"task-id":"原因"}}`；
+`retried` 为空且 `errors` 非空 ⇒ `409`（例如任务仍在运行）。审计动作 `cloud_task_retry`。
+
 ### POST /api/cloud/tasks/{id}/resume
 
 恢复/重新启动任务（支持续传）。

@@ -137,6 +137,11 @@ type CloudTask struct {
 	// 不泄密：Row.Meta 与持久化不含原始凭据/口令/secret 明文。
 	Audit []audit.Entry `json:"audit,omitempty"`
 
+	// Diagnostics 是**持久化诊断快照**（阶段/尝试次数/失败归类/部分产物）。
+	// 为什么需要（2026-11-21）：失败任务此前只留 error 文本且 1h 后即被清理 ⇒ 用户看不到
+	// 任务、看不出进度、无从重试。诊断随任务持久化后，失败仍可查、可据此决定重试策略。
+	Diagnostics *TaskDiagnostics `json:"diagnostics,omitempty"`
+
 	// IntegrityStatus 是下载完整性判定结果（校验管道写入；"" = 未校验/未生效）：
 	//   - verified：权威匹配（下载器 ModeAuthority）或语义校验通过；
 	//   - damaged：语义校验两次一致仍异常（默认放行，文件标记损坏）。
@@ -192,7 +197,7 @@ type CloudDownloadConfig struct {
 	TransferConcurrency int
 	MaxBatchURLs        int           // 批量/组下载单次最大 URL 数，默认 100；0 使用默认值
 	TaskTTL             time.Duration // 完成任务保留时间，默认 24h
-	FailedTaskTTL       time.Duration // 失败任务保留时间，默认 1h
+	FailedTaskTTL       time.Duration // 失败任务保留时间，默认 7d（2026-11-21：1h 太短，失败后无从重试）
 	AllowPrivate        bool          // 允许私有 IP 下载（仅测试用）
 	DownloadTimeout     time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
 	IdleTimeout         time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
@@ -276,7 +281,9 @@ func applyCloudConfigDefaults(cfg *CloudDownloadConfig) {
 		cfg.TaskTTL = 24 * time.Hour
 	}
 	if cfg.FailedTaskTTL <= 0 {
-		cfg.FailedTaskTTL = 1 * time.Hour
+		// 2026-11-21 用户裁定：失败任务必须**可长期复查与重试**（此前 1h 即被清理，
+		// 实测导致"任务消失、无法人工重试"）。7d 覆盖周末/隔日排查场景。
+		cfg.FailedTaskTTL = 7 * 24 * time.Hour
 	}
 	if cfg.DownloadTimeout <= 0 {
 		cfg.DownloadTimeout = 30 * time.Minute

@@ -346,6 +346,36 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
 }
 
+// CloudRetrySelector 是「按条件重试云端任务」的选择器（与服务端 cloud.RetrySelector 对应）。
+type CloudRetrySelector struct {
+	TaskID                  string `json:"task_id,omitempty"`
+	URL                     string `json:"url,omitempty"`
+	TransferPath            string `json:"transfer_path,omitempty"`
+	GroupID                 string `json:"group_id,omitempty"`
+	Force                   bool   `json:"force,omitempty"`
+	Limit                   int    `json:"limit,omitempty"`
+	IncludeCompletedDamaged bool   `json:"include_completed_damaged,omitempty"`
+}
+
+// CloudRetryResult 是重试结果（部分成功不视为整体失败）。
+type CloudRetryResult struct {
+	Success bool              `json:"success"`
+	Retried []string          `json:"retried"`
+	Errors  map[string]string `json:"errors"`
+}
+
+// RetryCloudTasks 按条件重试云端下载任务（2026-11-21：失败任务可跨存活期重试）。
+func (c *FileClient) RetryCloudTasks(ctx context.Context, sel CloudRetrySelector) (*CloudRetryResult, error) {
+	if sel.TaskID == "" && sel.URL == "" && sel.TransferPath == "" && sel.GroupID == "" {
+		return nil, fmt.Errorf("云端下载重试: 至少提供 task_id/url/transfer_path/group_id 之一")
+	}
+	var out CloudRetryResult
+	if err := c.doJSON(ctx, http.MethodPost, apiCloudTasksBase+"retry", sel, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CloudArchiveOption 配置云端归档行为（转存目标等）。
 type CloudArchiveOption func(*cloudArchiveOptions)
 
