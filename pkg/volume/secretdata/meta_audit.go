@@ -14,7 +14,7 @@ import (
 )
 
 // metaAuditSampleCap 是「缺失分块」样例的条数上限（报告体积可控）。
-const metaAuditSampleCap = 20
+const metaAuditSampleCap = 200
 
 // AuditMeta 只读审计元数据层（**不修改任何数据**）：
 //   - file meta：存活 / 墓碑 / 不可解密；
@@ -34,6 +34,7 @@ func (s *SecretdataFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, 
 		return syncpkg.MetaAuditReport{}, fmt.Errorf("secretdata: 存在在途写入，拒绝元数据审计（避免读到未提交状态）")
 	}
 	containers := s.gcContainersLocked()
+	owners := s.containerOwnersLocked()
 	s.mu.RUnlock()
 
 	// 阶段 1：逐容器轻量列举，缓存名字集合（供阶段 2 的引用存在性判定，避免二次列举）。
@@ -46,7 +47,7 @@ func (s *SecretdataFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, 
 	rep := syncpkg.MetaAuditReport{Containers: len(containers)}
 	var mu sync.Mutex
 	run := func(ctx context.Context, c string) error {
-		one := s.auditContainerMetas(ctx, c, listings)
+		one := s.auditContainerMetas(ctx, c, listings, owners)
 		mu.Lock()
 		defer mu.Unlock()
 		mergeMetaAudit(&rep, one)
@@ -68,6 +69,7 @@ type metaAuditPart struct {
 	dirUnreadable int
 	missing       int
 	samples       []string
+	owners        []string
 	err           error
 }
 
@@ -80,6 +82,12 @@ func mergeMetaAudit(rep *syncpkg.MetaAuditReport, p metaAuditPart) {
 	rep.DirMetas += p.dirMetas
 	rep.DirUnreadable += p.dirUnreadable
 	rep.MissingChunks += p.missing
+	for _, o := range p.owners {
+		if len(rep.MissingOwners) >= metaAuditSampleCap {
+			break
+		}
+		rep.MissingOwners = append(rep.MissingOwners, o)
+	}
 	for _, sm := range p.samples {
 		if len(rep.MissingSamples) >= metaAuditSampleCap {
 			break
@@ -118,7 +126,7 @@ func (s *SecretdataFS) auditListAll(
 
 // auditContainerMetas 解密单容器的全部 meta 并校验存活 meta 的分块引用。
 func (s *SecretdataFS) auditContainerMetas(
-	ctx context.Context, c string, listings map[string]map[string]struct{},
+	ctx context.Context, c string, listings map[string]map[string]struct{}, owners map[string]string,
 ) metaAuditPart {
 	var p metaAuditPart
 	for name := range listings[c] {
@@ -128,7 +136,7 @@ func (s *SecretdataFS) auditContainerMetas(
 		}
 		switch shardseal.ClassifyName(name) {
 		case shardseal.KindFileMeta:
-			s.auditOneFileMeta(ctx, c, name, listings, &p)
+			s.auditOneFileMeta(ctx, c, name, listings, owners, &p)
 		case shardseal.KindDirMeta:
 			s.auditOneDirMeta(ctx, c, name, &p)
 		}
@@ -138,7 +146,8 @@ func (s *SecretdataFS) auditContainerMetas(
 
 // auditOneFileMeta 解密单个 file meta：统计存活/墓碑/损坏，并校验其分块引用是否齐全。
 func (s *SecretdataFS) auditOneFileMeta(
-	ctx context.Context, c, name string, listings map[string]map[string]struct{}, p *metaAuditPart,
+	ctx context.Context, c, name string, listings map[string]map[string]struct{},
+	owners map[string]string, p *metaAuditPart,
 ) {
 	p.fileMetas++
 	mm, err := s.gcConfirmFileMeta(ctx, c, name)
@@ -169,6 +178,9 @@ func (s *SecretdataFS) auditOneFileMeta(
 		p.missing++
 		if len(p.samples) < metaAuditSampleCap {
 			p.samples = append(p.samples, path.Join(dir, ref))
+		}
+		if owner := owners[c]; owner != "" && len(p.owners) < metaAuditSampleCap {
+			p.owners = append(p.owners, owner)
 		}
 	}
 }

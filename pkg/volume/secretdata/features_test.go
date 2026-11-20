@@ -444,12 +444,6 @@ func (c *countingFS) ListDir(ctx context.Context, p string) ([]syncpkg.Entry, er
 	return c.wrap.ListDir(ctx, p)
 }
 
-// listCount 返回 ListDir 累计调用次数。
-func (c *countingFS) listCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.listCalls
-}
 func (c *countingFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error) {
 	return c.wrap.Stat(ctx, p)
 }

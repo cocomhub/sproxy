@@ -107,3 +107,45 @@ func TestAuditMeta_RefusesDuringInFlightWrite(t *testing.T) {
 		t.Fatal("在途写入时必须拒绝审计")
 	}
 }
+
+// TestAuditMeta_ReportsMissingOwner 锁定「缺失分块 → 所属文件 rel」的定位能力（重传依据）。
+func TestAuditMeta_ReportsMissingOwner(t *testing.T) {
+	t.Parallel()
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
+		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh")})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	ctx := context.Background()
+	rel := "own1/f.bin"
+	body := bytes.Repeat([]byte("owner-missing-"), 800)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
+		int64(len(body)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
+	}
+	sfs.mu.RLock()
+	var victim string
+	for _, e := range sfs.index {
+		if e != nil && e.meta != nil && len(e.meta.Chunks) > 0 {
+			victim = path.Join(e.dirSeg, e.meta.Chunks[0].FileName)
+			break
+		}
+	}
+	sfs.mu.RUnlock()
+	if victim == "" {
+		t.Skip("夹具未拿到分块名")
+	}
+	if rerr := sfs.inner.Delete(ctx, victim); rerr != nil {
+		t.Fatalf("删除分块: %v", rerr)
+	}
+	rep, aerr := sfs.AuditMeta(ctx)
+	if aerr != nil {
+		t.Fatalf("AuditMeta: %v", aerr)
+	}
+	if len(rep.MissingOwners) == 0 {
+		t.Fatal("必须报告缺失分块所属文件 rel")
+	}
+	if rep.MissingOwners[0] != rel {
+		t.Fatalf("owner 应为 %q，got %q", rel, rep.MissingOwners[0])
+	}
+}

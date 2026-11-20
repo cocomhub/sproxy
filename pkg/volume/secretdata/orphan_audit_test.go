@@ -201,55 +201,37 @@ func TestOrphanAuditConcurrencyDefault(t *testing.T) {
 	}
 }
 
-// TestOrphanChunks_UsesIndexKeysWithoutListing 锁定「快照条目无 meta 时按 dirSeg/metaName 直读」的路径：
-// 生产卷快照命中（895 容器 / 916 条目）但条目 meta 为 nil ⇒ 必须靠索引键读 meta 建引用，
-// **不能再做 895 次容器列举**（那是实测主要耗时）。
+// TestOrphanChunks_CoversMetasMissingFromIndex 是本轮**事故回归**（2026-11-20）：
+// 索引可能缺条目（快照不完整/懒加载）。若只按索引读 meta，则"索引里没有、但磁盘上在用"的
+// 文件分块会被误判为孤儿（生产实测据此误删 38 个被引用分块）✗。
+// 审计必须以「索引 ∪ 逐容器列举」为工作集 ⇒ 该文件的分块不得被判为孤儿。
 //
-// 变异：`orphanAuditTargets` 恒返回空（回退旧列举路径）⇒ 本用例统计的「列举次数」断言变红。
-func TestOrphanChunks_UsesIndexKeysWithoutListing(t *testing.T) {
+// 变异：把 collectAllReferences 退回只管索引 ⇒ 本用例红（报 1 个孤儿）。
+func TestOrphanChunks_CoversMetasMissingFromIndex(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	cfs := &countingFS{read: map[string]int{}, wrap: syncpkg.NewLocalFS(root, nil)}
-	sfs, err := NewFS(cfs,
+	sfs, err := NewFS(syncpkg.NewLocalFS(t.TempDir(), nil),
 		Options{Secret: []byte("test-secret-key-32bytes-abcdefgh"), OrphanAuditConcurrency: 4})
 	if err != nil {
 		t.Fatalf("NewFS: %v", err)
 	}
 	ctx := context.Background()
-	for i := range 6 {
-		rel := fmt.Sprintf("ik%d/g.bin", i)
-		body := bytes.Repeat([]byte(rel), 600)
-		if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
-			int64(len(body)), time.Now().Unix()); werr != nil {
-			t.Fatalf("WriteFile %s: %v", rel, werr)
-		}
+	rel := "gap0/h.bin"
+	body := bytes.Repeat([]byte("index-gap-"), 800)
+	if werr := sfs.WriteFile(ctx, syncpkg.LogicalKey{}, rel, bytes.NewReader(body),
+		int64(len(body)), time.Now().Unix()); werr != nil {
+		t.Fatalf("WriteFile: %v", werr)
 	}
-	// 模拟快照命中：条目保留 dirSeg/metaName，但冷结构 meta 置空。
+	// 模拟索引缺条目（文件仍在磁盘上、仍可读）。
 	sfs.mu.Lock()
-	for _, e := range sfs.index {
-		if e != nil {
-			e.meta = nil
-		}
-	}
+	delete(sfs.index, rel)
 	sfs.mu.Unlock()
 
-	targets := sfs.orphanAuditTargets() // 必须在释放写锁后取（其内部取 RLock）
-	if len(targets) != 6 {
-		t.Fatalf("应得到 6 个待读 meta 的工作项，got %d", len(targets))
-	}
-
-	// 断言「只做一遍容器列举」（索引键路径的特征）：
-	// 索引键路径 = 仅清扫阶段每容器 1 次列举；树推导路径 = 建引用 + 清扫 共 2 遍。
-	sfs.mu.RLock()
-	nc := len(sfs.gcContainersLocked())
-	sfs.mu.RUnlock()
-	before := cfs.listCount()
-	if _, rerr := sfs.OrphanChunks(ctx); rerr != nil {
+	rep, rerr := sfs.OrphanChunks(ctx)
+	if rerr != nil {
 		t.Fatalf("OrphanChunks: %v", rerr)
 	}
-	delta := cfs.listCount() - before
-	if delta != nc {
-		t.Fatalf("索引键路径应只列举一遍容器（want %d，got %d；2 遍即回退到树推导）", nc, delta)
+	if len(rep.Chunks) != 0 {
+		t.Fatalf("索引缺失条目所属文件的分块不得判为孤儿，got %d", len(rep.Chunks))
 	}
 }
 
