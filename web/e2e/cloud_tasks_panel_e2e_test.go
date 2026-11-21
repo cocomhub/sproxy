@@ -116,3 +116,100 @@ func TestCloudTasksPanel_ShowsFailureAndRetries(t *testing.T) {
 		t.Fatal("点击重试后未发出 /api/cloud/tasks/retry 请求")
 	}
 }
+
+// TestCloudTasksPanel_DetailAndBatchRetry 覆盖详情展开与批量重试（2026-11-22）。
+func TestCloudTasksPanel_DetailAndBatchRetry(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	body := []byte(`{"url":"http://127.0.0.1:1/nope2.bin","filename":"nope2.bin","download_local":true,"save":true}`)
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+		t.Fatalf("创建任务失败: %d %s", code, resp)
+	}
+	// 等任务失败（服务端异步）。
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("点击云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-detail-btn", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("失败任务行未渲染: %v", err)
+	}
+
+	// ① 详情：点开必须出现 ct-detail 行（含失败原文/部分产物）。
+	if err := page.Locator("#cloud-tasks-panel .ct-detail-btn").First().Click(); err != nil {
+		t.Fatalf("点击详情: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-detail", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("详情行未展开: %v", err)
+	}
+
+	// ② 批量重试：全选 → 点批量重试 → 必须发出 POST /api/cloud/tasks/retry。
+	reqCh := make(chan playwright.Request, 4)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/api/cloud/tasks/retry") {
+			select {
+			case reqCh <- r:
+			default:
+			}
+		}
+	})
+	if err := page.Locator("#ct-pick-all").Check(); err != nil {
+		t.Fatalf("全选: %v", err)
+	}
+	if err := page.Locator("#ct-retry-selected").Click(); err != nil {
+		t.Fatalf("批量重试: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		var payload struct {
+			TaskID string `json:"task_id"`
+			Force  bool   `json:"force"`
+		}
+		requestJSON(t, req, &payload)
+		if payload.TaskID == "" || !payload.Force {
+			t.Fatalf("批量重试请求体异常: %+v", payload)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("批量重试未发出 /api/cloud/tasks/retry")
+	}
+}
+
+// waitFailedTask 轮询直到存在 failed 任务（服务端异步）。
+func waitFailedTask(t *testing.T, baseURL string) {
+	t.Helper()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(20 * time.Second)
+	for {
+		resp, err := http.Get(baseURL + "/api/cloud/tasks")
+		if err == nil {
+			var payload struct {
+				Tasks []struct {
+					Status string `json:"status"`
+				} `json:"tasks"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&payload)
+			resp.Body.Close()
+			for _, tk := range payload.Tasks {
+				if tk.Status == "failed" {
+					return
+				}
+			}
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatal("20s 内没有任务进入 failed")
+		}
+	}
+}

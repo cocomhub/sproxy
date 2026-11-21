@@ -80,3 +80,32 @@ test('ctPanelHtml 空列表给明确提示，失败行含原因与重试按钮',
   assert.ok(html.includes('ct-retry'));
   assert.ok(html.includes('1 MiB')); // 部分产物大小可见
 });
+
+test('ctBatchRetryPayloads 逐条构造（跳过空 id）', () => {
+  const payloads = m.ctBatchRetryPayloads(['t1', '', 't2']);
+  assert.strictEqual(payloads.length, 2);
+  assert.deepStrictEqual(payloads[0], { task_id: 't1', force: true });
+});
+
+test('ctFailuresOnly 只保留失败/取消', () => {
+  const got = m.ctFailuresOnly([
+    { id: 'a', status: 'failed' }, { id: 'b', status: 'completed' },
+    { id: 'c', status: 'cancelled' }, null,
+  ]);
+  assert.deepStrictEqual(got.map((t) => t.id), ['a', 'c']);
+});
+
+test('ctDetailHtml 展开详情含失败原文与部分产物', () => {
+  const html = m.ctDetailHtml({
+    id: 't1', url: 'https://x/1', transfer: { volume: 'baidu', path: 'jav/1.mp4' },
+    diagnostics: {
+      stage: 'downloading', attempts: 4, last_error_class: 'throttled',
+      last_error: '429 too many requests', partial_size: 2097152, partial_path: 'cloud/t1',
+    },
+  });
+  assert.ok(html.includes('jav/1.mp4'));       // 转存目标
+  assert.ok(html.includes('429 too many'));    // 失败原文
+  assert.ok(html.includes('cloud/t1'));        // 部分产物路径
+  assert.ok(html.includes('2 MiB'));           // 部分产物大小
+  assert.ok(html.includes('源限流'));           // 类别中文
+});

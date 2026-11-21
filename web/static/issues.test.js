@@ -102,3 +102,13 @@ test('issuesListQuery 组装筛选参数（空则不带头）', () => {
     '/api/issues?status=needs_human&volume=baidu&unresolved=1');
   assert.strictEqual(m.issuesListQuery({ kind: 'dir_meta_ambiguous' }), '/api/issues?kind=dir_meta_ambiguous');
 });
+
+test('issuesCloudRetryPayload 用卷+路径精确定位（云端下载重试，2026-11-22）', () => {
+  assert.deepStrictEqual(m.issuesCloudRetryPayload('baidu', 'jav/x/1.mp4'), {
+    transfer_volume: 'baidu', transfer_path: 'jav/x/1.mp4', force: true,
+  });
+  // 缺字段也要给出稳定结构（服务端会 400 并给出明确错误，不静默成功）。
+  assert.deepStrictEqual(m.issuesCloudRetryPayload(null, null), {
+    transfer_volume: '', transfer_path: '', force: true,
+  });
+});

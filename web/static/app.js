@@ -1053,6 +1053,26 @@ async function showIssues() {
   if (statusSel) statusSel.addEventListener('change', function () { void showIssues(); });
   const unBox = document.getElementById('issues-unresolved');
   if (unBox) unBox.addEventListener('change', function () { void showIssues(); });
+  // 云端下载失败：一键重试（按事项的 卷+路径 精确定位任务，2026-11-22）。
+  panel.querySelectorAll('.issues-retry-dl-btn').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      const payload = issuesCloudRetryPayload(btn.getAttribute('data-volume'), btn.getAttribute('data-path'));
+      btn.disabled = true;
+      btn.textContent = '重试中…';
+      try {
+        await sclientTransport.coreRequest('POST', '/api/cloud/tasks/retry', {
+          bodyBytes: new TextEncoder().encode(JSON.stringify(payload)),
+          headers: { 'Content-Type': 'application/json' },
+        });
+        void showIssues();
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = '重试下载';
+        alert('重试提交失败：' + e.message);
+      }
+    });
+  });
+
   const scanBtn = document.getElementById('issues-scan-btn');
   if (scanBtn) scanBtn.addEventListener('click', async function () {
     const msg = document.getElementById('issues-msg');

@@ -25,9 +25,11 @@ import (
 func (s *Service) RetryTasks(w http.ResponseWriter, r *http.Request, owner string) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	var req struct {
-		TaskID                  string `json:"task_id"`
-		URL                     string `json:"url"`
-		TransferPath            string `json:"transfer_path"`
+		TaskID       string `json:"task_id"`
+		URL          string `json:"url"`
+		TransferPath string `json:"transfer_path"`
+		// TransferVolume 与 TransferPath 组合可**唯一定位**（事项里的 Volume+Path 直接可用）。
+		TransferVolume          string `json:"transfer_volume"`
 		GroupID                 string `json:"group_id"`
 		Force                   bool   `json:"force"`
 		Limit                   int    `json:"limit"`
@@ -47,11 +49,18 @@ func (s *Service) RetryTasks(w http.ResponseWriter, r *http.Request, owner strin
 		}, http.StatusBadRequest)
 		return
 	}
+	if req.TransferVolume != "" && req.TransferPath == "" {
+		s.writeJSON(w, map[string]string{
+			"error": "transfer_volume 必须与 transfer_path 同时给出（否则无法唯一定位目标）",
+		}, http.StatusBadRequest)
+		return
+	}
 
 	sel := cloud.RetrySelector{
 		TaskID:                  req.TaskID,
 		URL:                     req.URL,
 		TransferPath:            req.TransferPath,
+		TransferVolume:          req.TransferVolume,
 		GroupID:                 req.GroupID,
 		Owner:                   owner,
 		Limit:                   req.Limit,

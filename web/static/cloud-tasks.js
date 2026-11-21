@@ -101,6 +101,46 @@ function ctRetryPayload(taskId, force) {
   return { task_id: String(taskId || ''), force: !!force };
 }
 
+// ctBatchRetryPayloads 由选中的任务 ID 生成**逐条**重试请求体（服务端按单任务处理）。
+// 为什么逐条：服务端 retry 语义是"选择器 → 选中任务"，批量已在 CLI `batch` 覆盖；
+// UI 侧循环提交可让单条失败不影响其余（与 CLI `--continue-on-error` 一致）。
+function ctBatchRetryPayloads(ids) {
+  return (Array.isArray(ids) ? ids : [])
+    .filter(function (id) { return !!id; })
+    .map(function (id) { return ctRetryPayload(id, true); });
+}
+
+// ctFailuresOnly 选出可重试任务（失败/取消）。
+function ctFailuresOnly(tasks) {
+  return (Array.isArray(tasks) ? tasks : []).filter(function (t) {
+    return t && (t.status === 'failed' || t.status === 'cancelled');
+  });
+}
+
+// ctDetailHtml 渲染单任务详情（展开行）：阶段/尝试次数/失败原文/部分产物路径。
+// 目的：面板列表只给摘要，**排障需要原文与产物位置**（此前只能看 CLI 或日志）。
+function ctDetailHtml(t) {
+  if (!t) return '';
+  const d = t.diagnostics || {};
+  const rows = [
+    ['任务 ID', t.id || '-'],
+    ['源 URL', t.url || '-'],
+    ['转存目标', t.transfer ? (t.transfer.volume || '') + ':' + (t.transfer.path || '') : '-'],
+    ['阶段', ctStageLabel(d.stage)],
+    ['失败次数', String(d.attempts || 0)],
+    ['失败类别', ctClassInfo(d.last_error_class).label + '（' + ctClassInfo(d.last_error_class).hint + '）'],
+    ['失败原文', d.last_error || '-'],
+    ['部分产物', d.partial_path ? d.partial_path + '（' + Math.round((d.partial_size || 0) / 1048576) + ' MiB）' : '-'],
+  ];
+  let html = '<tr class="ct-detail" data-detail-for="' + ctEsc(t.id) + '"><td colspan="7" ' +
+    'style="background:rgba(127,127,127,.06);padding:10px 12px;"><table style="font-size:12px;">';
+  rows.forEach(function (r) {
+    html += '<tr><td style="color:var(--text-muted);padding:2px 12px 2px 0;white-space:nowrap;">' + ctEsc(r[0]) +
+      '</td><td style="padding:2px 0;word-break:break-all;">' + ctEsc(r[1]) + '</td></tr>';
+  });
+  return html + '</table></td></tr>';
+}
+
 // ctGroupByClass 失败任务按类别分组（用于"哪类失败最多"的一眼判断）。
 function ctGroupByClass(tasks) {
   const out = {};
@@ -149,14 +189,17 @@ function ctRowHtml(t) {
   const cancelBtn = (t.status === 'pending' || t.status === 'downloading')
     ? '<button class="ct-cancel" data-id="' + ctEsc(t.id) + '">取消</button>'
     : '';
+  const canRetry = (t.status === 'failed' || t.status === 'cancelled');
   return '<tr data-id="' + ctEsc(t.id) + '">' +
+    '<td>' + (canRetry ? '<input type="checkbox" class="ct-pick" data-id="' + ctEsc(t.id) + '">' : '') + '</td>' +
     '<td style="color:' + ctStatusColor(t.status) + ';">' + ctEsc(ctStatusLabel(t.status)) + '</td>' +
     '<td>' + ctEsc(t.filename || t.url || '') + '</td>' +
     '<td>' + (pct === null ? '-' : pct + '%') + '</td>' +
     '<td>' + ctEsc(ctStageLabel(d.stage)) + '</td>' +
     '<td>' + failure + '</td>' +
     '<td>' + ctEsc(d.partial_size ? (Math.round(d.partial_size / 1048576) + ' MiB') : '-') + '</td>' +
-    '<td>' + retryBtn + cancelBtn + '</td>' +
+    '<td>' + retryBtn + cancelBtn +
+      '<button class="ct-detail-btn" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">详情</button></td>' +
     '</tr>';
 }
 
@@ -164,8 +207,12 @@ function ctRowHtml(t) {
 function ctTableHtml(tasks) {
   const list = Array.isArray(tasks) ? tasks : [];
   if (list.length === 0) return '';
-  let html = '<table style="width:100%;font-size:12px;border-collapse:collapse;"><thead><tr>' +
-    '<th>状态</th><th>文件</th><th>进度</th><th>阶段</th><th>失败原因</th><th>已下载</th><th>操作</th>' +
+  let html = '<div style="margin-bottom:6px;font-size:12px;">' +
+    '<label><input type="checkbox" id="ct-pick-all"> 全选失败</label> ' +
+    '<button id="ct-retry-selected" style="margin-left:8px;">批量重试选中</button>' +
+    '<span id="ct-msg" style="margin-left:10px;color:var(--text-muted);"></span></div>' +
+    '<table style="width:100%;font-size:12px;border-collapse:collapse;"><thead><tr>' +
+    '<th style="width:24px;"></th><th>状态</th><th>文件</th><th>进度</th><th>阶段</th><th>失败原因</th><th>已下载</th><th>操作</th>' +
     '</tr></thead><tbody>';
   list.forEach(function (t) { html += ctRowHtml(t); });
   return html + '</tbody></table>';
@@ -188,6 +235,9 @@ if (typeof module !== 'undefined' && module.exports) {
     ctSummarize: ctSummarize,
     ctGroupByClass: ctGroupByClass,
     ctRetryPayload: ctRetryPayload,
+    ctBatchRetryPayloads: ctBatchRetryPayloads,
+    ctFailuresOnly: ctFailuresOnly,
+    ctDetailHtml: ctDetailHtml,
     ctSummaryHtml: ctSummaryHtml,
     ctRowHtml: ctRowHtml,
     ctTableHtml: ctTableHtml,
@@ -216,9 +266,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     try {
       tasks = await ctFetchTasks();
     } catch (e) {
-      panel.innerHTML = '<div style="color:#c0392b;font-size:13px;">加载失败：' + ctEsc(e.message) + '</div>';
+    panel.innerHTML = '<div style="color:#c0392b;font-size:13px;">加载失败：' + ctEsc(e.message) + '</div>';
       return;
     }
+    window.__ctLastTasks = tasks; // 详情行展开需要完整任务对象（纯渲染用）
     panel.innerHTML =
       '<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;font-size:13px;">' +
       '<label><input type="checkbox" id="ct-failed-only"' + (filters.failedOnly ? ' checked' : '') + '> 只看失败/取消</label>' +
@@ -231,6 +282,50 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
     const fOnly = document.getElementById('ct-failed-only');
     if (fOnly) fOnly.addEventListener('change', function () { void window.showCloudTasks(); });
+
+    // 详情展开/收起（行内插入 ct-detail 行；再次点击移除）。
+    panel.querySelectorAll('.ct-detail-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const id = btn.getAttribute('data-id');
+        const exists = panel.querySelector('.ct-detail[data-detail-for="' + id + '"]');
+        if (exists) { exists.remove(); return; }
+        const row = btn.closest('tr');
+        const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
+        if (row && t) row.insertAdjacentHTML('afterend', ctDetailHtml(t));
+      });
+    });
+
+    // 全选失败任务（勾选所有可重试行）。
+    const pickAll = document.getElementById('ct-pick-all');
+    if (pickAll) {
+      pickAll.addEventListener('change', function () {
+        panel.querySelectorAll('.ct-pick').forEach(function (cb) { cb.checked = !!pickAll.checked; });
+      });
+    }
+
+    // 批量重试选中：逐条提交（单条失败不影响其余），完成后刷新并提示。
+    const batchBtn = document.getElementById('ct-retry-selected');
+    if (batchBtn) {
+      batchBtn.addEventListener('click', async function () {
+        const ids = Array.prototype.slice.call(panel.querySelectorAll('.ct-pick:checked'))
+          .map(function (cb) { return cb.getAttribute('data-id'); });
+        const msg = document.getElementById('ct-msg');
+        if (!ids.length) { if (msg) msg.textContent = '先勾选要重试的任务'; return; }
+        if (msg) msg.textContent = '重试中（' + ids.length + '）...';
+        let ok = 0, failed = 0;
+        for (const payload of ctBatchRetryPayloads(ids)) {
+          try {
+            await window.sclientTransport.coreRequest('POST', '/api/cloud/tasks/retry', {
+              bodyBytes: new TextEncoder().encode(JSON.stringify(payload)),
+              headers: { 'Content-Type': 'application/json' },
+            });
+            ok++;
+          } catch (e) { failed++; }
+        }
+        if (msg) msg.textContent = '已提交 ' + ok + ' 个，失败 ' + failed + ' 个';
+        await window.showCloudTasks();
+      });
+    }
 
     panel.querySelectorAll('.ct-retry').forEach(function (btn) {
       btn.addEventListener('click', async function () {
