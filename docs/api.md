@@ -766,6 +766,14 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
 - 指标：`sproxy_cloud_task_failed_total{reason="<error_class>"}`（source_unreachable / throttled /
   content_mismatch / target_conflict / disk_full / auth / unknown）。
 
+### Web UI：云端任务面板
+
+`/ui/` → 监控弹窗 → **云端任务** tab（`web/static/cloud-tasks.js`）：
+- 列表显示 状态 / 文件 / 进度 / 阶段 / **失败原因（类别 + 次数）** / 已下载字节；
+- 顶部汇总（总数、进行中、完成、失败、取消）并按失败类别聚合；
+- 操作：失败/取消行 **一键重试**（`POST /api/cloud/tasks/retry`，body 含 task_id）、进行中行 **取消**；
+- 过滤：只看失败/取消；**自动刷新（5s）**。
+
 ### POST /api/cloud/tasks/retry
 
 按条件**重试云端下载任务**（2026-11-21）：不依赖任务存活期，失败任务只要仍在保留期内即可重试。

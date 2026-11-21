@@ -943,6 +943,10 @@ function switchStatsTab(tab) {
   var issuesPanelEl = document.getElementById('issues-panel');
   if (issuesPanelEl) issuesPanelEl.style.display = tab === 'issues' ? 'block' : 'none';
   if (tab === 'issues') void showIssues();
+  // 云端任务面板（2026-11-21）：可见性 + 一键重试（失败原因/部分产物可见）。
+  var cloudTasksEl = document.getElementById('cloud-tasks-panel');
+  if (cloudTasksEl) cloudTasksEl.style.display = tab === 'cloud-tasks' ? 'block' : 'none';
+  if (tab === 'cloud-tasks' && typeof showCloudTasks === 'function') void showCloudTasks();
   document.getElementById('sync-panel').style.display = tab === 'sync' ? 'block' : 'none';
   document.getElementById('mesh-panel').style.display = tab === 'mesh' ? 'block' : 'none';
   document.getElementById('secret-panel').style.display = tab === 'secret' ? 'block' : 'none';
@@ -3699,6 +3703,7 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('vol-manage-tab').addEventListener('click', function() { switchStatsTab('vol-manage'); });
   document.getElementById('credentials-tab').addEventListener('click', function() { switchStatsTab('credentials'); });
   document.getElementById('issues-tab').addEventListener('click', function() { switchStatsTab('issues'); });
+  document.getElementById('cloud-tasks-tab').addEventListener('click', function() { switchStatsTab('cloud-tasks'); });
   document.getElementById('secret-tab').addEventListener('click', function() { switchStatsTab('secret'); });
   document.getElementById('sync-tab').addEventListener('click', function() { switchStatsTab('sync'); });
   document.getElementById('mesh-tab').addEventListener('click', function() { switchStatsTab('mesh'); });
