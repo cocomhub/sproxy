@@ -24,4 +24,8 @@ const (
 	flagIntegrityMustPass = "integrity-must-pass"
 	// flagMetaExtra 是转存产物的自定义元数据（JSON 或 @file；上传命令已有同名 flag）。
 	flagMetaExtra = "meta-extra"
+	// flagExpectChecksum 期望产物 checksum（转存前校验；不一致走 content_mismatch 重试）。
+	flagExpectChecksum = "expect-checksum"
+	// flagFallbackURL 备选源（可重复；主源失败自动切换）。
+	flagFallbackURL = "fallback-url"
 )

@@ -223,6 +223,11 @@ func (s *Service) CreateDownload(w http.ResponseWriter, r *http.Request, owner s
 		// MetaExtra 是转存产物的自定义元数据（客户端传入；仅 Transfer 非空时有意义）。
 		// 转存成功后与来源信息（source=transfer/source_url/etag）合并写入目标卷 meta.Extra。
 		MetaExtra map[string]any `json:"meta_extra,omitempty"`
+		// ExpectedChecksum 期望产物 checksum（修复场景传目标 meta 的 sha256）；
+		// 非空时下载完成、转存前必须一致，否则失败并归类 content_mismatch（→ 换源重试）。
+		ExpectedChecksum string `json:"expected_checksum,omitempty"`
+		// FallbackURLs 备选源（同内容多条 URL）；主源源类失败/内容不一致时自动切换。
+		FallbackURLs []string `json:"fallback_urls,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeJSON(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -255,7 +260,7 @@ func (s *Service) CreateDownload(w http.ResponseWriter, r *http.Request, owner s
 	// 创建任务并启动下载。提交时文件大小未知（-1），SubmitAndStart 的同步条件
 	// （totalSize > 0 且 < syncThreshold）不满足，因此恒异步执行：客户端断连后
 	// 服务端继续异步下载，不阻塞 handler。
-	task, err := s.deps.Tasks.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
+	task, err := s.deps.Tasks.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, r.Context(), owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra, ExpectedChecksum: req.ExpectedChecksum, FallbackSources: req.FallbackURLs})
 	if err != nil {
 		// 存储不足（全局账本或租户 Scope）映射 507，其余视为 400（URL 等输入问题已提前拦截）
 		if IsStorageFull(err) {

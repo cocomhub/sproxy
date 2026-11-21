@@ -80,13 +80,15 @@ const (
 type CloudDownloadOption func(*cloudDownloadOptions)
 
 type cloudDownloadOptions struct {
-	filename       string
-	maxBatchURLs   int
-	transfer       *TransferSpec
-	save           *bool
-	downloadLocal  bool
-	forceIntegrity bool
-	metaExtra      map[string]any // 转存产物的自定义 meta（服务端叠加来源信息后写目标卷）
+	filename         string
+	maxBatchURLs     int
+	transfer         *TransferSpec
+	save             *bool
+	downloadLocal    bool
+	forceIntegrity   bool
+	metaExtra        map[string]any // 转存产物的自定义 meta（服务端叠加来源信息后写目标卷）
+	expectedChecksum string         // 期望产物 checksum（转存前校验；空 = 不校验）
+	fallbackURLs     []string       // 备选源（主源失败自动切换）
 }
 
 // WithCloudDownloadFilename 设置云端下载的文件名（覆盖 URL 自动提取的文件名）。
@@ -137,6 +139,17 @@ func WithCloudDownloadIntegrityMustPass(v bool) CloudDownloadOption {
 
 // WithCloudDownloadMetaExtra 设置转存产物的自定义元数据（仅 Transfer 非空有意义；
 // 服务端与来源信息合并写入目标卷 meta.Extra）。nil/空 = 不发送（零回归）。
+// WithCloudDownloadExpectChecksum 设置期望产物 checksum（下载完成、转存前校验；
+// 不一致按 content_mismatch 失败并触发换源重试）。
+func WithCloudDownloadExpectChecksum(sum string) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) { o.expectedChecksum = sum }
+}
+
+// WithCloudDownloadFallbackURLs 设置备选源（同内容多条 URL，主源失败自动切换）。
+func WithCloudDownloadFallbackURLs(urls ...string) CloudDownloadOption {
+	return func(o *cloudDownloadOptions) { o.fallbackURLs = append(o.fallbackURLs, urls...) }
+}
+
 func WithCloudDownloadMetaExtra(extra map[string]any) CloudDownloadOption {
 	return func(o *cloudDownloadOptions) {
 		if len(extra) == 0 {
@@ -205,6 +218,12 @@ func (c *FileClient) CloudDownload(ctx context.Context, urlStr string, opts ...C
 	if len(cfg.metaExtra) > 0 {
 		body["meta_extra"] = cfg.metaExtra
 	}
+	if cfg.expectedChecksum != "" {
+		body["expected_checksum"] = cfg.expectedChecksum
+	}
+	if len(cfg.fallbackURLs) > 0 {
+		body["fallback_urls"] = cfg.fallbackURLs
+	}
 
 	var task CloudTask
 	if err := c.doJSON(ctx, http.MethodPost, "/api/cloud/download", body, &task); err != nil {
@@ -258,6 +277,12 @@ func (c *FileClient) CloudDownloadBatchEntries(ctx context.Context, entries []cl
 	}
 	if len(cfg.metaExtra) > 0 {
 		body["meta_extra"] = cfg.metaExtra
+	}
+	if cfg.expectedChecksum != "" {
+		body["expected_checksum"] = cfg.expectedChecksum
+	}
+	if len(cfg.fallbackURLs) > 0 {
+		body["fallback_urls"] = cfg.fallbackURLs
 	}
 
 	var result struct {

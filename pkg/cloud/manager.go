@@ -137,6 +137,12 @@ type CloudTask struct {
 	// 不泄密：Row.Meta 与持久化不含原始凭据/口令/secret 明文。
 	Audit []audit.Entry `json:"audit,omitempty"`
 
+	// ExpectedChecksum / FallbackSources / SourceIndex 是「多源 + 校验闭环」状态
+	// （2026-11-21）：来源可轮换，索引持久化以便重启后从下一条继续。
+	ExpectedChecksum string   `json:"expected_checksum,omitempty"`
+	FallbackSources  []string `json:"fallback_sources,omitempty"`
+	SourceIndex      int      `json:"source_index,omitempty"`
+
 	// Diagnostics 是**持久化诊断快照**（阶段/尝试次数/失败归类/部分产物）。
 	// 为什么需要（2026-11-21）：失败任务此前只留 error 文本且 1h 后即被清理 ⇒ 用户看不到
 	// 任务、看不出进度、无从重试。诊断随任务持久化后，失败仍可查、可据此决定重试策略。
@@ -992,4 +998,11 @@ type TaskParams struct {
 	// MetaExtra 是转存产物的自定义元数据（客户端传入；转存成功后与来源信息合并写入
 	// 目标卷 meta.Extra）。仅 Transfer 非 nil 时有意义（无转存则丢弃）。
 	MetaExtra map[string]any
+	// ExpectedChecksum 是**期望的产物 checksum**（如修复场景取目标卷 meta 的 sha256）。
+	// 非空时：下载完成、转存之前必须校验一致，否则任务失败并归类 content_mismatch
+	// （→ 事项中心按"换源"策略重试）。空 = 不额外校验（沿用既有完整性管道）。
+	ExpectedChecksum string
+	// FallbackSources 是**备选源**（同内容的多条 URL，如备用分享/镜像）。
+	// 主源失败且归类为源类问题（unreachable/throttled）或内容不一致时，自动切到下一条重试。
+	FallbackSources []string
 }

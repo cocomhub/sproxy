@@ -109,6 +109,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		Save:              params.Save, // 客户端任务参数（默认 true 保留；false = 完成即服务端清理）
 		IntegrityMustPass: params.IntegrityMustPass,
 		MetaExtra:         cloneMetaExtra(params.MetaExtra), // 转存产物自定义 meta（深拷贝防任务间共享 map 竞态）
+		ExpectedChecksum:  params.ExpectedChecksum,
+		FallbackSources:   append([]string(nil), params.FallbackSources...),
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
 		ExpiresAt:         time.Now().Add(m.config.TaskTTL),
@@ -627,6 +629,12 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// C2：下载成功 ⇒ 立即持久化「产物完整」标记（在转存/终态之前）。崩溃/被 kill 后恢复时
 	// 据此跳过重复下载；转存失败触发的「文件异常重下」与显式 resume 会清掉该标记。
 	m.markDownloadArtifactDone(task, destPath, result)
+	// 期望 checksum 校验（转存前；空 = 不校验）。不一致 ⇒ 按 content_mismatch 失败，
+	// 由事项中心/重试轮换来源（见 manager_multisource.go）。
+	if verr := m.verifyExpectedChecksum(task, resultViewOf(result)); verr != nil {
+		m.failTask(task, verr.Error())
+		return
+	}
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
 	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
