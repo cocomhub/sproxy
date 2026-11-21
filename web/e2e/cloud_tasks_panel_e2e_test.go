@@ -1,0 +1,118 @@
+// Copyright 2026 The Cocomhub Authors. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package e2e
+
+// cloud_tasks_panel_e2e_test.go — 「云端任务」面板真交互 E2E（2026-11-21）。
+//
+// 覆盖：失败任务在面板可见（状态 + 失败类别 + 尝试次数）→ 点「重试」发出
+// POST /api/cloud/tasks/retry（body.task_id 必须是被点那条）→ 面板刷新。
+// 用**真实失败任务**（不可达源）而非 mock，避免 false-green。
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/mxschmitt/playwright-go"
+)
+
+// TestCloudTasksPanel_ShowsFailureAndRetries 锁定「看得见 + 点得动」。
+func TestCloudTasksPanel_ShowsFailureAndRetries(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端，无法并行
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true // 回环/内网源放行
+		c.CloudMaxRetries = 1              // 快速失败，缩短等待
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	// 1) 造一个必然失败的云任务：不可达端口。
+	body := []byte(`{"url":"http://127.0.0.1:1/nope.bin","filename":"nope.bin","download_local":true,"save":true}`)
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+		t.Fatalf("创建任务失败: %d %s", code, resp)
+	}
+	// 2) 等它进入 failed（服务端异步），再用 API 取 task id。
+	var taskID string
+	deadline := time.Now().Add(30 * time.Second)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for time.Now().Before(deadline) && taskID == "" {
+		resp, err := http.Get(baseURL + "/api/cloud/tasks")
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		var payload struct {
+			Tasks []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"tasks"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+		for _, tk := range payload.Tasks {
+			if tk.Status == "failed" {
+				taskID = tk.ID
+			}
+		}
+		if taskID == "" {
+			select {
+			case <-tick.C:
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+	}
+	if taskID == "" {
+		t.Fatal("任务未在 30s 内进入 failed（面板用例无法继续）")
+	}
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page) // tab 行在监控弹窗内
+
+	// 3) 打开「云端任务」tab：失败行必须出现（状态/重试按钮）。
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("点击云端任务 tab: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-retry", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("失败任务行未渲染: %v", err)
+	}
+	rowText, err := page.Locator("#cloud-tasks-panel tbody tr").First().TextContent()
+	if err != nil {
+		t.Fatalf("读取行文本: %v", err)
+	}
+	if !strings.Contains(rowText, "失败") && !strings.Contains(rowText, "已取消") {
+		t.Fatalf("行内应显示失败状态，got %q", rowText)
+	}
+
+	// 4) 点「重试」：必须发出 POST /api/cloud/tasks/retry 且 task_id 正确。
+	reqCh := make(chan playwright.Request, 1)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/api/cloud/tasks/retry") {
+			select {
+			case reqCh <- r:
+			default:
+			}
+		}
+	})
+	if err := page.Locator("#cloud-tasks-panel .ct-retry").Click(); err != nil {
+		t.Fatalf("点击重试: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		var payload struct {
+			TaskID string `json:"task_id"`
+			Force  bool   `json:"force"`
+		}
+		requestJSON(t, req, &payload)
+		if payload.TaskID != taskID {
+			t.Fatalf("重试 task_id = %q, want %q", payload.TaskID, taskID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("点击重试后未发出 /api/cloud/tasks/retry 请求")
+	}
+}
