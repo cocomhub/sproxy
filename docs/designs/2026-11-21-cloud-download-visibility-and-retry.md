@@ -1,6 +1,6 @@
 # 云端下载：可见性、人工/自动重试与成功率设计
 
-> 状态：设计（待评审）｜日期：2026-11-21｜触发：修复 24 个受损文件时，任务失败后**从列表消失**、
+> 状态：**已实施（P1–P5 全部落地）**｜日期：2026-11-21｜触发：修复 24 个受损文件时，任务失败后**从列表消失**、
 > 无法人工重试、也看不出"已经下载了多少/部分文件在哪"。
 
 ## 1. 现状与问题（均已在代码中核实）
@@ -90,3 +90,27 @@
 1. 用现有 `cloud-download` 单条重试（keepshare 时段性问题，建议 1–2 并发、失败后 15–30 分钟再试）。
 2. P2 落地后改用 `cloud-download retry --url ... --transfer-path ...`（不依赖历史 task id）。
 3. 全部完成后 `volume meta-audit --refresh` 复核 `missing_chunks` 归零；期间**不做任何清理类操作**。
+
+## 6. 落地记录（P1–P5 全部完成）
+
+| 期 | 交付 | PR |
+| --- | --- | --- |
+| P1 | `FailedTaskTTL` 1h→7d；持久化 `CloudTask.Diagnostics`（stage/attempts/last_error_class/last_error/partial_*） | #1209 |
+| P2 | `SelectRetryable`/`RetryTasks`（task_id/url/transfer_path/transfer_volume/group）；`POST /api/cloud/tasks/retry`；`cloud-download retry` | #1209 |
+| P3 | `TaskFailure` 观察者 → `issues.KindCloudDownloadFailed`；按类别 retryable；执行器 `RetryCloudDownload` | #1210 |
+| P4 | `ExpectedChecksum`（转存前校验）+ `FallbackSources`/`SourceIndex`（源类失败自动换源） | #1211 |
+| P5 | `sproxy_cloud_task_failed_total{reason}` 指标；`list --watch`；`cloud-download batch`（TSV + 有界并发 + 汇总） | #1212 |
+
+**实施要点（复用既有能力，不新造机制）**
+- 重试内核只有一份：人工 CLI、HTTP retry、issues 执行器都走 `RetryTasks → ResumeTask`。
+- 失败归类 `classifyCloudError` 是唯一判据来源（决定换源/退避/转人工）。
+- 事项 ID 稳定 = `Kind+Volume+Path` ⇒ `Volume`=转存卷、`Path`=转存 rel（用 URL/任务 ID 会导致无法合并）。
+
+**验证纪律**
+- 每期均先写用例：归类/诊断/TTL/选择器/端点/换源/校验/清单解析/指标分桶；关键点做**变异命中**验证。
+- 门禁同步：R38 路由分类、R35-a 审计调用点、R35-b 变更型路由场景用例、R55 API 文档、
+  `cloudtasks` 接口方法数/方法集断言。
+
+**已知未覆盖（后续可选）**
+- 源健康自适应降并发（当前由 issues 退避间接缓解）；
+- 目标冲突的**提交期**预检（现由转存失败归类 `target_conflict` 转人工兜底）。
