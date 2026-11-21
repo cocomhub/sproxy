@@ -390,6 +390,7 @@ type CloudRetrySelector struct {
 	TaskID                  string `json:"task_id,omitempty"`
 	URL                     string `json:"url,omitempty"`
 	TransferPath            string `json:"transfer_path,omitempty"`
+	TransferVolume          string `json:"transfer_volume,omitempty"`
 	GroupID                 string `json:"group_id,omitempty"`
 	Force                   bool   `json:"force,omitempty"`
 	Limit                   int    `json:"limit,omitempty"`

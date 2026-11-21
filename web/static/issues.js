@@ -86,6 +86,10 @@ function issuesListHtml(data) {
       (it.last_error ? '<div style="color:#c0392b;">最近失败：' + issuesEscHtml(it.last_error) + '</div>' : '') + '</td>' +
       '<td style="padding:6px 8px;white-space:nowrap;">' +
       '<button type="button" class="btn btn-sm issues-resolve-btn" data-id="' + issuesEscHtml(it.id) + '">标记已解决</button>' +
+      (it.kind === 'cloud_download_failed'
+        ? '<button type="button" class="btn btn-sm issues-retry-dl-btn" data-volume="' + issuesEscHtml(it.volume) +
+          '" data-path="' + issuesEscHtml(it.path) + '" style="margin-left:6px;">重试下载</button>'
+        : '') +
       '</td></tr>';
   }).join('');
   return '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:var(--bg-hover);">' +
@@ -120,6 +124,12 @@ function issuesDetailHtml(item) {
 }
 
 // issuesResolveBody(note) → 人工解决请求（服务端要求 note 必填：写明处置方式，供审计）。
+// issuesCloudRetryPayload 由事项的（卷, 路径）构造云端下载重试请求体（2026-11-22）。
+// 与服务端 POST /api/cloud/tasks/retry 的 transfer_volume + transfer_path 精确匹配约定一致。
+function issuesCloudRetryPayload(volume, path) {
+  return { transfer_volume: String(volume || ''), transfer_path: String(path || ''), force: true };
+}
+
 function issuesResolveQuery(id, note) {
   return '/api/issues/resolve?id=' + encodeURIComponent(id || '') + '&note=' + encodeURIComponent(note || '');
 }
@@ -155,6 +165,7 @@ if (typeof module !== 'undefined' && module.exports) {
     issuesPanelHtml: issuesPanelHtml,
     issuesDetailHtml: issuesDetailHtml,
     issuesResolveQuery: issuesResolveQuery,
+    issuesCloudRetryPayload: issuesCloudRetryPayload,
     issuesListQuery: issuesListQuery,
     escHtml: issuesEscHtml,
   };

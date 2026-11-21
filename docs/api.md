@@ -771,7 +771,8 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
 `/ui/` → 监控弹窗 → **云端任务** tab（`web/static/cloud-tasks.js`）：
 - 列表显示 状态 / 文件 / 进度 / 阶段 / **失败原因（类别 + 次数）** / 已下载字节；
 - 顶部汇总（总数、进行中、完成、失败、取消）并按失败类别聚合；
-- 操作：失败/取消行 **一键重试**（`POST /api/cloud/tasks/retry`，body 含 task_id）、进行中行 **取消**；
+- 操作：失败/取消行 **一键重试**（`POST /api/cloud/tasks/retry`，body 含 task_id）、进行中行 **取消**、
+  **详情展开**（阶段/尝试次数/失败原文/部分产物路径）、**全选失败 + 批量重试**；
 - 过滤：只看失败/取消；**自动刷新（5s）**。
 
 ### POST /api/cloud/tasks/retry
@@ -785,6 +786,7 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
 | `task_id` | 指定任务 |
 | `url` | 按源 URL 子串匹配 |
 | `transfer_path` | 按转存目标路径**精确**匹配（修复场景常用） |
+| `transfer_volume` | 按转存目标卷匹配（必须与 `transfer_path` 同时给出，否则 400） |
 | `group_id` | 按任务组 |
 | `force` | 透传 `ResumeTask(force)` |
 | `limit` | 最多重试数量（0 = 不限） |
