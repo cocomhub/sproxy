@@ -284,3 +284,23 @@ tr:hover td { background: var(--bg-hover); }
 .audit-plain {
   color: var(--text-secondary);
 }
+
+/* 控制台（原「服务器监控」弹窗改造，2026-11-22）：全屏布局 + 左侧分区导航。
+   狭窄屏下侧栏降级为顶部横向滚动条，保证内容区仍占满高度。 */
+#stats-modal #console-shell { overflow: hidden; }
+#stats-modal #stats-tab-bar .stats-tab { border-bottom: none !important; }
+#stats-modal #stats-tab-bar .stats-tab:hover { background: rgba(127, 127, 127, .12) !important; }
+#stats-modal #stats-tab-bar .stats-tab.active { font-weight: 600; }
+#stats-modal #console-body > div { min-width: 0; }
+@media (max-width: 820px) {
+  #stats-modal #console-shell { width: 96vw !important; height: 92vh !important; }
+  #stats-modal #console-shell > div { flex-direction: column; }
+  #stats-modal #stats-tab-bar {
+    flex-direction: row !important;
+    width: auto !important;
+    overflow-x: auto;
+    border-right: none !important;
+    border-bottom: 1px solid var(--border);
+  }
+  #stats-modal #stats-tab-bar .stats-tab { white-space: nowrap; }
+}
