@@ -72,6 +72,31 @@ let _volumeFilter = localStorage.getItem(VOLUME_STORE_KEY) || '';
 // _volumeRestorePending：启动时从 localStorage 恢复的卷需等 /api/volumes 确认「仍可见」后再
 // 决定是否带 ?volume= 请求列表（否则卷已删/无权限时会得到一个空列表且无从解释）。
 let _volumeRestorePending = _volumeFilter !== '';
+// _volumeRestoreSettled + resolve（2026-11-22 缺陷修复）：
+// 此前首次 refreshList 在 initVolumeSelect 之前跑 ⇒ 恢复未完成就**丢弃 volume** 发请求
+// ⇒ 「在 baidu 卷某目录刷新页面 → 列表为空，点目录后才正常」。改为列表**等待**恢复完成
+// （有界超时）后再决定 volume ⇒ 刷新即正确。
+let _volumeRestoreSettled = _volumeFilter === '';
+let _volumeRestoreResolve = null;
+const _volumeRestorePromise = new Promise(function (resolve) { _volumeRestoreResolve = resolve; });
+
+// awaitVolumeRestore 有界等待卷恢复完成（默认 3s；超时后按"已尝试"处理，不阻塞 UI）。
+async function awaitVolumeRestore(timeoutMs) {
+  if (_volumeRestoreSettled) return;
+  const ms = timeoutMs || 3000;
+  await Promise.race([
+    _volumeRestorePromise,
+    new Promise(function (r) { setTimeout(r, ms); }),
+  ]);
+}
+
+// settleVolumeRestore 标记恢复完成并唤醒等待者（initVolumeSelect 结束时调用，幂等）。
+function settleVolumeRestore() {
+  if (_volumeRestoreSettled) return;
+  _volumeRestoreSettled = true;
+  _volumeRestorePending = false;
+  if (_volumeRestoreResolve) _volumeRestoreResolve();
+}
 const PAGE_LIMIT = 500;
 
 // 传输层由 sclient 领域库统一（隧道/直连协商 + SproxySig 签名），页面级
@@ -251,7 +276,8 @@ async function initVolumeSelect() {
     const data = await sc.files.volumes();
     populateVolumeSelect(data?.volumes);
   } catch (e) { /* 无凭据/未授权/无卷 API：保持空（全部卷 / auto），不破坏无认证浏览 */ }
-  _volumeRestorePending = false;
+  // 无论成功/失败都要唤醒等待者：否则首屏列表会一直等到超时（3s 白屏）。
+  settleVolumeRestore();
 }
 
 // refreshVolumeSelect 重新拉取 /api/volumes 并刷新「卷」下拉。
@@ -327,8 +353,9 @@ async function refreshList(opts) {
     // 卷已删/无权限时回落全部卷（否则会得到一个空列表且无从解释）。确认流程由
     // initVolumeSelect 异步完成（populateVolumeSelect 会把不可见卷重置为 ''），
     // 这里在确认完成前**不发送** ?volume=（避免带已失效卷名请求）。
-    let vol = _volumeFilter;
-    if (_volumeRestorePending) vol = '';
+    // 2026-11-22：**先等待卷恢复**再决定 volume（此前直接丢弃 ⇒ 卷路径刷新后列表为空）。
+    await awaitVolumeRestore(3000);
+    const vol = _volumeFilter;
     let data = await sc.files.list(currentSubdir, { offset: 0, limit: PAGE_LIMIT, volume: vol || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset = files.length;
@@ -368,8 +395,8 @@ async function forceRefreshList() {
 async function loadMore() {
   const el = document.getElementById('file-list');
   try {
-    let vol = _volumeFilter;
-    if (_volumeRestorePending) vol = '';
+    await awaitVolumeRestore(3000);
+    const vol = _volumeFilter;
     let data = await sc.files.list(currentSubdir, { offset: _currentOffset, limit: PAGE_LIMIT, volume: vol || undefined });
     let files = Array.isArray(data) ? data : data?.files || [];
     _currentOffset += files.length;
