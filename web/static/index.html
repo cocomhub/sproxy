@@ -98,46 +98,51 @@
 </div>
 <div class="toast" id="toast"></div>
 
-<div id="stats-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
-  <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:500px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-      <h3 style="margin:0;font-size:16px;">服务器监控</h3>
-      <button type="button" id="stats-close-btn" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+<div id="stats-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;padding:12px;">
+  <div id="console-shell" role="dialog" aria-label="服务器控制台" style="display:flex;flex-direction:column;background:var(--modal-bg);border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,.28);width:1229px;height:736px;max-width:96vw;max-height:92vh;overflow:hidden;">
+    <header style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--border);flex:0 0 auto;">
+      <h3 style="margin:0;font-size:16px;">服务器控制台</h3>
+      <span id="console-subtitle" style="font-size:12px;color:var(--text-muted);"></span>
+      <span style="flex:1 1 auto;"></span>
+      <button type="button" id="stats-refresh-btn" class="btn btn-secondary" style="padding:4px 12px;font-size:13px;">刷新</button>
+      <button type="button" id="stats-close-btn" aria-label="关闭" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--text-muted);line-height:1;">&times;</button>
+    </header>
+    <div style="display:flex;flex:1 1 auto;min-height:0;">
+      <nav id="stats-tab-bar" aria-label="控制台分区" style="display:flex;flex-direction:column;gap:4px;width:176px;flex:0 0 auto;padding:12px 10px;border-right:1px solid var(--border);overflow-y:auto;">
+      <button type="button" id="stats-tab" class="stats-tab active" style="border:none;background:var(--tab-active-bg,rgba(31,111,235,.12));cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-primary);">统计</button>
+      <button type="button" id="cloud-tasks-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">云端任务</button>
+      <button type="button" id="issues-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">待处理事项</button>
+      <button type="button" id="audit-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">审计</button>
+      <button type="button" id="volumes-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">卷</button>
+      <button type="button" id="vol-manage-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">卷管理</button>
+      <button type="button" id="credentials-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">凭据</button>
+      <button type="button" id="secret-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">Secret</button>
+      <button type="button" id="sync-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">同步冲突</button>
+      <button type="button" id="mesh-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">Mesh</button>
+      <button type="button" id="hub-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">Hub</button>
+      <button type="button" id="config-tab" class="stats-tab" style="border:none;background:transparent;cursor:pointer;padding:9px 12px;border-radius:6px;text-align:left;font-size:13px;color:var(--text-secondary);">配置</button>
+      </nav>
+      <section id="console-body" style="flex:1 1 auto;min-width:0;overflow:auto;padding:16px 18px;">
+      <div id="stats-panel"></div>
+      <div id="config-panel" style="display:none;"></div>
+      <div id="hub-panel" style="display:none;"></div>
+      <div id="audit-panel" style="display:none;"></div>
+      <div id="volumes-panel" style="display:none;"></div>
+      <div id="vol-manage-panel" style="display:none;"></div>
+      <div id="credentials-panel" style="display:none;"></div>
+      <div id="issues-panel" style="display:none;"></div>
+      <div id="cloud-tasks-panel" style="display:none;"></div>
+      <div id="secret-panel" style="display:none;"></div>
+      <div id="sync-panel" style="display:none;"></div>
+      <div id="mesh-panel" style="display:none;"></div>
+      </section>
     </div>
-    <div id="stats-tab-bar" style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--tab-border);">
-      <button type="button" id="stats-tab" class="stats-tab active" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid var(--tab-active);margin-bottom:-2px;font-size:14px;color:var(--text-primary);">统计</button>
-      <button type="button" id="config-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">配置</button>
-      <button type="button" id="hub-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Hub</button>
-      <button type="button" id="audit-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">审计</button>
-      <button type="button" id="volumes-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷</button>
-      <button type="button" id="vol-manage-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">卷管理</button>
-      <button type="button" id="credentials-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">凭据</button>
-      <button type="button" id="issues-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">待处理事项</button>
-      <button type="button" id="cloud-tasks-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">云端任务</button>
-      <button type="button" id="secret-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Secret</button>
-      <button type="button" id="sync-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">同步冲突</button>
-      <button type="button" id="mesh-tab" class="stats-tab" style="padding:8px 16px;border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;font-size:14px;color:var(--text-secondary);">Mesh</button>
-    </div>
-    <div id="stats-panel"></div>
-    <div id="config-panel" style="display:none;"></div>
-    <div id="hub-panel" style="display:none;"></div>
-    <div id="audit-panel" style="display:none;"></div>
-    <div id="volumes-panel" style="display:none;"></div>
-    <div id="vol-manage-panel" style="display:none;"></div>
-    <div id="credentials-panel" style="display:none;"></div>
-    <div id="issues-panel" style="display:none;"></div>
-    <div id="cloud-tasks-panel" style="display:none;margin-top:12px;"></div>
-    <div id="secret-panel" style="display:none;"></div>
-    <div id="sync-panel" style="display:none;"></div>
-    <div id="mesh-panel" style="display:none;"></div>
-    <div style="margin-top:16px;text-align:right;">
-      <button type="button" id="stats-refresh-btn" class="btn btn-secondary" style="margin-right:8px;">刷新</button>
+    <footer style="display:flex;justify-content:flex-end;gap:8px;padding:10px 18px;border-top:1px solid var(--border);flex:0 0 auto;">
       <button type="button" id="stats-close-modal-btn" class="btn btn-primary">关闭</button>
-    </div>
+    </footer>
   </div>
 </div>
 
-<!-- 分享管理弹窗 -->
 <div id="share-modal" style="display:none;position:fixed;inset:0;background:var(--modal-overlay);z-index:1000;align-items:center;justify-content:center;">
   <div style="background:var(--modal-bg);border-radius:8px;padding:24px;width:600px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
@@ -308,6 +313,7 @@
 <script src="credentials-format.js"></script>
 <script src="issues.js"></script>
 <script src="cloud-tasks.js"></script>
+<script src="console-nav.js"></script>
 <script src="secrets-format.js"></script>
 <script src="vol-manage-format.js"></script>
 <script src="audit-rows-format.js"></script>

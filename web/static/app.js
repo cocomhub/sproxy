@@ -107,6 +107,8 @@ let sc = null;
 // 读写 localStorage 键 sproxy_web_transport_override（与 sclient config.js 的
 // overrideKey 同键）——transport.readLocalOverride/effectiveMode 实时读它。
 const CUTUNNEL_OVERRIDE_KEY = 'sproxy_web_transport_override';
+// CONSOLE_TAB_KEY 记忆控制台最后分区（刷新后回到同一分区）。
+const CONSOLE_TAB_KEY = 'sproxy_console_tab';
 function cuTunnelOverride() {
   try {
     const v = localStorage.getItem(CUTUNNEL_OVERRIDE_KEY);
@@ -915,8 +917,20 @@ function statsRefresh() {
 
 // showStats 打开监控弹窗并默认展示 stats tab。
 async function showStats() {
+  // 全屏控制台（2026-11-22）：按视口计算尺寸（宽 96vw 限幅 720–1600，高 92vh）；
+  // 分区来自深链 hash（#/console/<tab>）或上次记忆，缺省概览。
+  var shell = document.getElementById('console-shell');
+  if (shell && typeof consoleLayoutStyle === 'function') {
+    var dim = consoleLayoutStyle(window.innerWidth, window.innerHeight);
+    shell.style.width = dim.width;
+    shell.style.height = dim.height;
+  }
+  var wantTab = (typeof tabFromHash === 'function' ? tabFromHash(location.hash) : '');
+  if (!wantTab) wantTab = localStorage.getItem(CONSOLE_TAB_KEY) || '';
   document.getElementById('stats-modal').style.display = 'flex';
-  switchStatsTab('stats');
+  // 只切一次：有深链/记忆则进该分区，否则概览（此前多一次 switchStatsTab('stats')
+  // 会把深链分区覆盖回概览——2026-11-22 刷新后停在概览的根因）。
+  switchStatsTab(typeof consoleTabValid === 'function' && consoleTabValid(wantTab) ? wantTab : 'stats');
   document.getElementById('stats-panel').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
   try {
     // /api/stats 无对应领域方法（api/index 只有 files/cloud/share/config/hub 命名空间），
@@ -956,6 +970,10 @@ async function notifyTest() {
 
 function hideStats() {
   document.getElementById('stats-modal').style.display = 'none';
+  // 关闭控制台时移除深链（避免刷新又弹开）；分区记忆保留在 localStorage。
+  if (/^#\/console\//.test(location.hash)) {
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   volumeHealthTimerStop(); // 弹窗关闭：停止卷健康定时刷新（避免无谓 /metrics 拉取）
 }
 
@@ -993,6 +1011,18 @@ function switchStatsTab(tab) {
   if (tab === 'mesh') void showMeshStatus();
   if (tab === 'secret') void showSecrets();
   if (tab === 'vol-manage') void showVolManage();
+  // 深链与记忆（2026-11-22）：刷新/分享链接保持同一分区。
+  try {
+    localStorage.setItem(CONSOLE_TAB_KEY, tab);
+    if (/^#\/console\//.test(location.hash) || document.getElementById('stats-modal').style.display === 'flex') {
+      history.replaceState(null, '', consoleHashFor(tab));
+    }
+    var sub = document.getElementById('console-subtitle');
+    if (sub && typeof CONSOLE_TABS !== 'undefined') {
+      var found = CONSOLE_TABS.filter(function (t) { return t.id === tab; })[0];
+      sub.textContent = found ? found.label : '';
+    }
+  } catch (e) { /* 无 localStorage/无 history 权限时静默 */ }
 }
 
 // --- 凭据管理（B2：/api/credentials admin 面板） ---
@@ -3721,6 +3751,12 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
   document.getElementById('stats-refresh-btn').addEventListener('click', statsRefresh);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
+  // Esc 关闭控制台（2026-11-22：全屏界面必须有键盘退出，避免"困在弹窗里"）。
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var modal = document.getElementById('stats-modal');
+    if (modal && modal.style.display === 'flex') hideStats();
+  });
   // 监控弹窗标签页切换
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
   document.getElementById('config-tab').addEventListener('click', function() { switchStatsTab('config'); });
