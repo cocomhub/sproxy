@@ -113,6 +113,10 @@ func (m *CloudDownloadManager) RetryTasks(sel RetrySelector, force bool) ([]stri
 	errs := make(map[string]error, len(ids))
 	ok := make([]string, 0, len(ids))
 	for _, id := range ids {
+		// 源类失败/内容不一致且还有备选源 ⇒ 先切源再重试（2026-11-21，成功率关键路径）。
+		if rotated := m.rotateSource(id); rotated {
+			m.logger.Info("云端下载切换备选源后重试", "task_id", id)
+		}
 		if err := m.ResumeTask(id, force, sel.Owner); err != nil {
 			errs[id] = fmt.Errorf("retry %s: %w", id, err)
 			continue
@@ -120,4 +124,24 @@ func (m *CloudDownloadManager) RetryTasks(sel RetrySelector, force bool) ([]stri
 		ok = append(ok, id)
 	}
 	return ok, errs
+}
+
+// rotateSource 在重试前为该任务轮换来源（持锁读改写 + 持久化）。返回是否发生轮换。
+func (m *CloudDownloadManager) rotateSource(taskID string) bool {
+	m.mu.Lock()
+	t, ok := m.tasks[taskID]
+	if !ok || t == nil {
+		m.mu.Unlock()
+		return false
+	}
+	rotated := t.rotateSourceLocked()
+	if !rotated {
+		m.mu.Unlock()
+		return false
+	}
+	m.mu.Unlock()
+	if err := m.saveTask(t); err != nil {
+		m.logger.Warn("持久化来源轮换失败（重启后可能回到旧源）", "task_id", taskID, "error", err)
+	}
+	return true
 }

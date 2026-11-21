@@ -108,3 +108,55 @@ func TestObserveFailure_NotifiesObserver(t *testing.T) {
 		t.Fatalf("类别/次数错误: %+v", got)
 	}
 }
+
+// TestRotateSource 锁定「换源」策略（2026-11-21 设计 §3.4）：
+// 源类失败/内容不一致且有备选源 ⇒ 切到下一条并把尝试计数归零；其它类别或没有备选 ⇒ 不切。
+func TestRotateSource(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		class  string
+		fb     []string
+		idx    int
+		want   bool
+		wantIn int
+	}{
+		{"源不可达且有备选", ErrClassSourceUnreachable, []string{"u0", "u1"}, 0, true, 1},
+		{"限流且有备选", ErrClassThrottled, []string{"u0", "u1"}, 0, true, 1},
+		{"内容不一致且有备选", ErrClassContentMismatch, []string{"u0", "u1"}, 0, true, 1},
+		{"已用尽备选", ErrClassSourceUnreachable, []string{"u0"}, 0, false, 0},
+		{"磁盘满不换源", ErrClassDiskFull, []string{"u0", "u1"}, 0, false, 0},
+		{"无备选源", ErrClassSourceUnreachable, nil, 0, false, 0},
+	}
+	for _, c := range cases {
+		task := &CloudTask{URL: "u0", FallbackSources: c.fb, SourceIndex: c.idx}
+		task.noteFailure("x", 0, "")
+		task.Diagnostics.LastErrorClass = c.class
+		if got := task.rotateSourceLocked(); got != c.want {
+			t.Errorf("%s: rotate=%v want %v", c.name, got, c.want)
+		}
+		if task.SourceIndex != c.wantIn {
+			t.Errorf("%s: SourceIndex=%d want %d", c.name, task.SourceIndex, c.wantIn)
+		}
+		if c.want && task.URL != c.fb[c.wantIn] {
+			t.Errorf("%s: URL 未切换，got %s", c.name, task.URL)
+		}
+	}
+}
+
+// TestVerifyExpectedChecksum 锁定「转存前期望校验」：不一致必须报错（→ content_mismatch 重试）。
+func TestVerifyExpectedChecksum(t *testing.T) {
+	t.Parallel()
+	m := &CloudDownloadManager{tasks: map[string]*CloudTask{}}
+	task := &CloudTask{ID: "t", ExpectedChecksum: "abc"}
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "abc"}); err != nil {
+		t.Fatalf("一致时应通过: %v", err)
+	}
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "def"}); err == nil {
+		t.Fatal("不一致必须报错")
+	}
+	// 未指定期望值 ⇒ 不额外校验（零回归）。
+	if err := m.verifyExpectedChecksum(&CloudTask{ID: "t2"}, &downloaderResultView{Checksum: "x"}); err != nil {
+		t.Fatalf("未指定期望值不应报错: %v", err)
+	}
+}

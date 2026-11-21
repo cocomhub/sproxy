@@ -746,6 +746,17 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 取消下载任务（幂等）。
 
+#### 请求体新增字段（2026-11-21，成功率闭环）
+
+`POST /api/cloud/download` 与 `POST /api/cloud/download/batch` 支持：
+
+| 字段 | 说明 |
+|---|---|
+| `expected_checksum` | 期望产物 checksum；非空时**下载完成、转存前**必须一致，否则任务失败并归类 `content_mismatch`（事项中心按"换源"重试） |
+| `fallback_urls[]` | 备选源（同内容多条 URL）；主源失败且归类为 `source_unreachable`/`throttled`/`content_mismatch` 时**自动切下一条**重试 |
+
+CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
+
 ### POST /api/cloud/tasks/retry
 
 按条件**重试云端下载任务**（2026-11-21）：不依赖任务存活期，失败任务只要仍在保留期内即可重试。

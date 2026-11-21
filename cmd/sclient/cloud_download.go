@@ -167,6 +167,8 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
+	cmd.Flags().String(flagExpectChecksum, "", "期望产物 checksum（下载完成、转存前校验；不一致按 content_mismatch 换源重试）")
+	cmd.Flags().StringArray(flagFallbackURL, nil, "备选源 URL（可重复；主源失败自动切换）")
 
 	// 注册子命令
 	cmd.AddCommand(NewCmdCloudSubmit(factory, ios, cfgSvc))
@@ -240,6 +242,8 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	cmd.Flags().Bool(flagDownloadLocal, true, "客户端下载本地（链式拉取 cloud 桶文件）；false = 只转存/只保留")
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
+	cmd.Flags().String(flagExpectChecksum, "", "期望产物 checksum（下载完成、转存前校验；不一致按 content_mismatch 换源重试）")
+	cmd.Flags().StringArray(flagFallbackURL, nil, "备选源 URL（可重复；主源失败自动切换）")
 	return cmd
 }
 
@@ -463,6 +467,12 @@ func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 	if cmd.Flags().Changed(flagIntegrityMustPass) {
 		f, _ := cmd.Flags().GetBool(flagIntegrityMustPass)
 		opts = append(opts, client.WithCloudDownloadIntegrityMustPass(f))
+	}
+	if sum, _ := cmd.Flags().GetString(flagExpectChecksum); sum != "" {
+		opts = append(opts, client.WithCloudDownloadExpectChecksum(sum))
+	}
+	if fb, _ := cmd.Flags().GetStringArray(flagFallbackURL); len(fb) > 0 {
+		opts = append(opts, client.WithCloudDownloadFallbackURLs(fb...))
 	}
 	// meta-extra：解析失败由 runCloudSubmit 预解析返回 err（此处成功才并入，
 	// 失败不 append 任何选项——runCloudSubmit 已拦截）。
