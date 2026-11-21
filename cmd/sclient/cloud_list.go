@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
@@ -33,6 +34,12 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 				return fmt.Errorf(errFmtInitClient, err)
 			}
 
+			watch, _ := cmd.Flags().GetBool("watch")
+			interval, _ := cmd.Flags().GetDuration("interval")
+			if watch {
+				return watchCloudList(cmd, svc, ios)
+			}
+			_ = interval
 			statusFilter, _ := cmd.Flags().GetString("status")
 			offset, _ := cmd.Flags().GetInt("offset")
 			limit, _ := cmd.Flags().GetInt("limit")
@@ -60,6 +67,37 @@ func NewCmdCloudList(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc Co
 	cmd.Flags().String("status", "", "按状态过滤（pending/downloading/completed/failed/cancelled/damaged——damaged 列出完整性损坏放行的已完成任务）")
 	cmd.Flags().Int("offset", -1, "跳过前 N 条（默认 -1 不偏移）")
 	cmd.Flags().Int("limit", 0, "返回条数上限（默认 0 返回全部）")
+	cmd.Flags().Bool("watch", false, "持续刷新（每 --interval 重新拉取，Ctrl-C 退出）")
+	cmd.Flags().Duration("interval", 5*time.Second, "watch 刷新间隔")
 
 	return cmd
+}
+
+// watchCloudList 持续刷新任务列表（`--watch`）：每 interval 重新拉取并按同一格式打印。
+//
+// 为什么（2026-11-21 P5）：失败/重试期间用户需要"盯着看"，此前只能反复手敲 list。
+func watchCloudList(cmd *cobra.Command, svc *client.FileClient, ios cli.IOStreams) error {
+	interval, _ := cmd.Flags().GetDuration("interval")
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	statusFilter, _ := cmd.Flags().GetString("status")
+	for {
+		tasks, _, err := svc.ListCloudTasksWithTotal(cmd.Context(), statusFilter, -1, 0)
+		if err != nil {
+			return fmt.Errorf("获取云端下载任务列表失败: %w", err)
+		}
+		ios.WriteOutLine("── %s ──", time.Now().Format("15:04:05"))
+		if len(tasks) == 0 {
+			ios.WriteOutLine("暂无云端下载任务")
+		} else {
+			fm := buildFormatterWithWriter(ios.Out, cmd)
+			fm.PrintCloudTaskList(tasks)
+		}
+		select {
+		case <-cmd.Context().Done():
+			return cmd.Context().Err()
+		case <-time.After(interval):
+		}
+	}
 }

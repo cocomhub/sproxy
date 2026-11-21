@@ -34,6 +34,10 @@ type CloudTask struct {
 	ETag       string `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
 	Error      string `json:"error"`
 	GroupID    string `json:"group_id,omitempty"` // 所属下载组 ID（可选）
+	// Diagnostics 是服务端持久化的诊断快照（2026-11-21）：阶段/失败次数/失败归类/部分产物。
+	// 客户端据此显示"为何失败、是否值得重试"。
+	Diagnostics *CloudTaskDiagnostics `json:"diagnostics,omitempty"`
+
 	// IntegrityStatus 完整性校验状态（R3-I3）："" 未校验 / verified 通过 / damaged 损坏。
 	// 客户端透传供链式/CLI 识别损坏文件（默认放行时 completed+damaged 不应被当可靠成功）。
 	IntegrityStatus string    `json:"integrity_status,omitempty"`
@@ -369,6 +373,16 @@ func (c *FileClient) DeleteCloudTask(ctx context.Context, taskID string) error {
 	}
 	apiPath := apiCloudTasksBase + url.PathEscape(taskID)
 	return c.doJSON(ctx, http.MethodDelete, apiPath, nil, nil)
+}
+
+// CloudTaskDiagnostics 是任务的诊断快照（与 cloud.TaskDiagnostics 字段对齐）。
+type CloudTaskDiagnostics struct {
+	Stage          string `json:"stage,omitempty"`
+	Attempts       int    `json:"attempts,omitempty"`
+	LastErrorClass string `json:"last_error_class,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	PartialSize    int64  `json:"partial_size,omitempty"`
+	PartialPath    string `json:"partial_path,omitempty"`
 }
 
 // CloudRetrySelector 是「按条件重试云端任务」的选择器（与服务端 cloud.RetrySelector 对应）。

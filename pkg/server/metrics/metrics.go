@@ -65,6 +65,9 @@ type Metrics struct {
 	AuditWriteFailed atomic.Int64
 	AuditHookPanics  atomic.Int64
 	auditRotate      *labeledCounters[string]
+	// cloudFailedByClass 是云端下载失败按错误类别分桶（2026-11-21 P5）：
+	// 成功率治理的核心输入（哪类失败占多数 → 该换源 / 该扩磁盘 / 该修凭据）。
+	cloudFailedByClass *labeledCounters[string]
 
 	// ---- W4：带标签的跨节点指标 ----
 	//
@@ -321,6 +324,9 @@ func (g *labeledGauges[K]) samples() []LabeledSample {
 func NewMetrics() *Metrics {
 	m := &Metrics{
 		auditRotate: newLabeledCounters(func(k string) string {
+			return fmt.Sprintf(`reason="%s"`, escapeLabel(k))
+		}),
+		cloudFailedByClass: newLabeledCounters(func(k string) string {
 			return fmt.Sprintf(`reason="%s"`, escapeLabel(k))
 		}),
 		meshDial: newLabeledCounters(func(k meshDialKey) string {
@@ -623,6 +629,25 @@ func (m *Metrics) RecordAuditRotate(reason string) {
 		reason = "unknown"
 	}
 	m.auditRotate.add(reason)
+}
+
+// CloudTaskFailedSamples 暴露云端下载失败分桶样本（/metrics 渲染用）。
+func (m *Metrics) CloudTaskFailedSamples() []LabeledSample {
+	if m == nil {
+		return nil
+	}
+	return m.cloudFailedByClass.samples()
+}
+
+// RecordCloudTaskFailed 记录一次云端下载失败（按错误类别分桶；nil 安全 no-op）。
+func (m *Metrics) RecordCloudTaskFailed(class string) {
+	if m == nil {
+		return
+	}
+	if class == "" {
+		class = "unknown"
+	}
+	m.cloudFailedByClass.add(class)
 }
 
 // Snapshot 返回当前所有指标的快照（用于调试和日志输出）。

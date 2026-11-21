@@ -33,6 +33,7 @@ func (h *Handlers) ReportCloudTaskFailure(f cloud.TaskFailure) {
 	if center == nil {
 		return
 	}
+	h.metrics.RecordCloudTaskFailed(f.ErrorClass)
 	volume, path := f.Volume, f.Path
 	if volume == "" {
 		volume, path = "cloud", f.URL

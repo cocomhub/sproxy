@@ -161,6 +161,8 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	metrics.WriteMetric(&b, "sproxy_audit_write_failed_total", "counter", "Audit journal write failures", m.AuditWriteFailed.Load())
 	metrics.WriteMetric(&b, "sproxy_audit_hook_panics_total", "counter", "Audit downstream hook panics (isolated)", m.AuditHookPanics.Load())
 	metrics.WriteLabeledCounter(&b, "sproxy_audit_rotate_total", "Audit segment rotations by reason", m.AuditRotateSamples())
+	metrics.WriteLabeledCounter(&b, "sproxy_cloud_task_failed_total",
+		"Cloud download task failures by reason class", m.CloudTaskFailedSamples())
 	metrics.WriteMetric(&b, "sproxy_keyframe_fmp4_total", "counter", "Uploads detected as fragmented MP4 (fMP4, no global stss) — decision input for mp4ff switch", m.KeyframeFragmented.Load())
 
 	// 传输层连接级指标（xfer TCP：FromNetConn 包装的连接消息/字节计数）。

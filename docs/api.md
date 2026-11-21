@@ -757,6 +757,15 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
 
+#### 批量编排与观测（2026-11-21 P5）
+
+- `sclient cloud-download batch --file plan.tsv [--concurrency 2] [--wait] [--timeout 6h]`
+  清单为 TSV：`url<TAB>转存目标路径<TAB>期望checksum(可空)`；`#` 开头为注释。
+  默认等待全部终态并输出**成功/失败/未完成**汇总（失败附错误类别），单条失败不中断。
+- `sclient cloud-download list --watch [--interval 5s]`：持续刷新任务列表。
+- 指标：`sproxy_cloud_task_failed_total{reason="<error_class>"}`（source_unreachable / throttled /
+  content_mismatch / target_conflict / disk_full / auth / unknown）。
+
 ### POST /api/cloud/tasks/retry
 
 按条件**重试云端下载任务**（2026-11-21）：不依赖任务存活期，失败任务只要仍在保留期内即可重试。
