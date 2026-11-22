@@ -203,3 +203,14 @@ test('ctImportRetryPayloads 只取需重试的行（id 优先，其次卷+路径
   assert.deepStrictEqual(got[1], { transfer_volume: 'baidu', transfer_path: 'jav/2.mp4', force: true });
   assert.deepStrictEqual(got[2], { task_id: 't4', force: true });
 });
+
+test('ctBatchCancelTargets 只取排队中/下载中的勾选项', () => {
+  const tasks = [
+    { id: 'a', status: 'downloading' }, { id: 'b', status: 'pending' },
+    { id: 'c', status: 'failed' }, { id: 'd', status: 'completed' },
+  ];
+  assert.deepStrictEqual(m.ctBatchCancelTargets(tasks, ['a', 'c', 'd']), ['a']);
+  assert.deepStrictEqual(m.ctBatchCancelTargets(tasks, ['a', 'b']), ['a', 'b']);
+  assert.deepStrictEqual(m.ctBatchCancelTargets(tasks, []), []);
+  assert.deepStrictEqual(m.ctBatchCancelTargets(null, ['a']), []);
+});
