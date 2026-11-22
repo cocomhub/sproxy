@@ -87,6 +87,7 @@ function issuesFiltersHtml(cur) {
         issuesEscHtml(issueKindLabel(k)) + '</option>';
     }).join('') + '</select></label>' +
     '<label style="font-size:12px;"><input type="checkbox" id="issues-unresolved"' + checked + '> 只看未解决</label>' +
+    '<button type="button" id="issues-export" class="btn btn-sm">导出CSV</button>' +
     '<button type="button" id="issues-refresh-btn" class="btn btn-sm">刷新</button>' +
     '<button type="button" id="issues-scan-btn" class="btn btn-sm btn-primary">立即审查存储</button>' +
     '<span id="issues-msg" style="font-size:12px;color:var(--text-muted);"></span></div>';
@@ -169,6 +170,30 @@ function issuesCloudRetryPayload(volume, path) {
   return { transfer_volume: String(volume || ''), transfer_path: String(path || ''), force: true };
 }
 
+// issuesCSVField 按 RFC4180 转义单元格（含逗号/引号/换行 ⇒ 用双引号包裹并翻倍内部引号）。
+function issuesCSVField(v) {
+  const str = String(v === undefined || v === null ? '' : v);
+  const needsQuote = str.indexOf(',') >= 0 || str.indexOf('"') >= 0 ||
+    str.indexOf(String.fromCharCode(10)) >= 0 || str.indexOf(String.fromCharCode(13)) >= 0;
+  if (needsQuote) return '"' + str.replace(/"/g, '""') + '"';
+  return str;
+}
+
+// issuesExportCSV 导出事项清单为 CSV（默认导出于"当前筛选结果"，便于 Excel 打开/工单留档）。
+function issuesExportCSV(items) {
+  const head = ['id', 'kind', 'kind_label', 'status', 'volume', 'path', 'attempts', 'occurrences',
+    'retryable', 'first_seen', 'last_seen', 'next_retry_at', 'last_error', 'resolution'];
+  const rows = (Array.isArray(items) ? items : []).map(function (it) {
+    return [
+      it.id, it.kind, issueKindLabel(it.kind), it.status, it.volume, it.path,
+      it.attempts || 0, it.occurrences || 0, it.retryable ? 'yes' : 'no',
+      it.first_seen, it.last_seen, it.next_retry_at, it.last_error, it.resolution,
+    ].map(issuesCSVField).join(',');
+  });
+  return head.join(',') + String.fromCharCode(10) + rows.join(String.fromCharCode(10)) +
+    (rows.length ? String.fromCharCode(10) : '');
+}
+
 // issuesRowDetailHtml 渲染单行详情（展开用）：时间线/重试计划/解决说明——均为服务端已有字段。
 // 为什么（2026-11-22）：列表只给摘要，排障需要"首次/最近出现、自动重试次数与下次时间、人工解决说明"。
 function issuesRowDetailHtml(it) {
@@ -243,6 +268,8 @@ if (typeof module !== 'undefined' && module.exports) {
     issueKindOptions: issueKindOptions,
     issuesBatchRetryPayloads: issuesBatchRetryPayloads,
     issuesRowDetailHtml: issuesRowDetailHtml,
+    issuesCSVField: issuesCSVField,
+    issuesExportCSV: issuesExportCSV,
     issuesListQuery: issuesListQuery,
     escHtml: issuesEscHtml,
   };

@@ -146,3 +146,20 @@ test('issuesRowDetailHtml 展示时间线/重试计划/解决说明', () => {
   assert.ok(html.includes('人工需要重传'));
   assert.strictEqual(m.issuesRowDetailHtml(null), '');
 });
+
+test('issuesCSVField/issuesExportCSV 按 RFC4180 转义', () => {
+  assert.strictEqual(m.issuesCSVField('a,b'), '"a,b"');
+  assert.strictEqual(m.issuesCSVField('he said "hi"'), '"he said ""hi"""');
+  assert.strictEqual(m.issuesCSVField('line1\nline2'), '"line1\nline2"');
+  assert.strictEqual(m.issuesCSVField(undefined), '');
+  const csv = m.issuesExportCSV([
+    { id: 'i1', kind: 'cloud_download_failed', status: 'needs_human', volume: 'baidu',
+      path: 'jav/a,b.mp4', attempts: 3, occurrences: 5, retryable: false, last_error: 'x' },
+  ]);
+  const lines = csv.trim().split('\n');
+  assert.ok(lines[0].startsWith('id,kind,kind_label,status'));
+  assert.ok(lines[1].includes('"jav/a,b.mp4"'));       // 逗号转义
+  assert.ok(lines[1].includes('云端下载失败'));         // 中文类型标签
+  assert.ok(lines[1].includes(',no,'));                 // retryable
+  assert.strictEqual(m.issuesExportCSV([]).trim().split('\n').length, 1);
+});

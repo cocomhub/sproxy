@@ -1275,6 +1275,17 @@ async function showIssues() {
     });
   });
 
+  const exportBtn = document.getElementById('issues-export');
+  if (exportBtn) exportBtn.addEventListener('click', function () {
+    // 导出**当前筛选结果**（与用户所见一致）。
+    const blob = new Blob([issuesExportCSV(window.__issuesItems || [])], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'issues.csv';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+  });
+
   const scanBtn = document.getElementById('issues-scan-btn');
   if (scanBtn) scanBtn.addEventListener('click', async function () {
     const msg = document.getElementById('issues-msg');

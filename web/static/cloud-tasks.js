@@ -80,6 +80,10 @@ function ctFilterTasks(tasks, filters) {
     if (f.status && t.status !== f.status) return false;
     if (f.failedOnly && t.status !== 'failed' && t.status !== 'cancelled') return false;
     if (f.volume && (!t.transfer || t.transfer.volume !== f.volume)) return false;
+    if (f.minSizeMB) {
+      const mb = Number(t.total_size || 0) / 1048576;
+      if (!(mb >= Number(f.minSizeMB))) return false;
+    }
     if (f.cls) {
       const cls = (t.diagnostics && t.diagnostics.last_error_class) || 'unknown';
       if (cls !== f.cls) return false;
@@ -448,6 +452,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       { failedOnly: false, volume: '', query: '', cls: '' });
     const filters = {
       failedOnly: !!st.failedOnly,
+      minSizeMB: st.minSizeMB || 0,
       sort: st.sort || 'updated',
       sortDir: st.sortDir || 'desc',
       volume: st.volume || '',
@@ -477,6 +482,8 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       '<label>关键字 <input id="ct-query" type="search" placeholder="文件名/转存路径" value="' + ctEsc(filters.query || '') + '" style="width:180px;"></label>' +
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
+      '<label>≥ <input id="ct-minsize" type="number" min="0" step="100" placeholder="MiB" value="' +
+      (filters.minSizeMB ? filters.minSizeMB : '') + '" style="width:80px;"> MiB</label>' +
       '<label>排序 <select id="ct-sort">' +
       [['updated', '更新时间'], ['status', '状态'], ['name', '文件名'], ['size', '体积']]
         .map(function (o) {
@@ -542,6 +549,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
     // 操作结果消息回填（必须在 innerHTML 渲染**之后**，否则 #ct-msg 还不存在）。
     if (window.__ctMsg) setCtMsg(window.__ctMsg);
+    const minSizeEl = document.getElementById('ct-minsize');
+    if (minSizeEl) minSizeEl.addEventListener('change', function () {
+      st.minSizeMB = Number(minSizeEl.value) || 0; window.__ctOffset = 0; void window.showCloudTasks();
+    });
     const sortSel = document.getElementById('ct-sort');
     if (sortSel) sortSel.addEventListener('change', function () { st.sort = sortSel.value; void window.showCloudTasks(); });
     const sortDirSel = document.getElementById('ct-sort-dir');
