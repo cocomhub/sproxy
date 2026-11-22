@@ -130,3 +130,23 @@ test('ctVolumes 去重排序；ctCopyText 输出 ID/源/目标', () => {
   assert.ok(txt.includes('t1') && txt.includes('https://x/1') && txt.includes('baidu:jav/1.mp4'));
   assert.strictEqual(m.ctCopyText(null), '');
 });
+
+test('ctFilterTasks 支持按失败类别过滤', () => {
+  const tasks = [
+    { id: 'a', status: 'failed', diagnostics: { last_error_class: 'throttled' } },
+    { id: 'b', status: 'failed', diagnostics: { last_error_class: 'disk_full' } },
+    { id: 'c', status: 'failed' }, // 无类别 ⇒ unknown
+  ];
+  assert.strictEqual(m.ctFilterTasks(tasks, { cls: 'throttled' }).length, 1);
+  assert.strictEqual(m.ctFilterTasks(tasks, { cls: 'unknown' }).length, 1);
+});
+
+test('ctPageRange 夹取边界；ctPagerHtml 显示区间并可禁用按钮', () => {
+  assert.deepStrictEqual(m.ctPageRange(0, 100, 250), [0, 100]);
+  assert.deepStrictEqual(m.ctPageRange(200, 100, 250), [200, 250]);
+  assert.deepStrictEqual(m.ctPageRange(999, 100, 250), [200, 250]); // 越界夹到最后一页起点
+  assert.deepStrictEqual(m.ctPageRange(0, 100, 0), [0, 0]);
+  const html = m.ctPagerHtml(250, 0, 100);
+  assert.ok(html.includes('第 1–100 条 / 共 250'));
+  assert.ok(html.includes('id="ct-prev"') && html.includes('disabled'));
+});

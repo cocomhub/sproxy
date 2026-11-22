@@ -125,3 +125,43 @@ func TestConsoleOverviewAndFilters(t *testing.T) {
 		}
 	}
 }
+
+// TestConsoleCardsJumpAndPaging 覆盖概览卡片一键跳转（带过滤）、分页控件与最近审计流（2026-11-22）。
+func TestConsoleCardsJumpAndPaging(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/j.bin","filename":"j.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	// ① 概览底部「最近审计事件」区块存在（无事件也显示占位）。
+	if err := waitLoc(page, "#overview-audit", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("概览审计流未渲染: %v", err)
+	}
+
+	// ② 点「云端任务失败」卡片 → 切到云端任务且**只看失败**已勾选；分页控件存在。
+	if err := page.Locator("#overview-cards [data-card='cloud-failed']").Click(); err != nil {
+		t.Fatalf("点击失败卡片: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel #ct-failed-only", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("云端任务面板未就绪: %v", err)
+	}
+	checked, _ := page.Locator("#ct-failed-only").IsChecked()
+	if !checked {
+		t.Fatal("卡片跳转后「只看失败」未勾选")
+	}
+	if n, _ := page.Locator("#ct-prev").Count(); n != 1 {
+		t.Fatalf("分页控件缺失（ct-prev）")
+	}
+}

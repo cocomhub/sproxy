@@ -32,3 +32,22 @@ test('overviewCardsHtml 渲染每张卡片（0 也显示）', () => {
   assert.ok(html.includes('data-card="issues-human"'));
   assert.ok(html.includes('>1<'));
 });
+
+test('overviewCardAction 卡片→分区与过滤映射', () => {
+  assert.deepStrictEqual(m.overviewCardAction('cloud-failed'), { tab: 'cloud-tasks', filters: { failedOnly: true } });
+  assert.deepStrictEqual(m.overviewCardAction('cloud-running'), { tab: 'cloud-tasks', filters: { status: 'downloading' } });
+  assert.deepStrictEqual(m.overviewCardAction('issues-human'), { tab: 'issues', status: 'needs_human' });
+  assert.deepStrictEqual(m.overviewCardAction('nope'), { tab: 'stats', filters: {} });
+});
+
+test('overviewAuditHtml 渲染最近事件（最多 5 条，空有提示）', () => {
+  assert.ok(m.overviewAuditHtml([]).includes('暂无事件'));
+  const html = m.overviewAuditHtml([
+    { action: 'cloud_task_retry', object: 'cloud-1', result: 'success' },
+    { action: 'delete', object: 'a.mp4', result: 'error' },
+  ]);
+  assert.ok(html.includes('cloud_task_retry'));
+  assert.ok(html.includes('#c0392b')); // 失败用红色
+  const many = m.overviewAuditHtml(new Array(10).fill({ action: 'x', result: 'success' }));
+  assert.strictEqual((many.match(/<li>/g) || []).length, 5);
+});
