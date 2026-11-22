@@ -78,6 +78,9 @@ function issuesListHtml(data) {
       '<td style="padding:6px 8px;color:' + issueStatusColor(it.status) + ';white-space:nowrap;">' +
       issuesEscHtml(issueStatusLabel(it.status)) + '</td>' +
       '<td style="padding:6px 8px;font-family:monospace;font-size:12px;">' + issuesEscHtml(it.kind) + '</td>' +
+      '<td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="issues-pick" ' +
+      'data-id="' + issuesEscHtml(it.id) + '" data-kind="' + issuesEscHtml(it.kind) + '" ' +
+      'data-volume="' + issuesEscHtml(it.volume) + '" data-path="' + issuesEscHtml(it.path) + '"></td>' +
       '<td style="padding:6px 8px;">' + issuesEscHtml(it.volume) + '</td>' +
       '<td style="padding:6px 8px;font-family:monospace;font-size:12px;word-break:break-all;">' + issuesEscHtml(it.path) + '</td>' +
       '<td style="padding:6px 8px;font-size:12px;color:var(--text-secondary);">' + issuesEscHtml(retry) +
@@ -92,7 +95,14 @@ function issuesListHtml(data) {
         : '') +
       '</td></tr>';
   }).join('');
-  return '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:var(--bg-hover);">' +
+  return '<div style="margin-bottom:6px;font-size:12px;">' +
+    '<label><input type="checkbox" id="issues-pick-all"> 全选</label>' +
+    '<button type="button" class="btn btn-sm" id="issues-batch-retry" style="margin-left:8px;">批量重试下载</button>' +
+    '<button type="button" class="btn btn-sm" id="issues-batch-resolve" style="margin-left:6px;">批量标记已解决</button>' +
+    '<span id="issues-batch-msg" style="margin-left:10px;color:var(--text-muted);"></span>' +
+    '</div>' +
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:var(--bg-hover);">' +
+    '<th style="padding:6px 8px;width:24px;"></th>' +
     '<th style="padding:6px 8px;text-align:left;">状态</th>' +
     '<th style="padding:6px 8px;text-align:left;">类型</th>' +
     '<th style="padding:6px 8px;text-align:left;">卷</th>' +
@@ -128,6 +138,16 @@ function issuesDetailHtml(item) {
 // 与服务端 POST /api/cloud/tasks/retry 的 transfer_volume + transfer_path 精确匹配约定一致。
 function issuesCloudRetryPayload(volume, path) {
   return { transfer_volume: String(volume || ''), transfer_path: String(path || ''), force: true };
+}
+
+// issuesBatchRetryPayloads 由勾选项（含 kind/volume/path）生成云端下载重试请求体列表。
+// 只保留 `cloud_download_failed` 且（卷,路径）齐全的项——其余无法精确定位，跳过而非误试。
+function issuesBatchRetryPayloads(picked) {
+  return (Array.isArray(picked) ? picked : []).filter(function (p) {
+    return p && p.kind === 'cloud_download_failed' && p.volume && p.path;
+  }).map(function (p) {
+    return issuesCloudRetryPayload(p.volume, p.path);
+  });
 }
 
 function issuesResolveQuery(id, note) {
@@ -166,6 +186,7 @@ if (typeof module !== 'undefined' && module.exports) {
     issuesDetailHtml: issuesDetailHtml,
     issuesResolveQuery: issuesResolveQuery,
     issuesCloudRetryPayload: issuesCloudRetryPayload,
+    issuesBatchRetryPayloads: issuesBatchRetryPayloads,
     issuesListQuery: issuesListQuery,
     escHtml: issuesEscHtml,
   };

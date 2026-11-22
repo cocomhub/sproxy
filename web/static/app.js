@@ -915,6 +915,31 @@ function statsRefresh() {
   void showStats();
 }
 
+// renderOverviewCards 渲染「概览」顶部卡片（云端失败/进行中、事项待处理/需人工）。
+//
+// 数据源：GET /api/cloud/tasks + GET /api/issues/stats（互不阻塞，任一失败则该项按 0 显示并提示）。
+async function renderOverviewCards() {
+  const panel = document.getElementById('stats-panel');
+  if (!panel) return;
+  let cloud = null;
+  let issuesStats = null;
+  try {
+    const r = await sclientTransport.coreRequest('GET', '/api/cloud/tasks', {});
+    const data = sclientUtil.decodeJSON(r.body);
+    const tasks = Array.isArray(data) ? data : (data.tasks || []);
+    if (typeof ctSummarize === 'function') cloud = ctSummarize(tasks);
+  } catch (e) { /* 无权限/未登录：卡片显示 0 */ }
+  try {
+    const r2 = await sclientTransport.coreRequest('GET', '/api/issues/stats', {});
+    issuesStats = sclientUtil.decodeJSON(r2.body);
+  } catch (e) { /* 同上 */ }
+  if (typeof overviewCardsHtml !== 'function') return;
+  const host = document.getElementById('overview-cards');
+  const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats));
+  if (host) { host.innerHTML = html; return; }
+  panel.insertAdjacentHTML('afterbegin', '<div id="overview-cards">' + html + '</div>');
+}
+
 // showStats 打开监控弹窗并默认展示 stats tab。
 async function showStats() {
   // 全屏控制台（2026-11-22）：按视口计算尺寸（宽 96vw 限幅 720–1600，高 92vh）；
@@ -950,6 +975,8 @@ async function showStats() {
         '</div>' + notifyTableHtml(ndata.entries || []);
     } catch { /* 通知历史端点不可用/无凭据——跳过该区块 */ notifyHtml = ''; }
     document.getElementById('stats-panel').innerHTML = statsTableHtml(du, rc, data) + notifyHtml;
+    // 概览卡片必须在本段渲染**之后**插入（否则被 innerHTML 覆盖 —— 2026-11-22 实测竞态）。
+    void renderOverviewCards();
     const testBtn = document.getElementById('notify-test-btn');
     if (testBtn) testBtn.addEventListener('click', notifyTest);
   } catch (e) { document.getElementById('stats-panel').innerHTML = '<div style="color:red">错误: ' + e.message + '</div>'; }
@@ -1002,6 +1029,7 @@ function switchStatsTab(tab) {
     el.style.borderBottomColor = on ? 'var(--tab-active)' : 'transparent';
     el.style.color = on ? 'var(--text-primary)' : 'var(--text-secondary)';
   });
+  if (tab === 'stats') void renderOverviewCards();
   if (tab === 'config') void showConfig();
   if (tab === 'hub') void showHub();
   if (tab === 'audit') void showAudit();
@@ -1053,6 +1081,59 @@ async function showIssues() {
   if (statusSel) statusSel.addEventListener('change', function () { void showIssues(); });
   const unBox = document.getElementById('issues-unresolved');
   if (unBox) unBox.addEventListener('change', function () { void showIssues(); });
+  // 事项批量操作（2026-11-22）：全选 / 批量重试下载 / 批量标记已解决。
+  const pickAll = document.getElementById('issues-pick-all');
+  if (pickAll) {
+    pickAll.addEventListener('change', function () {
+      panel.querySelectorAll('.issues-pick').forEach(function (cb) { cb.checked = !!pickAll.checked; });
+    });
+  }
+  const pickedItems = function () {
+    return Array.prototype.slice.call(panel.querySelectorAll('.issues-pick:checked')).map(function (cb) {
+      return {
+        id: cb.getAttribute('data-id'), kind: cb.getAttribute('data-kind'),
+        volume: cb.getAttribute('data-volume'), path: cb.getAttribute('data-path'),
+      };
+    });
+  };
+  const batchRetry = document.getElementById('issues-batch-retry');
+  if (batchRetry) {
+    batchRetry.addEventListener('click', async function () {
+      const payloads = issuesBatchRetryPayloads(pickedItems());
+      const msg = document.getElementById('issues-batch-msg');
+      if (!payloads.length) { if (msg) msg.textContent = '勾选项中没有可重试的云端下载失败事项'; return; }
+      let ok = 0;
+      for (const pl of payloads) {
+        try {
+          await sclientTransport.coreRequest('POST', '/api/cloud/tasks/retry', {
+            bodyBytes: new TextEncoder().encode(JSON.stringify(pl)),
+            headers: { 'Content-Type': 'application/json' },
+          });
+          ok++;
+        } catch (e) { /* 单条失败不中断 */ }
+      }
+      if (msg) msg.textContent = '已提交 ' + ok + '/' + payloads.length + ' 个重试';
+      void showIssues();
+    });
+  }
+  const batchResolve = document.getElementById('issues-batch-resolve');
+  if (batchResolve) {
+    batchResolve.addEventListener('click', async function () {
+      const items = pickedItems();
+      const msg = document.getElementById('issues-batch-msg');
+      if (!items.length) { if (msg) msg.textContent = '先勾选事项'; return; }
+      let ok = 0;
+      for (const it of items) {
+        try {
+          await sclientTransport.coreRequest('POST', issuesResolveQuery(it.id, '批量标记'), {});
+          ok++;
+        } catch (e) { /* 单条失败不中断 */ }
+      }
+      if (msg) msg.textContent = '已解决 ' + ok + '/' + items.length + ' 个';
+      void showIssues();
+    });
+  }
+
   // 云端下载失败：一键重试（按事项的 卷+路径 精确定位任务，2026-11-22）。
   panel.querySelectorAll('.issues-retry-dl-btn').forEach(function (btn) {
     btn.addEventListener('click', async function () {
