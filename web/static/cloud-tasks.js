@@ -106,6 +106,33 @@ function ctPageRange(offset, limit, total) {
   return [off, end];
 }
 
+// ctSortTasks 排序任务（不改变入参；返回新数组）。
+// key: status | name | updated | size；dir: 'asc' | 'desc'。
+// 排序稳定性：同键值按 id 兜底，保证多次渲染顺序一致（避免列表"跳动"）。
+function ctSortTasks(tasks, key, dir) {
+  const list = (Array.isArray(tasks) ? tasks : []).slice();
+  const desc = dir === 'desc';
+  const rank = { downloading: 0, pending: 1, failed: 2, cancelled: 3, completed: 4 };
+  const val = function (t) {
+    switch (key) {
+      case 'status': return rank[t.status] === undefined ? 9 : rank[t.status];
+      case 'name': return String(t.filename || '');
+      case 'size': return Number(t.total_size || 0);
+      case 'updated': return Date.parse(t.updated_at || '') || 0;
+      default: return 0;
+    }
+  };
+  list.sort(function (a, b) {
+    const va = val(a), vb = val(b);
+    let c;
+    if (typeof va === 'string' || typeof vb === 'string') c = String(va).localeCompare(String(vb));
+    else c = va - vb;
+    if (c === 0) c = String(a.id || '').localeCompare(String(b.id || ''));
+    return desc ? -c : c;
+  });
+  return list;
+}
+
 // ctExportTSV 把任务清单导出为 TSV（表头 + 每行一条），便于换环境复跑/工单留档。
 // 列：id / status / stage / error_class / attempts / volume / path / url / partial_bytes
 function ctExportTSV(tasks) {
@@ -372,6 +399,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ctFilterTasks: ctFilterTasks,
     ctVolumes: ctVolumes,
     ctPageRange: ctPageRange,
+    ctSortTasks: ctSortTasks,
     ctExportTSV: ctExportTSV,
     ctFailedLastHour: ctFailedLastHour,
     ctParseTSV: ctParseTSV,
@@ -420,6 +448,8 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       { failedOnly: false, volume: '', query: '', cls: '' });
     const filters = {
       failedOnly: !!st.failedOnly,
+      sort: st.sort || 'updated',
+      sortDir: st.sortDir || 'desc',
       volume: st.volume || '',
       query: st.query || '',
       cls: st.cls || '',
@@ -447,11 +477,20 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       '<label>关键字 <input id="ct-query" type="search" placeholder="文件名/转存路径" value="' + ctEsc(filters.query || '') + '" style="width:180px;"></label>' +
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
+      '<label>排序 <select id="ct-sort">' +
+      [['updated', '更新时间'], ['status', '状态'], ['name', '文件名'], ['size', '体积']]
+        .map(function (o) {
+          return '<option value="' + o[0] + '"' + (filters.sort === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+        }).join('') + '</select></label>' +
+      '<label><select id="ct-sort-dir">' +
+      [['desc', '降序'], ['asc', '升序']].map(function (o) {
+        return '<option value="' + o[0] + '"' + (filters.sortDir === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></label>' +
       '<button id="ct-export">导出TSV</button>' +
       '<label style="cursor:pointer;">导入TSV重试<input id="ct-import" type="file" accept=".tsv,text/tab-separated-values" style="display:none;"></label>' +
       '</div>' + (function renderPaged() {
         // 分页在**过滤之后**做（过滤是客户端全量语义，服务端未提供卷/类别过滤）。
-        const filtered = ctFilterTasks(tasks, filters);
+        const filtered = ctSortTasks(ctFilterTasks(tasks, filters), filters.sort, filters.sortDir);
         const limit = 100;
         const [start, end] = ctPageRange(window.__ctOffset || 0, limit, filtered.length);
         window.__ctOffset = start;
@@ -503,6 +542,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
     // 操作结果消息回填（必须在 innerHTML 渲染**之后**，否则 #ct-msg 还不存在）。
     if (window.__ctMsg) setCtMsg(window.__ctMsg);
+    const sortSel = document.getElementById('ct-sort');
+    if (sortSel) sortSel.addEventListener('change', function () { st.sort = sortSel.value; void window.showCloudTasks(); });
+    const sortDirSel = document.getElementById('ct-sort-dir');
+    if (sortDirSel) sortDirSel.addEventListener('change', function () { st.sortDir = sortDirSel.value; void window.showCloudTasks(); });
     const syncHash = function () {
       if (typeof window.syncCloudFiltersHash === 'function') window.syncCloudFiltersHash();
     };

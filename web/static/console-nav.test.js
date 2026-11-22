@@ -58,3 +58,13 @@ test('consoleStateFromHash 解析 tab + 参数（与 consoleHashFor 对称）', 
   assert.deepStrictEqual(m.consoleStateFromHash('#/console/issues'), { tab: 'issues', params: {} });
   assert.deepStrictEqual(m.consoleStateFromHash('#/files').tab, '');
 });
+
+test('consoleNeighborTab 循环前后；consoleTabByOrdinal 1-based', () => {
+  const ids = m.consoleTabIDs();
+  assert.strictEqual(m.consoleNeighborTab('stats', 1), ids[1]);
+  assert.strictEqual(m.consoleNeighborTab('stats', -1), ids[ids.length - 1]); // 循环到末尾
+  assert.strictEqual(m.consoleNeighborTab('unknown', 1), ids[0]);
+  assert.strictEqual(m.consoleTabByOrdinal(1), 'stats');
+  assert.strictEqual(m.consoleTabByOrdinal(2), 'cloud-tasks');
+  assert.strictEqual(m.consoleTabByOrdinal(99), '');
+});
