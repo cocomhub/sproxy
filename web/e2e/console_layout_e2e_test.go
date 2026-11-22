@@ -453,3 +453,32 @@ func TestConsoleIssuesExportAndSizeFilter(t *testing.T) {
 	//    本测试环境 /api/issues 未装配 issue center，面板只显示占位，故不在此断言按钮。
 	_ = baseURL
 }
+
+// TestConsoleHelpPanel 覆盖 `?` 打开/关闭快捷键帮助（2026-11-23）。
+func TestConsoleHelpPanel(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {})
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	if err := page.Keyboard().Press("?"); err != nil {
+		t.Fatalf("按下 ?: %v", err)
+	}
+	if err := waitLoc(page, "#console-help", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("帮助面板未打开: %v", err)
+	}
+	text, _ := page.Locator("#console-help").TextContent()
+	if !strings.Contains(text, "Alt+") || !strings.Contains(text, "Esc") {
+		t.Fatalf("帮助内容缺少快捷键: %q", text)
+	}
+	if err := page.Keyboard().Press("?"); err != nil {
+		t.Fatalf("再次按下 ?: %v", err)
+	}
+	if err := waitLoc(page, "#console-help", playwright.WaitForSelectorStateDetached, 5000); err != nil {
+		t.Fatalf("帮助面板未关闭: %v", err)
+	}
+}

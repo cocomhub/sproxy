@@ -3992,7 +3992,26 @@ document.addEventListener('DOMContentLoaded', function() {
     var modal = document.getElementById('stats-modal');
     var open = modal && modal.style.display === 'flex';
     if (e.key === 'Escape' && open) { hideStats(); return; }
-    if (!open || !e.altKey) return;
+    if (!open) return;
+    // ?：显示/隐藏帮助（Shift+/ 在各键盘布局下均为 '?'）。
+    if (e.key === '?') {
+      e.preventDefault();
+      const shell = document.getElementById('console-shell');
+      const helpEl = document.getElementById('console-help');
+      if (helpEl) { helpEl.remove(); return; }
+      if (shell && typeof consoleHelpHtml === 'function') {
+        shell.style.position = 'relative';
+        shell.insertAdjacentHTML('beforeend', consoleHelpHtml());
+      }
+      return;
+    }
+    // /：在云端任务分区聚焦关键字搜索。
+    if (e.key === '/') {
+      const q = document.getElementById('ct-query');
+      if (q) { e.preventDefault(); q.focus(); }
+      return;
+    }
+    if (!e.altKey) return;
     // 焦点在输入控件时不劫持（Alt 组合仍可能被用户用于输入法/系统快捷键）。
     var tag = (e.target && e.target.tagName) || '';
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;

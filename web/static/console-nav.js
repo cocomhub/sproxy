@@ -100,6 +100,29 @@ function consoleTabByOrdinal(n) {
   return idx >= 0 && idx < ids.length ? ids[idx] : '';
 }
 
+// consoleShortcuts 是控制台快捷键清单（单一事实源：帮助面板与文档一致）。
+const CONSOLE_SHORTCUTS = [
+  { key: '?', desc: '显示/隐藏本帮助' },
+  { key: 'Esc', desc: '关闭控制台' },
+  { key: 'Alt+← / Alt+→', desc: '切换上一个/下一个分区' },
+  { key: 'Alt+1…9', desc: '直接跳到第 N 个分区' },
+  { key: '/', desc: '在云端任务分区聚焦关键字搜索' },
+];
+
+// consoleHelpHtml 渲染快捷键帮助面板（纯函数，便于单测）。
+function consoleHelpHtml() {
+  let rows = '';
+  CONSOLE_SHORTCUTS.forEach(function (s) {
+    rows += '<tr><td style="padding:4px 10px 4px 0;font-family:monospace;white-space:nowrap;">' +
+      s.key + '</td><td style="padding:4px 0;">' + s.desc + '</td></tr>';
+  });
+  return '<div id="console-help" style="position:absolute;right:16px;top:52px;z-index:5;' +
+    'background:var(--modal-bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px;' +
+    'box-shadow:0 8px 24px rgba(0,0,0,.18);font-size:12px;">' +
+    '<div style="font-weight:600;margin-bottom:6px;">键盘快捷键</div>' +
+    '<table>' + rows + '</table></div>';
+}
+
 // consoleNavHtml 生成左侧导航 HTML（当前分区高亮；计数徽标可选）。
 function consoleNavHtml(active, badges) {
   const cur = consoleTabValid(active) ? active : 'stats';
@@ -140,6 +163,8 @@ if (typeof module !== 'undefined' && module.exports) {
     tabFromHash: tabFromHash,
     consoleStateFromHash: consoleStateFromHash,
     consoleNavHtml: consoleNavHtml,
+    CONSOLE_SHORTCUTS: CONSOLE_SHORTCUTS,
+    consoleHelpHtml: consoleHelpHtml,
     consoleNeighborTab: consoleNeighborTab,
     consoleTabByOrdinal: consoleTabByOrdinal,
     consoleLayoutStyle: consoleLayoutStyle,

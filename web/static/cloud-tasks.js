@@ -254,6 +254,18 @@ function ctBatchRetryPayloads(ids) {
     .map(function (id) { return ctRetryPayload(id, true); });
 }
 
+// ctClassRetryPayloads 选出指定失败类别的可重试任务并生成请求体。
+// 用途：概览/汇总里点「源不可达 3」这类聚合，直接批量重试该类别（服务端 retry 时会自动换源，
+// 见 P4 `rotateSource`）。只取 failed/cancelled，避免把运行中任务也重试。
+function ctClassRetryPayloads(tasks, cls) {
+  const want = cls || 'unknown';
+  return (Array.isArray(tasks) ? tasks : []).filter(function (t) {
+    if (!t || (t.status !== 'failed' && t.status !== 'cancelled')) return false;
+    const c = (t.diagnostics && t.diagnostics.last_error_class) || 'unknown';
+    return c === want;
+  }).map(function (t) { return ctRetryPayload(t.id, true); });
+}
+
 // ctBatchCancelTargets 由勾选 ID 与任务列表筛出**可取消**的任务（pending/downloading）。
 // 已完成/失败/取消的行不产生取消请求（否则会得到无意义 4xx）。
 function ctBatchCancelTargets(tasks, ids) {
@@ -320,12 +332,16 @@ function ctSummaryHtml(tasks) {
   if (s.total === 0) return '<div style="color:var(--text-secondary);font-size:13px;">暂无云端下载任务</div>';
   const cls = ctGroupByClass(tasks);
   const failParts = Object.keys(cls).map(function (k) {
-    return ctClassInfo(k).label + ' ' + cls[k];
+    // 可点击 chip：一键批量重试该类别（源类失败服务端会自动换源）。
+    return '<button class="ct-class-chip" data-class="' + ctEsc(k) +
+      '" style="border:none;background:rgba(192,57,43,.12);color:#c0392b;border-radius:10px;' +
+      'padding:2px 8px;margin-right:4px;cursor:pointer;font-size:12px;" title="批量重试该类别">' +
+      ctEsc(ctClassInfo(k).label) + ' ' + cls[k] + '</button>';
   });
   let html = '<div style="font-size:13px;margin-bottom:6px;">总 ' + s.total +
     '｜进行中 ' + s.running + '｜完成 ' + s.completed + '｜失败 ' + s.failed +
     '｜取消 ' + s.cancelled;
-  if (failParts.length) html += '（' + ctEsc(failParts.join('，')) + '）';
+  if (failParts.length) html += '（' + failParts.join('') + '）';
   return html + '</div>';
 }
 
@@ -416,6 +432,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ctBatchRetryPayloads: ctBatchRetryPayloads,
     ctFailuresOnly: ctFailuresOnly,
     ctBatchCancelTargets: ctBatchCancelTargets,
+    ctClassRetryPayloads: ctClassRetryPayloads,
     ctDetailHtml: ctDetailHtml,
     ctSummaryHtml: ctSummaryHtml,
     ctRowHtml: ctRowHtml,
@@ -553,6 +570,26 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (minSizeEl) minSizeEl.addEventListener('change', function () {
       st.minSizeMB = Number(minSizeEl.value) || 0; window.__ctOffset = 0; void window.showCloudTasks();
     });
+    panel.querySelectorAll('.ct-class-chip').forEach(function (chip) {
+      chip.addEventListener('click', async function () {
+        const cls = chip.getAttribute('data-class');
+        const payloads = ctClassRetryPayloads(tasks, cls);
+        if (!payloads.length) { setCtMsg('该类别的任务均不可重试'); return; }
+        let ok = 0, failed = 0;
+        for (const pl of payloads) {
+          try {
+            await window.sclientTransport.coreRequest('POST', '/api/cloud/tasks/retry', {
+              bodyBytes: new TextEncoder().encode(JSON.stringify(pl)),
+              headers: { 'Content-Type': 'application/json' },
+            });
+            ok++;
+          } catch (e) { failed++; }
+        }
+        setCtMsg('按类别重试（' + ctClassInfo(cls).label + '）：提交 ' + ok + ' 个，失败 ' + failed + ' 个');
+        await window.showCloudTasks();
+      });
+    });
+
     const sortSel = document.getElementById('ct-sort');
     if (sortSel) sortSel.addEventListener('change', function () { st.sort = sortSel.value; void window.showCloudTasks(); });
     const sortDirSel = document.getElementById('ct-sort-dir');

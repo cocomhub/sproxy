@@ -68,3 +68,11 @@ test('consoleNeighborTab 循环前后；consoleTabByOrdinal 1-based', () => {
   assert.strictEqual(m.consoleTabByOrdinal(2), 'cloud-tasks');
   assert.strictEqual(m.consoleTabByOrdinal(99), '');
 });
+
+test('consoleHelpHtml 列出全部快捷键（与 CONSOLE_SHORTCUTS 单一事实源一致）', () => {
+  const html = m.consoleHelpHtml();
+  m.CONSOLE_SHORTCUTS.forEach((s) => {
+    assert.ok(html.includes(s.key), '缺少快捷键 ' + s.key);
+  });
+  assert.ok(html.includes('id="console-help"'));
+});

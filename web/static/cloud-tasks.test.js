@@ -238,3 +238,15 @@ test('ctFilterTasks 支持体积阈值（minSizeMB）', () => {
   assert.deepStrictEqual(m.ctFilterTasks(tasks, { minSizeMB: 100 }).map((t) => t.id), ['b']);
   assert.deepStrictEqual(m.ctFilterTasks(tasks, { minSizeMB: 0 }).map((t) => t.id), ['a', 'b', 'c']);
 });
+
+test('ctClassRetryPayloads 按失败类别生成重试体（只取 failed/cancelled）', () => {
+  const tasks = [
+    { id: 'a', status: 'failed', diagnostics: { last_error_class: 'throttled' } },
+    { id: 'b', status: 'failed', diagnostics: { last_error_class: 'throttled' } },
+    { id: 'c', status: 'downloading', diagnostics: { last_error_class: 'throttled' } },
+    { id: 'd', status: 'failed' }, // unknown
+  ];
+  assert.deepStrictEqual(m.ctClassRetryPayloads(tasks, 'throttled').map((p) => p.task_id), ['a', 'b']);
+  assert.deepStrictEqual(m.ctClassRetryPayloads(tasks, 'unknown').map((p) => p.task_id), ['d']);
+  assert.deepStrictEqual(m.ctClassRetryPayloads(tasks, 'disk_full'), []);
+});
