@@ -362,3 +362,39 @@ func TestConsoleCardJumpWritesDeepLink(t *testing.T) {
 		t.Fatalf("卡片跳转未写深链: %v（want #/console/cloud-tasks?failed=1）", h)
 	}
 }
+
+// TestConsoleKeyboardNav 锁定键盘导航：Alt+→ 切下一个分区、Alt+1 回概览、Esc 关闭（2026-11-22）。
+func TestConsoleKeyboardNav(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {})
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	// Alt+→ ⇒ 第二个分区（云端任务）。
+	if err := page.Keyboard().Press("Alt+ArrowRight"); err != nil {
+		t.Fatalf("Alt+ArrowRight: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("Alt+→ 未切到云端任务: %v", err)
+	}
+
+	// Alt+1 ⇒ 概览（第一个分区）。
+	if err := page.Keyboard().Press("Alt+1"); err != nil {
+		t.Fatalf("Alt+1: %v", err)
+	}
+	if err := waitLoc(page, "#stats-panel", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("Alt+1 未回到概览: %v", err)
+	}
+
+	// Esc ⇒ 关闭控制台。
+	if err := page.Keyboard().Press("Escape"); err != nil {
+		t.Fatalf("Escape: %v", err)
+	}
+	if err := waitLoc(page, "#stats-modal", playwright.WaitForSelectorStateHidden, 5000); err != nil {
+		t.Fatalf("Esc 未关闭控制台: %v", err)
+	}
+}

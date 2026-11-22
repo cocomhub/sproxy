@@ -214,3 +214,17 @@ test('ctBatchCancelTargets 只取排队中/下载中的勾选项', () => {
   assert.deepStrictEqual(m.ctBatchCancelTargets(tasks, []), []);
   assert.deepStrictEqual(m.ctBatchCancelTargets(null, ['a']), []);
 });
+
+test('ctSortTasks 支持状态/名称/体积/更新时间（含方向与稳定兜底）', () => {
+  const tasks = [
+    { id: 'a', status: 'completed', filename: 'b.mp4', total_size: 300, updated_at: '2026-11-22T01:00:00Z' },
+    { id: 'b', status: 'failed', filename: 'a.mp4', total_size: 100, updated_at: '2026-11-22T03:00:00Z' },
+    { id: 'c', status: 'downloading', filename: 'c.mp4', total_size: 200, updated_at: '2026-11-22T02:00:00Z' },
+  ];
+  assert.deepStrictEqual(m.ctSortTasks(tasks, 'status', 'asc').map((t) => t.id), ['c', 'b', 'a']);
+  assert.deepStrictEqual(m.ctSortTasks(tasks, 'name', 'asc').map((t) => t.id), ['b', 'a', 'c']);
+  assert.deepStrictEqual(m.ctSortTasks(tasks, 'size', 'desc').map((t) => t.id), ['a', 'c', 'b']);
+  assert.deepStrictEqual(m.ctSortTasks(tasks, 'updated', 'asc').map((t) => t.id), ['a', 'c', 'b']);
+  // 不改入参
+  assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b', 'c']);
+});

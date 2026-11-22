@@ -82,6 +82,24 @@ function tabFromHash(hash) {
   return consoleTabValid(m[1]) ? m[1] : 'stats';
 }
 
+// consoleNeighborTab 返回相邻分区 id（delta=±1；循环）。
+// 用于键盘导航（Alt+←/→）：在控制台内快速前后切换，不依赖鼠标。
+function consoleNeighborTab(current, delta) {
+  const ids = consoleTabIDs();
+  const i = ids.indexOf(current);
+  if (i < 0) return ids[0];
+  const n = ids.length;
+  return ids[((i + (Number(delta) || 1)) % n + n) % n];
+}
+
+// consoleTabByOrdinal 返回第 n 个分区（1-based；越界 ⇒ 空串）。
+// 用于 Alt+1..9 直接跳转。
+function consoleTabByOrdinal(n) {
+  const idx = Number(n) - 1;
+  const ids = consoleTabIDs();
+  return idx >= 0 && idx < ids.length ? ids[idx] : '';
+}
+
 // consoleNavHtml 生成左侧导航 HTML（当前分区高亮；计数徽标可选）。
 function consoleNavHtml(active, badges) {
   const cur = consoleTabValid(active) ? active : 'stats';
@@ -122,6 +140,8 @@ if (typeof module !== 'undefined' && module.exports) {
     tabFromHash: tabFromHash,
     consoleStateFromHash: consoleStateFromHash,
     consoleNavHtml: consoleNavHtml,
+    consoleNeighborTab: consoleNeighborTab,
+    consoleTabByOrdinal: consoleTabByOrdinal,
     consoleLayoutStyle: consoleLayoutStyle,
   };
 }

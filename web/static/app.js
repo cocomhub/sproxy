@@ -3973,11 +3973,29 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('stats-close-btn').addEventListener('click', hideStats);
   document.getElementById('stats-refresh-btn').addEventListener('click', statsRefresh);
   document.getElementById('stats-close-modal-btn').addEventListener('click', hideStats);
-  // Esc 关闭控制台（2026-11-22：全屏界面必须有键盘退出，避免"困在弹窗里"）。
+  // Esc 关闭 + 键盘导航（2026-11-22）：全屏界面必须可纯键盘操作。
+  // - Esc：关闭控制台
+  // - Alt+←/→：前后切换分区（循环）
+  // - Alt+1..9：直接跳到第 N 个分区
   document.addEventListener('keydown', function (e) {
-    if (e.key !== 'Escape') return;
     var modal = document.getElementById('stats-modal');
-    if (modal && modal.style.display === 'flex') hideStats();
+    var open = modal && modal.style.display === 'flex';
+    if (e.key === 'Escape' && open) { hideStats(); return; }
+    if (!open || !e.altKey) return;
+    // 焦点在输入控件时不劫持（Alt 组合仍可能被用户用于输入法/系统快捷键）。
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      var active = document.querySelector('.stats-tab.active');
+      var cur = active ? active.id.replace('-tab', '') : 'stats';
+      var next = consoleNeighborTab(cur, e.key === 'ArrowRight' ? 1 : -1);
+      if (next) { e.preventDefault(); switchStatsTab(next); }
+      return;
+    }
+    if (/^[1-9]$/.test(e.key)) {
+      var tab = consoleTabByOrdinal(e.key);
+      if (tab) { e.preventDefault(); switchStatsTab(tab); }
+    }
   });
   // 监控弹窗标签页切换
   document.getElementById('stats-tab').addEventListener('click', function() { switchStatsTab('stats'); });
