@@ -11,7 +11,23 @@
 // overviewCards 汇总卡片数据。
 // cloud: {total, running, completed, failed, cancelled}（ctSummarize 输出）
 // issues: {open, retrying, needs_human, resolved}（服务端 stats）
-function overviewCards(cloud, issues, failedLastHour) {
+// overviewStorage 汇总存储水位（volumes: [{name, capacity, usage, allowed, state}]）。
+// 只统计 capacity>0 的卷；返回 {capacity, usage, percent}（无容量信息 ⇒ percent=null）。
+function overviewStorage(volumes) {
+  let cap = 0, use = 0;
+  (Array.isArray(volumes) ? volumes : []).forEach(function (v) {
+    if (!v) return;
+    const c = Number(v.capacity || 0);
+    if (!(c > 0)) return;
+    cap += c;
+    use += Number(v.usage || 0);
+  });
+  if (cap <= 0) return { capacity: 0, usage: 0, percent: null };
+  const pct = Math.round((use / cap) * 100);
+  return { capacity: cap, usage: use, percent: pct > 100 ? 100 : pct };
+}
+
+function overviewCards(cloud, issues, failedLastHour, storage) {
   const c = cloud || {};
   const i = issues || {};
   const pendingIssues = Number(i.open || 0) + Number(i.retrying || 0);
@@ -24,6 +40,14 @@ function overviewCards(cloud, issues, failedLastHour) {
     { key: 'cloud-running', label: '云端进行中', value: Number(c.running || 0), tone: 'info', hint: '下载/转存中' },
     { key: 'issues-pending', label: '待处理事项', value: pendingIssues, tone: pendingIssues > 0 ? 'warn' : 'ok', hint: '自动重试中或待处理' },
     { key: 'issues-human', label: '需人工接入', value: needsHuman, tone: needsHuman > 0 ? 'bad' : 'ok', hint: '自动重试已放弃' },
+    { key: 'storage-used', label: '存储水位',
+      value: (storage && storage.percent !== null && storage.percent !== undefined) ? Number(storage.percent) : 0,
+      tone: (storage && storage.percent >= 90) ? 'bad' : (storage && storage.percent >= 75 ? 'warn' : 'ok'),
+      hint: (storage && storage.percent !== null && storage.percent !== undefined)
+        ? '已用 ' + (storage.percent) + '%（' + Math.round((storage.usage || 0) / 1073741824) + ' / ' +
+          Math.round((storage.capacity || 0) / 1073741824) + ' GiB）'
+        : '未提供容量信息',
+      unit: '%' },
   ];
 }
 
@@ -70,8 +94,8 @@ function overviewAuditHtml(entries) {
 }
 
 // overviewCardsHtml 渲染卡片区（数值为 0 也显示，避免"看不见=以为没有"）。
-function overviewCardsHtml(cloud, issues, failedLastHour) {
-  const cards = overviewCards(cloud, issues, failedLastHour);
+function overviewCardsHtml(cloud, issues, failedLastHour, storage) {
+  const cards = overviewCards(cloud, issues, failedLastHour, storage);
   let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;">';
   cards.forEach(function (c) {
     html += '<div class="overview-card" data-card="' + c.key + '" title="' + c.hint + '" ' +
@@ -79,7 +103,7 @@ function overviewCardsHtml(cloud, issues, failedLastHour) {
       'border-radius:6px;padding:10px 12px;background:var(--modal-bg);">' +
       '<div style="font-size:12px;color:var(--text-secondary);">' + c.label + '</div>' +
       '<div style="font-size:22px;font-weight:600;color:' + overviewToneColor(c.tone) + ';line-height:1.3;">' +
-      c.value + '</div></div>';
+      c.value + (c.unit || '') + '</div></div>';
   });
   return html + '</div>';
 }
@@ -89,6 +113,7 @@ if (typeof module !== 'undefined' && module.exports) {
     overviewCards: overviewCards,
     overviewToneColor: overviewToneColor,
     overviewCardsHtml: overviewCardsHtml,
+    overviewStorage: overviewStorage,
     overviewCardAction: overviewCardAction,
     overviewAuditHtml: overviewAuditHtml,
   };
