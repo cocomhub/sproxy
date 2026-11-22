@@ -228,3 +228,13 @@ test('ctSortTasks 支持状态/名称/体积/更新时间（含方向与稳定�
   // 不改入参
   assert.deepStrictEqual(tasks.map((t) => t.id), ['a', 'b', 'c']);
 });
+
+test('ctFilterTasks 支持体积阈值（minSizeMB）', () => {
+  const tasks = [
+    { id: 'a', status: 'failed', total_size: 2 * 1048576 },
+    { id: 'b', status: 'failed', total_size: 500 * 1048576 },
+    { id: 'c', status: 'failed' }, // 未知体积 ⇒ 0
+  ];
+  assert.deepStrictEqual(m.ctFilterTasks(tasks, { minSizeMB: 100 }).map((t) => t.id), ['b']);
+  assert.deepStrictEqual(m.ctFilterTasks(tasks, { minSizeMB: 0 }).map((t) => t.id), ['a', 'b', 'c']);
+});

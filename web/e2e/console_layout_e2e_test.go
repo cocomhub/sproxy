@@ -398,3 +398,58 @@ func TestConsoleKeyboardNav(t *testing.T) {
 		t.Fatalf("Esc 未关闭控制台: %v", err)
 	}
 }
+
+// TestConsoleIssuesExportAndSizeFilter 覆盖事项导出CSV按钮与云端任务体积阈值控件（2026-11-22）。
+func TestConsoleIssuesExportAndSizeFilter(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/sz.bin","filename":"sz.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	// ① 云端任务：体积阈值控件存在，输入超大阈值后列表被过滤为空。
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("切换云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#ct-minsize", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("体积阈值控件缺失: %v", err)
+	}
+	if err := page.Locator("#ct-minsize").Fill("1000000"); err != nil {
+		t.Fatalf("填写阈值: %v", err)
+	}
+	if err := page.Locator("#ct-minsize").Press("Enter"); err != nil {
+		t.Fatalf("提交阈值: %v", err)
+	}
+	if _, err := page.Locator("#ct-minsize").Evaluate("el => el.dispatchEvent(new Event('change'))", nil); err != nil {
+		t.Fatalf("触发 change: %v", err)
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(5 * time.Second)
+	for {
+		n, _ := page.Locator("#cloud-tasks-panel tbody tr").Count()
+		if n == 0 {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("体积阈值过滤未生效（仍有 %d 行）", n)
+		}
+	}
+
+	// ② 事项导出CSV 由纯函数单测覆盖（`issuesExportCSV`/`issuesCSVField`）；
+	//    本测试环境 /api/issues 未装配 issue center，面板只显示占位，故不在此断言按钮。
+	_ = baseURL
+}
