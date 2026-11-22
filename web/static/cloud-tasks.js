@@ -223,6 +223,16 @@ function ctBatchRetryPayloads(ids) {
     .map(function (id) { return ctRetryPayload(id, true); });
 }
 
+// ctBatchCancelTargets 由勾选 ID 与任务列表筛出**可取消**的任务（pending/downloading）。
+// 已完成/失败/取消的行不产生取消请求（否则会得到无意义 4xx）。
+function ctBatchCancelTargets(tasks, ids) {
+  const want = {};
+  (Array.isArray(ids) ? ids : []).forEach(function (id) { if (id) want[id] = true; });
+  return (Array.isArray(tasks) ? tasks : []).filter(function (t) {
+    return t && want[t.id] && (t.status === 'pending' || t.status === 'downloading');
+  }).map(function (t) { return t.id; });
+}
+
 // ctFailuresOnly 选出可重试任务（失败/取消）。
 function ctFailuresOnly(tasks) {
   return (Array.isArray(tasks) ? tasks : []).filter(function (t) {
@@ -324,6 +334,7 @@ function ctTableHtml(tasks) {
   let html = '<div style="margin-bottom:6px;font-size:12px;">' +
     '<label><input type="checkbox" id="ct-pick-all"> 全选失败</label> ' +
     '<button id="ct-retry-selected" style="margin-left:8px;">批量重试选中</button>' +
+    '<button id="ct-cancel-selected" style="margin-left:6px;">批量取消选中</button>' +
     '<span id="ct-msg" style="margin-left:10px;color:var(--text-muted);"></span></div>' +
     '<table style="width:100%;font-size:12px;border-collapse:collapse;"><thead><tr>' +
     '<th style="width:24px;"></th><th>状态</th><th>文件</th><th>进度</th><th>阶段</th><th>失败原因</th><th>已下载</th><th>操作</th>' +
@@ -372,6 +383,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ctRetryPayload: ctRetryPayload,
     ctBatchRetryPayloads: ctBatchRetryPayloads,
     ctFailuresOnly: ctFailuresOnly,
+    ctBatchCancelTargets: ctBatchCancelTargets,
     ctDetailHtml: ctDetailHtml,
     ctSummaryHtml: ctSummaryHtml,
     ctRowHtml: ctRowHtml,
@@ -556,6 +568,24 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     }
 
     // 批量重试选中：逐条提交（单条失败不影响其余），完成后刷新并提示。
+    const cancelSelBtn = document.getElementById('ct-cancel-selected');
+    if (cancelSelBtn) cancelSelBtn.addEventListener('click', async function () {
+      const ids = Array.prototype.slice.call(panel.querySelectorAll('.ct-pick:checked'))
+        .map(function (cb) { return cb.getAttribute('data-id'); });
+      const targets = ctBatchCancelTargets(tasks, ids);
+      if (!targets.length) { setCtMsg('选中的任务都不可取消（仅排队中/下载中可取消）'); return; }
+      let ok = 0, failed = 0;
+      for (const id of targets) {
+        try {
+          await window.sclientTransport.coreRequest('POST',
+            '/api/cloud/tasks/' + encodeURIComponent(id) + '/cancel', {});
+          ok++;
+        } catch (e) { failed++; }
+      }
+      setCtMsg('批量取消：成功 ' + ok + ' 个，失败 ' + failed + ' 个');
+      await window.showCloudTasks();
+    });
+
     const batchBtn = document.getElementById('ct-retry-selected');
     if (batchBtn) {
       batchBtn.addEventListener('click', async function () {

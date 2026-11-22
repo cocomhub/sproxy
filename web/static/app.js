@@ -982,7 +982,16 @@ function bindOverviewCards() {
           window.__ctFilterState || {}, { failedOnly: true });
         window.__ctOffset = 0;
       }
+      // 事项状态等"打开后应用"的参数先落到模块状态，供 showIssues 消费。
+      if (act.tab === 'issues' && act.status !== undefined) window.__issuesDeepStatus = act.status;
       switchStatsTab(act.tab);
+      // 写深链必须**在 switchStatsTab 之后**：该函数尾部会用不带参数的 hash 覆盖（2026-11-22 实测）。
+      try {
+        const params = {};
+        if (act.filters && act.filters.failedOnly) params.failed = true;
+        if (act.status) params.status = act.status;
+        history.replaceState(null, '', consoleHashFor(act.tab, params));
+      } catch (e) { /* 无 history 权限时忽略 */ }
       if (act.tab === 'issues' && act.status !== undefined) {
         // 预置事项状态过滤后再渲染（select 的 change 事件不触发，这里显式调用）。
         const sel = document.getElementById('issues-status');
@@ -1025,6 +1034,10 @@ async function showStats() {
   var deep = (typeof consoleStateFromHash === 'function')
     ? consoleStateFromHash(location.hash) : { tab: '', params: {} };
   var wantTab = deep.tab || (typeof tabFromHash === 'function' ? tabFromHash(location.hash) : '');
+  // 深链参数 → 事项面板状态过滤（如 `#/console/issues?status=needs_human`）。
+  if (deep.tab === 'issues' && typeof deep.params.status === 'string') {
+    window.__issuesDeepStatus = deep.params.status;
+  }
   // 深链参数 → 云端任务过滤状态（可分享"只看 failed 且限流"这类视图）。
   if (deep.tab === 'cloud-tasks') {
     window.__ctFilterState = {
@@ -1146,6 +1159,11 @@ async function showIssues() {
   const sel = document.getElementById('issues-status');
   const volEl = document.getElementById('issues-volume');
   const unEl = document.getElementById('issues-unresolved');
+  if (window.__issuesDeepStatus !== undefined) {
+    const selEl = document.getElementById('issues-status');
+    if (selEl && window.__issuesDeepStatus !== null) selEl.value = window.__issuesDeepStatus;
+    window.__issuesDeepStatus = undefined;
+  }
   const kindEl = document.getElementById('issues-kind');
   const filters = {
     status: sel ? sel.value : '',

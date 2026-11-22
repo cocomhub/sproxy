@@ -329,3 +329,36 @@ func TestConsoleDeepLinkFilters(t *testing.T) {
 		t.Fatalf("深链过滤后应有失败任务行，got %d", n)
 	}
 }
+
+// TestConsoleCardJumpWritesDeepLink 锁定卡片跳转**写深链**（可分享该视图，2026-11-22）。
+func TestConsoleCardJumpWritesDeepLink(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/hl.bin","filename":"hl.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := waitLoc(page, "#overview-cards [data-card='cloud-failed']", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("概览卡片未渲染: %v", err)
+	}
+	if err := page.Locator("#overview-cards [data-card='cloud-failed']").Click(); err != nil {
+		t.Fatalf("点击失败卡片: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel #ct-failed-only", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("未切到云端任务: %v", err)
+	}
+	h, _ := page.Evaluate("() => location.hash", nil)
+	if h != "#/console/cloud-tasks?failed=1" {
+		t.Fatalf("卡片跳转未写深链: %v（want #/console/cloud-tasks?failed=1）", h)
+	}
+}
