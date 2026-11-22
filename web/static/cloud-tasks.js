@@ -80,6 +80,10 @@ function ctFilterTasks(tasks, filters) {
     if (f.status && t.status !== f.status) return false;
     if (f.failedOnly && t.status !== 'failed' && t.status !== 'cancelled') return false;
     if (f.volume && (!t.transfer || t.transfer.volume !== f.volume)) return false;
+    if (f.cls) {
+      const cls = (t.diagnostics && t.diagnostics.last_error_class) || 'unknown';
+      if (cls !== f.cls) return false;
+    }
     if (q) {
       // 关键字匹配：文件名的子串 或 转存路径子串（排障时最常用两种定位）。
       const name = String(t.filename || '').toLowerCase();
@@ -88,6 +92,18 @@ function ctFilterTasks(tasks, filters) {
     }
     return true;
   });
+}
+
+// ctPageRange 计算分页区间（总数为 0 时返回 [0,0]；越界自动夹取）。
+// 服务端 /api/cloud/tasks 支持 offset/limit，UI 用固定页大小避免一次拉上千条。
+function ctPageRange(offset, limit, total) {
+  const t = Math.max(0, Number(total) || 0);
+  const lim = Math.max(1, Number(limit) || 100);
+  // 越界夹到**最后一页起点**（而非 t-1），保证"末页"语义与分页按钮一致。
+  const lastStart = t === 0 ? 0 : Math.max(0, Math.floor((t - 1) / lim) * lim);
+  const off = Math.min(Math.max(0, Number(offset) || 0), lastStart);
+  const end = Math.min(off + lim, t);
+  return [off, end];
 }
 
 // ctVolumes 列出任务涉及的转存卷（供筛选下拉；稳定排序、去空）。
@@ -244,6 +260,19 @@ function ctTableHtml(tasks) {
   return html + '</tbody></table>';
 }
 
+// ctPagerHtml 分页控件（上一页/下一页 + 区间提示）。服务端支持 offset/limit。
+function ctPagerHtml(total, offset, limit) {
+  const lim = limit || 100;
+  const off = offset || 0;
+  const range = ctPageRange(off, lim, total);
+  const prevDis = off <= 0 ? ' disabled' : '';
+  const nextDis = range[1] >= total ? ' disabled' : '';
+  return '<div style="display:flex;gap:8px;align-items:center;margin-top:8px;font-size:12px;">' +
+    '<button id="ct-prev"' + prevDis + '>上一页</button>' +
+    '<button id="ct-next"' + nextDis + '>下一页</button>' +
+    '<span style="color:var(--text-muted);">第 ' + (range[0] + 1) + '–' + range[1] + ' 条 / 共 ' + total + '</span></div>';
+}
+
 // ctPanelHtml 面板整体（汇总 + 表格）。
 function ctPanelHtml(tasks, filters) {
   const filtered = ctFilterTasks(tasks, filters);
@@ -259,6 +288,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctStageLabel: ctStageLabel,
     ctFilterTasks: ctFilterTasks,
     ctVolumes: ctVolumes,
+    ctPageRange: ctPageRange,
+    ctPagerHtml: ctPagerHtml,
     ctCopyText: ctCopyText,
     ctSummarize: ctSummarize,
     ctGroupByClass: ctGroupByClass,
@@ -289,12 +320,15 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (!panel) return;
     const failedOnly = document.getElementById('ct-failed-only');
     const autoEl = document.getElementById('ct-auto');
-    const volEl = document.getElementById('ct-volume');
-    const qEl = document.getElementById('ct-query');
+    // 过滤状态以模块状态为**唯一真源**（2026-11-22）：卡片跳转会预置过滤，
+    // 若仍从 DOM 读，则首次渲染覆盖预置值（实测 failedOnly 丢失）。
+    const st = window.__ctFilterState || (window.__ctFilterState =
+      { failedOnly: false, volume: '', query: '', cls: '' });
     const filters = {
-      failedOnly: !!(failedOnly && failedOnly.checked),
-      volume: volEl ? volEl.value : '',
-      query: qEl ? qEl.value : '',
+      failedOnly: !!st.failedOnly,
+      volume: st.volume || '',
+      query: st.query || '',
+      cls: st.cls || '',
     };
     let tasks = [];
     try {
@@ -311,20 +345,48 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       ctVolumes(tasks).map(function (v) {
         return '<option value="' + ctEsc(v) + '"' + (filters.volume === v ? ' selected' : '') + '>' + ctEsc(v) + '</option>';
       }).join('') + '</select></label>' +
+      '<label>失败类别 <select id="ct-class"><option value="">全部</option>' +
+      ['source_unreachable', 'throttled', 'content_mismatch', 'target_conflict', 'disk_full', 'auth', 'unknown']
+        .map(function (c) {
+          return '<option value="' + c + '"' + (filters.cls === c ? ' selected' : '') + '>' + ctClassInfo(c).label + '</option>';
+        }).join('') + '</select></label>' +
       '<label>关键字 <input id="ct-query" type="search" placeholder="文件名/转存路径" value="' + ctEsc(filters.query || '') + '" style="width:180px;"></label>' +
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
-      '</div>' + ctPanelHtml(tasks, filters);
+      '</div>' + (function renderPaged() {
+        // 分页在**过滤之后**做（过滤是客户端全量语义，服务端未提供卷/类别过滤）。
+        const filtered = ctFilterTasks(tasks, filters);
+        const limit = 100;
+        const [start, end] = ctPageRange(window.__ctOffset || 0, limit, filtered.length);
+        window.__ctOffset = start;
+        return ctSummaryHtml(tasks) + ctTableHtml(filtered.slice(start, end)) +
+          ctPagerHtml(filtered.length, start, limit);
+      })();
 
     // 事件绑定（每次重渲染后重绑；控件是面板内新建的）。
     const refreshBtn = document.getElementById('ct-refresh');
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
+    const offsetReset = function () { window.__ctOffset = 0; };
+    const prevBtn = document.getElementById('ct-prev');
+    if (prevBtn) prevBtn.addEventListener('click', function () {
+      window.__ctOffset = Math.max(0, (window.__ctOffset || 0) - 100);
+      void window.showCloudTasks();
+    });
+    const nextBtn = document.getElementById('ct-next');
+    if (nextBtn) nextBtn.addEventListener('click', function () {
+      window.__ctOffset = (window.__ctOffset || 0) + 100;
+      void window.showCloudTasks();
+    });
+    const clsSel = document.getElementById('ct-class');
+    if (clsSel) clsSel.addEventListener('change', function () { void window.showCloudTasks(); });
     const volSel = document.getElementById('ct-volume');
     if (volSel) volSel.addEventListener('change', function () { void window.showCloudTasks(); });
     const qInput = document.getElementById('ct-query');
     if (qInput) {
-      qInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') void window.showCloudTasks(); });
-      qInput.addEventListener('change', function () { void window.showCloudTasks(); });
+      qInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { st.query = qInput.value; offsetReset(); void window.showCloudTasks(); }
+      });
+      qInput.addEventListener('change', function () { st.query = qInput.value; offsetReset(); void window.showCloudTasks(); });
     }
     panel.querySelectorAll('.ct-copy').forEach(function (btn) {
       btn.addEventListener('click', async function () {
@@ -341,7 +403,9 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     });
 
     const fOnly = document.getElementById('ct-failed-only');
-    if (fOnly) fOnly.addEventListener('change', function () { void window.showCloudTasks(); });
+    if (fOnly) fOnly.addEventListener('change', function () {
+      st.failedOnly = !!fOnly.checked; window.__ctOffset = 0; void window.showCloudTasks();
+    });
 
     // 详情展开/收起（行内插入 ct-detail 行；再次点击移除）。
     panel.querySelectorAll('.ct-detail-btn').forEach(function (btn) {

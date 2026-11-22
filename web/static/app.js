@@ -936,8 +936,58 @@ async function renderOverviewCards() {
   if (typeof overviewCardsHtml !== 'function') return;
   const host = document.getElementById('overview-cards');
   const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats));
-  if (host) { host.innerHTML = html; return; }
-  panel.insertAdjacentHTML('afterbegin', '<div id="overview-cards">' + html + '</div>');
+  if (host) {
+    host.innerHTML = html;
+  } else {
+    panel.insertAdjacentHTML('afterbegin', '<div id="overview-cards">' + html + '</div>');
+  }
+  bindOverviewCards();
+  await renderOverviewAudit();
+}
+
+// bindOverviewCards 让概览卡片可点击跳转（失败→云端任务只看失败；待处理/需人工→事项面板）。
+function bindOverviewCards() {
+  const host = document.getElementById('overview-cards');
+  if (!host || typeof overviewCardAction !== 'function') return;
+  host.querySelectorAll('.overview-card').forEach(function (card) {
+    card.style.cursor = 'pointer';
+    card.addEventListener('click', function () {
+      const act = overviewCardAction(card.getAttribute('data-card'));
+      // **先**预置过滤状态再跳转：showCloudTasks 在函数开头就读取状态，
+      // 先跳转后设置会读到旧值（2026-11-22 实测 failedOnly 丢失）。
+      if (act.filters && act.filters.failedOnly) {
+        window.__ctFilterState = Object.assign({ failedOnly: false, volume: '', query: '', cls: '' },
+          window.__ctFilterState || {}, { failedOnly: true });
+        window.__ctOffset = 0;
+      }
+      switchStatsTab(act.tab);
+      if (act.tab === 'issues' && act.status !== undefined) {
+        // 预置事项状态过滤后再渲染（select 的 change 事件不触发，这里显式调用）。
+        const sel = document.getElementById('issues-status');
+        if (sel) sel.value = act.status;
+        void showIssues();
+      }
+    });
+  });
+}
+
+// renderOverviewAudit 渲染概览底部「最近审计事件」快捷流（失败时静默隐藏）。
+async function renderOverviewAudit() {
+  if (typeof overviewAuditHtml !== 'function') return;
+  const panel = document.getElementById('stats-panel');
+  if (!panel) return;
+  try {
+    const r = await sclientTransport.coreRequest('GET', '/api/audit?limit=5', {});
+    const data = sclientUtil.decodeJSON(r.body);
+    const entries = Array.isArray(data) ? data : (data.entries || data.events || []);
+    const host = document.getElementById('overview-audit');
+    const html = overviewAuditHtml(entries);
+    if (host) host.innerHTML = html;
+    else panel.insertAdjacentHTML('beforeend', '<div id="overview-audit">' + html + '</div>');
+  } catch (e) { /* 无凭据/端点不可用：不显示该区块 */ }
+  if (!document.getElementById('overview-audit') && typeof overviewAuditHtml === 'function') {
+    panel.insertAdjacentHTML('beforeend', '<div id="overview-audit">' + overviewAuditHtml([]) + '</div>');
+  }
 }
 
 // showStats 打开监控弹窗并默认展示 stats tab。

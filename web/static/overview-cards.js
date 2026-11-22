@@ -34,6 +34,38 @@ function overviewToneColor(tone) {
   }
 }
 
+// overviewCardAction 把卡片映射为「跳转到哪个分区 + 带上什么过滤」。
+//
+// 目的（2026-11-22）：概览卡片不仅显示数字，还要**一键到现场**（失败→云端任务并只看失败；
+// 待处理/需人工→事项面板并预置状态过滤），减少"看到红灯还要自己找地方"的摩擦。
+function overviewCardAction(key) {
+  switch (key) {
+    case 'cloud-failed': return { tab: 'cloud-tasks', filters: { failedOnly: true } };
+    case 'cloud-running': return { tab: 'cloud-tasks', filters: { status: 'downloading' } };
+    case 'issues-pending': return { tab: 'issues', status: '' };
+    case 'issues-human': return { tab: 'issues', status: 'needs_human' };
+    default: return { tab: 'stats', filters: {} };
+  }
+}
+
+// overviewAuditHtml 渲染「最近审计事件」快捷流（最多 5 条；空则提示）。
+function overviewAuditHtml(entries) {
+  const list = Array.isArray(entries) ? entries.slice(0, 5) : [];
+  let html = '<div style="margin-top:6px;"><div style="font-size:13px;color:var(--text-secondary);margin-bottom:6px;">' +
+    '最近审计事件</div>';
+  if (list.length === 0) {
+    return html + '<div style="font-size:12px;color:var(--text-muted);">暂无事件</div></div>';
+  }
+  html += '<ul style="margin:0;padding-left:18px;font-size:12px;line-height:1.7;">';
+  list.forEach(function (e) {
+    const ok = (e.result || '') !== 'error';
+    html += '<li><span style="font-family:monospace;">' + (e.action || '-') + '</span> ' +
+      '<span style="color:var(--text-muted);">' + (e.object || '') + '</span> ' +
+      '<span style="color:' + (ok ? '#2da44e' : '#c0392b') + ';">' + (e.result || '') + '</span></li>';
+  });
+  return html + '</ul></div>';
+}
+
 // overviewCardsHtml 渲染卡片区（数值为 0 也显示，避免"看不见=以为没有"）。
 function overviewCardsHtml(cloud, issues) {
   const cards = overviewCards(cloud, issues);
@@ -54,5 +86,7 @@ if (typeof module !== 'undefined' && module.exports) {
     overviewCards: overviewCards,
     overviewToneColor: overviewToneColor,
     overviewCardsHtml: overviewCardsHtml,
+    overviewCardAction: overviewCardAction,
+    overviewAuditHtml: overviewAuditHtml,
   };
 }
