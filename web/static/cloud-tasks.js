@@ -491,7 +491,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
     // 操作结果消息回填（必须在 innerHTML 渲染**之后**，否则 #ct-msg 还不存在）。
     if (window.__ctMsg) setCtMsg(window.__ctMsg);
-    const offsetReset = function () { window.__ctOffset = 0; };
+    const syncHash = function () {
+      if (typeof window.syncCloudFiltersHash === 'function') window.syncCloudFiltersHash();
+    };
+    const offsetReset = function () { window.__ctOffset = 0; syncHash(); };
     const prevBtn = document.getElementById('ct-prev');
     if (prevBtn) prevBtn.addEventListener('click', function () {
       window.__ctOffset = Math.max(0, (window.__ctOffset || 0) - 100);
@@ -529,7 +532,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
 
     const fOnly = document.getElementById('ct-failed-only');
     if (fOnly) fOnly.addEventListener('change', function () {
-      st.failedOnly = !!fOnly.checked; window.__ctOffset = 0; void window.showCloudTasks();
+      st.failedOnly = !!fOnly.checked; window.__ctOffset = 0; syncHash(); void window.showCloudTasks();
     });
 
     // 详情展开/收起（行内插入 ct-detail 行；再次点击移除）。

@@ -131,3 +131,18 @@ test('issueKindLabel/issueKindOptions 类型中文标签（未知原样）', () 
   assert.ok(opts.includes('cloud_download_failed'));
   assert.ok(opts.includes('blob_pending_verify'));
 });
+
+test('issuesRowDetailHtml 展示时间线/重试计划/解决说明', () => {
+  const html = m.issuesRowDetailHtml({
+    id: 'i1', first_seen: '2026-11-20T01:00:00Z', last_seen: '2026-11-22T01:00:00Z',
+    occurrences: 3, attempts: 2, next_retry_at: '2026-11-22T02:00:00Z', retryable: true,
+    last_error: 'boom', resolved_at: '', resolution: '', detail: '人工需要重传',
+  });
+  assert.ok(html.includes('首次发现') && html.includes('2026-11-20T01:00:00Z'));
+  assert.ok(html.includes('3'));                        // 出现次数
+  assert.ok(html.includes('下次 2026-11-22T02:00:00Z'));
+  assert.ok(html.includes('可自动重试') && html.includes('是'));
+  assert.ok(html.includes('boom'));
+  assert.ok(html.includes('人工需要重传'));
+  assert.strictEqual(m.issuesRowDetailHtml(null), '');
+});

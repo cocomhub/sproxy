@@ -292,3 +292,40 @@ func TestConsoleImportTSVRetries(t *testing.T) {
 		}
 	}
 }
+
+// TestConsoleDeepLinkFilters 锁定深链带过滤：直接打开带参数的 URL 即恢复筛选视图（2026-11-22）。
+func TestConsoleDeepLinkFilters(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/dl.bin","filename":"dl.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	// 直接访问「云端任务 + 只看失败 + 类别 source_unreachable」深链。
+	page.Goto(baseURL + "/ui/#/console/cloud-tasks?failed=1&cls=source_unreachable")
+	openStatsModal(t, page)
+
+	if err := waitLoc(page, "#cloud-tasks-panel #ct-failed-only", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("深链未打开云端任务分区: %v", err)
+	}
+	checked, _ := page.Locator("#ct-failed-only").IsChecked()
+	if !checked {
+		t.Fatal("深链 failed=1 未生效（只看失败未勾选）")
+	}
+	cls, _ := page.Locator("#ct-class").InputValue()
+	if cls != "source_unreachable" {
+		t.Fatalf("深链 cls 未生效: %q", cls)
+	}
+	// 至少 1 行（该任务类别的失败任务）
+	if n, _ := page.Locator("#cloud-tasks-panel tbody tr").Count(); n < 1 {
+		t.Fatalf("深链过滤后应有失败任务行，got %d", n)
+	}
+}
