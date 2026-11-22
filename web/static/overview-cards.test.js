@@ -51,3 +51,11 @@ test('overviewAuditHtml 渲染最近事件（最多 5 条，空有提示）', ()
   const many = m.overviewAuditHtml(new Array(10).fill({ action: 'x', result: 'success' }));
   assert.strictEqual((many.match(/<li>/g) || []).length, 5);
 });
+
+test('overviewCards 失败卡片 hint 带「近 1 小时新增」', () => {
+  const cards = m.overviewCards({ failed: 5 }, {}, 2);
+  const card = cards.find((c) => c.key === 'cloud-failed');
+  assert.ok(card.hint.includes('近 1 小时新增 2 个'));
+  const noTrend = m.overviewCards({ failed: 5 }, {}, 0).find((c) => c.key === 'cloud-failed');
+  assert.ok(!noTrend.hint.includes('近 1 小时'));
+});

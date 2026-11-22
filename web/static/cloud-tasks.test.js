@@ -150,3 +150,29 @@ test('ctPageRange 夹取边界；ctPagerHtml 显示区间并可禁用按钮', ()
   assert.ok(html.includes('第 1–100 条 / 共 250'));
   assert.ok(html.includes('id="ct-prev"') && html.includes('disabled'));
 });
+
+test('ctExportTSV 输出表头 + 每行任务（TSV）', () => {
+  const tsv = m.ctExportTSV([
+    { id: 't1', status: 'failed', url: 'https://x/1',
+      diagnostics: { stage: 'downloading', last_error_class: 'throttled', attempts: 2, partial_size: 1024 },
+      transfer: { volume: 'baidu', path: 'jav/1.mp4' } },
+    { id: 't2', status: 'completed' },
+  ]);
+  const lines = tsv.trim().split('\n');
+  assert.strictEqual(lines[0], 'id\tstatus\tstage\terror_class\tattempts\tvolume\tpath\turl\tpartial_bytes');
+  assert.ok(lines[1].startsWith('t1\tfailed\tdownloading\tthrottled\t2\tbaidu\tjav/1.mp4\t'));
+  assert.strictEqual(lines.length, 3);
+  assert.strictEqual(m.ctExportTSV([]).trim().split('\n').length, 1); // 只有表头
+});
+
+test('ctFailedLastHour 只统计近 1 小时内失败', () => {
+  const now = Date.parse('2026-11-22T10:00:00Z');
+  const tasks = [
+    { status: 'failed', diagnostics: { last_error_at: '2026-11-22T09:30:00Z' } }, // 30 分钟前
+    { status: 'failed', diagnostics: { last_error_at: '2026-11-22T07:00:00Z' } }, // 3 小时前
+    { status: 'failed', diagnostics: {} },                                        // 无时间
+    { status: 'completed', diagnostics: { last_error_at: '2026-11-22T09:59:00Z' } },
+  ];
+  assert.strictEqual(m.ctFailedLastHour(tasks, now), 1);
+  assert.strictEqual(m.ctFailedLastHour(null, now), 0);
+});

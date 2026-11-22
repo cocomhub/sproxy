@@ -165,3 +165,40 @@ func TestConsoleCardsJumpAndPaging(t *testing.T) {
 		t.Fatalf("分页控件缺失（ct-prev）")
 	}
 }
+
+// TestConsoleExportAndTrend 覆盖概览趋势副标题与云端任务「导出TSV」按钮（2026-11-22）。
+func TestConsoleExportAndTrend(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/tr.bin","filename":"tr.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	// ① 失败卡片副标题带「近 1 小时新增」（服务端刚失败，必在窗口内）。
+	if err := waitLoc(page, "#overview-cards [data-card='cloud-failed']", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("概览卡片未渲染: %v", err)
+	}
+	hint, _ := page.Locator("#overview-cards [data-card='cloud-failed']").GetAttribute("title")
+	if !strings.Contains(hint, "近 1 小时新增") {
+		t.Fatalf("失败卡片缺少趋势提示: %q", hint)
+	}
+
+	// ② 云端任务面板有「导出TSV」按钮，且导出内容包含表头（拦截 Blob 生成不便，改为校验按钮存在 + 纯函数已单测）。
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("切换云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#ct-export", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("导出按钮缺失: %v", err)
+	}
+}

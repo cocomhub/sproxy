@@ -11,13 +11,16 @@
 // overviewCards 汇总卡片数据。
 // cloud: {total, running, completed, failed, cancelled}（ctSummarize 输出）
 // issues: {open, retrying, needs_human, resolved}（服务端 stats）
-function overviewCards(cloud, issues) {
+function overviewCards(cloud, issues, failedLastHour) {
   const c = cloud || {};
   const i = issues || {};
   const pendingIssues = Number(i.open || 0) + Number(i.retrying || 0);
   const needsHuman = Number(i.needs_human || 0);
   return [
-    { key: 'cloud-failed', label: '云端任务失败', value: Number(c.failed || 0), tone: Number(c.failed || 0) > 0 ? 'bad' : 'ok', hint: '点「云端任务」查看/重试' },
+    { key: 'cloud-failed', label: '云端任务失败', value: Number(c.failed || 0),
+      tone: Number(c.failed || 0) > 0 ? 'bad' : 'ok',
+      hint: '点「云端任务」查看/重试' +
+        (Number(failedLastHour || 0) > 0 ? '；近 1 小时新增 ' + Number(failedLastHour) + ' 个' : '') },
     { key: 'cloud-running', label: '云端进行中', value: Number(c.running || 0), tone: 'info', hint: '下载/转存中' },
     { key: 'issues-pending', label: '待处理事项', value: pendingIssues, tone: pendingIssues > 0 ? 'warn' : 'ok', hint: '自动重试中或待处理' },
     { key: 'issues-human', label: '需人工接入', value: needsHuman, tone: needsHuman > 0 ? 'bad' : 'ok', hint: '自动重试已放弃' },
@@ -67,8 +70,8 @@ function overviewAuditHtml(entries) {
 }
 
 // overviewCardsHtml 渲染卡片区（数值为 0 也显示，避免"看不见=以为没有"）。
-function overviewCardsHtml(cloud, issues) {
-  const cards = overviewCards(cloud, issues);
+function overviewCardsHtml(cloud, issues, failedLastHour) {
+  const cards = overviewCards(cloud, issues, failedLastHour);
   let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px;">';
   cards.forEach(function (c) {
     html += '<div class="overview-card" data-card="' + c.key + '" title="' + c.hint + '" ' +
