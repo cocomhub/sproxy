@@ -106,6 +106,38 @@ function ctPageRange(offset, limit, total) {
   return [off, end];
 }
 
+// ctExportTSV 把任务清单导出为 TSV（表头 + 每行一条），便于换环境复跑/工单留档。
+// 列：id / status / stage / error_class / attempts / volume / path / url / partial_bytes
+function ctExportTSV(tasks) {
+  const head = ['id', 'status', 'stage', 'error_class', 'attempts', 'volume', 'path', 'url', 'partial_bytes'];
+  const rows = (Array.isArray(tasks) ? tasks : []).map(function (t) {
+    const d = t.diagnostics || {};
+    const tr = t.transfer || {};
+    return [
+      t.id || '', t.status || '', d.stage || '', d.last_error_class || '', String(d.attempts || 0),
+      tr.volume || '', tr.path || '', t.url || '', String(d.partial_size || 0),
+    ].join(String.fromCharCode(9));
+  });
+  return head.join(String.fromCharCode(9)) + String.fromCharCode(10) + rows.join(String.fromCharCode(10)) + (rows.length ? String.fromCharCode(10) : '');
+}
+
+// ctFailedLastHour 统计「最近 1 小时内失败」的任务数（用于概览卡片趋势副标题）。
+// 依据 `diagnostics.last_error_at`（服务端失败时写入）；时间无法解析的计入 unknown → 不计。
+function ctFailedLastHour(tasks, nowMs) {
+  const now = Number(nowMs) || Date.now();
+  const windowMs = 3600 * 1000;
+  let n = 0;
+  (Array.isArray(tasks) ? tasks : []).forEach(function (t) {
+    if (!t || t.status !== 'failed') return;
+    const d = t.diagnostics || {};
+    if (!d.last_error_at) return;
+    const ts = Date.parse(d.last_error_at);
+    if (isNaN(ts)) return;
+    if (now - ts >= 0 && now - ts <= windowMs) n++;
+  });
+  return n;
+}
+
 // ctVolumes 列出任务涉及的转存卷（供筛选下拉；稳定排序、去空）。
 function ctVolumes(tasks) {
   const set = {};
@@ -289,6 +321,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctFilterTasks: ctFilterTasks,
     ctVolumes: ctVolumes,
     ctPageRange: ctPageRange,
+    ctExportTSV: ctExportTSV,
+    ctFailedLastHour: ctFailedLastHour,
     ctPagerHtml: ctPagerHtml,
     ctCopyText: ctCopyText,
     ctSummarize: ctSummarize,
@@ -353,6 +387,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       '<label>关键字 <input id="ct-query" type="search" placeholder="文件名/转存路径" value="' + ctEsc(filters.query || '') + '" style="width:180px;"></label>' +
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
+      '<button id="ct-export">导出TSV</button>' +
       '</div>' + (function renderPaged() {
         // 分页在**过滤之后**做（过滤是客户端全量语义，服务端未提供卷/类别过滤）。
         const filtered = ctFilterTasks(tasks, filters);
@@ -364,6 +399,17 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       })();
 
     // 事件绑定（每次重渲染后重绑；控件是面板内新建的）。
+    const exportBtn = document.getElementById('ct-export');
+    if (exportBtn) exportBtn.addEventListener('click', function () {
+      // 导出**当前过滤结果**（与用户所见一致），便于复跑或贴工单。
+      const list = ctFilterTasks(tasks, filters);
+      const blob = new Blob([ctExportTSV(list)], { type: 'text/tab-separated-values' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cloud-tasks.tsv';
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    });
     const refreshBtn = document.getElementById('ct-refresh');
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
     const offsetReset = function () { window.__ctOffset = 0; };

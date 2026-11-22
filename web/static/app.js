@@ -927,6 +927,7 @@ async function renderOverviewCards() {
     const r = await sclientTransport.coreRequest('GET', '/api/cloud/tasks', {});
     const data = sclientUtil.decodeJSON(r.body);
     const tasks = Array.isArray(data) ? data : (data.tasks || []);
+    window.__ctLastTasks = tasks; // 供概览趋势（近 1h 失败数）计算
     if (typeof ctSummarize === 'function') cloud = ctSummarize(tasks);
   } catch (e) { /* 无权限/未登录：卡片显示 0 */ }
   try {
@@ -935,7 +936,9 @@ async function renderOverviewCards() {
   } catch (e) { /* 同上 */ }
   if (typeof overviewCardsHtml !== 'function') return;
   const host = document.getElementById('overview-cards');
-  const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats));
+  const failedLastHour = (typeof ctFailedLastHour === 'function' && Array.isArray(window.__ctLastTasks))
+    ? ctFailedLastHour(window.__ctLastTasks, Date.now()) : 0;
+  const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats), failedLastHour);
   if (host) {
     host.innerHTML = html;
   } else {
@@ -1112,9 +1115,11 @@ async function showIssues() {
   const sel = document.getElementById('issues-status');
   const volEl = document.getElementById('issues-volume');
   const unEl = document.getElementById('issues-unresolved');
+  const kindEl = document.getElementById('issues-kind');
   const filters = {
     status: sel ? sel.value : '',
     volume: volEl ? volEl.value.trim() : '',
+    kind: kindEl ? kindEl.value : '',
     unresolved: unEl ? !!unEl.checked : false,
   };
   try {
@@ -1131,6 +1136,8 @@ async function showIssues() {
   if (statusSel) statusSel.addEventListener('change', function () { void showIssues(); });
   const unBox = document.getElementById('issues-unresolved');
   if (unBox) unBox.addEventListener('change', function () { void showIssues(); });
+  const kindSel = document.getElementById('issues-kind');
+  if (kindSel) kindSel.addEventListener('change', function () { void showIssues(); });
   // 事项批量操作（2026-11-22）：全选 / 批量重试下载 / 批量标记已解决。
   const pickAll = document.getElementById('issues-pick-all');
   if (pickAll) {

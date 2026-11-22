@@ -122,3 +122,12 @@ test('issuesBatchRetryPayloads 只取可定位的云端下载失败项', () => {
   assert.strictEqual(got.length, 1);
   assert.deepStrictEqual(got[0], { transfer_volume: 'baidu', transfer_path: 'jav/a.mp4', force: true });
 });
+
+test('issueKindLabel/issueKindOptions 类型中文标签（未知原样）', () => {
+  assert.strictEqual(m.issueKindLabel('cloud_download_failed'), '云端下载失败');
+  assert.strictEqual(m.issueKindLabel('upload_failed'), '上传/转存失败');
+  assert.strictEqual(m.issueKindLabel('brand_new_kind'), 'brand_new_kind'); // 不吞信息
+  const opts = m.issueKindOptions();
+  assert.ok(opts.includes('cloud_download_failed'));
+  assert.ok(opts.includes('blob_pending_verify'));
+});

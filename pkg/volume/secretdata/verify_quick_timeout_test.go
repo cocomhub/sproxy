@@ -63,10 +63,10 @@ func TestWriteFile_InvisibleDefersWithoutSyncWait(t *testing.T) {
 		t.Fatalf("批量校验窗口 = %v（应 ≤3s；旧值 verifyBatchTimeout=15s）——不可见已知必然发生，"+
 			"同步等待换来的结论仍是「计入待复核」，纯属浪费 ✗", fsy.window)
 	}
-	// ② 兜底墙钟上界（宽松）：确保没有别处又引入长时间同步等待。
-	if elapsed > 12*time.Second {
-		t.Fatalf("不可见场景整体耗时 %v 过长（应远小于旧的 15s 窗口）", elapsed)
-	}
+	// ② **不做墙钟兜底**（2026-11-22 移除）：CI 全包并行负载下整体耗时 13.7s 实测误报 ✗。
+	//    真判据是上面的 `fsy.window`（校验窗口），整体耗时要看加密/落盘/机器负载，与本用例
+	//    要锁的语义无关。AGENTS 纪律：不得用墙钟断言「不阻塞」。`elapsed` 仅用于失败信息。
+	_ = elapsed
 	if fsy.calls == 0 {
 		t.Fatal("仍必须做**一次**校验（可见/不一致仍要判）——只是不阻塞等待")
 	}

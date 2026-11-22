@@ -47,6 +47,28 @@ function issuesStatsHtml(stats) {
   return '<div style="font-size:13px;">' + parts.join('') + '</div>';
 }
 
+// ISSUE_KIND_LABELS 事项类型中文标签（与服务端 issues.Kind* 对齐；未知类型原样显示）。
+const ISSUE_KIND_LABELS = {
+  dir_meta_ambiguous: '目录 meta 歧义',
+  dir_meta_cleanup_failed: '目录 meta 清理失败',
+  container_not_indexed: '容器未索引',
+  upload_failed: '上传/转存失败',
+  blob_md5_unconverged: 'md5 未收敛',
+  blob_pending_verify: '待复核块',
+  cloud_download_failed: '云端下载失败',
+  other: '其它',
+};
+
+// issueKindLabel 类型 → 中文（未知原样返回，绝不吞掉信息）。
+function issueKindLabel(kind) {
+  return ISSUE_KIND_LABELS[kind] || kind || '-';
+}
+
+// issueKindOptions 返回类型下拉选项（按已知类型固定顺序，未知类型由调用方追加）。
+function issueKindOptions() {
+  return Object.keys(ISSUE_KIND_LABELS);
+}
+
 // issuesFiltersHtml(cur) → 筛选控件（状态/卷/仅未解决）。cur = {status, volume, unresolved}
 function issuesFiltersHtml(cur) {
   const c = cur || {};
@@ -59,6 +81,11 @@ function issuesFiltersHtml(cur) {
   return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;">' +
     '<select id="issues-status" style="padding:5px 8px;font-size:12px;">' + opts + '</select>' +
     '<input id="issues-volume" placeholder="卷名（可选）" value="' + issuesEscHtml(c.volume || '') + '" style="padding:5px 8px;font-size:12px;">' +
+    '<label style="font-size:12px;">类型 <select id="issues-kind"><option value="">全部</option>' +
+    issueKindOptions().map(function (k) {
+      return '<option value="' + issuesEscHtml(k) + '"' + (c.kind === k ? ' selected' : '') + '>' +
+        issuesEscHtml(issueKindLabel(k)) + '</option>';
+    }).join('') + '</select></label>' +
     '<label style="font-size:12px;"><input type="checkbox" id="issues-unresolved"' + checked + '> 只看未解决</label>' +
     '<button type="button" id="issues-refresh-btn" class="btn btn-sm">刷新</button>' +
     '<button type="button" id="issues-scan-btn" class="btn btn-sm btn-primary">立即审查存储</button>' +
@@ -77,7 +104,8 @@ function issuesListHtml(data) {
     return '<tr>' +
       '<td style="padding:6px 8px;color:' + issueStatusColor(it.status) + ';white-space:nowrap;">' +
       issuesEscHtml(issueStatusLabel(it.status)) + '</td>' +
-      '<td style="padding:6px 8px;font-family:monospace;font-size:12px;">' + issuesEscHtml(it.kind) + '</td>' +
+      '<td style="padding:6px 8px;font-size:12px;" title="' + issuesEscHtml(it.kind) + '">' +
+      issuesEscHtml(issueKindLabel(it.kind)) + '</td>' +
       '<td style="padding:6px 8px;text-align:center;"><input type="checkbox" class="issues-pick" ' +
       'data-id="' + issuesEscHtml(it.id) + '" data-kind="' + issuesEscHtml(it.kind) + '" ' +
       'data-volume="' + issuesEscHtml(it.volume) + '" data-path="' + issuesEscHtml(it.path) + '"></td>' +
@@ -186,6 +214,8 @@ if (typeof module !== 'undefined' && module.exports) {
     issuesDetailHtml: issuesDetailHtml,
     issuesResolveQuery: issuesResolveQuery,
     issuesCloudRetryPayload: issuesCloudRetryPayload,
+    issueKindLabel: issueKindLabel,
+    issueKindOptions: issueKindOptions,
     issuesBatchRetryPayloads: issuesBatchRetryPayloads,
     issuesListQuery: issuesListQuery,
     escHtml: issuesEscHtml,
