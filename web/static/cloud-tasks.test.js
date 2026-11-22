@@ -109,3 +109,24 @@ test('ctDetailHtml 展开详情含失败原文与部分产物', () => {
   assert.ok(html.includes('2 MiB'));           // 部分产物大小
   assert.ok(html.includes('源限流'));           // 类别中文
 });
+
+test('ctFilterTasks 支持按卷与关键字（文件名/转存路径）', () => {
+  const tasks = [
+    { id: 'a', status: 'failed', filename: 'AAA.mp4', transfer: { volume: 'baidu', path: 'jav/x/AAA.mp4' } },
+    { id: 'b', status: 'failed', filename: 'BBB.mp4', transfer: { volume: 'main', path: 'tmp/BBB.mp4' } },
+  ];
+  assert.strictEqual(m.ctFilterTasks(tasks, { volume: 'baidu' }).length, 1);
+  assert.strictEqual(m.ctFilterTasks(tasks, { query: 'bbb' }).length, 1);
+  assert.strictEqual(m.ctFilterTasks(tasks, { query: 'JAV/X' }).length, 1);
+  assert.strictEqual(m.ctFilterTasks(tasks, { query: 'zzz' }).length, 0);
+});
+
+test('ctVolumes 去重排序；ctCopyText 输出 ID/源/目标', () => {
+  const vols = m.ctVolumes([
+    { transfer: { volume: 'main' } }, { transfer: { volume: 'baidu' } }, {}, { transfer: { volume: 'main' } },
+  ]);
+  assert.deepStrictEqual(vols, ['baidu', 'main']);
+  const txt = m.ctCopyText({ id: 't1', url: 'https://x/1', transfer: { volume: 'baidu', path: 'jav/1.mp4' } });
+  assert.ok(txt.includes('t1') && txt.includes('https://x/1') && txt.includes('baidu:jav/1.mp4'));
+  assert.strictEqual(m.ctCopyText(null), '');
+});

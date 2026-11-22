@@ -74,12 +74,37 @@ function ctStageLabel(stage) {
 function ctFilterTasks(tasks, filters) {
   const list = Array.isArray(tasks) ? tasks : [];
   const f = filters || {};
+  const q = String(f.query || '').trim().toLowerCase();
   return list.filter(function (t) {
     if (!t) return false;
     if (f.status && t.status !== f.status) return false;
     if (f.failedOnly && t.status !== 'failed' && t.status !== 'cancelled') return false;
+    if (f.volume && (!t.transfer || t.transfer.volume !== f.volume)) return false;
+    if (q) {
+      // 关键字匹配：文件名的子串 或 转存路径子串（排障时最常用两种定位）。
+      const name = String(t.filename || '').toLowerCase();
+      const path = String((t.transfer && t.transfer.path) || '').toLowerCase();
+      if (name.indexOf(q) === -1 && path.indexOf(q) === -1) return false;
+    }
     return true;
   });
+}
+
+// ctVolumes 列出任务涉及的转存卷（供筛选下拉；稳定排序、去空）。
+function ctVolumes(tasks) {
+  const set = {};
+  (Array.isArray(tasks) ? tasks : []).forEach(function (t) {
+    const v = t && t.transfer && t.transfer.volume;
+    if (v) set[v] = true;
+  });
+  return Object.keys(set).sort();
+}
+
+// ctCopyText 返回「复制」按钮应写入剪贴板的文本（任务 ID + 源 + 目标，便于贴到工单/命令行）。
+function ctCopyText(t) {
+  if (!t) return '';
+  const target = t.transfer ? (t.transfer.volume || '') + ':' + (t.transfer.path || '') : '';
+  return [t.id || '', t.url || '', target].filter(function (x) { return x; }).join(String.fromCharCode(10));
 }
 
 // ctSummarize 汇总数量（供面板顶部显示）。
@@ -199,7 +224,8 @@ function ctRowHtml(t) {
     '<td>' + failure + '</td>' +
     '<td>' + ctEsc(d.partial_size ? (Math.round(d.partial_size / 1048576) + ' MiB') : '-') + '</td>' +
     '<td>' + retryBtn + cancelBtn +
-      '<button class="ct-detail-btn" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">详情</button></td>' +
+      '<button class="ct-detail-btn" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">详情</button>' +
+      '<button class="ct-copy" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">复制ID</button></td>' +
     '</tr>';
 }
 
@@ -232,6 +258,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctProgressPercent: ctProgressPercent,
     ctStageLabel: ctStageLabel,
     ctFilterTasks: ctFilterTasks,
+    ctVolumes: ctVolumes,
+    ctCopyText: ctCopyText,
     ctSummarize: ctSummarize,
     ctGroupByClass: ctGroupByClass,
     ctRetryPayload: ctRetryPayload,
@@ -261,7 +289,13 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (!panel) return;
     const failedOnly = document.getElementById('ct-failed-only');
     const autoEl = document.getElementById('ct-auto');
-    const filters = { failedOnly: !!(failedOnly && failedOnly.checked) };
+    const volEl = document.getElementById('ct-volume');
+    const qEl = document.getElementById('ct-query');
+    const filters = {
+      failedOnly: !!(failedOnly && failedOnly.checked),
+      volume: volEl ? volEl.value : '',
+      query: qEl ? qEl.value : '',
+    };
     let tasks = [];
     try {
       tasks = await ctFetchTasks();
@@ -273,6 +307,11 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     panel.innerHTML =
       '<div style="display:flex;gap:12px;align-items:center;margin-bottom:8px;font-size:13px;">' +
       '<label><input type="checkbox" id="ct-failed-only"' + (filters.failedOnly ? ' checked' : '') + '> 只看失败/取消</label>' +
+      '<label>卷 <select id="ct-volume"><option value="">全部</option>' +
+      ctVolumes(tasks).map(function (v) {
+        return '<option value="' + ctEsc(v) + '"' + (filters.volume === v ? ' selected' : '') + '>' + ctEsc(v) + '</option>';
+      }).join('') + '</select></label>' +
+      '<label>关键字 <input id="ct-query" type="search" placeholder="文件名/转存路径" value="' + ctEsc(filters.query || '') + '" style="width:180px;"></label>' +
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
       '</div>' + ctPanelHtml(tasks, filters);
@@ -280,6 +319,27 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     // 事件绑定（每次重渲染后重绑；控件是面板内新建的）。
     const refreshBtn = document.getElementById('ct-refresh');
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
+    const volSel = document.getElementById('ct-volume');
+    if (volSel) volSel.addEventListener('change', function () { void window.showCloudTasks(); });
+    const qInput = document.getElementById('ct-query');
+    if (qInput) {
+      qInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') void window.showCloudTasks(); });
+      qInput.addEventListener('change', function () { void window.showCloudTasks(); });
+    }
+    panel.querySelectorAll('.ct-copy').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const id = btn.getAttribute('data-id');
+        const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
+        try {
+          await navigator.clipboard.writeText(ctCopyText(t));
+          btn.textContent = '已复制';
+          setTimeout(function () { btn.textContent = '复制ID'; }, 1200);
+        } catch (e) {
+          alert('复制失败：' + e.message);
+        }
+      });
+    });
+
     const fOnly = document.getElementById('ct-failed-only');
     if (fOnly) fOnly.addEventListener('change', function () { void window.showCloudTasks(); });
 

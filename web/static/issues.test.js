@@ -112,3 +112,13 @@ test('issuesCloudRetryPayload 用卷+路径精确定位（云端下载重试，2
     transfer_volume: '', transfer_path: '', force: true,
   });
 });
+
+test('issuesBatchRetryPayloads 只取可定位的云端下载失败项', () => {
+  const got = m.issuesBatchRetryPayloads([
+    { id: '1', kind: 'cloud_download_failed', volume: 'baidu', path: 'jav/a.mp4' },
+    { id: '2', kind: 'upload_failed', volume: 'baidu', path: 'jav/b.mp4' },      // 类型不符
+    { id: '3', kind: 'cloud_download_failed', volume: '', path: 'jav/c.mp4' },   // 缺卷
+  ]);
+  assert.strictEqual(got.length, 1);
+  assert.deepStrictEqual(got[0], { transfer_volume: 'baidu', transfer_path: 'jav/a.mp4', force: true });
+});

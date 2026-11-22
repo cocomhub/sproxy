@@ -257,6 +257,8 @@ web-test:
 	@node --check web/static/issues.js
 	@node --check web/static/cloud-tasks.js
 	@node --check web/static/console-nav.js
+	@node --check web/static/overview-cards.js
+	@node --check web/static/overview-cards.test.js
 	@node --check web/static/console-nav.test.js
 	@node --check web/static/cloud-tasks.test.js
 	@node --check web/static/secrets-format.js
@@ -295,6 +297,7 @@ web-test:
 	node --test web/static/issues.test.js
 	node --test web/static/cloud-tasks.test.js
 	node --test web/static/console-nav.test.js
+	node --test web/static/overview-cards.test.js
 	node --test web/static/secrets-format.test.js
 	node --test web/static/vol-manage-format.test.js
 	node --test web/static/sync-conflicts-format.test.js

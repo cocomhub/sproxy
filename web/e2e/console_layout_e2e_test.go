@@ -9,7 +9,9 @@ package e2e
 // ② 左侧导航含全部分区；③ 点击「云端任务」切分区并写 hash；④ **刷新后仍停在云端任务**（深链）。
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
@@ -68,5 +70,58 @@ func TestConsoleLayout_FullscreenNavAndDeepLink(t *testing.T) {
 	openStatsModal(t, page)
 	if err := waitLoc(page, "#cloud-tasks-panel", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("刷新后未恢复云端任务分区: %v", err)
+	}
+}
+
+// TestConsoleOverviewAndFilters 覆盖概览卡片 + 云端任务筛选/复制按钮（2026-11-22）。
+func TestConsoleOverviewAndFilters(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	// 造一个失败任务（供卡片与列表断言）。
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/ov.bin","filename":"ov.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+
+	// ① 概览卡片：四张卡片必须渲染，且「云端任务失败」计数 ≥1（tone=bad）。
+	if err := waitLoc(page, "#overview-cards .overview-card", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("概览卡片未渲染: %v", err)
+	}
+	if n, _ := page.Locator("#overview-cards .overview-card").Count(); n != 4 {
+		t.Fatalf("概览卡片数 = %d，want 4", n)
+	}
+	txt, _ := page.Locator("#overview-cards [data-card='cloud-failed']").TextContent()
+	if !strings.Contains(txt, "1") {
+		t.Fatalf("云端失败卡片未反映失败任务: %q", txt)
+	}
+
+	// ② 云端任务筛选控件 + 复制按钮存在，输入关键字可过滤（无匹配 → 0 行）。
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("切换云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-copy", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("复制按钮未渲染: %v", err)
+	}
+	if err := page.Locator("#ct-query").Fill("zzz-no-match"); err != nil {
+		t.Fatalf("填写关键字: %v", err)
+	}
+	if err := page.Locator("#ct-query").Press("Enter"); err != nil {
+		t.Fatalf("提交关键字: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel tbody tr", playwright.WaitForSelectorStateDetached, 5000); err != nil {
+		// 过滤后无行（tbody 内 tr 数量为 0）也算通过；这里用 detached 语义兜底。
+		if n, _ := page.Locator("#cloud-tasks-panel tbody tr").Count(); n != 0 {
+			t.Fatalf("关键字过滤未生效（仍有 %d 行）: %v", n, err)
+		}
 	}
 }
