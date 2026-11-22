@@ -176,3 +176,30 @@ test('ctFailedLastHour 只统计近 1 小时内失败', () => {
   assert.strictEqual(m.ctFailedLastHour(tasks, now), 1);
   assert.strictEqual(m.ctFailedLastHour(null, now), 0);
 });
+
+test('ctParseTSV 按表头解析（容错缺列/空行）', () => {
+  const tsv = 'id\tstatus\tvolume\tpath\turl\n' +
+    't1\tfailed\tbaidu\tjav/1.mp4\thttps://x/1\n' +
+    '\n' +
+    't2\tcompleted\t\t\t\n';
+  const got = m.ctParseTSV(tsv);
+  assert.strictEqual(got.rows.length, 2);
+  assert.strictEqual(got.rows[0].id, 't1');
+  assert.strictEqual(got.rows[0].volume, 'baidu');
+  assert.strictEqual(got.skipped, 0);
+  assert.deepStrictEqual(m.ctParseTSV(''), { rows: [], skipped: 0 });
+});
+
+test('ctImportRetryPayloads 只取需重试的行（id 优先，其次卷+路径）', () => {
+  const got = m.ctImportRetryPayloads([
+    { id: 't1', status: 'failed' },
+    { id: '', status: 'failed', volume: 'baidu', path: 'jav/2.mp4' },
+    { id: '', status: 'failed' },                       // 无法定位 → 跳过
+    { id: 't3', status: 'completed' },                  // 已完成 → 跳过
+    { id: 't4', status: '' },                           // 未知状态按需重试
+  ]);
+  assert.strictEqual(got.length, 3);
+  assert.deepStrictEqual(got[0], { task_id: 't1', force: true });
+  assert.deepStrictEqual(got[1], { transfer_volume: 'baidu', transfer_path: 'jav/2.mp4', force: true });
+  assert.deepStrictEqual(got[2], { task_id: 't4', force: true });
+});

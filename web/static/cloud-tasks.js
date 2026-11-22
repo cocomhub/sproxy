@@ -121,6 +121,46 @@ function ctExportTSV(tasks) {
   return head.join(String.fromCharCode(9)) + String.fromCharCode(10) + rows.join(String.fromCharCode(10)) + (rows.length ? String.fromCharCode(10) : '');
 }
 
+// ctParseTSV 解析导出的任务清单（表头驱动；容错缺列/空行，未知列忽略）。
+// 返回 {rows: [{id,status,volume,path,url,error_class,attempts}], skipped: n}。
+// 设计：只依赖**表头名**，因此新增列不会破坏旧文件的导入。
+function ctParseTSV(text) {
+  const lines = String(text || '').split(String.fromCharCode(10)).filter(function (l) { return l.trim() !== ''; });
+  if (lines.length < 2) return { rows: [], skipped: 0 };
+  const head = lines[0].split(String.fromCharCode(9));
+  const idx = {};
+  head.forEach(function (h, i) { idx[h.trim()] = i; });
+  if (idx.id === undefined && idx.path === undefined) return { rows: [], skipped: lines.length - 1 };
+  const rows = [];
+  let skipped = 0;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(String.fromCharCode(9));
+    const pick = function (k) { const j = idx[k]; return j === undefined ? '' : String(cols[j] || '').trim(); };
+    const row = {
+      id: pick('id'), status: pick('status'), volume: pick('volume'), path: pick('path'),
+      url: pick('url'), error_class: pick('error_class'), attempts: Number(pick('attempts') || 0),
+    };
+    if (!row.id && !(row.volume && row.path)) { skipped++; continue; }
+    rows.push(row);
+  }
+  return { rows: rows, skipped: skipped };
+}
+
+// ctImportRetryPayloads 由导入行生成重试请求体：
+// 优先 task_id（最精确）；无 id 时用 transfer_volume + transfer_path 定位；
+// 仅保留**失败/取消/未知状态**（其它状态无需重试）。两者都不具备的行跳过。
+function ctImportRetryPayloads(rows) {
+  const out = [];
+  (Array.isArray(rows) ? rows : []).forEach(function (r) {
+    if (!r) return;
+    const st = String(r.status || '');
+    if (st === 'completed' || st === 'downloading' || st === 'pending') return;
+    if (r.id) { out.push({ task_id: String(r.id), force: true }); return; }
+    if (r.volume && r.path) { out.push({ transfer_volume: String(r.volume), transfer_path: String(r.path), force: true }); }
+  });
+  return out;
+}
+
 // ctFailedLastHour 统计「最近 1 小时内失败」的任务数（用于概览卡片趋势副标题）。
 // 依据 `diagnostics.last_error_at`（服务端失败时写入）；时间无法解析的计入 unknown → 不计。
 function ctFailedLastHour(tasks, nowMs) {
@@ -323,6 +363,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctPageRange: ctPageRange,
     ctExportTSV: ctExportTSV,
     ctFailedLastHour: ctFailedLastHour,
+    ctParseTSV: ctParseTSV,
+    ctImportRetryPayloads: ctImportRetryPayloads,
     ctPagerHtml: ctPagerHtml,
     ctCopyText: ctCopyText,
     ctSummarize: ctSummarize,
@@ -340,6 +382,12 @@ if (typeof module !== 'undefined' && module.exports) {
 
 // ---- 浏览器侧交互（仅浏览器执行；node --test 下无 document，自动跳过） ----
 if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  // setCtMsg 记录操作结果消息（重渲染后仍显示：写入 __ctMsg，渲染时回填）。
+  function setCtMsg(text) {
+    window.__ctMsg = text || '';
+    const el = document.getElementById('ct-msg');
+    if (el) el.textContent = window.__ctMsg;
+  }
   // ctFetchTasks 拉取任务列表（服务端 GET /api/cloud/tasks）。
   async function ctFetchTasks() {
     const res = await window.sclientTransport.coreRequest('GET', '/api/cloud/tasks', {});
@@ -388,6 +436,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       '<label><input type="checkbox" id="ct-auto"> 自动刷新(5s)</label>' +
       '<button id="ct-refresh">刷新</button>' +
       '<button id="ct-export">导出TSV</button>' +
+      '<label style="cursor:pointer;">导入TSV重试<input id="ct-import" type="file" accept=".tsv,text/tab-separated-values" style="display:none;"></label>' +
       '</div>' + (function renderPaged() {
         // 分页在**过滤之后**做（过滤是客户端全量语义，服务端未提供卷/类别过滤）。
         const filtered = ctFilterTasks(tasks, filters);
@@ -399,6 +448,34 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       })();
 
     // 事件绑定（每次重渲染后重绑；控件是面板内新建的）。
+    const importEl = document.getElementById('ct-import');
+    if (importEl) importEl.addEventListener('change', function () {
+      const f = importEl.files && importEl.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = async function () {
+        const parsed = ctParseTSV(String(reader.result || ''));
+        const payloads = ctImportRetryPayloads(parsed.rows);
+        const msg = document.getElementById('ct-msg');
+        if (!payloads.length) {
+          setCtMsg('导入文件中没有可重试的任务（已跳过 ' + parsed.skipped + ' 行）');
+          return;
+        }
+        let ok = 0, failed = 0;
+        for (const pl of payloads) {
+          try {
+            await window.sclientTransport.coreRequest('POST', '/api/cloud/tasks/retry', {
+              bodyBytes: new TextEncoder().encode(JSON.stringify(pl)),
+              headers: { 'Content-Type': 'application/json' },
+            });
+            ok++;
+          } catch (e) { failed++; }
+        }
+        setCtMsg('导入重试：提交 ' + ok + ' 个，失败 ' + failed + ' 个，跳过 ' + parsed.skipped + ' 行');
+        await window.showCloudTasks();
+      };
+      reader.readAsText(f);
+    });
     const exportBtn = document.getElementById('ct-export');
     if (exportBtn) exportBtn.addEventListener('click', function () {
       // 导出**当前过滤结果**（与用户所见一致），便于复跑或贴工单。
@@ -412,6 +489,8 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     });
     const refreshBtn = document.getElementById('ct-refresh');
     if (refreshBtn) refreshBtn.addEventListener('click', function () { void window.showCloudTasks(); });
+    // 操作结果消息回填（必须在 innerHTML 渲染**之后**，否则 #ct-msg 还不存在）。
+    if (window.__ctMsg) setCtMsg(window.__ctMsg);
     const offsetReset = function () { window.__ctOffset = 0; };
     const prevBtn = document.getElementById('ct-prev');
     if (prevBtn) prevBtn.addEventListener('click', function () {
@@ -481,7 +560,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
           .map(function (cb) { return cb.getAttribute('data-id'); });
         const msg = document.getElementById('ct-msg');
         if (!ids.length) { if (msg) msg.textContent = '先勾选要重试的任务'; return; }
-        if (msg) msg.textContent = '重试中（' + ids.length + '）...';
+        setCtMsg('重试中（' + ids.length + '）...');
         let ok = 0, failed = 0;
         for (const payload of ctBatchRetryPayloads(ids)) {
           try {
@@ -492,7 +571,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             ok++;
           } catch (e) { failed++; }
         }
-        if (msg) msg.textContent = '已提交 ' + ok + ' 个，失败 ' + failed + ' 个';
+        setCtMsg('已提交 ' + ok + ' 个，失败 ' + failed + ' 个');
         await window.showCloudTasks();
       });
     }

@@ -938,7 +938,13 @@ async function renderOverviewCards() {
   const host = document.getElementById('overview-cards');
   const failedLastHour = (typeof ctFailedLastHour === 'function' && Array.isArray(window.__ctLastTasks))
     ? ctFailedLastHour(window.__ctLastTasks, Date.now()) : 0;
-  const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats), failedLastHour);
+  let storage = null;
+  try {
+    const rv = await sclientTransport.coreRequest('GET', '/api/volumes', {});
+    const vd = sclientUtil.decodeJSON(rv.body);
+    if (typeof overviewStorage === 'function') storage = overviewStorage(vd && vd.volumes);
+  } catch (e) { /* 未授权/端点不可用：不显示水位 */ }
+  const html = overviewCardsHtml(cloud, issuesStats && (issuesStats.stats || issuesStats), failedLastHour, storage);
   if (host) {
     host.innerHTML = html;
   } else {

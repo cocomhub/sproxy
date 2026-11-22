@@ -59,3 +59,16 @@ test('overviewCards 失败卡片 hint 带「近 1 小时新增」', () => {
   const noTrend = m.overviewCards({ failed: 5 }, {}, 0).find((c) => c.key === 'cloud-failed');
   assert.ok(!noTrend.hint.includes('近 1 小时'));
 });
+
+test('overviewStorage 聚合容量水位（无容量 ⇒ percent=null）', () => {
+  const s = m.overviewStorage([
+    { capacity: 100, usage: 90 }, { capacity: 100, usage: 10 }, { capacity: 0, usage: 5 }, null,
+  ]);
+  assert.strictEqual(s.capacity, 200);
+  assert.strictEqual(s.usage, 100);
+  assert.strictEqual(s.percent, 50);
+  assert.strictEqual(m.overviewStorage([]).percent, null);
+  // 卡片：90% 以上标红
+  const cards = m.overviewCards({}, {}, 0, { capacity: 100, usage: 95, percent: 95 });
+  assert.strictEqual(cards.find((c) => c.key === 'storage-used').tone, 'bad');
+});

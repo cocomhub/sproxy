@@ -9,6 +9,9 @@ package e2e
 // ② 左侧导航含全部分区；③ 点击「云端任务」切分区并写 hash；④ **刷新后仍停在云端任务**（深链）。
 
 import (
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -97,8 +100,9 @@ func TestConsoleOverviewAndFilters(t *testing.T) {
 	if err := waitLoc(page, "#overview-cards .overview-card", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("概览卡片未渲染: %v", err)
 	}
-	if n, _ := page.Locator("#overview-cards .overview-card").Count(); n != 4 {
-		t.Fatalf("概览卡片数 = %d，want 4", n)
+	// 卡片数 = 4 张健康/任务卡 + 1 张存储水位卡（2026-11-22 新增）。
+	if n, _ := page.Locator("#overview-cards .overview-card").Count(); n != 5 {
+		t.Fatalf("概览卡片数 = %d，want 5（含存储水位）", n)
 	}
 	txt, _ := page.Locator("#overview-cards [data-card='cloud-failed']").TextContent()
 	if !strings.Contains(txt, "1") {
@@ -200,5 +204,91 @@ func TestConsoleExportAndTrend(t *testing.T) {
 	}
 	if err := waitLoc(page, "#ct-export", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("导出按钮缺失: %v", err)
+	}
+}
+
+// TestConsoleImportTSVRetries 覆盖「导出→导入→重试」闭环（2026-11-22）：
+// 上传 TSV 后必须逐条发出 retry 请求，并显示汇总消息（重渲染后仍可见）。
+func TestConsoleImportTSVRetries(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/im.bin","filename":"im.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("切换云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#ct-import", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("导入控件缺失: %v", err)
+	}
+
+	// 取真实任务 ID 构造 TSV（模拟"导出后再导入"）。
+	idsRaw, err := page.Evaluate("() => (window.__ctLastTasks || []).map(t => t.id)", nil)
+	if err != nil {
+		t.Fatalf("读取任务 ID: %v", err)
+	}
+	ids, _ := idsRaw.([]any)
+	if len(ids) == 0 {
+		t.Fatal("页面未加载到任务（无法构造导入文件）")
+	}
+	taskID, _ := ids[0].(string)
+
+	planPath := filepath.Join(t.TempDir(), "plan.tsv")
+	content := "id\tstatus\tstage\terror_class\tattempts\tvolume\tpath\turl\tpartial_bytes\n" +
+		taskID + "\tfailed\tdownloading\tsource_unreachable\t1\t\t\thttp://127.0.0.1:1/im.bin\t0\n"
+	if werr := os.WriteFile(planPath, []byte(content), 0o600); werr != nil {
+		t.Fatalf("写 TSV: %v", werr)
+	}
+
+	reqCh := make(chan playwright.Request, 4)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/api/cloud/tasks/retry") {
+			select {
+			case reqCh <- r:
+			default:
+			}
+		}
+	})
+	if err := page.Locator("#ct-import").SetInputFiles(planPath); err != nil {
+		t.Fatalf("导入 TSV: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		var payload struct {
+			TaskID string `json:"task_id"`
+			Force  bool   `json:"force"`
+		}
+		requestJSON(t, req, &payload)
+		if payload.TaskID != taskID || !payload.Force {
+			t.Fatalf("导入重试请求体异常: %+v（want task_id=%s force=true）", payload, taskID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("导入后未发出 retry 请求")
+	}
+	// 汇总消息在重渲染后仍需可见（由 __ctMsg 回填）。异步：轮询至出现（最多 5s）。
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(5 * time.Second)
+	for {
+		msg, _ := page.Locator("#ct-msg").TextContent()
+		if strings.Contains(msg, "导入重试") {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("导入结果消息缺失: %q", msg)
+		}
 	}
 }
