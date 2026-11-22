@@ -35,3 +35,26 @@ test('全屏尺寸：宽 96vw（720–1600 限幅）、高 92vh（≥520）', ()
   assert.strictEqual(m.consoleLayoutStyle(600, 400).width, '720px');  // 下限
   assert.strictEqual(m.consoleLayoutStyle(4000, 3000).width, '1600px'); // 上限
 });
+
+test('consoleHashFor 带参数（省略空值，参数排序稳定）', () => {
+  assert.strictEqual(m.consoleHashFor('cloud-tasks'), '#/console/cloud-tasks');
+  assert.strictEqual(
+    m.consoleHashFor('cloud-tasks', { failed: true, cls: 'throttled', volume: '', q: '' }),
+    '#/console/cloud-tasks?cls=throttled&failed=1',
+  );
+  // 相邻两次构建必须字节一致（可分享、可幂等 replaceState）
+  const a = m.consoleHashFor('cloud-tasks', { volume: 'baidu', failed: true });
+  const b = m.consoleHashFor('cloud-tasks', { failed: true, volume: 'baidu' });
+  assert.strictEqual(a, b);
+});
+
+test('consoleStateFromHash 解析 tab + 参数（与 consoleHashFor 对称）', () => {
+  const st = m.consoleStateFromHash('#/console/cloud-tasks?failed=1&cls=throttled&volume=baidu&q=abc');
+  assert.strictEqual(st.tab, 'cloud-tasks');
+  assert.deepStrictEqual(st.params, { failed: true, cls: 'throttled', volume: 'baidu', q: 'abc' });
+  // 往返一致
+  assert.strictEqual(m.consoleHashFor(st.tab, st.params),
+    '#/console/cloud-tasks?cls=throttled&failed=1&q=abc&volume=baidu');
+  assert.deepStrictEqual(m.consoleStateFromHash('#/console/issues'), { tab: 'issues', params: {} });
+  assert.deepStrictEqual(m.consoleStateFromHash('#/files').tab, '');
+});

@@ -35,10 +35,44 @@ function consoleTabValid(id) {
   return consoleTabIDs().indexOf(id) !== -1;
 }
 
-// consoleHashFor 由分区 id 生成深链 hash（如 `#/console/cloud-tasks`）。
-function consoleHashFor(tab) {
+// consoleHashFor 由分区 id + 可选过滤参数生成深链 hash。
+//
+// 带参数（2026-11-22）：`#/console/cloud-tasks?failed=1&cls=throttled&volume=baidu&q=xxx`
+// ⇒ 分享链接/刷新后仍是"同一视图"，避免用户重复设置筛选。
+// 空值参数自动省略（保持 URL 简短、幂等）。
+function consoleHashFor(tab, params) {
   const id = consoleTabValid(tab) ? tab : 'stats';
-  return '#/console/' + id;
+  const p = params || {};
+  const q = [];
+  Object.keys(p).sort().forEach(function (k) {
+    const v = p[k];
+    if (v === undefined || v === null || v === '' || v === false || v === 0) return;
+    q.push(encodeURIComponent(k) + '=' + encodeURIComponent(v === true ? '1' : String(v)));
+  });
+  return '#/console/' + id + (q.length ? '?' + q.join('&') : '');
+}
+
+// consoleStateFromHash 解析完整深链状态：{tab, params}（非控制台 hash ⇒ tab 为空串）。
+// params 值：`1`/`true` ⇒ true，纯数字 ⇒ number，其余为字符串（与 consoleHashFor 对称）。
+function consoleStateFromHash(hash) {
+  const raw = String(hash || '');
+  const m = /^#\/console\/([a-z0-9-]+)(?:\?([^#]*))?$/.exec(raw);
+  if (!m) return { tab: '', params: {} };
+  const tab = consoleTabValid(m[1]) ? m[1] : 'stats';
+  const params = {};
+  if (m[2]) {
+    m[2].split('&').forEach(function (kv) {
+      if (!kv) return;
+      const idx = kv.indexOf('=');
+      const k = decodeURIComponent(idx < 0 ? kv : kv.slice(0, idx));
+      const v = idx < 0 ? '' : decodeURIComponent(kv.slice(idx + 1));
+      if (!k) return;
+      if (v === '1' || v === 'true') params[k] = true;
+      else if (/^\d+$/.test(v)) params[k] = Number(v);
+      else params[k] = v;
+    });
+  }
+  return { tab: tab, params: params };
 }
 
 // tabFromHash 从 hash 解析分区 id（非控制台 hash ⇒ 空串；非法分区 ⇒ 概览）。
@@ -86,6 +120,7 @@ if (typeof module !== 'undefined' && module.exports) {
     consoleTabValid: consoleTabValid,
     consoleHashFor: consoleHashFor,
     tabFromHash: tabFromHash,
+    consoleStateFromHash: consoleStateFromHash,
     consoleNavHtml: consoleNavHtml,
     consoleLayoutStyle: consoleLayoutStyle,
   };

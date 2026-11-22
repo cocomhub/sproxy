@@ -116,6 +116,7 @@ function issuesListHtml(data) {
       '<td style="padding:6px 8px;font-size:12px;">' + issuesEscHtml(it.detail) +
       (it.last_error ? '<div style="color:#c0392b;">最近失败：' + issuesEscHtml(it.last_error) + '</div>' : '') + '</td>' +
       '<td style="padding:6px 8px;white-space:nowrap;">' +
+      '<button type="button" class="btn btn-sm issues-detail-btn" data-id="' + issuesEscHtml(it.id) + '">详情</button>' +
       '<button type="button" class="btn btn-sm issues-resolve-btn" data-id="' + issuesEscHtml(it.id) + '">标记已解决</button>' +
       (it.kind === 'cloud_download_failed'
         ? '<button type="button" class="btn btn-sm issues-retry-dl-btn" data-volume="' + issuesEscHtml(it.volume) +
@@ -168,6 +169,30 @@ function issuesCloudRetryPayload(volume, path) {
   return { transfer_volume: String(volume || ''), transfer_path: String(path || ''), force: true };
 }
 
+// issuesRowDetailHtml 渲染单行详情（展开用）：时间线/重试计划/解决说明——均为服务端已有字段。
+// 为什么（2026-11-22）：列表只给摘要，排障需要"首次/最近出现、自动重试次数与下次时间、人工解决说明"。
+function issuesRowDetailHtml(it) {
+  if (!it) return '';
+  const rows = [
+    ['首次发现', it.first_seen || '-'],
+    ['最近出现', it.last_seen || '-'],
+    ['出现次数', String(it.occurrences || 0)],
+    ['自动重试', (it.attempts || 0) + ' 次' + (it.next_retry_at ? '（下次 ' + it.next_retry_at + '）' : '')],
+    ['可自动重试', it.retryable ? '是' : '否（需人工）'],
+    ['最近失败', it.last_error || '-'],
+    ['解决时间', it.resolved_at || '-'],
+    ['解决说明', it.resolution || '-'],
+    ['详细说明', it.detail || '-'],
+  ];
+  let html = '<tr class="issues-detail" data-detail-for="' + issuesEscHtml(it.id) + '"><td colspan="8" ' +
+    'style="background:rgba(127,127,127,.06);padding:10px 12px;"><table style="font-size:12px;">';
+  rows.forEach(function (r) {
+    html += '<tr><td style="color:var(--text-muted);padding:2px 12px 2px 0;white-space:nowrap;">' +
+      issuesEscHtml(r[0]) + '</td><td style="padding:2px 0;word-break:break-all;">' + issuesEscHtml(r[1]) + '</td></tr>';
+  });
+  return html + '</table></td></tr>';
+}
+
 // issuesBatchRetryPayloads 由勾选项（含 kind/volume/path）生成云端下载重试请求体列表。
 // 只保留 `cloud_download_failed` 且（卷,路径）齐全的项——其余无法精确定位，跳过而非误试。
 function issuesBatchRetryPayloads(picked) {
@@ -217,6 +242,7 @@ if (typeof module !== 'undefined' && module.exports) {
     issueKindLabel: issueKindLabel,
     issueKindOptions: issueKindOptions,
     issuesBatchRetryPayloads: issuesBatchRetryPayloads,
+    issuesRowDetailHtml: issuesRowDetailHtml,
     issuesListQuery: issuesListQuery,
     escHtml: issuesEscHtml,
   };

@@ -954,6 +954,19 @@ async function renderOverviewCards() {
   await renderOverviewAudit();
 }
 
+// syncCloudFiltersHash 把当前云端任务过滤写入深链（分享/刷新保留同一视图）。
+// 只在控制台打开且处于云端任务分区时更新，避免影响文件页 URL。
+function syncCloudFiltersHash() {
+  const st = window.__ctFilterState || {};
+  const modal = document.getElementById('stats-modal');
+  if (!modal || modal.style.display !== 'flex') return;
+  if (!/^#\/console\/cloud-tasks/.test(location.hash)) return;
+  const hash = consoleHashFor('cloud-tasks', {
+    failed: !!st.failedOnly, cls: st.cls || '', volume: st.volume || '', q: st.query || '',
+  });
+  history.replaceState(null, '', hash);
+}
+
 // bindOverviewCards 让概览卡片可点击跳转（失败→云端任务只看失败；待处理/需人工→事项面板）。
 function bindOverviewCards() {
   const host = document.getElementById('overview-cards');
@@ -1009,7 +1022,19 @@ async function showStats() {
     shell.style.width = dim.width;
     shell.style.height = dim.height;
   }
-  var wantTab = (typeof tabFromHash === 'function' ? tabFromHash(location.hash) : '');
+  var deep = (typeof consoleStateFromHash === 'function')
+    ? consoleStateFromHash(location.hash) : { tab: '', params: {} };
+  var wantTab = deep.tab || (typeof tabFromHash === 'function' ? tabFromHash(location.hash) : '');
+  // 深链参数 → 云端任务过滤状态（可分享"只看 failed 且限流"这类视图）。
+  if (deep.tab === 'cloud-tasks') {
+    window.__ctFilterState = {
+      failedOnly: deep.params.failed === true,
+      volume: typeof deep.params.volume === 'string' ? deep.params.volume : '',
+      query: typeof deep.params.q === 'string' ? deep.params.q : '',
+      cls: typeof deep.params.cls === 'string' ? deep.params.cls : '',
+    };
+    window.__ctOffset = 0;
+  }
   if (!wantTab) wantTab = localStorage.getItem(CONSOLE_TAB_KEY) || '';
   document.getElementById('stats-modal').style.display = 'flex';
   // 只切一次：有深链/记忆则进该分区，否则概览（此前多一次 switchStatsTab('stats')
@@ -1131,6 +1156,7 @@ async function showIssues() {
   try {
     const res = await sclientTransport.coreRequest('GET', issuesListQuery(filters), {});
     const data = sclientUtil.decodeJSON(res.body);
+    window.__issuesItems = (data && data.items) || [];
     panel.innerHTML = issuesPanelHtml(data, filters);
   } catch (e) {
     panel.innerHTML = '<div style="color:#c0392b;font-size:13px;">加载失败：' + escHtmlIssues(e.message) + '</div>';
@@ -1144,6 +1170,20 @@ async function showIssues() {
   if (unBox) unBox.addEventListener('change', function () { void showIssues(); });
   const kindSel = document.getElementById('issues-kind');
   if (kindSel) kindSel.addEventListener('change', function () { void showIssues(); });
+  // 行详情展开（2026-11-22）：在行后插入 issues-detail，再次点击收起。
+  panel.querySelectorAll('.issues-detail-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const id = btn.getAttribute('data-id');
+      const exists = panel.querySelector('.issues-detail[data-detail-for="' + id + '"]');
+      if (exists) { exists.remove(); return; }
+      const it = (window.__issuesItems || []).filter(function (x) { return x && x.id === id; })[0];
+      const row = btn.closest('tr');
+      if (row && it && typeof issuesRowDetailHtml === 'function') {
+        row.insertAdjacentHTML('afterend', issuesRowDetailHtml(it));
+      }
+    });
+  });
+
   // 事项批量操作（2026-11-22）：全选 / 批量重试下载 / 批量标记已解决。
   const pickAll = document.getElementById('issues-pick-all');
   if (pickAll) {
