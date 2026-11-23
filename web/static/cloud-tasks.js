@@ -137,6 +137,43 @@ function ctSortTasks(tasks, key, dir) {
   return list;
 }
 
+// 操作审计流（2026-11-23）：记录面板内的人工动作（重试/取消/导入/批量），
+// 存 sessionStorage（同标签页刷新仍在，换标签页清空——这是"现场记录"，不是服务端审计）。
+const CT_AUDIT_KEY = 'sproxy_ct_actions';
+const CT_AUDIT_CAP = 100;
+
+// ctAppendAudit 追加一条操作记录并裁剪到上限（返回新数组，不改入参）。
+function ctAppendAudit(log, entry, cap) {
+  const list = (Array.isArray(log) ? log : []).slice();
+  const e = entry || {};
+  list.unshift({
+    ts: e.ts || new Date().toISOString(),
+    action: e.action || '',
+    target: e.target || '',
+    result: e.result || '',
+    detail: e.detail || '',
+  });
+  const max = cap || CT_AUDIT_CAP;
+  return list.slice(0, max);
+}
+
+// ctAuditHtml 渲染最近操作（最多 n 条；空则提示"暂无操作"）。
+function ctAuditHtml(log, n) {
+  const list = (Array.isArray(log) ? log : []).slice(0, n || 10);
+  let html = '<div style="margin-top:10px;font-size:12px;"><div style="color:var(--text-secondary);margin-bottom:4px;">' +
+    '最近操作（本页面）</div>';
+  if (list.length === 0) return html + '<div style="color:var(--text-muted);">暂无操作</div></div>';
+  html += '<ul style="margin:0;padding-left:18px;line-height:1.7;">';
+  list.forEach(function (e) {
+    const ok = (e.result || '') !== 'failed';
+    html += '<li><span style="font-family:monospace;">' + ctEsc(e.ts) + '</span> ' +
+      ctEsc(e.action) + (e.target ? ' → ' + ctEsc(e.target) : '') +
+      (e.detail ? ' ' + ctEsc(e.detail) : '') +
+      ' <span style="color:' + (ok ? '#2da44e' : '#c0392b') + ';">' + ctEsc(e.result) + '</span></li>';
+  });
+  return html + '</ul></div>';
+}
+
 // ctExportTSV 把任务清单导出为 TSV（表头 + 每行一条），便于换环境复跑/工单留档。
 // 列：id / status / stage / error_class / attempts / volume / path / url / partial_bytes
 function ctExportTSV(tasks) {
@@ -207,6 +244,41 @@ function ctFailedLastHour(tasks, nowMs) {
     if (now - ts >= 0 && now - ts <= windowMs) n++;
   });
   return n;
+}
+
+// ctGroupByVolume 按「转存目标卷」分组汇总（total/failed/running/completed），按总数降序。
+// 用途：多卷场景一眼看出"哪个卷上的任务出问题"（2026-11-23）。
+function ctGroupByVolume(tasks) {
+  const map = {};
+  (Array.isArray(tasks) ? tasks : []).forEach(function (t) {
+    if (!t) return;
+    const vol = (t.transfer && t.transfer.volume) || '(无目标卷)';
+    const g = map[vol] || (map[vol] = { volume: vol, total: 0, failed: 0, running: 0, completed: 0 });
+    g.total++;
+    if (t.status === 'failed' || t.status === 'cancelled') g.failed++;
+    else if (t.status === 'pending' || t.status === 'downloading') g.running++;
+    else if (t.status === 'completed') g.completed++;
+  });
+  return Object.keys(map).map(function (k) { return map[k]; })
+    .sort(function (a, b) { return b.total - a.total || a.volume.localeCompare(b.volume); });
+}
+
+// ctGroupByVolumeHtml 渲染卷分组 chips（点击可按该卷过滤）。
+function ctGroupByVolumeHtml(tasks) {
+  const groups = ctGroupByVolume(tasks);
+  if (groups.length === 0) return '';
+  let html = '<div style="margin:4px 0 8px;font-size:12px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;">' +
+    '<span style="color:var(--text-secondary);">按卷：</span>';
+  groups.forEach(function (g) {
+    const bad = g.failed > 0;
+    html += '<button class="ct-vol-chip" data-volume="' + ctEsc(g.volume) + '" ' +
+      'style="border:1px solid ' + (bad ? '#c0392b' : 'var(--border)') + ';background:' +
+      (bad ? 'rgba(192,57,43,.10)' : 'transparent') + ';color:' + (bad ? '#c0392b' : 'var(--text-secondary)') +
+      ';border-radius:10px;padding:2px 9px;cursor:pointer;font-size:12px;" ' +
+      'title="点按该卷过滤">' + ctEsc(g.volume) + ' ' + g.total +
+      (bad ? '（失败 ' + g.failed + '）' : '') + '</button>';
+  });
+  return html + '</div>';
 }
 
 // ctVolumes 列出任务涉及的转存卷（供筛选下拉；稳定排序、去空）。
@@ -418,8 +490,14 @@ if (typeof module !== 'undefined' && module.exports) {
     ctStageLabel: ctStageLabel,
     ctFilterTasks: ctFilterTasks,
     ctVolumes: ctVolumes,
+    ctGroupByVolume: ctGroupByVolume,
+    ctGroupByVolumeHtml: ctGroupByVolumeHtml,
     ctPageRange: ctPageRange,
     ctSortTasks: ctSortTasks,
+    ctAppendAudit: ctAppendAudit,
+    ctAuditHtml: ctAuditHtml,
+    CT_AUDIT_KEY: CT_AUDIT_KEY,
+    CT_AUDIT_CAP: CT_AUDIT_CAP,
     ctExportTSV: ctExportTSV,
     ctFailedLastHour: ctFailedLastHour,
     ctParseTSV: ctParseTSV,
@@ -443,6 +521,23 @@ if (typeof module !== 'undefined' && module.exports) {
 
 // ---- 浏览器侧交互（仅浏览器执行；node --test 下无 document，自动跳过） ----
 if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  // ctLoadAudit/ctSaveAudit 从 sessionStorage 读写操作记录（浏览器不可用/存储异常时静默）。
+  function ctLoadAudit() {
+    try {
+      const raw = sessionStorage.getItem(CT_AUDIT_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+  function ctSaveAudit(log) {
+    try { sessionStorage.setItem(CT_AUDIT_KEY, JSON.stringify(log)); } catch (e) { /* 配额/隐私模式忽略 */ }
+  }
+  // ctRecord 记录一条操作（供重试/取消/导入/批量共用）。
+  function ctRecord(action, target, result, detail) {
+    const log = ctAppendAudit(ctLoadAudit(), { action: action, target: target, result: result, detail: detail });
+    ctSaveAudit(log);
+    return log;
+  }
   // setCtMsg 记录操作结果消息（重渲染后仍显示：写入 __ctMsg，渲染时回填）。
   function setCtMsg(text) {
     window.__ctMsg = text || '';
@@ -518,8 +613,8 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
         const limit = 100;
         const [start, end] = ctPageRange(window.__ctOffset || 0, limit, filtered.length);
         window.__ctOffset = start;
-        return ctSummaryHtml(tasks) + ctTableHtml(filtered.slice(start, end)) +
-          ctPagerHtml(filtered.length, start, limit);
+        return ctSummaryHtml(tasks) + ctGroupByVolumeHtml(tasks) + ctTableHtml(filtered.slice(start, end)) +
+          ctPagerHtml(filtered.length, start, limit) + ctAuditHtml(ctLoadAudit(), 8);
       })();
 
     // 事件绑定（每次重渲染后重绑；控件是面板内新建的）。
@@ -546,6 +641,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             ok++;
           } catch (e) { failed++; }
         }
+        ctRecord('导入重试', ok + ' 个', failed ? 'failed' : 'ok', '跳过 ' + parsed.skipped + ' 行');
         setCtMsg('导入重试：提交 ' + ok + ' 个，失败 ' + failed + ' 个，跳过 ' + parsed.skipped + ' 行');
         await window.showCloudTasks();
       };
@@ -570,6 +666,15 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     if (minSizeEl) minSizeEl.addEventListener('change', function () {
       st.minSizeMB = Number(minSizeEl.value) || 0; window.__ctOffset = 0; void window.showCloudTasks();
     });
+    panel.querySelectorAll('.ct-vol-chip').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        st.volume = chip.getAttribute('data-volume');
+        window.__ctOffset = 0;
+        if (typeof window.syncCloudFiltersHash === 'function') window.syncCloudFiltersHash();
+        void window.showCloudTasks();
+      });
+    });
+
     panel.querySelectorAll('.ct-class-chip').forEach(function (chip) {
       chip.addEventListener('click', async function () {
         const cls = chip.getAttribute('data-class');
@@ -585,6 +690,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             ok++;
           } catch (e) { failed++; }
         }
+        ctRecord('按类别重试', ctClassInfo(cls).label, failed ? 'failed' : 'ok', ok + ' 个');
         setCtMsg('按类别重试（' + ctClassInfo(cls).label + '）：提交 ' + ok + ' 个，失败 ' + failed + ' 个');
         await window.showCloudTasks();
       });
@@ -673,6 +779,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
           ok++;
         } catch (e) { failed++; }
       }
+      ctRecord('批量取消', ok + ' 个', failed ? 'failed' : 'ok', '失败 ' + failed);
       setCtMsg('批量取消：成功 ' + ok + ' 个，失败 ' + failed + ' 个');
       await window.showCloudTasks();
     });
@@ -695,6 +802,7 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             ok++;
           } catch (e) { failed++; }
         }
+        ctRecord('批量重试', ok + ' 个', failed ? 'failed' : 'ok', '失败 ' + failed);
         setCtMsg('已提交 ' + ok + ' 个，失败 ' + failed + ' 个');
         await window.showCloudTasks();
       });
@@ -708,8 +816,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             bodyBytes: new TextEncoder().encode(JSON.stringify(ctRetryPayload(id, true))),
             headers: { 'Content-Type': 'application/json' },
           });
+          ctRecord('重试', id, 'ok');
           await window.showCloudTasks();
         } catch (e) {
+          ctRecord('重试', id, 'failed', e.message);
           alert('重试失败：' + e.message);
         }
       });
@@ -720,8 +830,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
         try {
           await window.sclientTransport.coreRequest('POST',
             '/api/cloud/tasks/' + encodeURIComponent(id) + '/cancel', {});
+          ctRecord('取消', id, 'ok');
           await window.showCloudTasks();
         } catch (e) {
+          ctRecord('取消', id, 'failed', e.message);
           alert('取消失败：' + e.message);
         }
       });
