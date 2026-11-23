@@ -250,3 +250,33 @@ test('ctClassRetryPayloads 按失败类别生成重试体（只取 failed/cancel
   assert.deepStrictEqual(m.ctClassRetryPayloads(tasks, 'unknown').map((p) => p.task_id), ['d']);
   assert.deepStrictEqual(m.ctClassRetryPayloads(tasks, 'disk_full'), []);
 });
+
+test('ctGroupByVolume 按卷汇总并按总数降序', () => {
+  const groups = m.ctGroupByVolume([
+    { status: 'failed', transfer: { volume: 'baidu' } },
+    { status: 'completed', transfer: { volume: 'baidu' } },
+    { status: 'downloading', transfer: { volume: 'main' } },
+    { status: 'failed' }, // 无目标卷
+  ]);
+  assert.strictEqual(groups[0].volume, 'baidu');
+  assert.strictEqual(groups[0].total, 2);
+  assert.strictEqual(groups[0].failed, 1);
+  const none = groups.find((g) => g.volume === '(无目标卷)');
+  assert.strictEqual(none.total, 1);
+  assert.ok(m.ctGroupByVolumeHtml([{ status: 'failed', transfer: { volume: 'v' } }]).includes('ct-vol-chip'));
+  assert.strictEqual(m.ctGroupByVolumeHtml([]), '');
+});
+
+test('ctAppendAudit 追加并裁剪；ctAuditHtml 渲染最近操作', () => {
+  let log = [];
+  log = m.ctAppendAudit(log, { action: '重试', target: 't1', result: 'ok' });
+  log = m.ctAppendAudit(log, { action: '取消', target: 't2', result: 'failed', detail: 'boom' });
+  assert.strictEqual(log.length, 2);
+  assert.strictEqual(log[0].action, '取消'); // 最新在前
+  for (let i = 0; i < 5; i++) log = m.ctAppendAudit(log, { action: 'x' + i }, 3);
+  assert.strictEqual(log.length, 3);
+  const html = m.ctAuditHtml(log, 2);
+  assert.ok(html.includes('最近操作'));
+  assert.ok(html.includes('x4'));
+  assert.ok(m.ctAuditHtml([]).includes('暂无操作'));
+});

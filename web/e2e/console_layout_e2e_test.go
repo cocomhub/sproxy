@@ -482,3 +482,53 @@ func TestConsoleHelpPanel(t *testing.T) {
 		t.Fatalf("帮助面板未关闭: %v", err)
 	}
 }
+
+// TestConsoleVolumeChipsAndActionLog 覆盖「按卷分组 chips」与面板内「最近操作」记录（2026-11-23）。
+func TestConsoleVolumeChipsAndActionLog(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	postJSON(t, baseURL+"/api/cloud/download",
+		[]byte(`{"url":"http://127.0.0.1:1/vc.bin","filename":"vc.bin","download_local":true,"save":true}`))
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("切换云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-retry", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("任务行未渲染: %v", err)
+	}
+
+	// ① 按卷分组 chips 存在（该任务无转存卷 ⇒ 归入「(无目标卷)」）。
+	if n, _ := page.Locator("#cloud-tasks-panel .ct-vol-chip").Count(); n < 1 {
+		t.Fatalf("按卷分组 chip 缺失")
+	}
+
+	// ② 点「重试」后，面板底部「最近操作」必须出现该动作记录（sessionStorage 持久）。
+	if err := page.Locator("#cloud-tasks-panel .ct-retry").First().Click(); err != nil {
+		t.Fatalf("点击重试: %v", err)
+	}
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	deadline := time.After(8 * time.Second)
+	for {
+		html, _ := page.Locator("#cloud-tasks-panel").InnerHTML()
+		if strings.Contains(html, "最近操作") && strings.Contains(html, "重试") {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatal("操作审计流未记录重试动作")
+		}
+	}
+}
