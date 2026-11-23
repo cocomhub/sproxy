@@ -25,7 +25,7 @@ const metaAuditSampleCap = 200
 // 为什么需要（2026-11-20）：清理孤儿分块后，容器里仍残留历史 file meta（墓碑）；跑 GC 前
 // 必须先确认「存活 meta 引用的分块齐全、meta 可解密」，否则清理会扩大损失。
 //
-// 复用：解密走 `gcConfirmFileMeta` / `decryptDirMeta`（与 GC 同一判据）；并发走 `runOrphanWorkers`。
+// 复用：解密走 `gcConfirmFileMeta` / `decryptDirMeta`（与 GC 同一判据）；并发走 `runBoundedWorkers`。
 // fail-closed：任一容器列举失败 ⇒ 返回错误（不给出可能误导的报告）。
 func (s *SecretdataFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, error) {
 	s.mu.RLock()
@@ -53,7 +53,7 @@ func (s *SecretdataFS) AuditMeta(ctx context.Context) (syncpkg.MetaAuditReport, 
 		mergeMetaAudit(&rep, one)
 		return one.err
 	}
-	if err := s.runOrphanWorkers(ctx, len(containers), containers, run); err != nil {
+	if err := runBoundedWorkers(s, ctx, len(containers), containers, run); err != nil {
 		return syncpkg.MetaAuditReport{}, err
 	}
 	return rep, nil
@@ -120,7 +120,7 @@ func (s *SecretdataFS) auditListAll(
 		mu.Unlock()
 		return nil
 	}
-	if err := s.runOrphanWorkers(ctx, len(containers), containers, run); err != nil {
+	if err := runBoundedWorkers(s, ctx, len(containers), containers, run); err != nil {
 		return nil, err
 	}
 	return out, nil

@@ -78,7 +78,14 @@ BIN_NAME        := $(BIN_DIR)/$(PROJECT_NAME)-$(GOOS)-$(GOARCH)$(EXE)
 # ═══════════════════════════════════════════════════════════════════════════════
 # OTHER VARIABLES — 原有变量，保留不动
 # ═══════════════════════════════════════════════════════════════════════════════
+# GOFMT 必须与 `go` **同一工具链**：PATH 里可能先命中旧版（WSL 实测 /usr/bin/gofmt 是 Go 1.22，
+# 会把 Go 1.27 才支持的泛型方法判为 "method must have no type parameters" 并使 make build 失败；
+# 而 `go` 因 go.mod 的 toolchain 声明自动切换到了 1.27，gofmt 不会自动切换）。
+# 取 GOROOT（已按 GOTOOLCHAIN 解析）下的 gofmt；解析失败再回退 PATH。
+GOFMT := $(shell go env GOROOT 2>/dev/null)/bin/gofmt
+ifeq ($(wildcard $(GOFMT)),)
 GOFMT := gofmt
+endif
 ALL_SRC := $(shell go list -f '{{range .GoFiles}}{{$$.Dir}}/{{.}} {{end}}' ./... 2>/dev/null)
 BENCH_DATA_DIR := $(BUILD_DIR)/benchmark/data
 BENCH_WEB_DIR := $(BUILD_DIR)/benchmark/web
