@@ -1014,7 +1014,7 @@ func (s *SecretdataFS) collectIndexedReferences(
 	run := func(ctx context.Context, t orphanTarget) error {
 		return s.applyIndexedTarget(ctx, t, referenced, &st, &muSt, &muRef)
 	}
-	if err := s.runOrphanWorkers(ctx, len(targets), targets, run); err != nil {
+	if err := runBoundedWorkers(s, ctx, len(targets), targets, run); err != nil {
 		return treeRefStats{}, err
 	}
 	return st, nil
@@ -1047,9 +1047,13 @@ func (s *SecretdataFS) applyIndexedTarget(
 	return nil
 }
 
-// runOrphanWorkers 用有界并发执行 work（首个错误即取消全局并返回）。
-func (s *SecretdataFS) runOrphanWorkers[T any](
-	ctx context.Context, total int, work []T, run func(context.Context, T) error,
+// runBoundedWorkers 用有界并发执行 work（首个错误即取消全局并返回）。
+//
+// 为什么是**包级泛型函数**而非方法（2026-11-21 构建失败修正）：Go 语言规定
+// **方法不能带类型参数**（`method must have no type parameters`）；把 `s` 作首参即可，
+// 语义与并发度来源不变。
+func runBoundedWorkers[T any](
+	s *SecretdataFS, ctx context.Context, total int, work []T, run func(context.Context, T) error,
 ) error {
 	workers := min(s.orphanAuditConcurrency(), total)
 	if workers <= 0 {
@@ -1139,7 +1143,7 @@ func (s *SecretdataFS) collectAllReferences(
 		mu.Unlock()
 		return nil
 	}
-	if err := s.runOrphanWorkers(ctx, len(containers), containers, list); err != nil {
+	if err := runBoundedWorkers(s, ctx, len(containers), containers, list); err != nil {
 		return treeRefStats{}, err
 	}
 	return s.collectIndexedReferences(ctx, work, referenced)
