@@ -41,6 +41,9 @@ func (h *Handlers) ReportCloudTaskFailure(f cloud.TaskFailure) {
 	}
 	detail := fmt.Sprintf("云端下载任务失败：task=%s 类别=%s 次数=%d 源=%s 错误=%s",
 		f.TaskID, f.ErrorClass, f.Attempts, f.URL, f.Error)
+	if f.ArtifactDir != "" {
+		detail += fmt.Sprintf("；已保留产物目录=%s（未删除，可人工判断/换源复用）", f.ArtifactDir)
+	}
 	center.ReportStorageIssue(volume, string(issues.KindCloudDownloadFailed), path, detail,
 		retryableCloudFailure(f.ErrorClass))
 }

@@ -221,3 +221,23 @@ func TestWantOverwrite(t *testing.T) {
 		t.Fatal("显式 Overwrite=true 时应允许覆盖")
 	}
 }
+
+// TestKeepArtifactDecision 锁定「失败不删产物」的决策表（用户裁定 2026-11-24）：
+// 只有空间不足才删；其余失败一律保留（供人工/换源复用），否则慢源下载数小时被清空。
+func TestKeepArtifactDecision(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{ // msg -> 是否保留
+		"hybrid integrity check failed: integrity mismatch (gcid)": true,
+		"转存目标 已存在且幂等":                                              true,
+		`目标卷 "baidu" 未装配`:                                          true,
+		"context deadline exceeded":                                true,
+		"no space left on device":                                  false, // 必须腾空间
+	}
+	for msg, wantKeep := range cases {
+		class := classifyCloudError(msg)
+		gotKeep := class != ErrClassDiskFull
+		if gotKeep != wantKeep {
+			t.Errorf("msg=%q class=%s keep=%v want %v", msg, class, gotKeep, wantKeep)
+		}
+	}
+}
