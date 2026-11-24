@@ -82,6 +82,8 @@
             <input id="v2-upload-input" type="file" multiple hidden>
             <button class="btn" id="v2-mkdir" type="button">新建目录</button>
             <button class="btn" id="v2-batch-delete" type="button" disabled>删除所选</button>
+            <button class="btn btn-ghost" id="v2-batch-rename" type="button" disabled>重命名所选</button>
+            <button class="btn btn-ghost" id="v2-batch-archive" type="button" disabled>打包下载</button>
             <button class="btn" id="v2-refresh" type="button">刷新</button>
             <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存">清缓存</button>
           </div>
@@ -349,8 +351,11 @@
                 <button class="btn btn-ghost" id="v2-cs-tasks-retry" type="button" disabled>重试所选</button>
                 <button class="btn btn-ghost" id="v2-cs-tasks-cancel" type="button" disabled>取消所选</button>
                 <button class="btn btn-ghost" id="v2-cs-tasks-export" type="button">导出 TSV</button>
+                <label class="btn btn-ghost" for="v2-cs-tasks-import">导入 TSV</label>
+                <input id="v2-cs-tasks-import" type="file" accept=".tsv,text/tab-separated-values" hidden>
                 <button class="btn" id="v2-cs-tasks-refresh" type="button">刷新</button>
               </div>
+              <div class="muted" id="v2-cs-tasks-recent" style="font-size:11.5px;margin-bottom:8px" hidden></div>
               <div id="v2-cs-tasks-detail" class="card" hidden style="margin-bottom:10px">
                 <div class="card-title">任务详情</div>
                 <pre class="json" id="v2-cs-tasks-detail-json"></pre>
@@ -573,6 +578,7 @@
 <script src="files-inspector.js"></script>
 <script src="../cloud-tasks.js"></script>
 <script src="cloud-table.js"></script>
+<script src="cloud-ops.js"></script>
 <script src="audit-console.js"></script>
 <script src="config-console.js"></script>
 <script src="notify-console.js"></script>

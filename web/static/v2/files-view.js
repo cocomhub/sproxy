@@ -140,8 +140,10 @@
 
   function syncSelection() {
     var n = Object.keys(state.selected).length;
-    var btn = el('v2-batch-delete');
-    if (btn) { btn.disabled = n === 0; }
+    ['v2-batch-delete', 'v2-batch-rename', 'v2-batch-archive'].forEach(function (id) {
+      var b = el(id);
+      if (b) { b.disabled = n === 0; }
+    });
     var all = el('v2-select-all');
     if (all) { all.checked = n > 0 && n === state.files.length; }
     var count = el('v2-count');

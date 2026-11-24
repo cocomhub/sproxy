@@ -271,6 +271,84 @@
     });
   }
 
+  function relOf(name) {
+    var sub = view() ? view().subdir() : '';
+    var j = window.v2files && window.v2files.joinSubdir ? window.v2files.joinSubdir(sub, name) : name;
+    return j || name;
+  }
+
+  function selectedFiles() {
+    var names = view() ? view().selected() : [];
+    return names.map(function (name) {
+      var info = view() && view().file ? view().file(name) : null;
+      return { name: name, rel: relOf(name), info: info || {} };
+    });
+  }
+
+  function batchRenameSelected() {
+    var items = selectedFiles().filter(function (it) { return !it.info || !it.info.isDir; });
+    if (!items.length) { toast('warn', '请选择文件（目录不支持批量重命名）'); return; }
+    var wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true">' +
+      '<h3>批量重命名 ' + items.length + ' 项</h3>' +
+      '<p class="muted">在原名基础上添加前缀/后缀（不改目录）</p>' +
+      '<label class="field">前缀<input id="v2-br-prefix" autocomplete="off"></label>' +
+      '<label class="field">后缀<input id="v2-br-suffix" autocomplete="off"></label>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-br="cancel">取消</button>' +
+      '<button type="button" class="btn btn-primary" data-br="ok">重命名</button></div></div>';
+    document.body.appendChild(wrap);
+    var close = function () { wrap.remove(); };
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) { close(); } });
+    wrap.querySelector('[data-br=cancel]').addEventListener('click', close);
+    wrap.querySelector('[data-br=ok]').addEventListener('click', function () {
+      var pre = wrap.querySelector('#v2-br-prefix').value;
+      var suf = wrap.querySelector('#v2-br-suffix').value;
+      if (!pre && !suf) { toast('warn', '请填写前缀或后缀'); return; }
+      var ops = items.map(function (it) {
+        return {
+          from: it.rel,
+          to: relOf(pre + it.name + suf),
+          checksum: (it.info && it.info.checksum) || ''
+        };
+      });
+      close();
+      api.json('POST', '/api/batch/rename', {
+        body: new TextEncoder().encode(JSON.stringify({ operations: ops })),
+        contentType: 'application/json'
+      }).then(function (body) {
+        var results = (body && body.results) || [];
+        var okN = results.filter(function (r) { return r.success; }).length;
+        toast(okN === results.length ? 'ok' : 'warn', '重命名成功 ' + okN + '/' + results.length);
+        if (view()) { view().load(); }
+      }).catch(function (e) { toast('bad', '批量重命名失败：' + (e.message || e)); });
+    });
+    var input = wrap.querySelector('#v2-br-prefix');
+    if (input) { input.focus(); }
+  }
+
+  function archiveSelected() {
+    var items = selectedFiles();
+    if (!items.length) { return; }
+    var files = items.map(function (it) { return it.rel; });
+    toast('info', '正在打包 ' + files.length + ' 项…');
+    api.request('POST', '/api/archive', {
+      body: new TextEncoder().encode(JSON.stringify({ files: files })),
+      contentType: 'application/json'
+    }).then(api.ensureOk).then(function (resp) { return resp.blob(); })
+      .then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        var d = new Date();
+        a.download = 'archive-' + d.toISOString().slice(0, 10) + '.tar.gz';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+        toast('ok', '已开始下载归档（' + files.length + ' 项）');
+      })
+      .catch(function (e) { toast('bad', '打包失败：' + (e.message || e)); });
+  }
+
   function init() {
     var input = el('v2-upload-input');
     if (input) {
@@ -282,6 +360,8 @@
     var mk = el('v2-mkdir');
     if (mk) { mk.addEventListener('click', mkdir); }
 
+    var br = el('v2-batch-rename'); if (br) { br.addEventListener('click', batchRenameSelected); }
+    var ba = el('v2-batch-archive'); if (ba) { ba.addEventListener('click', archiveSelected); }
     var batch = el('v2-batch-delete');
     if (batch) {
       batch.addEventListener('click', function () {
@@ -289,7 +369,7 @@
         if (!names.length) { return; }
         openDialog({
           title: '删除所选 ' + names.length + ' 项？',
-          message: '删除后不可恢复；目录将连同内容一并删除。',
+          message: '文件会移入回收站（可恢复）；目录将直接删除并连同内容。',
           danger: true, okText: '删除',
           onOk: function () {
             var sub = view() ? view().subdir() : '';

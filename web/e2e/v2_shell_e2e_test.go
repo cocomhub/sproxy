@@ -556,6 +556,11 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator(".modal-backdrop [data-dlg=ok]").Click(); err != nil {
 		t.Fatalf("再次确认删除: %v", err)
 	}
+	if _, err := page.WaitForFunction(
+		"() => !document.querySelector('#v2-file-body tr[data-name=\"e2e.txt\"]')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("二次删除后列表仍存在条目: %v", err)
+	}
 	if _, err := page.Evaluate("() => { location.hash = '#/trash'; }", nil); err != nil {
 		t.Fatalf("进入回收站: %v", err)
 	}
@@ -577,6 +582,79 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => !document.querySelector('#v2-trash-empty-hint').hidden",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("清空后回收站未变为空: %v", err)
+	}
+
+	// 批量重命名 + 打包下载（真实 /api/batch/rename 与 /api/archive）。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := waitLoc(page, "#v2-upload-input", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("上传控件不可用: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "ren.txt", MimeType: "text/plain", Buffer: []byte("rename me"),
+	}}); err != nil {
+		t.Fatalf("上传 ren.txt: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"ren.txt\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("ren.txt 未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"ren.txt\"] .cb").Check(); err != nil {
+		t.Fatalf("选择 ren.txt: %v", err)
+	}
+	if err := page.Locator("#v2-batch-rename").Click(); err != nil {
+		t.Fatalf("打开批量重命名: %v", err)
+	}
+	if err := page.Locator("#v2-br-suffix").Fill("-v2"); err != nil {
+		t.Fatalf("填写后缀: %v", err)
+	}
+	if err := page.Locator("[data-br=ok]").Click(); err != nil {
+		t.Fatalf("提交批量重命名: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"ren.txt-v2\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("批量重命名结果未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"ren.txt-v2\"] .cb").Check(); err != nil {
+		t.Fatalf("选择重命名后的文件: %v", err)
+	}
+	if err := page.Locator("#v2-batch-archive").Click(); err != nil {
+		t.Fatalf("点击打包下载: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('归档'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("打包下载未回显: %v", err)
+	}
+
+	// 云任务 TSV 导入：按 url 触发真实重试，回显导入结果并记录最近操作。
+	if _, err := page.Evaluate("() => { location.hash = '#/console'; }", nil); err != nil {
+		t.Fatalf("回到控制台: %v", err)
+	}
+	if err := page.Locator("[data-cs=tasks]").Click(); err != nil {
+		t.Fatalf("切换云端任务分区: %v", err)
+	}
+	if err := waitLoc(page, "#v2-cs-tasks-import", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("TSV 导入控件不可用: %v", err)
+	}
+	tsv := "id\tstatus\tfilename\ttotal_size\turl\tupdated_at\n" +
+		"\t\t\t0\thttp://127.0.0.1:1/nope2.bin\t\n"
+	if err := page.Locator("#v2-cs-tasks-import").SetInputFiles([]playwright.InputFile{{
+		Name: "tasks.tsv", MimeType: "text/tab-separated-values", Buffer: []byte(tsv),
+	}}); err != nil {
+		t.Fatalf("导入 TSV: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('TSV'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		toasts, _ := page.Locator("#v2-toasts").TextContent()
+		recent, _ := page.Locator("#v2-cs-tasks-recent").TextContent()
+		state, _ := page.Locator("#v2-cs-state").TextContent()
+		t.Fatalf("TSV 导入未回显: %v (toasts=%q recent=%q state=%q)", err, toasts, recent, state)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const r = document.querySelector('#v2-cs-tasks-recent'); return r && !r.hidden && r.textContent.includes('导入 TSV'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("最近操作未记录: %v", err)
 	}
 
 	// 主题切换。

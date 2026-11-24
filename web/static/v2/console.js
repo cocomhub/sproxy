@@ -228,9 +228,63 @@
     });
     return chain.then(function () {
       if (window.v2toast) { window.v2toast(done ? 'ok' : 'bad', '已处理 ' + done + '/' + target.length + ' 个任务'); }
+      recordOp((kind === 'retry' ? '批量重试 ' : '批量取消 ') + done + '/' + target.length);
       loadTasks();
       return done;
     });
+  }
+
+  var RECENT_KEY = 'sproxy_v2_task_ops';
+
+  function loadRecentOps() {
+    try { return JSON.parse(sessionStorage.getItem(RECENT_KEY) || '[]') || []; } catch (e) { return []; }
+  }
+
+  function recordOp(text) {
+    var list = loadRecentOps();
+    list.unshift({ ts: Date.now(), text: text });
+    list = list.slice(0, 5);
+    try { sessionStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (e) { /* 忽略 */ }
+    renderRecentOps();
+  }
+
+  function renderRecentOps() {
+    var box = el('v2-cs-tasks-recent');
+    if (!box) { return; }
+    var list = loadRecentOps();
+    if (!list.length) { box.hidden = true; return; }
+    box.hidden = false;
+    box.textContent = '最近操作：' + list.map(function (it) {
+      var d = new Date(it.ts);
+      return d.toLocaleTimeString() + ' ' + it.text;
+    }).join(' · ');
+  }
+
+  function importTasks(file) {
+    if (!file) { return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var rows = window.v2cloudOps ? window.v2cloudOps.parseTSV(reader.result) : [];
+      var targets = rows.filter(function (r) { return r.id || r.url; });
+      if (!targets.length) { banner('warn', 'TSV 中没有可导入的 id/url 行'); return; }
+      var done = 0;
+      var chain = Promise.resolve();
+      targets.forEach(function (row) {
+        chain = chain.then(function () {
+          var payload = row.id ? { task_id: row.id, force: true } : { url: row.url, force: true };
+          return api.json('POST', '/api/cloud/tasks/retry', {
+            body: new TextEncoder().encode(JSON.stringify(payload)),
+            contentType: 'application/json'
+          }).then(function () { done += 1; }).catch(function () { /* 单条失败继续 */ });
+        });
+      });
+      chain.then(function () {
+        if (window.v2toast) { window.v2toast(done ? 'ok' : 'bad', 'TSV 导入重试 ' + done + '/' + targets.length); }
+        recordOp('导入 TSV · 重试 ' + done + '/' + targets.length);
+        loadTasks();
+      });
+    };
+    reader.readAsText(file);
   }
 
   function exportTasks() {
@@ -379,6 +433,9 @@
     var bRetry = el('v2-cs-tasks-retry'); if (bRetry) { bRetry.addEventListener('click', function () { batchTasks('retry'); }); }
     var bCancel = el('v2-cs-tasks-cancel'); if (bCancel) { bCancel.addEventListener('click', function () { batchTasks('cancel'); }); }
     var bExport = el('v2-cs-tasks-export'); if (bExport) { bExport.addEventListener('click', exportTasks); }
+    var imp = el('v2-cs-tasks-import');
+    if (imp) { imp.addEventListener('change', function () { importTasks(imp.files && imp.files[0]); imp.value = ''; }); }
+    renderRecentOps();
     var ir = el('v2-cs-issues-refresh'); if (ir) { ir.addEventListener('click', loadIssues); }
     if (isActive()) { load(); }
   }
