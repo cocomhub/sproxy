@@ -697,6 +697,25 @@ body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 .src .rdo{width:14px;height:14px;border-radius:50%;border:1px solid var(--border-strong);display:inline-block}
 .src.sel .rdo{border:4px solid var(--accent)}
 
+
+/* ───── 右键上下文菜单 ───── */
+.ctx{position:fixed;z-index:120;min-width:200px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-md);box-shadow:var(--shadow-2);padding:5px;display:none}
+.ctx.show{display:block}
+.ctx button{display:flex;width:100%;align-items:center;gap:8px;border:0;background:none;padding:7px 10px;border-radius:var(--radius-sm);color:var(--text-2);font-size:13px;cursor:pointer;text-align:left}
+.ctx button:hover{background:var(--surface-hover);color:var(--text)}
+.ctx button.danger{color:var(--bad)}
+.ctx .sep{height:1px;background:var(--border);margin:5px 4px}
+.ctx .hint{margin-left:auto;font-size:10.5px;color:var(--text-3)}
+/* ───── Meta 面板 ───── */
+.meta-bar{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-3)}
+.meta-code{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;font-family:var(--font-mono);font-size:11.5px;line-height:1.65;color:var(--text-2);overflow:auto;max-height:320px;white-space:pre}
+.chunk-state{width:10px;height:10px;border-radius:3px;display:inline-block}
+/* ───── 点击模型表 ───── */
+.click-model{display:flex;flex-direction:column;gap:8px}
+.click-model .row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;font-size:12.5px;padding:8px 0;border-bottom:1px solid var(--border)}
+.click-model .row:last-child{border-bottom:0}
+.click-model kbd{justify-self:start}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -2072,6 +2091,22 @@ sclient list --subdir jav/EXAMPLE</div>
             </div>
           </div>
 
+          <div class="ds-sec"><h4>文件点击模型</h4>
+            <div class="ds-body">
+              <div class="click-model">
+                <div class="row"><span>单击行</span><span>只切换选中（不打开内容）；多选后出现批量条</span></div>
+                <div class="row"><span>单击文件名 / 缩略图</span><span>预览：视频 → 播放器；图片 → 灯箱；文本 → 代码视图；未知类型 → 详情</span></div>
+                <div class="row"><span>双击行</span><span>打开右侧检查器（概览），不离开列表</span></div>
+                <div class="row"><span>右键 / 行尾 ⋯</span><span>上下文菜单：预览 / 详情 Meta / 下载 / 重命名 / 分享 / 复制路径 / 删除</span></div>
+                <div class="row"><span><kbd>Space</kbd></span><span>预览当前行</span></div>
+                <div class="row"><span><kbd>Enter</kbd></span><span>打开检查器概览</span></div>
+                <div class="row"><span><kbd>m</kbd></span><span>打开检查器并切到 Meta</span></div>
+                <div class="row"><span><kbd>⌘C</kbd></span><span>复制选中文件路径（多选用换行分隔）</span></div>
+                <div class="row"><span><kbd>Shift</kbd> + 勾选</span><span>区间选择（从上次勾选到当前）</span></div>
+              </div>
+            </div>
+          </div>
+
           <div class="ds-sec"><h4>反馈：Toast / Banner / 空态 / 骨架</h4>
             <div class="ds-body">
               <div class="ds-row">
@@ -2120,20 +2155,35 @@ sclient list --subdir jav/EXAMPLE</div>
   <header><h3>EXAMPLE-001.mp4</h3><span class="pill pill-ok"><span class="dot"></span>一致</span>
     <div style="margin-left:auto"><button class="icon-btn" id="drawer-close" type="button" title="关闭">✕</button></div></header>
   <div class="dtabs" role="tablist">
-    <button class="dtab" data-dtab="info" aria-current="page" type="button">详情</button>
+    <button class="dtab" data-dtab="info" aria-current="page" type="button">概览</button>
+    <button class="dtab" data-dtab="chunks" type="button">分块 <span class="muted">12</span></button>
+    <button class="dtab" data-dtab="meta" type="button">Meta</button>
     <button class="dtab" data-dtab="ver" type="button">版本 <span class="muted">3</span></button>
     <button class="dtab" data-dtab="share" type="button">分享</button>
   </div>
   <div class="body">
     <div class="dpane active" data-dpane="info">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="pill pill-ok"><span class="dot"></span>校验一致</span>
+        <span class="pill pill-mute">视频</span>
+        <span class="pill pill-info">baidu</span>
+        <span class="muted" style="font-size:11.5px;margin-left:auto">修改 11-24 17:10</span>
+      </div>
       <dl class="kv">
+        <dt>路径</dt><dd class="mono">/jav/EXAMPLE/EXAMPLE-001.mp4</dd>
         <dt>卷</dt><dd>baidu（外部 · mydisk/s）</dd>
         <dt>大小</dt><dd class="num">4.72 GB（5,068,546,048 B）</dd>
         <dt>校验</dt><dd class="mono" style="overflow-wrap:anywhere">sha256:example…checksum</dd>
-        <dt>分块</dt><dd>12 / 12 · 64 MiB</dd>
-        <dt>修改</dt><dd class="num">2026-11-24 17:10:22</dd>
-        <dt>来源</dt><dd>cloud-download · pikpak</dd>
+        <dt>分块</dt><dd>12 / 12 · 64 MiB · <a style="color:var(--accent);cursor:pointer" data-dtab="chunks">查看分块</a></dd>
+        <dt>来源</dt><dd>cloud-download · pikpak · <a style="color:var(--accent);cursor:pointer" data-dialog="dlg-audit">审计</a></dd>
+        <dt>标签</dt><dd><span class="pill pill-mute">示例</span> <span class="pill pill-mute">1080p</span></dd>
       </dl>
+      <div class="divider"></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" data-toast="已复制路径 /jav/EXAMPLE/EXAMPLE-001.mp4" data-toast-kind="ok">复制路径</button>
+        <button class="btn btn-sm" type="button" data-preview="video">预览</button>
+        <button class="btn btn-sm" type="button" data-toast="已复制 sha256" data-toast-kind="ok">复制校验值</button>
+      </div>
       <div class="divider"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-sm" type="button" data-preview="video">预览</button>
@@ -2143,6 +2193,43 @@ sclient list --subdir jav/EXAMPLE</div>
         <button class="btn btn-sm" type="button" style="color:var(--bad)" data-toast="已移入回收站" data-toast-kind="ok" data-undo="1">删除</button>
       </div>
     </div>
+    <div class="dpane" data-dpane="chunks">
+      <div class="meta-bar"><span>12 个分块 · 64 MiB</span><span style="margin-left:auto" class="pill pill-ok">全部可读</span></div>
+      <div style="overflow:auto;border:1px solid var(--border);border-radius:var(--radius-md)">
+        <table class="table" style="font-size:12px">
+          <thead><tr><th style="width:44px">#</th><th style="width:78px">大小</th><th>校验</th><th style="width:88px">状态</th><th style="width:70px"></th></tr></thead>
+          <tbody>
+            <tr><td class="num">1</td><td class="num">64 MiB</td><td class="mono">a1b2…</td><td><span class="chunk-state" style="background:var(--ok)"></span></td><td></td></tr>
+            <tr><td class="num">2</td><td class="num">64 MiB</td><td class="mono">c3d4…</td><td><span class="chunk-state" style="background:var(--ok)"></span></td><td></td></tr>
+            <tr><td class="num">3</td><td class="num">64 MiB</td><td class="mono">e5f6…</td><td><span class="chunk-state" style="background:var(--ok)"></span></td><td></td></tr>
+            <tr><td class="num">4</td><td class="num">64 MiB</td><td class="mono">不可读</td><td><span class="chunk-state" style="background:var(--bad)"></span></td><td><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试分块 4" data-toast-kind="ok">重试</button></td></tr>
+            <tr><td class="num">…</td><td class="num">…</td><td class="muted">共 12 块</td><td></td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="muted" style="font-size:11.5px">分块校验用于定位损坏范围；外部卷不支持 md5 时分块状态显示为「跳过」。</div>
+    </div>
+
+    <div class="dpane" data-dpane="meta">
+      <div class="meta-bar"><span>文件元数据（只读）</span>
+        <button class="btn btn-sm btn-ghost" style="margin-left:auto" type="button" data-toast="已复制完整 Meta JSON" data-toast-kind="ok">复制 JSON</button>
+        <button class="btn btn-sm btn-ghost" type="button" data-toast="已下载 meta.json" data-toast-kind="ok">下载</button>
+      </div>
+      <div class="meta-code">{
+  "path": "/jav/EXAMPLE/EXAMPLE-001.mp4",
+  "volume": "baidu",
+  "size": 5068546048,
+  "checksum": "sha256:example…checksum",
+  "chunk_size": 67108864,
+  "chunks": 12,
+  "mtime": "2026-11-24T17:10:22Z",
+  "source": { "kind": "cloud-download", "provider": "pikpak" },
+  "tags": ["示例", "1080p"],
+  "extra": { "title_ja": "サンプルタイトル", "series": "EXAMPLE" }
+}</div>
+      <div class="muted" style="font-size:11.5px">Meta 来自卷 sidecar；外部卷以服务端缓存为准，可能滞后。<a style="color:var(--accent);cursor:pointer" data-toast="已请求刷新 Meta" data-toast-kind="info">刷新</a></div>
+    </div>
+
     <div class="dpane" data-dpane="ver">
       <div class="muted" style="font-size:12px">版本由服务端 versioning 管理；恢复会生成新版本，不覆盖历史。</div>
       <div style="display:flex;flex-direction:column;gap:10px">
@@ -2450,6 +2537,18 @@ cloud-9c31aa07-1</textarea>
   <button role="menuitemradio" type="button" data-lang-opt="en-US" aria-checked="false">English</button>
   <div class="pop-sep"></div>
   <button role="menuitem" type="button" data-lang-opt="auto">跟随浏览器</button>
+</div>
+
+<div class="ctx" id="ctx" role="menu" aria-hidden="true">
+  <button type="button" role="menuitem" data-ctx="preview">预览<span class="hint">Space</span></button>
+  <button type="button" role="menuitem" data-ctx="meta">详情 / Meta<span class="hint">Enter</span></button>
+  <div class="sep"></div>
+  <button type="button" role="menuitem" data-ctx="download">下载</button>
+  <button type="button" role="menuitem" data-ctx="rename">重命名 / 移动</button>
+  <button type="button" role="menuitem" data-ctx="share">分享</button>
+  <button type="button" role="menuitem" data-ctx="copy">复制路径<span class="hint">⌘C</span></button>
+  <div class="sep"></div>
+  <button type="button" role="menuitem" class="danger" data-ctx="delete">删除</button>
 </div>
 
 <div class="popover" id="account-menu" role="menu" aria-hidden="true">
@@ -3036,10 +3135,17 @@ cloud-9c31aa07-1</textarea>
 
   // ── 抽屉 ──
   var drawer = id('drawer'), taskDrawer = id('task-drawer');
-  function openDrawer(el) {
+  function setDTab(name) {
+    $$('.dtab').forEach(function (t) { t.removeAttribute('aria-current'); });
+    var tab = document.querySelector('.dtab[data-dtab="' + name + '"]');
+    if (tab) { tab.setAttribute('aria-current', 'page'); }
+    $$('.dpane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-dpane') === name); });
+  }
+  function openDrawer(el, tab) {
     lastFocus = document.activeElement;
     el.classList.add('show'); el.setAttribute('aria-hidden', 'false');
     layerStack.push(el.id);
+    if (tab) { setDTab(tab); }
     var f = el.querySelector('.dtab, button'); if (f) { f.focus(); }
   }
   function closeDrawer(el) {
@@ -3051,11 +3157,11 @@ cloud-9c31aa07-1</textarea>
   id('drawer-close').addEventListener('click', function () { closeDrawer(drawer); });
   id('task-close').addEventListener('click', function () { closeDrawer(taskDrawer); });
   $$('.dtab').forEach(function (t) {
-    t.addEventListener('click', function () {
-      $$('.dtab').forEach(function (x) { x.removeAttribute('aria-current'); });
-      t.setAttribute('aria-current', 'page');
-      $$('.dpane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-dpane') === t.getAttribute('data-dtab')); });
-    });
+    t.addEventListener('click', function () { setDTab(t.getAttribute('data-dtab')); });
+  });
+  drawer.addEventListener('click', function (e) {
+    var link = e.target.closest('[data-dtab]');
+    if (link && !link.classList.contains('dtab')) { setDTab(link.getAttribute('data-dtab')); }
   });
 
   // ── 命令面板 ──
@@ -3128,7 +3234,8 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'volume') { closeVol(); }
+      if (top === 'ctx') { window.__closeCtx && window.__closeCtx(); }
+      else if (top === 'volume') { closeVol(); }
       else if (top === 'preview') { closePreview(); }
       else if (top === 'sheet') { closeSheet(); }
       else if (top === 'lang') { closeLang(); }
@@ -3181,6 +3288,27 @@ cloud-9c31aa07-1</textarea>
       if (picked > 0 && document.querySelector('.view.active').id === 'view-files') {
         e.preventDefault();
         openConfirm({ title: '删除已选的 ' + picked + ' 项？', msg: '将移入回收站，30 天内可恢复。', ok: '删除', toast: '已删除 ' + picked + ' 项' });
+      }
+      return;
+    }
+    if (e.key === ' ') {
+      var rowS = document.activeElement.closest ? document.activeElement.closest('tr') : null;
+      if (rowS && rowS.closest('#view-files')) {
+        e.preventDefault();
+        var nm = (rowS.querySelector('.t') || {}).textContent || '';
+        openPreview(/\.(png|jpe?g|webp|gif)$/i.test(nm) ? 'image' : /\.(json|txt|md|log|srt)$/i.test(nm) ? 'text' : 'video');
+      }
+      return;
+    }
+    if (e.key.toLowerCase() === 'm' && !e.metaKey && !e.ctrlKey) {
+      if (document.activeElement.closest && document.activeElement.closest('#view-files tr')) { e.preventDefault(); openDrawer(drawer, 'meta'); }
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+      var pickedC = $$('#view-files tbody.real-rows .cb:checked, #files-grid .cb:checked');
+      if (pickedC.length) {
+        e.preventDefault();
+        toast('ok', '已复制 ' + pickedC.length + ' 个路径');
       }
       return;
     }
@@ -3435,6 +3563,95 @@ cloud-9c31aa07-1</textarea>
       auto.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
     }
     render();
+  })();
+
+  // ── 文件点击模型 ──
+  (function () {
+    var rows = $$('#view-files tbody.real-rows tr');
+    var lastIdx = -1;
+    function nameOf(row) {
+      var t = row.querySelector('.t');
+      return t ? t.textContent.trim() : '文件';
+    }
+    function previewKind(row) {
+      var n = nameOf(row).toLowerCase();
+      if (/\.(mp4|mkv|webm|mov|avi)$/.test(n)) { return 'video'; }
+      if (/\.(png|jpg|jpeg|webp|gif)$/.test(n)) { return 'image'; }
+      if (/\.(json|txt|md|log|srt|yaml|yml)$/.test(n)) { return 'text'; }
+      return 'video';
+    }
+    function syncTitle(row) {
+      var n = nameOf(row);
+      var h = $('#drawer header h3'); if (h) { h.textContent = n; }
+      var pv = id('pv-title'); if (pv) { pv.textContent = n; }
+    }
+    rows.forEach(function (row, idx) {
+      var cb = row.querySelector('.cb');
+      row.addEventListener('click', function (e) {
+        if (e.target.closest('.cb') || e.target.closest('button') || e.target.closest('a')) { return; }
+        if (e.target.closest('.t')) { syncTitle(row); openPreview(previewKind(row)); return; }
+        if (cb) { cb.checked = !cb.checked; syncSelection(); }
+      });
+      row.addEventListener('dblclick', function (e) {
+        if (e.target.closest('.cb') || e.target.closest('button')) { return; }
+        syncTitle(row); openDrawer(drawer, 'info');
+      });
+      row.addEventListener('contextmenu', function (e) {
+        e.preventDefault(); syncTitle(row); openCtx(e.clientX, e.clientY, row);
+      });
+      if (cb) {
+        cb.addEventListener('click', function (e) {
+          if (e.shiftKey && lastIdx >= 0 && lastIdx !== idx) {
+            var a = Math.min(lastIdx, idx), b = Math.max(lastIdx, idx);
+            rows.forEach(function (r, i) { if (i >= a && i <= b) { r.querySelector('.cb').checked = true; } });
+            syncSelection();
+          }
+          lastIdx = idx;
+        });
+      }
+    });
+
+    // 右键菜单
+    var ctx = id('ctx');
+    var ctxRow = null;
+    window.__openCtxForRow = function (row, x, y) { syncTitle(row); openCtx(x, y, row); };
+    function openCtx(x, y, row) {
+      ctxRow = row;
+      ctx.style.left = Math.min(x, innerWidth - 220) + 'px';
+      ctx.style.top = Math.min(y, innerHeight - 280) + 'px';
+      ctx.classList.add('show'); ctx.setAttribute('aria-hidden', 'false');
+      layerStack.push('ctx');
+      var f = ctx.querySelector('button'); if (f) { f.focus(); }
+    }
+    function closeCtx() {
+      ctx.classList.remove('show'); ctx.setAttribute('aria-hidden', 'true');
+      layerStack = layerStack.filter(function (x) { return x !== 'ctx'; });
+    }
+    window.__closeCtx = closeCtx;
+    ctx.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-ctx]'); if (!b) { return; }
+      var act = b.getAttribute('data-ctx');
+      var name = ctxRow ? (ctxRow.querySelector('.t') || {}).textContent : '文件';
+      closeCtx();
+      if (act === 'preview') { openPreview(ctxRow ? previewKind(ctxRow) : 'video'); }
+      else if (act === 'meta') { openDrawer(drawer, 'meta'); }
+      else if (act === 'download') { toast('ok', '开始下载 ' + name); }
+      else if (act === 'rename') { openDialog(id('dlg-rename')); }
+      else if (act === 'share') { openDrawer(drawer, 'share'); }
+      else if (act === 'copy') { toast('ok', '已复制路径 /jav/EXAMPLE/' + name); }
+      else if (act === 'delete') { openConfirm({ title: '删除 ' + name + '？', msg: '将移入回收站，30 天内可恢复。', ok: '删除', toast: '已删除 ' + name }); }
+    });
+    document.addEventListener('click', function (e) {
+      if (ctx.classList.contains('show') && !ctx.contains(e.target)) { closeCtx(); }
+    });
+    window.addEventListener('scroll', function () { if (ctx.classList.contains('show')) { closeCtx(); } }, true);
+    window.addEventListener('resize', function () { if (ctx.classList.contains('show')) { closeCtx(); } });
+
+    // 网格卡片右键 / 双击
+    $$('#files-grid .fcard').forEach(function (c) {
+      c.addEventListener('contextmenu', function (e) { e.preventDefault(); openCtx(e.clientX, e.clientY, c); });
+      c.addEventListener('dblclick', function () { openDrawer(drawer, 'info'); });
+    });
   })();
 
   // ── 工作卷选择 ──
@@ -3973,7 +4190,7 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu'), ctx: id('ctx') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {

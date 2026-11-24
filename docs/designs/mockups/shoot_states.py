@@ -68,6 +68,16 @@ for skin in "abc":
         spec(f"{skin}-files-en", skin, actions=[
             "document.getElementById('lang-btn').click()",
             "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-ctx-menu", skin, actions=[
+            "var r=document.querySelectorAll('#view-files tbody.real-rows tr')[1];r.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:520,clientY:360}));"]),
+        spec(f"{skin}-drawer-meta", skin, actions=[
+            "var r=document.querySelectorAll('#view-files tbody.real-rows tr')[1];r.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));",
+            "document.querySelector('.dtab[data-dtab=meta]').click()"]),
+        spec(f"{skin}-drawer-chunks", skin, actions=[
+            "var r=document.querySelectorAll('#view-files tbody.real-rows tr')[1];r.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));",
+            "document.querySelector('.dtab[data-dtab=chunks]').click()"]),
+        spec(f"{skin}-design-system", skin, actions=[
+            "document.getElementById('dev-ds').click()"]),
         spec(f"{skin}-volume-menu", skin, actions=[
             "document.getElementById('volume-btn').click()"]),
         spec(f"{skin}-cloud-batch", skin, actions=[
