@@ -286,6 +286,12 @@ web-test:
 	@node --check web/static/v2/audit-console.test.js
 	@node --check web/static/v2/config-console.js
 	@node --check web/static/v2/config-console.test.js
+	@node --check web/static/v2/notify-console.js
+	@node --check web/static/v2/notify-console.test.js
+	@node --check web/static/v2/verify-console.js
+	@node --check web/static/v2/verify-console.test.js
+	@node --check web/static/v2/access-console.js
+	@node --check web/static/v2/access-console.test.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js
@@ -316,6 +322,9 @@ web-test:
 	node --test web/static/sync.test.js
 	node --test web/static/v2/audit-console.test.js
 	node --test web/static/v2/config-console.test.js
+	node --test web/static/v2/notify-console.test.js
+	node --test web/static/v2/verify-console.test.js
+	node --test web/static/v2/access-console.test.js
 	node --test web/static/v2/shell.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js
