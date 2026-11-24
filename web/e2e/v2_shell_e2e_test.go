@@ -5,6 +5,8 @@
 package e2e
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server"
@@ -20,6 +22,13 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	page, stop := pageFixture(t)
 	defer stop()
 
+	// 播种一个真实目录，验证 P1a 列表与面包屑（测试实例允许 loopback 匿名）。
+	resp, mkErr := http.Post(baseURL+"/mkdir?dirname=v2demo", "", nil)
+	if mkErr != nil {
+		t.Fatalf("seed mkdir: %v", mkErr)
+	}
+	resp.Body.Close()
+
 	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
 		t.Fatalf("打开 /ui/v2/: %v", err)
 	}
@@ -31,6 +40,25 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 	if txt, _ := page.Locator("#v2-title").TextContent(); txt != "文件" {
 		t.Fatalf("默认路由标题 = %q，期望 文件", txt)
+	}
+
+	// P1a：列表来自 /api/files，且可进入子目录。
+	if err := waitLoc(page, "#v2-file-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("文件列表未渲染: %v", err)
+	}
+	if txt, _ := page.Locator("#v2-file-body").TextContent(); !strings.Contains(txt, "v2demo") {
+		t.Fatalf("列表缺少播种目录 v2demo: %q", txt)
+	}
+	if err := page.Locator("#v2-file-body a").First().Click(); err != nil {
+		t.Fatalf("进入 v2demo: %v", err)
+	}
+	if h, _ := page.Evaluate("() => location.hash", nil); h != "#/files/v2demo" {
+		t.Fatalf("子目录 hash = %v", h)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-crumbs').textContent.indexOf('v2demo') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("面包屑未更新为 v2demo: %v", err)
 	}
 
 	// 切换路由：hash + 面板可见性。

@@ -85,7 +85,10 @@
     if (title) { title.textContent = t[0]; }
     if (sub) { sub.textContent = t[1]; }
     document.title = t[0] + ' · sproxy v2';
-    if (window.location.hash !== routeHref(route)) {
+    // 仅当 hash 缺失或首段非法时补默认值；保留 #/files/<subdir> 等子路径。
+    var raw = String(window.location.hash || '').replace(/^#\/?/, '');
+    var first = raw.split('/')[0];
+    if (!raw || ROUTES.indexOf(first) === -1) {
       try { history.replaceState(null, '', routeHref(route)); } catch (e) { /* file:// */ }
     }
   }

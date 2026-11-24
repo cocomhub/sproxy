@@ -450,10 +450,15 @@
 | 批次 | 状态 | 交付物 |
 | --- | --- | --- |
 | P0 壳层 | ✅ 已交付 | `web/static/v2/{index.html,tokens.css,components.css,shell.js,shell.test.js}`；`/ui/v2/` 由既有静态路由直接提供（无需改后端）；旧页顶栏新增「试用新版」（可回滚） |
-| P1 文件页 | ⬜ | 接 `/api/files`、上传/批量/检查器 |
+| P1a 文件列表 | ✅ 已交付 | `/api/files` 真实列表（复用旧版 SproxySig 凭据）、面包屑/子目录、空态/错误态/401 提示；上传/批量/检查器待 P1b |
+| P1b 文件写操作 | ⬜ | 上传、批量、检查器 |
 | P2 传输页 | ⬜ | 云端任务/任务组/上传队列 |
 | P3 控制台 | ⬜ | 弹窗改善 → 页面化评估 |
 | P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+
+P1a 验收证据：`node --test v2/{auth,files}.test.js` 11 例通过；`make web-test` 通过（508 断言）；
+`go test ./web/e2e -run TestV2Shell` 通过（真实 `/mkdir` 播种 → 列表渲染 → 进入子目录 → 面包屑）；
+`go build ./...` 与 archcheck 通过。
 
 P0 验收证据：`make web-test` 通过（含 `v2/shell.test.js` 5 例）；`go test ./internal/archcheck -run TestWebAssets` 通过；
 `go test ./web/e2e -run TestV2Shell` 通过（路由/深链刷新/主题/旧版入口）；`go build ./...` 通过。
