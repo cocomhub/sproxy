@@ -143,3 +143,17 @@
 | 390×844 | 174 | **0** |
 
 截图扩到 **118 张**（新增 `*-console-access`、`*-wizard-rotate`、`*-dialog-audit`、`*-dialog-config`、`*-task-source`）。
+
+## 12. 第七轮审计（覆盖补全 + 属性泄漏检查）
+
+对抗审查补齐 7 项功能缺口后，状态矩阵扩到 **192 个**（新增：卷菜单、云端批量、同步任务表、同步/组/归档对话框）。
+
+| 视口 | 状态数 | 问题数 |
+| --- | --- | --- |
+| 1500×950 | 192 | **0** |
+| 390×844 | 192 | **0** |
+
+新增检查项 **leaked-attr**：可见文本中出现 `data-i18n=` / `data-sort=` / `aria-sort=` / `data-dialog=` 即失败。
+该项抓到真实缺陷：i18n 替换把属性写到 `>` 之后，表头显示属性文本且排序失效（已修复，见 `design-coverage-review.md` P2-1）。
+
+截图扩到 **133 张**（新增 `*-volume-menu`、`*-cloud-batch`、`*-dialog-sync`、`*-dialog-group-create`、`*-dialog-archive`）。

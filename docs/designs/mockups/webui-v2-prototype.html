@@ -587,6 +587,11 @@ body[data-share="invalid"] #share-invalid{display:block}
 body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 
 
+/* ───── 通用批量条（控制台表格用） ───── */
+.batchbar{display:none;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-2);flex-wrap:wrap}
+.batchbar.show{display:flex}
+.batchbar .cnt{font-size:12.5px;font-weight:650;white-space:nowrap}
+
 /* ───── 通知中心 ───── */
 .chan{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .chan .kpi{align-items:flex-start}
@@ -824,6 +829,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
 
     <header class="topbar">
       <div class="page-title" id="page-title">文件<span class="page-sub" id="page-sub">/ 全部卷</span></div>
+      <button class="chip" id="volume-btn" type="button" aria-haspopup="menu" aria-expanded="false" style="height:var(--input-h);border-radius:var(--radius-md)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
+        <span id="volume-label">全部卷</span>
+      </button>
       <div class="search-trigger" id="search-trigger" role="button" tabindex="0">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <span data-i18n="act.search">搜索文件、任务、卷…</span>
@@ -964,7 +973,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <button class="btn btn-sm" type="button">移动</button>
           <button class="btn btn-sm" type="button">校验</button>
           <button class="btn btn-sm" type="button" data-dialog="dlg-batch">批量重命名</button>
-          <button class="btn btn-sm" type="button" data-write data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
+          <button class="btn btn-sm" type="button" data-write data-confirm-title="删除已选的 2 项？" data-confirm-msg="将移入回收站，30 天内可恢复；关联的分享链接会立即失效。" data-confirm-ok="删除" data-confirm-toast="已删除 2 项，可在回收站恢复">删除</button>
           <button class="btn btn-sm" type="button" id="topbatch-clear">取消选择</button>
         </div>
 
@@ -973,8 +982,12 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <thead>
               <tr>
                 <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
-                <th> data-i18n="th.name">名称</th><th style="width:110px"> data-i18n="th.volume">卷</th><th style="width:96px" class="r"> data-i18n="th.size">大小</th>
-                <th style="width:150px"> data-i18n="th.mtime">修改时间</th><th style="width:130px"> data-i18n="th.checksum">校验</th><th style="width:90px"></th>
+                <th data-i18n="th.name" data-sort="name" style="cursor:pointer" aria-sort="none">名称 <span class="sort-arrow" aria-hidden="true">↕</span></th>
+                <th style="width:110px" data-i18n="th.volume">卷</th>
+                <th style="width:96px" class="r" data-i18n="th.size" data-sort="size" style="cursor:pointer" aria-sort="none">大小 <span class="sort-arrow" aria-hidden="true">↕</span></th>
+                <th style="width:150px" data-i18n="th.mtime" data-sort="mtime" style="cursor:pointer" aria-sort="none">修改时间 <span class="sort-arrow" aria-hidden="true">↕</span></th>
+                <th style="width:130px" data-i18n="th.checksum">校验</th>
+                <th style="width:90px"></th>
               </tr>
             </thead>
             <tbody class="real-rows">
@@ -1066,7 +1079,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             </div>
             <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
               <button class="btn btn-sm" type="button" data-dialog="dlg-mkdir">新建目录</button>
-              <button class="btn btn-sm" type="button">下载归档</button>
+              <button class="btn btn-sm" type="button" data-dialog="dlg-archive">下载归档</button>
               <span class="muted" style="font-size:12px;margin-left:auto">上传会先创建分块会话，断网后可在传输页继续。</span>
             </div>
           </div>
@@ -1216,14 +1229,14 @@ time: 2026-11-24T18:41:02Z</div>
 
             <div class="card">
               <div class="card-h"><h3>任务组</h3><span class="hint">组内成员共享来源与目标卷</span>
-                <div style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" type="button" data-dialog="dlg-group">组详情</button><button class="btn btn-sm" type="button" data-toast="已创建任务组（3 项）" data-toast-kind="ok">创建组</button></div></div>
+                <div style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" type="button" data-dialog="dlg-group">组详情</button><button class="btn btn-sm" type="button" data-dialog="dlg-group-create">创建组</button></div></div>
               <div class="card-b">
                 <div class="groups">
                   <div class="gcard">
                     <div class="gh"><b>mgt-102 系列</b><span class="pill pill-info" style="margin-left:auto">进行中</span></div>
                     <div class="gm"><span class="num">2/4 完成</span><span>·</span><span>失败 1</span></div>
                     <div class="bar"><i style="width:52%"></i></div>
-                    <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button" data-dialog="dlg-group">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试组内失败项" data-toast-kind="ok">重试失败</button></div>
+                    <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-sm" type="button" data-dialog="dlg-group">详情</button><button class="btn btn-sm" type="button" data-toast="已启动组链式下载（3 项）" data-toast-kind="ok">组链式</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试组内失败项" data-toast-kind="ok">重试失败</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消组内运行任务" data-toast-kind="warn">取消运行</button></div>
                   </div>
                   <div class="gcard">
                     <div class="gh"><b>NHDTB 十一月</b><span class="pill pill-ok" style="margin-left:auto">已完成</span></div>
@@ -1424,8 +1437,28 @@ time: 2026-11-24T18:41:02Z</div>
                   <span class="chip" role="button" tabindex="0" data-class="target_unavailable">target_unavailable <span class="n">1</span></span>
                 </div>
 
+                <div class="filters" id="cloud-volume-groups">
+                  <span class="muted" style="font-size:11.5px">按卷：</span>
+                  <span class="chip active" data-vg="">全部 <span class="n">12</span></span>
+                  <span class="chip" data-vg="baidu">baidu <span class="n">8</span></span>
+                  <span class="chip" data-vg="secretdata">secretdata <span class="n">2</span></span>
+                  <span class="chip" data-vg="local">local <span class="n">2</span></span>
+                  <span class="spacer" style="flex:1"></span>
+                  <span class="pill pill-ok" id="cloud-auto" role="button" tabindex="0" aria-pressed="true" style="cursor:pointer"><span class="dot"></span>自动刷新 5s</span>
+                  <button class="btn btn-sm" type="button" data-toast="已重试当前失败类别（content_mismatch 1 项）" data-toast-kind="ok">重试失败类别</button>
+                </div>
+
+                <div class="batchbar" id="cloud-batch">
+                  <span class="cnt">已选 <b class="num">0</b> 项</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已批量重试 0 项" data-toast-kind="ok">批量重试</button>
+                  <button class="btn btn-sm" type="button" data-toast="已批量取消 0 项" data-toast-kind="warn">批量取消</button>
+                  <button class="btn btn-sm" type="button" data-toast="已导出所选任务" data-toast-kind="ok">导出所选</button>
+                  <button class="btn btn-sm btn-ghost" type="button" id="cloud-batch-clear">取消选择</button>
+                </div>
+
                 <div class="card" style="overflow:hidden">
-                  <table class="table">
+                  <table class="table" id="cloud-table">
                     <thead><tr>
                       <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
                       <th>任务</th><th style="width:110px">来源</th><th style="width:110px">目标卷</th>
@@ -1469,6 +1502,10 @@ time: 2026-11-24T18:41:02Z</div>
                         <td><div class="row-actions"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试（目标卷已装配）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
                     </tbody>
                   </table>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>最近操作</h3><span class="hint">本页操作记录（sessionStorage，刷新保留、换标签页清空）</span></div>
+                  <div class="card-b" id="cloud-actions" style="font-size:12.5px;display:flex;flex-direction:column;gap:8px"></div>
                 </div>
                 <div class="pager">
                   <span>共 12 条 · 每页 5</span>
@@ -1732,6 +1769,21 @@ time: 2026-11-24T18:41:02Z</div>
 
               <!-- 同步冲突 -->
               <section class="csection" data-sec="sync">
+                <div class="card" style="overflow:hidden">
+                  <div class="card-h"><h3>同步任务</h3><span class="hint">push / pull / both；冲突与删除策略按任务独立</span>
+                    <div style="margin-left:auto"><button class="btn btn-sm btn-primary" type="button" data-dialog="dlg-sync">新建同步</button></div></div>
+                  <table class="table">
+                    <thead><tr><th>任务</th><th style="width:90px">方向</th><th>路径</th><th style="width:170px">策略</th><th style="width:110px">状态</th><th style="width:170px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">sync-a1</td><td><span class="pill pill-info">push</span></td><td class="mono">jav/NHDTB → node-b2:/jav/NHDTB</td><td class="muted">conflict-rename · 不传播删除</td><td><span class="pill pill-warn">冲突 2</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-sync">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消同步任务 sync-a1" data-toast-kind="warn">取消</button></div></td></tr>
+                      <tr><td class="mono">sync-b7</td><td><span class="pill pill-info">both</span></td><td class="mono">archive/2026-11 ↔ node-a1:/archive</td><td class="muted">lww · 传播删除</td><td><span class="pill pill-info">运行中</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已暂停同步" data-toast-kind="info">暂停</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消同步任务" data-toast-kind="warn">取消</button></div></td></tr>
+                      <tr><td class="mono">sync-c2</td><td><span class="pill pill-mute">pull</span></td><td class="mono">node-c3:/backup → local</td><td class="muted">skip · 不传播删除</td><td><span class="pill pill-ok">已完成</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已删除同步任务" data-toast-kind="ok">删除</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
                 <div class="filters">
                   <span class="chip active">待处理 <span class="n">2</span></span><span class="chip">已解决 <span class="n">14</span></span>
                   <select class="select" aria-label="冲突策略"><option>冲突策略：conflict-rename</option><option>skip</option><option>overwrite</option><option>lww</option></select>
@@ -2058,7 +2110,7 @@ sclient list --subdir jav/NHDTB</div>
   <button class="btn btn-sm btn-ghost" type="button">移动</button>
   <button class="btn btn-sm btn-ghost" type="button" data-toast="已提交校验任务" data-toast-kind="info">校验</button>
   <button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-batch">重命名</button>
-  <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
+  <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93" data-confirm-title="删除已选的 2 项？" data-confirm-msg="将移入回收站，30 天内可恢复。" data-confirm-ok="删除" data-confirm-toast="已删除 2 项，可在回收站恢复">删除</button>
   <span class="sep"></span>
   <button class="btn btn-sm btn-ghost" type="button" id="float-clear">取消</button>
 </div>
@@ -2233,6 +2285,74 @@ sclient list --subdir jav/NHDTB</div>
   </div>
 </div>
 
+<!-- 新建任务组 -->
+<div class="modal" id="dlg-group-create" role="dialog" aria-modal="true" aria-labelledby="gc-title" aria-hidden="true">
+  <div class="modal-box" style="width:600px">
+    <h3 id="gc-title">创建任务组</h3>
+    <p>组内任务共享来源策略与目标卷；失败项可整组重试。</p>
+    <div class="form-grid">
+      <div class="form-row">组名<input class="input" value="mgt-102 系列"></div>
+      <div class="form-row">目标卷<select class="select"><option>baidu</option><option>secretdata</option><option>local</option></select></div>
+    </div>
+    <div class="form-row">来源策略<select class="select"><option>自动选源（按体积/校验优先）</option><option>固定来源（keepshare）</option><option>固定来源（pikpak）</option></select></div>
+    <div class="form-row">任务清单（每行一个链接或任务 id）
+      <textarea class="input" rows="4" style="height:auto;padding:8px;resize:vertical;font-family:var(--font-mono);font-size:12px">https://keepshare.org/pEXAMPLE001/magnet:?xt=urn:btih:EXAMPLEHASH01
+https://keepshare.org/pEXAMPLE002/magnet:?xt=urn:btih:EXAMPLEHASH02
+cloud-9c31aa07-1</textarea>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">失败策略<select class="select"><option>整组失败即停止</option><option>跳过失败继续</option></select></div>
+      <div class="form-row">并发<select class="select"><option>2</option><option>3</option><option>4</option></select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已创建任务组（3 项）并开始链式下载" data-toast-kind="ok" data-close>创建并开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 下载归档 -->
+<div class="modal" id="dlg-archive" role="dialog" aria-modal="true" aria-labelledby="ar-title" aria-hidden="true">
+  <div class="modal-box" style="width:560px">
+    <h3 id="ar-title">下载归档</h3>
+    <p>把所选 2 项打包为 tar，生成下载链接；归档任务完成后可在传输页查看。</p>
+    <div class="form-row">归档名<input class="input" value="NHDTB-864-archive.tar"></div>
+    <div class="form-grid">
+      <div class="form-row">保留目录结构<select class="select"><option>保留（推荐）</option><option>扁平化（重名自动改名）</option></select></div>
+      <div class="form-row">压缩<select class="select"><option>不压缩（tar）</option><option>gzip</option></select></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:10px"><input class="cb" type="checkbox" checked> 完成后发送通知</label>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已创建归档任务，可在传输页查看进度" data-toast-kind="ok" data-close>创建归档</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建同步 -->
+<div class="modal" id="dlg-sync" role="dialog" aria-modal="true" aria-labelledby="sync-title" aria-hidden="true">
+  <div class="modal-box" style="width:600px">
+    <h3 id="sync-title">新建同步任务</h3>
+    <p>在一次同步中固定方向与策略；任务可随时暂停/取消，删除任务不删除已同步文件。</p>
+    <div class="form-grid">
+      <div class="form-row">方向<select class="select"><option>push</option><option>pull</option><option>both</option></select></div>
+      <div class="form-row">远端节点<input class="input" placeholder="node-a1"></div>
+      <div class="form-row">源路径<input class="input" placeholder="jav/NHDTB"></div>
+      <div class="form-row">目标路径<input class="input" placeholder="jav/NHDTB"></div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">冲突策略<select class="select"><option>skip</option><option>overwrite</option><option>lww</option><option>conflict-rename</option></select></div>
+      <div class="form-row">删除传播<select class="select"><option>skip（不传播）</option><option>propagate（传播）</option></select></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:10px"><input class="cb" type="checkbox" checked> 递归子目录</label>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input class="cb" type="checkbox"> 仅同步校验一致的文件</label>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已创建同步任务 sync-d4（push）" data-toast-kind="ok" data-close>创建</button>
+    </div>
+  </div>
+</div>
+
 <!-- 任务组详情 -->
 <div class="modal" id="dlg-group" role="dialog" aria-modal="true" aria-labelledby="group-title" aria-hidden="true">
   <div class="modal-box" style="width:680px">
@@ -2311,6 +2431,18 @@ sclient list --subdir jav/NHDTB</div>
   <button class="sheet-item" type="button" data-toast="已复制分享链接" data-toast-kind="ok" data-close-sheet>分享</button>
   <button class="sheet-item danger" type="button" data-toast="已移入回收站" data-toast-kind="ok" data-undo="1" data-close-sheet>删除</button>
   <button class="sheet-item" type="button" data-close-sheet>取消</button>
+</div>
+
+<div class="popover" id="volume-menu" role="menu" aria-hidden="true" style="min-width:280px">
+  <div class="pop-head" style="display:block;padding:6px 10px 2px"><div style="font-weight:600;font-size:12.5px">工作卷</div><div class="muted" style="font-size:11px">影响列举范围、上传目标与卷内操作</div></div>
+  <div class="pop-sep"></div>
+  <button role="menuitemradio" type="button" data-vol="" aria-checked="true"><span>全部卷 / auto</span><span class="pop-badge">128 项</span></button>
+  <button role="menuitemradio" type="button" data-vol="baidu" aria-checked="false"><span>baidu</span><span class="pop-badge">外部 · 64%</span></button>
+  <button role="menuitemradio" type="button" data-vol="secretdata" aria-checked="false"><span>secretdata</span><span class="pop-badge">加密 · 31%</span></button>
+  <button role="menuitemradio" type="button" data-vol="local" aria-checked="false"><span>local</span><span class="pop-badge">本地 · 12%</span></button>
+  <button role="menuitemradio" type="button" data-vol="archive" aria-checked="false"><span>archive</span><span class="pop-badge">封装 · 88%</span></button>
+  <div class="pop-sep"></div>
+  <button role="menuitem" type="button" data-goto="console">管理卷 …</button>
 </div>
 
 <div class="popover lang-menu" id="lang-menu" role="menu" aria-hidden="true">
@@ -2667,6 +2799,7 @@ sclient list --subdir jav/NHDTB</div>
       <select class="select"><option>严格校验（推荐）</option><option>跳过校验（仅调试）</option></select>
     </div>
     <div class="form-row">超时<input class="input" value="10s"></div>
+    <label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px"><input class="cb" type="checkbox" style="margin-top:2px"> <span>走隧道（调试）<span class="muted" style="display:block;font-size:11.5px">仅用于排查；生产环境请关闭，避免绕过直连策略。</span></span></label>
     <div class="modal-actions">
       <button class="btn" type="button" data-toast="连接成功：v0.19.0，TLS 有效" data-toast-kind="ok">测试连接</button>
       <button class="btn" type="button" data-close>取消</button>
@@ -2995,7 +3128,8 @@ sclient list --subdir jav/NHDTB</div>
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'preview') { closePreview(); }
+      if (top === 'volume') { closeVol(); }
+      else if (top === 'preview') { closePreview(); }
       else if (top === 'sheet') { closeSheet(); }
       else if (top === 'lang') { closeLang(); }
       else if (top === 'queue') { closeQueue(); }
@@ -3018,6 +3152,37 @@ sclient list --subdir jav/NHDTB</div>
     if (Date.now() - gPressed < 900) {
       var map = { f: 'files', t: 'transfer', r: 'trash', c: 'console' };
       if (map[e.key]) { e.preventDefault(); gPressed = 0; show(map[e.key]); return; }
+    }
+    // Alt+1..9 打开控制台分区；Alt+←/→ 前后切换
+    if (e.altKey && /^[1-9]$/.test(e.key)) {
+      var order = ['overview','cloud','issues','audit','volumes','config','vol-manage','credentials','secret'];
+      var target = order[Number(e.key) - 1];
+      if (target) { e.preventDefault(); openConsole(target); }
+      return;
+    }
+    if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      var all = Array.prototype.map.call(document.querySelectorAll('.cnav[data-sec]'), function (n) { return n.getAttribute('data-sec'); });
+      var curIdx = all.indexOf(currentSec);
+      var nextIdx = e.key === 'ArrowRight' ? (curIdx + 1) % all.length : (curIdx - 1 + all.length) % all.length;
+      e.preventDefault(); openConsole(all[nextIdx]); return;
+    }
+    // Ctrl/Cmd+A 全选当前文件列表
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+      if (document.querySelector('.view.active') && document.querySelector('.view.active').id === 'view-files') {
+        e.preventDefault();
+        $$('#view-files tbody.real-rows .cb, #files-grid .cb').forEach(function (cb) { cb.checked = true; });
+        syncSelection(); announce('已全选');
+      }
+      return;
+    }
+    // Delete 删除选中
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      var picked = $$('#view-files tbody.real-rows .cb:checked, #files-grid .cb:checked').length;
+      if (picked > 0 && document.querySelector('.view.active').id === 'view-files') {
+        e.preventDefault();
+        openConfirm({ title: '删除已选的 ' + picked + ' 项？', msg: '将移入回收站，30 天内可恢复。', ok: '删除', toast: '已删除 ' + picked + ' 项' });
+      }
+      return;
     }
     if (e.key === 'j') { e.preventDefault(); focusRow(1); return; }
     if (e.key === 'k') { e.preventDefault(); focusRow(-1); return; }
@@ -3187,6 +3352,168 @@ sclient list --subdir jav/NHDTB</div>
       });
     });
     updateVisibility('');
+  })();
+
+  // ── 文件表排序（名称/大小/时间） ──
+  (function () {
+    var table = id('files-table');
+    if (!table) { return; }
+    var ths = $$('#files-table th[data-sort]');
+    ths.forEach(function (th) {
+      var btn = th;
+      btn.addEventListener('click', function () {
+        var key = th.getAttribute('data-sort');
+        var cur = th.getAttribute('aria-sort');
+        var next = cur === 'ascending' ? 'descending' : 'ascending';
+        ths.forEach(function (x) { x.setAttribute('aria-sort', 'none'); var a = x.querySelector('.sort-arrow'); if (a) { a.textContent = '↕'; } });
+        th.setAttribute('aria-sort', next);
+        var arrow = th.querySelector('.sort-arrow'); if (arrow) { arrow.textContent = next === 'ascending' ? '↑' : '↓'; }
+        var body = $('#files-table tbody.real-rows');
+        var rows = Array.prototype.slice.call(body.querySelectorAll('tr'));
+        rows.sort(function (a, b) {
+          var va, vb;
+          if (key === 'size') {
+            va = a.children[3].textContent.trim(); vb = b.children[3].textContent.trim();
+          } else if (key === 'mtime') {
+            va = a.children[4].textContent.trim(); vb = b.children[4].textContent.trim();
+          } else {
+            va = a.querySelector('.t').textContent.trim(); vb = b.querySelector('.t').textContent.trim();
+          }
+          var r = va.localeCompare(vb, 'zh-CN', { numeric: true });
+          return next === 'ascending' ? r : -r;
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+        toast('info', '已按' + ({ name: '名称', size: '大小', mtime: '修改时间' }[key]) + (next === 'ascending' ? ' 升序' : ' 降序') + '排序');
+      });
+    });
+  })();
+
+  // ── 云端任务：自动刷新 + 最近操作 ──
+  (function () {
+    var key = 'sproxy_ct_actions';
+    var actBox = id('cloud-actions');
+    var auto = id('cloud-auto');
+    function load() { try { return JSON.parse(sessionStorage.getItem(key) || '[]'); } catch (e) { return []; } }
+    function save(list) { try { sessionStorage.setItem(key, JSON.stringify(list.slice(0, 20))); } catch (e) { /* file:// */ } }
+    function render() {
+      if (!actBox) { return; }
+      var list = load();
+      if (!list.length) {
+        actBox.innerHTML = '<div class="muted">暂无操作。重试 / 取消 / 批量操作会记录在这里。</div>';
+        return;
+      }
+      // 用 DOM 构建（文件名可能含 < > &，禁止 innerHTML 拼接）
+      actBox.textContent = '';
+      list.slice(0, 6).forEach(function (it) {
+        var row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:8px;align-items:center';
+        var pill = document.createElement('span');
+        pill.className = 'pill ' + (it.kind || 'pill-mute');
+        pill.textContent = it.action;
+        var target = document.createElement('span');
+        target.style.flex = '1'; target.textContent = it.target;
+        var time = document.createElement('span');
+        time.className = 'muted num'; time.style.fontSize = '11px'; time.textContent = it.time;
+        row.appendChild(pill); row.appendChild(target); row.appendChild(time);
+        actBox.appendChild(row);
+      });
+    }
+    window.__cloudLog = function (action, target, kind) {
+      var list = load();
+      list.unshift({ action: action, target: target, kind: kind || 'pill-mute', time: new Date().toTimeString().slice(0, 8) });
+      save(list); render();
+    };
+    if (auto) {
+      var toggle = function () {
+        var on = auto.getAttribute('aria-pressed') === 'true';
+        auto.setAttribute('aria-pressed', on ? 'false' : 'true');
+        auto.className = on ? 'pill pill-mute' : 'pill pill-ok';
+        auto.innerHTML = (on ? '' : '<span class="dot"></span>') + (on ? '自动刷新已关闭' : '自动刷新 5s');
+        toast('info', on ? '已关闭自动刷新' : '已开启自动刷新（5s）');
+      };
+      auto.addEventListener('click', toggle);
+      auto.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+    }
+    render();
+  })();
+
+  // ── 工作卷选择 ──
+  var volMenu = id('volume-menu'), volBtn = id('volume-btn');
+  function openVol() {
+    var r = volBtn.getBoundingClientRect();
+    volMenu.style.left = Math.max(8, r.left) + 'px';
+    volMenu.style.top = (r.bottom + 8) + 'px';
+    volMenu.classList.add('show'); volBtn.setAttribute('aria-expanded', 'true'); layerStack.push('volume');
+  }
+  function closeVol() {
+    volMenu.classList.remove('show'); volBtn.setAttribute('aria-expanded', 'false');
+    layerStack = layerStack.filter(function (x) { return x !== 'volume'; });
+  }
+  volBtn.addEventListener('click', function (e) {
+    e.stopPropagation(); volMenu.classList.contains('show') ? closeVol() : openVol();
+  });
+  $$('[data-vol]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('[data-vol]').forEach(function (x) { x.setAttribute('aria-checked', 'false'); });
+      b.setAttribute('aria-checked', 'true');
+      id('volume-label').textContent = b.getAttribute('data-vol') ? b.getAttribute('data-vol') : '全部卷';
+      closeVol();
+      toast('info', b.getAttribute('data-vol') ? ('已切换工作卷：' + b.getAttribute('data-vol')) : '工作卷：全部卷 / auto');
+    });
+  });
+  document.addEventListener('click', function (e) {
+    if (!volMenu.classList.contains('show')) { return; }
+    if (volMenu.contains(e.target) || volBtn.contains(e.target)) { return; }
+    closeVol();
+  });
+
+  // ── 云端任务：批量选择 + 按卷分组 ──
+  (function () {
+    var table = id('cloud-table');
+    if (!table) { return; }
+    var bar = id('cloud-batch');
+    function sync() {
+      var boxes = $$('#cloud-table tbody .cb');
+      var n = $$('#cloud-table tbody .cb:checked').length;
+      bar.classList.toggle('show', n > 0);
+      bar.querySelector('.cnt b').textContent = String(n);
+      var head = $('#cloud-table thead .cb');
+      if (head) { head.checked = n > 0 && n === boxes.length; }
+    }
+    $$('#cloud-table .cb').forEach(function (cb) { cb.addEventListener('change', sync); });
+    var head = $('#cloud-table thead .cb');
+    if (head) {
+      head.addEventListener('change', function () {
+        $$('#cloud-table tbody .cb').forEach(function (cb) { cb.checked = head.checked; });
+        sync();
+      });
+    }
+    id('cloud-batch-clear').addEventListener('click', function () {
+      $$('#cloud-table tbody .cb').forEach(function (cb) { cb.checked = false; });
+      sync();
+    });
+    $$('#cloud-volume-groups .chip[data-vg]').forEach(function (c) {
+      c.addEventListener('click', function () {
+        $$('#cloud-volume-groups .chip[data-vg]').forEach(function (x) { x.classList.remove('active'); });
+        c.classList.add('active');
+        var vg = c.getAttribute('data-vg');
+        toast('info', vg ? ('按卷筛选：' + vg) : '按卷筛选：全部');
+      });
+    });
+    table.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b || !window.__cloudLog) { return; }
+      var label = b.textContent.trim();
+      if (['重试', '暂停', '取消', '详情'].indexOf(label) === -1) { return; }
+      var row = b.closest('tr');
+      var name = row ? (row.querySelector('.t') || {}).textContent || '任务' : '批量';
+      window.__cloudLog(label, name, label === '重试' ? 'pill-ok' : label === '取消' ? 'pill-warn' : 'pill-info');
+    });
+    $$('#cloud-batch button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (window.__cloudLog) { window.__cloudLog(b.textContent.trim(), '已选 ' + ($$('#cloud-table tbody .cb:checked').length) + ' 项', 'pill-info'); }
+      });
+    });
+    sync();
   })();
 
   // ── 凭据轮换向导 ──
@@ -3646,7 +3973,7 @@ sclient list --subdir jav/NHDTB</div>
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {

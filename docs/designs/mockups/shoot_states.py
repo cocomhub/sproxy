@@ -68,6 +68,21 @@ for skin in "abc":
         spec(f"{skin}-files-en", skin, actions=[
             "document.getElementById('lang-btn').click()",
             "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-volume-menu", skin, actions=[
+            "document.getElementById('volume-btn').click()"]),
+        spec(f"{skin}-cloud-batch", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=cloud]').click()",
+            "var c=document.querySelector('#cloud-table tbody .cb');c.checked=true;c.dispatchEvent(new Event('change',{bubbles:true}));"]),
+        spec(f"{skin}-dialog-sync", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=sync]').click()",
+            "document.querySelector('[data-dialog=dlg-sync]').click()"]),
+        spec(f"{skin}-dialog-group-create", skin, actions=[
+            "document.querySelector('[data-goto=transfer]').click()",
+            "document.querySelector('[data-dialog=dlg-group-create]').click()"]),
+        spec(f"{skin}-dialog-archive", skin, actions=[
+            "document.querySelector('[data-dialog=dlg-archive]').click()"]),
         spec(f"{skin}-console-access", skin, actions=[
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=access]').click()"]),
