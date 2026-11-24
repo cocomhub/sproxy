@@ -221,6 +221,22 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "[data-cspane=issues]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("控制台待处理事项未渲染: %v", err)
 	}
+	// 审计分区：过滤条与列表容器可用。
+	if err := page.Locator("[data-cs=audit]").Click(); err != nil {
+		t.Fatalf("切换审计分区: %v", err)
+	}
+	if err := waitLoc(page, "#v2-au-apply", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("审计分区未渲染: %v", err)
+	}
+	// 配置分区：可写字段与只读信息（或读取失败提示）。
+	if err := page.Locator("[data-cs=config]").Click(); err != nil {
+		t.Fatalf("切换配置分区: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const f = document.querySelector('#v2-cfg-facts'); return (f && f.children.length > 0) || !document.querySelector('#v2-cfg-state').hidden; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("配置分区既无字段也无提示: %v", err)
+	}
 
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)

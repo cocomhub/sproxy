@@ -282,6 +282,10 @@ web-test:
 	@node --check web/static/v2/transfer.js
 	@node --check web/static/v2/cloud-table.js
 	@node --check web/static/v2/console.js
+	@node --check web/static/v2/audit-console.js
+	@node --check web/static/v2/audit-console.test.js
+	@node --check web/static/v2/config-console.js
+	@node --check web/static/v2/config-console.test.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js
@@ -310,6 +314,8 @@ web-test:
 	node --test web/static/transfer-store.test.js
 	node --test web/static/transfer-render.test.js
 	node --test web/static/sync.test.js
+	node --test web/static/v2/audit-console.test.js
+	node --test web/static/v2/config-console.test.js
 	node --test web/static/v2/shell.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js

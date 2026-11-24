@@ -1,8 +1,8 @@
 // Copyright 2026 The Cocomhub Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// v2 控制台（P3a）：概览（KPI / 存储水位 / 卷 / 最近审计）。
-// 其余分区（云端任务/待处理/审计/配置/通知/巡检/接入）在 P3b 逐项接入。
+// v2 控制台：概览（KPI / 存储水位 / 卷 / 最近审计）、云端任务、待处理事项、审计、配置。
+// 通知/巡检/接入仍为占位。
 'use strict';
 
 (function () {
@@ -140,6 +140,8 @@
     });
     if (name === 'tasks') { loadTasks(); }
     if (name === 'issues') { loadIssues(); }
+    if (name === 'audit' && window.v2audit) { window.v2audit.init(); }
+    if (name === 'config' && window.v2config) { window.v2config.init(); }
   }
 
   function loadTasks() {
