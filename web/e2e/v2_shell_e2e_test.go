@@ -193,6 +193,35 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("取消新建同步: %v", err)
 	}
 
+	// P3a：控制台概览（KPI 或 503 提示）+ 分区导航。
+	if err := page.Locator(".nav[data-route=console]").Click(); err != nil {
+		t.Fatalf("进入控制台: %v", err)
+	}
+	if err := waitLoc(page, "#v2-cs-refresh", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("控制台未渲染: %v", err)
+	}
+	if n, _ := page.Locator(".cs-nav button").Count(); n != 9 {
+		t.Fatalf("控制台分区 = %d，期望 9", n)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-cs-kpis').children.length > 0 || !document.querySelector('#v2-cs-state').hidden",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("控制台概览既无 KPI 也无提示: %v", err)
+	}
+	// 控制台分区：云端任务 / 待处理事项（复用同一数据源，允许为空或未装配提示）。
+	if err := page.Locator("[data-cs=tasks]").Click(); err != nil {
+		t.Fatalf("切换云端任务分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=tasks]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("控制台云端任务未渲染: %v", err)
+	}
+	if err := page.Locator("[data-cs=issues]").Click(); err != nil {
+		t.Fatalf("切换待处理事项分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=issues]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("控制台待处理事项未渲染: %v", err)
+	}
+
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
 	if err := page.Locator("#v2-theme-toggle").Click(); err != nil {

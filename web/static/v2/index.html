@@ -186,13 +186,91 @@
         </div></div>
       </section>
 
-      <section class="panel" data-panel="console" hidden>
-        <div class="card"><div class="card-b placeholder">
-          <b>控制台</b>
-          <div class="muted">P3 接入：概览 / 云端任务 / 待处理事项 / 审计 / 卷 / 配置 / 通知 / 巡检 / 接入。</div>
-          <div class="empty"><b>控制台尚未迁移</b><div>当前请使用 <a href="/ui/">旧版控制台</a>。</div></div>
-        </div></div>
+      <section class="panel" data-panel="console" aria-labelledby="v2-title">
+        <div class="console">
+          <nav class="cs-nav" aria-label="控制台分区">
+            <button type="button" data-cs="overview" aria-current="page">概览</button>
+            <button type="button" data-cs="tasks">云端任务</button>
+            <button type="button" data-cs="issues">待处理事项</button>
+            <button type="button" data-cs="audit" disabled>审计 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="volumes" disabled>卷 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="config" disabled>配置 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="notify" disabled>通知 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="verify" disabled>巡检 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="access" disabled>接入 <span class="tag">P3b</span></button>
+          </nav>
+          <div class="cs-body">
+            <div class="toolbar" style="margin-bottom:12px">
+              <b>概览</b><span class="hint muted">只读聚合；P3b 逐项接入其余分区</span>
+              <span style="flex:1"></span>
+              <button class="btn" id="v2-cs-refresh" type="button">刷新</button>
+            </div>
+            <div data-cspane="overview">
+            <div id="v2-cs-state" class="banner" hidden role="status"></div>
+            <div class="kpis" id="v2-cs-kpis"></div>
+            <div class="card" style="margin-top:14px">
+              <div class="card-h"><h2>存储水位</h2><span class="hint">quota 权威口径</span></div>
+              <div class="card-b" id="v2-cs-storage">加载中…</div>
+            </div>
+            <div class="card" style="margin-top:14px">
+              <div class="card-h"><h2>卷</h2><span class="hint">名称 / 类型 / 模式 / 容量</span></div>
+              <table class="table">
+                <thead><tr><th>名称</th><th style="width:110px">类型</th><th style="width:90px">模式</th>
+                  <th style="width:110px" class="r">容量</th><th style="width:150px" class="r">用量</th></tr></thead>
+                <tbody id="v2-cs-volumes"></tbody>
+              </table>
+              <div class="empty" id="v2-cs-volumes-empty" hidden><b>暂无卷</b><div class="muted">未装配任何卷。</div></div>
+            </div>
+            </div>
+
+            <div data-cspane="tasks" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>云端任务</b><span class="muted" style="font-size:12px">与传输页同一数据源</span>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-cs-tasks-refresh" type="button">刷新</button>
+              </div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th>任务</th><th style="width:120px">状态</th><th style="width:150px">进度</th>
+                    <th style="width:90px" class="r">大小</th><th style="width:130px">更新</th><th style="width:160px"></th></tr></thead>
+                  <tbody id="v2-cs-tasks"></tbody>
+                </table>
+                <div class="empty" id="v2-cs-tasks-empty" hidden><b>暂无云端任务</b>
+                  <div class="muted">提交下载链接后在此查看。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="issues" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>待处理事项</b><span class="muted" style="font-size:12px">人工处置需填写说明（写入审计）</span>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-cs-issues-refresh" type="button">刷新</button>
+              </div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th style="width:130px">类型</th><th style="width:110px">卷</th><th>路径 / 说明</th>
+                    <th style="width:70px" class="r">尝试</th><th style="width:120px">最近</th><th style="width:100px">状态</th><th style="width:150px"></th></tr></thead>
+                  <tbody id="v2-cs-issues"></tbody>
+                </table>
+                <div class="empty" id="v2-cs-issues-empty" hidden><b>暂无待处理事项</b>
+                  <div class="muted">存储审查与上传/重命名会自动登记。</div></div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top:14px" id="v2-cs-audit-card">
+              <div class="card-h"><h2>最近审计</h2><span class="hint">仅管理员可读</span></div>
+              <table class="table">
+                <thead><tr><th style="width:120px">时间</th><th>操作</th><th style="width:110px">Actor</th>
+                  <th>对象</th><th style="width:90px">结果</th></tr></thead>
+                <tbody id="v2-cs-audit"></tbody>
+              </table>
+              <div class="empty" id="v2-cs-audit-empty" hidden><b>暂无审计条目</b><div class="muted">或当前凭据无审计读权限。</div></div>
+            </div>
+            </div>
+          </div>
+        </div>
       </section>
+
     </div>
   </div>
 </div>
@@ -267,7 +345,9 @@
 <script src="../video-player.js"></script>
 <script src="files-inspector.js"></script>
 <script src="../cloud-tasks.js"></script>
+<script src="cloud-table.js"></script>
 <script src="transfer.js"></script>
+<script src="console.js"></script>
 <script src="preview.js"></script>
 <script src="shell.js"></script>
 </body>
