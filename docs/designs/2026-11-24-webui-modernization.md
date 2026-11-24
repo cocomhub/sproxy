@@ -455,9 +455,12 @@
 | P1e 预览 | ✅ 已交付 | 图片/文本（签名请求）/浏览器可播视频（URL 票 `?spx_sig=`）；不支持格式提示下载；复用 video-player.js |
 | P1d 分块上传 | ✅ 已交付（页内暂停/继续） | >8MiB 走 init/status/chunk*/complete；分块进度、速度、剩余时间；暂停/继续/取消；跨刷新续传待补 |
 | P1c 检查器 | ✅ 已交付 | 抽屉四页签：概览 / Meta（只读 JSON）/ 版本（列表+恢复+删除）/ 分享（创建/列表/撤销）；分块页签待 P1d（需分块 API） |
-| P2 传输页 | ⬜ | 云端任务/任务组/上传队列 |
+| P2a 云端任务 | ✅ 已交付 | 列表/筛选 chips（全部·进行中·失败·已完成）/取消·重试·删除/自动刷新；复用 cloud-tasks.js 纯函数 |
+| P2b 任务组/同步 | ⬜ | 组创建/组链式、同步任务 |
 | P3 控制台 | ⬜ | 弹窗改善 → 页面化评估 |
 | P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+
+P2a 验收证据：e2e 进入传输页 → 空态可见 → 4 个筛选 chips；`make web-test`/archcheck/build 通过。
 
 P1e 验收证据：e2e 上传 `e2e.txt` → 点击文件名 → 预览浮层 → 文本内容含 `hello e2e` → 关闭；
 `make web-test`、archcheck、build、golangci-lint 通过。

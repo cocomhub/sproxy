@@ -88,12 +88,26 @@
         </div>
       </section>
 
-      <section class="panel" data-panel="transfer" hidden>
-        <div class="card"><div class="card-b placeholder">
-          <b>传输</b>
-          <div class="muted">P2 接入：云端任务、任务组、上传队列与本地上传。</div>
-          <div class="empty"><b>暂无数据</b><div>设计稿中的交互会在 P2 落地。</div></div>
-        </div></div>
+      <section class="panel" data-panel="transfer" aria-labelledby="v2-title">
+        <div class="card">
+          <div class="card-h">
+            <button class="chip" data-tf="" aria-pressed="true">全部 <span class="num" id="v2-tf-all">0</span></button>
+            <button class="chip" data-tf="running" aria-pressed="false">进行中 <span class="num" id="v2-tf-running">0</span></button>
+            <button class="chip" data-tf="failed" aria-pressed="false">失败 <span class="num" id="v2-tf-failed">0</span></button>
+            <button class="chip" data-tf="completed" aria-pressed="false">已完成 <span class="num" id="v2-tf-completed">0</span></button>
+            <span style="flex:1"></span>
+            <span class="pill pill-ok" id="v2-tf-auto" role="button" tabindex="0" aria-pressed="true"><span class="dot"></span>自动刷新 5s</span>
+            <button class="btn" id="v2-tf-refresh" type="button">刷新</button>
+          </div>
+          <div id="v2-tf-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>任务</th><th style="width:130px">状态</th><th style="width:170px">进度</th>
+              <th style="width:100px" class="r">大小</th><th style="width:140px">更新</th><th style="width:180px"></th></tr></thead>
+            <tbody id="v2-tf-body"></tbody>
+          </table>
+          <div class="empty" id="v2-tf-empty" hidden><b>暂无云端任务</b>
+            <div class="muted">提交下载链接后，任务会出现在这里。</div></div>
+        </div>
       </section>
 
       <section class="panel" data-panel="trash" hidden>
@@ -184,6 +198,8 @@
 <script src="files-actions.js"></script>
 <script src="../video-player.js"></script>
 <script src="files-inspector.js"></script>
+<script src="../cloud-tasks.js"></script>
+<script src="transfer.js"></script>
 <script src="preview.js"></script>
 <script src="shell.js"></script>
 </body>

@@ -156,6 +156,17 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("刷新后未停留在传输: %v", err)
 	}
 
+	// P2a：传输页（云端任务）可加载并显示空态/计数。
+	if err := page.Locator(".nav[data-route=transfer]").Click(); err != nil {
+		t.Fatalf("进入传输页: %v", err)
+	}
+	if err := waitLoc(page, "#v2-tf-empty", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("传输页空态未显示: %v", err)
+	}
+	if n, _ := page.Locator("[data-tf]").Count(); n != 4 {
+		t.Fatalf("传输筛选 chips = %d，期望 4", n)
+	}
+
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
 	if err := page.Locator("#v2-theme-toggle").Click(); err != nil {
