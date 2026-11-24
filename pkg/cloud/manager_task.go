@@ -1437,9 +1437,8 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
 	// keepFiles=true（转存失败场景）：已下载完整产物保留（Save 可取用/重试），不清理。
-	if len(keepFiles) == 0 || !keepFiles[0] {
-		m.cleanupTaskDirOnFail(task)
-	}
+	// 保留产物策略（2026-11-24 用户裁定）：失败不得直接删掉已下载的产物。
+	m.settleArtifactsOnFail(task, errMsg, keepFiles)
 }
 
 // failTaskOnStorageFull 处理失败路径中「磁盘占用超占位且 TryReserve 失败」的分支：
@@ -1863,4 +1862,45 @@ func (m *CloudDownloadManager) releaseIntegrityRetryBytes(task *CloudTask, resul
 		diskSize = st.Size()
 	}
 	m.releaseDownloadedBytes(task, diskSize)
+}
+
+// cleanupTaskTempsOnFail 失败时**只清理临时文件**，保留已下载产物与 .partial
+// （用户裁定 2026-11-24：转存/完整性失败不得直接删文件，应留给人工或换源重试）。
+func (m *CloudDownloadManager) cleanupTaskTempsOnFail(task *CloudTask) {
+	taskDir := m.TaskDirFor(task.Owner, task.ID)
+	if taskDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.Contains(e.Name(), ".tmp.") {
+			_ = os.Remove(filepath.Join(taskDir, e.Name()))
+		}
+	}
+}
+
+// settleArtifactsOnFail 按错误类别处置失败任务的产物（保留 / 只清临时 / 整体清理）。
+//
+// 决策（用户裁定 2026-11-24）：只有 `disk_full` 需要腾空间 ⇒ 整体清理；其余失败保留产物与
+// `.partial`（慢源下几小时的下载不应被清空），并把产物目录记入诊断供事项通知人工。
+// 调用方 `keepFiles=true`（转存失败）时同样保留。
+func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg string, keepFiles []bool) {
+	keep := classifyCloudError(errMsg) != ErrClassDiskFull
+	if len(keepFiles) > 0 && keepFiles[0] {
+		keep = true
+	}
+	if !keep {
+		m.cleanupTaskDirOnFail(task)
+		return
+	}
+	m.cleanupTaskTempsOnFail(task)
+	if d := task.Diagnostics; d != nil && d.PartialPath == "" {
+		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
+	}
 }

@@ -19,6 +19,8 @@ type TaskFailure struct {
 	ErrorClass string
 	// Attempts 是累计失败次数（诊断快照）。
 	Attempts int
+	// ArtifactDir 是保留的下载产物目录（失败不删除产物，供人工判断/换源重试；空 = 无）。
+	ArtifactDir string
 }
 
 // TaskFailureObserver 是任务失败观察者（装配层注入；nil = 不通知）。
@@ -51,5 +53,6 @@ func (m *CloudDownloadManager) observeFailure(t *CloudTask) {
 	}
 	d := t.Diag()
 	f.ErrorClass, f.Attempts = d.LastErrorClass, d.Attempts
+	f.ArtifactDir = d.PartialPath
 	obs(f)
 }
