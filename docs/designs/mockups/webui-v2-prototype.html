@@ -813,8 +813,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     </div>
     <div class="rail-foot">
       <div class="who" tabindex="0">
-        <div class="avatar">LL</div>
-        <div class="txt"><div style="font-size:12.5px;font-weight:600">leonli</div><small>凭据 Ring · 3 个 AK</small></div>
+        <div class="avatar">DM</div>
+        <div class="txt"><div style="font-size:12.5px;font-weight:600">demo</div><small>凭据 Ring · 3 个 AK</small></div>
       </div>
     </div>
   </aside>
@@ -842,7 +842,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>
       </button>
       <button class="icon-btn" id="account-btn" type="button" title="账户与凭据" aria-haspopup="menu" aria-expanded="false">
-        <span class="avatar" style="width:22px;height:22px">LL</span>
+        <span class="avatar" style="width:22px;height:22px">DM</span>
       </button>
       <button class="icon-btn" id="theme-quick" type="button" title="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -862,7 +862,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <h2>连接到你自己的存储</h2>
             <p class="sub">凭据由服务端 Ring 签发，Secret 只在本机保存；服务端不存明文。</p>
             <ul class="auth-facts">
-              <li><span class="k">服务器</span><span class="mono">https://sproxy.local:18083</span></li>
+              <li><span class="k">服务器</span><span class="mono">https://sproxy.example.com:8443</span></li>
               <li><span class="k">TLS</span><span class="pill pill-ok">已启用</span></li>
               <li><span class="k">当前凭据</span><span class="pill pill-warn">10 天后过期</span></li>
               <li><span class="k">上次连接</span><span class="num">11-24 18:41</span></li>
@@ -879,11 +879,11 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <form class="auth-pane active" data-auth-pane="login" novalidate>
               <div class="auth-err" id="auth-err"><span>!</span><div><b>认证失败</b><div style="font-size:11.5px">AccessKey 或 Secret 不正确（auth_failed）。若刚轮换过凭据，请使用新 Secret。</div></div></div>
               <div class="lockout" id="auth-lockout"><b>尝试次数过多</b><div>连续失败 3 次；请在 <span class="num">04:57</span> 后重试，或联系管理员重置。</div></div>
-              <label>Owner<input class="input" id="auth-owner" placeholder="例如 leonli" value="leonli"></label>
-              <label>AccessKey<input class="input" id="auth-ak" placeholder="skey-xxxxxxxx" value="skey-d6ff3f0f"></label>
+              <label>Owner<input class="input" id="auth-owner" placeholder="例如 demo" value="demo"></label>
+              <label>AccessKey<input class="input" id="auth-ak" placeholder="skey-xxxxxxxx" value="skey-example01"></label>
               <label>Secret
                 <span class="pw-wrap">
-                  <input class="input" id="auth-sk" type="password" placeholder="64 位 hex" value="00000000000000000000000000000000">
+                  <input class="input" id="auth-sk" type="password" placeholder="64 位 hex" value="example-secret-not-a-real-key">
                   <button class="pw-toggle" id="pw-toggle" type="button" aria-label="显示/隐藏 Secret">显示</button>
                 </span>
               </label>
@@ -894,7 +894,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
 
             <form class="auth-pane" data-auth-pane="register" novalidate>
               <div class="auth-err" id="reg-err" style="background:color-mix(in srgb,var(--warn) 10%,transparent);border-color:color-mix(in srgb,var(--warn) 30%,transparent);color:var(--warn)"><span>!</span><div><b>注册码无效</b><div style="font-size:11.5px">注册码由管理员一次性签发，有效期 30 分钟。</div></div></div>
-              <label>Owner<input class="input" placeholder="与管理员约定，例如 leonli"></label>
+              <label>Owner<input class="input" placeholder="与管理员约定，例如 demo"></label>
               <label>注册码<input class="input" placeholder="6 位数字或邀请码"></label>
               <label>设备名<input class="input" placeholder="例如 macbook-pro（用于区分凭据）"></label>
               <button class="btn btn-primary" id="reg-submit" type="submit" style="width:100%;height:38px">生成凭据</button>
@@ -904,9 +904,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <div class="auth-pane" data-auth-pane="result">
               <div class="banner banner-warn"><div><b>凭据只展示一次</b><div class="muted" style="font-size:12px">关闭后无法再次查看 Secret；丢失需重新轮换。</div></div></div>
               <div class="auth-secret">
-                <span class="muted">AccessKey</span><code id="new-ak">skey-7f2c1ab9</code>
-                <span class="muted">Secret</span><code id="new-sk">9f2c41ab7d0e55aa33c1b8e4d2f60177a9c4e5b8d1f30a2c6e7b8495d0a1f3c2</code>
-                <span class="muted">Owner</span><code>leonli</code>
+                <span class="muted">AccessKey</span><code id="new-ak">skey-example09</code>
+                <span class="muted">Secret</span><code id="new-sk">example-secret-not-a-real-key</code>
+                <span class="muted">Owner</span><code>demo</code>
               </div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <button class="btn btn-sm" type="button" data-toast="已复制 Secret" data-toast-kind="ok">复制 Secret</button>
@@ -929,7 +929,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         </div>
         <div class="banner replay-banner">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--ok);flex:0 0 auto"><path d="M20 6 9 17l-5-5"/></svg>
-          <div><b>已恢复 2 个未完成操作</b><div class="muted" style="font-size:12px">上传 NHDTB-864.mp4（从 62% 续传）· 重试 MGT-102（换源）</div></div>
+          <div><b>已恢复 2 个未完成操作</b><div class="muted" style="font-size:12px">上传 EXAMPLE-001.mp4（从 62% 续传）· 重试 EXAMPLE-101（换源）</div></div>
           <div class="acts"><button class="btn btn-sm" type="button" data-goto="transfer">查看</button><button class="btn btn-sm btn-ghost" type="button" data-dismiss-replay>不再提示</button></div>
         </div>
         <div class="banner ro-banner">
@@ -940,7 +940,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <div class="card"><div class="card-b">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><b style="font-size:15px">开始使用 sproxy</b><span class="muted" style="font-size:12px">3 步完成配置</span></div>
             <div class="steps">
-              <div class="step done"><span class="n">✓</span><div><div class="t">连接服务器并登录</div><div class="d">已完成：leonli · skey-d6ff3f0f</div></div><button class="btn btn-sm" type="button">查看</button></div>
+              <div class="step done"><span class="n">✓</span><div><div class="t">连接服务器并登录</div><div class="d">已完成：demo · skey-example01</div></div><button class="btn btn-sm" type="button">查看</button></div>
               <div class="step done"><span class="n">✓</span><div><div class="t">选择工作卷</div><div class="d">已完成：baidu（外部 · 1.6 TiB）</div></div><button class="btn btn-sm" type="button">切换</button></div>
               <div class="step cur"><span class="n">3</span><div><div class="t">上传第一个文件或新建目录</div><div class="d">拖拽到窗口即可上传，或先建目录整理</div></div><div style="display:flex;gap:6px"><button class="btn btn-sm btn-primary" type="button">上传文件</button><button class="btn btn-sm" type="button" data-write data-dialog="dlg-mkdir">新建目录</button></div></div>
             </div>
@@ -950,7 +950,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         <div class="toolbar">
           <div class="crumbs">
             <a>全部卷</a><span class="sep">/</span><a>anonymous</a><span class="sep">/</span>
-            <a>jav</a><span class="sep">/</span><span class="cur">NHDTB</span>
+            <a>jav</a><span class="sep">/</span><span class="cur">EXAMPLE</span>
           </div>
           <div class="spacer"></div>
           <div class="filters">
@@ -995,7 +995,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <td><input class="cb" type="checkbox" checked aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon dir" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-                  <span class="t">NHDTB-864</span><span class="pill pill-mute">目录</span></div></td>
+                  <span class="t">EXAMPLE-001</span><span class="pill pill-mute">目录</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num sub">—</td>
                 <td class="num muted">11-24 18:32</td><td><span class="pill pill-ok"><span class="dot"></span>12/12</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
@@ -1004,7 +1004,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
-                  <span class="t">NHDTB-864.mp4</span></div></td>
+                  <span class="t">EXAMPLE-001.mp4</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num">4.72 GB</td>
                 <td class="num muted">11-24 17:10</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td>
                 <td><div class="row-actions"><button class="icon-btn" data-drawer="1" title="详情">详情</button><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
@@ -1013,7 +1013,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
-                  <span class="t">NHDTB-863-uncensored-leak.mp4</span></div></td>
+                  <span class="t">EXAMPLE-003.mp4</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num">6.05 GB</td>
                 <td class="num muted">11-24 15:48</td><td><span class="pill pill-warn"><span class="dot"></span>待校验</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
@@ -1022,7 +1022,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <td><input class="cb" type="checkbox" checked aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
-                  <span class="t">NHDTB-861.mp4</span></div></td>
+                  <span class="t">EXAMPLE-002.mp4</span></div></td>
                 <td><span class="pill" style="color:var(--accent);background:var(--accent-soft)">secretdata</span></td>
                 <td class="r num">2.28 GB</td><td class="num muted">11-23 22:04</td>
                 <td><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span></td>
@@ -1052,22 +1052,22 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         <div class="files-grid" id="files-grid">
           <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
             <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="dur">12 项</span></div>
-            <div class="nm">NHDTB-864</div><div class="mt"><span class="pill pill-mute">目录</span><span>12 项</span></div></div>
+            <div class="nm">EXAMPLE-001</div><div class="mt"><span class="pill pill-mute">目录</span><span>12 项</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
             <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:14:07</span></div>
-            <div class="nm">NHDTB-864.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">4.72 GB</span></div></div>
+            <div class="nm">EXAMPLE-001.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">4.72 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
             <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:31:44</span></div>
-            <div class="nm">NHDTB-863-uncensored-leak.mp4</div><div class="mt"><span class="pill pill-warn"><span class="dot"></span>待校验</span><span class="num">6.05 GB</span></div></div>
+            <div class="nm">EXAMPLE-003.mp4</div><div class="mt"><span class="pill pill-warn"><span class="dot"></span>待校验</span><span class="num">6.05 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
             <div class="thumb video"><span class="res">720p</span><span class="play">▶</span><span class="dur">01:58:12</span></div>
-            <div class="nm">NHDTB-861.mp4</div><div class="mt"><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span><span class="num">2.28 GB</span></div></div>
+            <div class="nm">EXAMPLE-002.mp4</div><div class="mt"><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span><span class="num">2.28 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
             <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
             <div class="nm">archive-2026-11</div><div class="mt"><span class="pill pill-mute">目录</span><span>—</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
             <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:06:33</span></div>
-            <div class="nm">NHDTB-860.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">3.10 GB</span></div></div>
+            <div class="nm">EXAMPLE-005.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">3.10 GB</span></div></div>
         </div>
 
         <div class="card">
@@ -1098,11 +1098,11 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th>原路径</th><th style="width:100px" class="r">大小</th><th style="width:150px">删除时间</th><th style="width:170px"></th></tr></thead>
             <tbody>
               <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/NHDTB/_repair_probe/p3.html</span></div></td>
+                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/EXAMPLE/_repair_probe/p3.html</span></div></td>
                 <td class="r num">12 KB</td><td class="num muted">11-24 12:04</td>
                 <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已恢复 p3.html" data-toast-kind="ok">恢复</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已彻底删除 p3.html" data-toast-kind="bad" data-undo="1">彻底删除</button></div></td></tr>
               <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/NHDTB/_repair_probe/ok.html</span></div></td>
+                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/EXAMPLE/_repair_probe/ok.html</span></div></td>
                 <td class="r num">8 KB</td><td class="num muted">11-24 12:04</td>
                 <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已恢复 ok.html" data-toast-kind="ok">恢复</button><button class="btn btn-sm btn-ghost" type="button">彻底删除</button></div></td></tr>
               <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
@@ -1124,15 +1124,15 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         <div class="share-page">
           <div class="share-card" id="share-valid">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><b style="font-size:16px">分享的文件</b><span class="pill pill-ok" style="margin-left:auto">链接有效</span></div>
-            <div class="muted" style="font-size:12px">由 leonli 分享 · 匿名访问</div>
+            <div class="muted" style="font-size:12px">由 demo 分享 · 匿名访问</div>
             <div class="share-file">
               <div class="thumb video" style="width:72px;height:52px;border-radius:8px;background:var(--surface-3);display:grid;place-items:center;position:relative;flex:0 0 auto"><span class="play" style="width:24px;height:24px">▶</span></div>
-              <div style="min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">NHDTB-864.mp4</div><div class="muted" style="font-size:12px">4.72 GB · 视频</div></div>
+              <div style="min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">EXAMPLE-001.mp4</div><div class="muted" style="font-size:12px">4.72 GB · 视频</div></div>
             </div>
             <dl class="share-meta">
               <dt class="muted">有效期</dt><dd class="num">剩余 6 天（至 2026-11-30）</dd>
               <dt class="muted">下载次数</dt><dd class="num">3 次（不限）</dd>
-              <dt class="muted">校验</dt><dd class="mono">sha256:9f2c…41ab</dd>
+              <dt class="muted">校验</dt><dd class="mono">sha256:example…checksum</dd>
             </dl>
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">访问密码（可选）
               <input class="input" type="password" id="share-pw" value="1234">
@@ -1190,16 +1190,16 @@ time: 2026-11-24T18:41:02Z</div>
               <div class="tasks">
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-                  <div><div class="title">AVOP-173 · 1.24 GiB</div>
+                  <div><div class="title">EXAMPLE-201 · 1.24 GiB</div>
                     <div class="meta"><span class="pill pill-info">keepshare</span><span class="pill pill-mute">baidu</span><span class="mono">14%</span></div></div>
                   <div class="prog"><div class="bar"><i style="width:14%"></i></div>
                     <div class="l"><span>1.2 MB/s</span><span>剩余 <b>1h 12m</b></span></div></div>
                   <div class="when muted num">18:40</div>
-                  <div class="act"><button class="btn btn-sm btn-ghost" type="button" data-toast="已暂停 AVOP-173" data-toast-kind="info">暂停</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消 AVOP-173" data-toast-kind="warn" data-undo="1">取消</button></div>
+                  <div class="act"><button class="btn btn-sm btn-ghost" type="button" data-toast="已暂停 EXAMPLE-201" data-toast-kind="info">暂停</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消 EXAMPLE-201" data-toast-kind="warn" data-undo="1">取消</button></div>
                 </div>
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
-                  <div><div class="title">NHDTB-864.mp4 · 4.72 GB</div>
+                  <div><div class="title">EXAMPLE-001.mp4 · 4.72 GB</div>
                     <div class="meta"><span class="pill pill-info">pikpak</span><span class="pill pill-mute">baidu</span><span class="mono">67%</span></div></div>
                   <div class="prog"><div class="bar warn"><i style="width:67%"></i></div>
                     <div class="l"><span>11.4 MB/s</span><span>剩余 <b>2m 08s</b></span></div></div>
@@ -1208,16 +1208,16 @@ time: 2026-11-24T18:41:02Z</div>
                 </div>
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--bad)" stroke-width="1.7"><path d="M12 8v5m0 3.5h.01"/><path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
-                  <div><div class="title">MGT-102 · 4.52 GB</div>
+                  <div><div class="title">EXAMPLE-101 · 4.52 GB</div>
                     <div class="meta"><span class="pill pill-bad">content_mismatch</span><span class="pill pill-mute">baidu</span></div></div>
                   <div class="prog"><div class="bar bad"><i style="width:100%"></i></div>
-                    <div class="l"><span>已停止</span><span>期望 <b>541b612d…</b></span></div></div>
+                    <div class="l"><span>已停止</span><span>期望 <b>EXPECTED-CHECKSUM…</b></span></div></div>
                   <div class="when muted num">18:22</div>
-                  <div class="act"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试 MGT-102（换源 keepshare → pikpak）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div>
+                  <div class="act"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试 EXAMPLE-101（换源 keepshare → pikpak）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div>
                 </div>
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="1.7"><path d="M20 6 9 17l-5-5"/></svg>
-                  <div><div class="title">NHDTB-863 · 6.05 GB</div>
+                  <div><div class="title">EXAMPLE-003 · 6.05 GB</div>
                     <div class="meta"><span class="pill pill-ok">completed</span><span class="pill pill-mute">baidu</span></div></div>
                   <div class="prog"><div class="bar ok"><i style="width:100%"></i></div>
                     <div class="l"><span>完成</span><span><b>6.05 GB</b> · 18:05</span></div></div>
@@ -1233,13 +1233,13 @@ time: 2026-11-24T18:41:02Z</div>
               <div class="card-b">
                 <div class="groups">
                   <div class="gcard">
-                    <div class="gh"><b>mgt-102 系列</b><span class="pill pill-info" style="margin-left:auto">进行中</span></div>
+                    <div class="gh"><b>example-101 系列</b><span class="pill pill-info" style="margin-left:auto">进行中</span></div>
                     <div class="gm"><span class="num">2/4 完成</span><span>·</span><span>失败 1</span></div>
                     <div class="bar"><i style="width:52%"></i></div>
                     <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-sm" type="button" data-dialog="dlg-group">详情</button><button class="btn btn-sm" type="button" data-toast="已启动组链式下载（3 项）" data-toast-kind="ok">组链式</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试组内失败项" data-toast-kind="ok">重试失败</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消组内运行任务" data-toast-kind="warn">取消运行</button></div>
                   </div>
                   <div class="gcard">
-                    <div class="gh"><b>NHDTB 十一月</b><span class="pill pill-ok" style="margin-left:auto">已完成</span></div>
+                    <div class="gh"><b>EXAMPLE 十一月</b><span class="pill pill-ok" style="margin-left:auto">已完成</span></div>
                     <div class="gm"><span class="num">3/3 完成</span><span>·</span><span>失败 0</span></div>
                     <div class="bar ok"><i style="width:100%"></i></div>
                     <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button">详情</button></div>
@@ -1254,7 +1254,7 @@ time: 2026-11-24T18:41:02Z</div>
               <div class="tasks">
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 21V9m0 0 4 4m-4-4-4 4"/><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/></svg>
-                  <div><div class="title">NHDTB-864.mp4</div>
+                  <div><div class="title">EXAMPLE-001.mp4</div>
                     <div class="meta"><span class="pill pill-mute">本地</span><span class="mono">chunk 64 MiB</span></div></div>
                   <div class="prog"><div class="bar"><i style="width:92%"></i></div>
                     <div class="l"><span>92%</span><span>剩余 <b>18s</b></span></div></div>
@@ -1287,9 +1287,9 @@ time: 2026-11-24T18:41:02Z</div>
             <div class="card">
               <div class="card-h"><h3>操作审计</h3></div>
               <div class="card-b" style="display:flex;flex-direction:column;gap:10px;font-size:12.5px">
-                <div style="display:flex;gap:8px"><span class="pill pill-ok">重试</span><div><div>MGT-102 · 换源后重试</div><div class="muted" style="font-size:11px">18:31 · 成功</div></div></div>
-                <div style="display:flex;gap:8px"><span class="pill pill-bad">失败</span><div><div>AVOP-173 · content_mismatch</div><div class="muted" style="font-size:11px">18:22 · 期望校验失败</div></div></div>
-                <div style="display:flex;gap:8px"><span class="pill pill-info">上传</span><div><div>NHDTB-864.mp4 · 92%</div><div class="muted" style="font-size:11px">18:12 · 续传中</div></div></div>
+                <div style="display:flex;gap:8px"><span class="pill pill-ok">重试</span><div><div>EXAMPLE-101 · 换源后重试</div><div class="muted" style="font-size:11px">18:31 · 成功</div></div></div>
+                <div style="display:flex;gap:8px"><span class="pill pill-bad">失败</span><div><div>EXAMPLE-201 · content_mismatch</div><div class="muted" style="font-size:11px">18:22 · 期望校验失败</div></div></div>
+                <div style="display:flex;gap:8px"><span class="pill pill-info">上传</span><div><div>EXAMPLE-001.mp4 · 92%</div><div class="muted" style="font-size:11px">18:12 · 续传中</div></div></div>
               </div>
             </div>
           </div>
@@ -1382,9 +1382,9 @@ time: 2026-11-24T18:41:02Z</div>
                       <table class="table">
                         <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>结果</th></tr></thead>
                         <tbody>
-                          <tr><td class="num muted">18:41:02</td><td>cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td></tr>
-                          <tr><td class="num muted">18:38:51</td><td>upload.chunk</td><td class="mono">NHDTB-864.mp4</td><td><span class="pill pill-ok">ok</span></td></tr>
-                          <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td></tr>
+                          <tr><td class="num muted">18:41:02</td><td>cloud.retry</td><td class="mono">EXAMPLE-101</td><td><span class="pill pill-ok">ok</span></td></tr>
+                          <tr><td class="num muted">18:38:51</td><td>upload.chunk</td><td class="mono">EXAMPLE-001.mp4</td><td><span class="pill pill-ok">ok</span></td></tr>
+                          <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">EXAMPLE-201</td><td><span class="pill pill-bad">mismatch</span></td></tr>
                           <tr><td class="num muted">18:12:40</td><td>volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td></tr>
                         </tbody>
                       </table>
@@ -1404,9 +1404,9 @@ time: 2026-11-24T18:41:02Z</div>
                       <div class="card-h"><h3>待处理事项</h3><span class="hint">5</span>
                         <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" type="button" data-sec-jump="issues">全部</button></div></div>
                       <div class="card-b" style="display:flex;flex-direction:column;gap:9px;font-size:12.5px">
-                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-bad">块缺失</span><div><div>secretdata · NHDTB-861.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读 · 副本可修复</div></div></div>
+                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-bad">块缺失</span><div><div>secretdata · EXAMPLE-002.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读 · 副本可修复</div></div></div>
                         <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-warn">空目录</span><div><div>baidu · jav/_repair_probe</div><div class="muted" style="font-size:11px">列举为空，删除失败</div></div></div>
-                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-info">凭据</span><div><div>skey-d6ff3f0f 将于 10 天过期</div><div class="muted" style="font-size:11px">建议轮换</div></div></div>
+                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-info">凭据</span><div><div>skey-example01 将于 10 天过期</div><div class="muted" style="font-size:11px">建议轮换</div></div></div>
                       </div>
                     </div>
                   </div>
@@ -1466,35 +1466,35 @@ time: 2026-11-24T18:41:02Z</div>
                     </tr></thead>
                     <tbody>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                        <td><div class="name"><span class="t">AVOP-173 · 1.24 GiB</span></div><div class="muted mono" style="font-size:11px">cloud-44fdbad8-2</div></td>
+                        <td><div class="name"><span class="t">EXAMPLE-201 · 1.24 GiB</span></div><div class="muted mono" style="font-size:11px">cloud-44fdbad8-2</div></td>
                         <td><span class="pill pill-info">keepshare</span></td><td>baidu</td>
                         <td><div class="bar"><i style="width:14%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">14% · 1.2 MB/s</div></td>
                         <td><span class="pill pill-info"><span class="dot"></span>running</span></td>
                         <td class="num muted">18:40</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost">暂停</button><button class="btn btn-sm btn-ghost">取消</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                        <td><div class="name"><span class="t">MGT-102 · 4.52 GB</span></div><div class="muted mono" style="font-size:11px">cloud-9c31aa07-1</div></td>
+                        <td><div class="name"><span class="t">EXAMPLE-101 · 4.52 GB</span></div><div class="muted mono" style="font-size:11px">cloud-9c31aa07-1</div></td>
                         <td><span class="pill pill-info">keepshare</span></td><td>baidu</td>
                         <td><div class="bar bad"><i style="width:100%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">已停止</div></td>
                         <td><span class="pill pill-bad"><span class="dot"></span>failed · content_mismatch</span></td>
                         <td class="num muted">18:22</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试（换源）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                        <td><div class="name"><span class="t">NHDTB-864.mp4 · 4.72 GB</span></div><div class="muted mono" style="font-size:11px">cloud-1f7d02ae-4</div></td>
+                        <td><div class="name"><span class="t">EXAMPLE-001.mp4 · 4.72 GB</span></div><div class="muted mono" style="font-size:11px">cloud-1f7d02ae-4</div></td>
                         <td><span class="pill pill-info">pikpak</span></td><td>baidu</td>
                         <td><div class="bar warn"><i style="width:67%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">67% · 11.4 MB/s</div></td>
                         <td><span class="pill pill-info"><span class="dot"></span>running</span></td>
                         <td class="num muted">18:41</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost">暂停</button><button class="btn btn-sm btn-ghost">取消</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                        <td><div class="name"><span class="t">NHDTB-863 · 6.05 GB</span></div><div class="muted mono" style="font-size:11px">cloud-77aa1b90-3</div></td>
+                        <td><div class="name"><span class="t">EXAMPLE-003 · 6.05 GB</span></div><div class="muted mono" style="font-size:11px">cloud-77aa1b90-3</div></td>
                         <td><span class="pill pill-info">pikpak</span></td><td>baidu</td>
                         <td><div class="bar ok"><i style="width:100%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">完成 · md5 一致</div></td>
                         <td><span class="pill pill-ok"><span class="dot"></span>completed</span></td>
                         <td class="num muted">18:05</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
-                        <td><div class="name"><span class="t">HHD-812 · 1.02 GB</span></div><div class="muted mono" style="font-size:11px">cloud-2b8801cc-5</div></td>
+                        <td><div class="name"><span class="t">EXAMPLE-301 · 1.02 GB</span></div><div class="muted mono" style="font-size:11px">cloud-2b8801cc-5</div></td>
                         <td><span class="pill pill-info">keepshare</span></td><td>secretdata</td>
                         <td><div class="bar bad"><i style="width:0%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">未开始</div></td>
                         <td><span class="pill pill-warn"><span class="dot"></span>failed · target_unavailable</span></td>
@@ -1532,7 +1532,7 @@ time: 2026-11-24T18:41:02Z</div>
                     <tbody>
                       <tr><td><input class="cb" type="checkbox" checked aria-label="选择"></td>
                         <td><span class="pill pill-bad">chunk_missing</span></td>
-                        <td><div class="mono">secretdata:/NHDTB/NHDTB-861.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读；副本可修复</div></td>
+                        <td><div class="mono">secretdata:/EXAMPLE/EXAMPLE-002.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读；副本可修复</div></td>
                         <td class="muted">副本重建需要 1 个可用源</td>
                         <td><span class="pill pill-warn">open</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已开始修复分块" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
@@ -1544,7 +1544,7 @@ time: 2026-11-24T18:41:02Z</div>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已重试删除" data-toast-kind="ok">重试删除</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
                         <td><span class="pill pill-info">credential_expiring</span></td>
-                        <td><div class="mono">skey-d6ff3f0f</div><div class="muted" style="font-size:11px">10 天后过期</div></td>
+                        <td><div class="mono">skey-example01</div><div class="muted" style="font-size:11px">10 天后过期</div></td>
                         <td class="muted">建议在到期前轮换</td>
                         <td><span class="pill pill-info">open</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已打开轮换流程" data-toast-kind="info">轮换</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
@@ -1567,12 +1567,12 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th style="width:150px">时间</th><th style="width:170px">操作</th><th>对象</th><th style="width:110px">结果</th><th style="width:110px">耗时</th></tr></thead>
                     <tbody>
-                      <tr><td class="num muted">18:41:02.311</td><td class="mono">cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">12 ms</td></tr>
-                      <tr><td class="num muted">18:38:51.077</td><td class="mono">upload.chunk</td><td class="mono">NHDTB-864.mp4 #11</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">842 ms</td></tr>
-                      <tr><td class="num muted">18:22:13.902</td><td class="mono">cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td><td class="num muted">3 ms</td></tr>
+                      <tr><td class="num muted">18:41:02.311</td><td class="mono">cloud.retry</td><td class="mono">EXAMPLE-101</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">12 ms</td></tr>
+                      <tr><td class="num muted">18:38:51.077</td><td class="mono">upload.chunk</td><td class="mono">EXAMPLE-001.mp4 #11</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">842 ms</td></tr>
+                      <tr><td class="num muted">18:22:13.902</td><td class="mono">cloud.verify</td><td class="mono">EXAMPLE-201</td><td><span class="pill pill-bad">mismatch</span></td><td class="num muted">3 ms</td></tr>
                       <tr><td class="num muted">18:12:40.004</td><td class="mono">volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">1.2 s</td></tr>
-                      <tr><td class="num muted">18:05:22.618</td><td class="mono">cloud.complete</td><td class="mono">NHDTB-863</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">48 ms</td></tr>
-                      <tr><td class="num muted">17:58:10.233</td><td class="mono">cloud.submit</td><td class="mono">HHD-812</td><td><span class="pill pill-warn">rejected</span></td><td class="num muted">5 ms</td></tr>
+                      <tr><td class="num muted">18:05:22.618</td><td class="mono">cloud.complete</td><td class="mono">EXAMPLE-003</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">48 ms</td></tr>
+                      <tr><td class="num muted">17:58:10.233</td><td class="mono">cloud.submit</td><td class="mono">EXAMPLE-301</td><td><span class="pill pill-warn">rejected</span></td><td class="num muted">5 ms</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -1725,19 +1725,19 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th>AK</th><th style="width:110px">Owner</th><th style="width:120px">SK</th><th style="width:100px">状态</th><th style="width:130px">创建</th><th style="width:130px">到期</th><th style="width:200px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">skey-d6ff3f0f</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-info">active</span></td><td class="num muted">11-02</td><td class="num" style="color:var(--warn)">12-04</td>
+                      <tr><td class="mono">skey-example01</td><td>demo</td><td class="mono masked">••••••••</td><td><span class="pill pill-info">active</span></td><td class="num muted">11-02</td><td class="num" style="color:var(--warn)">12-04</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-rotate">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
-                      <tr><td class="mono">skey-7a21cc03</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-ok">active</span></td><td class="num muted">09-14</td><td class="num muted">2027-09-14</td>
+                      <tr><td class="mono">skey-example02</td><td>demo</td><td class="mono masked">••••••••</td><td><span class="pill pill-ok">active</span></td><td class="num muted">09-14</td><td class="num muted">2027-09-14</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
-                      <tr><td class="mono">skey-1b90eaff</td><td>ops</td><td class="mono masked">••••••••</td><td><span class="pill pill-mute">disabled</span></td><td class="num muted">08-01</td><td class="num muted">—</td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">启用</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除凭据 skey-1b90eaff？" data-confirm-msg="删除后使用该 AK 的客户端将无法认证。" data-confirm-ok="删除" data-confirm-toast="已删除凭据">删除</button></div></td></tr>
+                      <tr><td class="mono">skey-example03</td><td>ops</td><td class="mono masked">••••••••</td><td><span class="pill pill-mute">disabled</span></td><td class="num muted">08-01</td><td class="num muted">—</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">启用</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除凭据 skey-example03？" data-confirm-msg="删除后使用该 AK 的客户端将无法认证。" data-confirm-ok="删除" data-confirm-toast="已删除凭据">删除</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
                 <div class="card">
                   <div class="card-h"><h3>新增凭据</h3><span class="hint">生成后一次性展示 SK</span></div>
                   <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px">
-                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">Owner<input class="input" placeholder="leonli"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">Owner<input class="input" placeholder="demo"></label>
                     <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">AK<input class="input" placeholder="留空自动生成"></label>
                     <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">SK<input class="input" placeholder="留空自动生成" type="password"></label>
                     <div style="display:flex;align-items:flex-end;gap:8px"><button class="btn btn-sm btn-primary" type="button" data-toast="已生成 AK/SK（仅展示一次）" data-toast-kind="ok">生成</button></div>
@@ -1775,7 +1775,7 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th>任务</th><th style="width:90px">方向</th><th>路径</th><th style="width:170px">策略</th><th style="width:110px">状态</th><th style="width:170px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">sync-a1</td><td><span class="pill pill-info">push</span></td><td class="mono">jav/NHDTB → node-b2:/jav/NHDTB</td><td class="muted">conflict-rename · 不传播删除</td><td><span class="pill pill-warn">冲突 2</span></td>
+                      <tr><td class="mono">sync-a1</td><td><span class="pill pill-info">push</span></td><td class="mono">jav/EXAMPLE → node-b2:/jav/EXAMPLE</td><td class="muted">conflict-rename · 不传播删除</td><td><span class="pill pill-warn">冲突 2</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-sync">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消同步任务 sync-a1" data-toast-kind="warn">取消</button></div></td></tr>
                       <tr><td class="mono">sync-b7</td><td><span class="pill pill-info">both</span></td><td class="mono">archive/2026-11 ↔ node-a1:/archive</td><td class="muted">lww · 传播删除</td><td><span class="pill pill-info">运行中</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已暂停同步" data-toast-kind="info">暂停</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消同步任务" data-toast-kind="warn">取消</button></div></td></tr>
@@ -1795,7 +1795,7 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th>任务</th><th>路径</th><th style="width:130px">类型</th><th style="width:120px">本地 / 远端</th><th style="width:120px">时间</th><th style="width:250px"></th></tr></thead>
                     <tbody>
-                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td><td class="mono">sync-a1</td><td class="mono">jav/NHDTB-864.mp4</td><td><span class="pill pill-warn">both_modified</span></td><td class="num">v3 / v2</td><td class="num muted">18:30</td>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td><td class="mono">sync-a1</td><td class="mono">jav/EXAMPLE-001.mp4</td><td><span class="pill pill-warn">both_modified</span></td><td class="num">v3 / v2</td><td class="num muted">18:30</td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已保留本地版本" data-toast-kind="ok">保留本地</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已保留远端版本" data-toast-kind="ok">保留远端</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已改名保留两份" data-toast-kind="info">改名</button></div></td></tr>
                       <tr><td><input class="cb" type="checkbox" aria-label="选择"></td><td class="mono">sync-b7</td><td class="mono">archive/2026-11/</td><td><span class="pill pill-bad">delete_vs_modify</span></td><td class="num">— / v5</td><td class="num muted">17:52</td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-confirm-title="传播删除到远端？" data-confirm-msg="远端 v5 将被删除，此操作不可撤销。" data-confirm-ok="传播删除" data-confirm-toast="已传播删除">传播删除</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已保留远端版本" data-toast-kind="ok">保留远端</button><button class="btn btn-sm btn-ghost" type="button">忽略</button></div></td></tr>
@@ -1817,9 +1817,9 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th>节点</th><th style="width:170px">地址</th><th style="width:100px">角色</th><th style="width:90px" class="r">延迟</th><th style="width:110px" class="r">流量</th><th style="width:100px">状态</th><th style="width:180px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">node-a1</td><td class="mono">10.0.0.11:18083</td><td><span class="pill pill-info">exit</span></td><td class="r num">12 ms</td><td class="r num">620 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="断开 node-a1？" data-confirm-msg="该节点承载 3 条中继流，断开后自动重连其它出口。" data-confirm-ok="断开" data-confirm-toast="已断开 node-a1">断开</button></div></td></tr>
-                      <tr><td class="mono">node-b2</td><td class="mono">10.0.0.12:18083</td><td><span class="pill pill-mute">relay</span></td><td class="r num">44 ms</td><td class="r num">380 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">断开</button></div></td></tr>
-                      <tr><td class="mono">node-c3</td><td class="mono">10.0.0.13:18083</td><td><span class="pill pill-mute">relay</span></td><td class="r num">—</td><td class="r num">0</td><td><span class="pill pill-warn">心跳超时</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-a1</td><td class="mono">192.0.2.11:8443</td><td><span class="pill pill-info">exit</span></td><td class="r num">12 ms</td><td class="r num">620 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="断开 node-a1？" data-confirm-msg="该节点承载 3 条中继流，断开后自动重连其它出口。" data-confirm-ok="断开" data-confirm-toast="已断开 node-a1">断开</button></div></td></tr>
+                      <tr><td class="mono">node-b2</td><td class="mono">192.0.2.12:8443</td><td><span class="pill pill-mute">relay</span></td><td class="r num">44 ms</td><td class="r num">380 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">断开</button></div></td></tr>
+                      <tr><td class="mono">node-c3</td><td class="mono">192.0.2.13:8443</td><td><span class="pill pill-mute">relay</span></td><td class="r num">—</td><td class="r num">0</td><td><span class="pill pill-warn">心跳超时</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -1838,9 +1838,9 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th>节点</th><th style="width:110px">角色</th><th style="width:180px">地址</th><th style="width:140px">最后心跳</th><th style="width:80px" class="r">流</th><th style="width:170px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">node-a1</td><td><span class="pill pill-info">exit</span></td><td class="mono">10.0.0.11:18083</td><td class="num muted">3s 前</td><td class="r num">6</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="从 Hub 移除 node-a1？" data-confirm-msg="移除后该节点需重新注册（SproxySig 准入）。" data-confirm-ok="移除" data-confirm-toast="已移除 node-a1">移除</button></div></td></tr>
-                      <tr><td class="mono">node-b2</td><td><span class="pill pill-mute">relay</span></td><td class="mono">10.0.0.12:18083</td><td class="num muted">8s 前</td><td class="r num">3</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
-                      <tr><td class="mono">node-d4</td><td><span class="pill pill-mute">relay</span></td><td class="mono">10.0.0.14:18083</td><td class="num muted">2m 前</td><td class="r num">0</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-a1</td><td><span class="pill pill-info">exit</span></td><td class="mono">192.0.2.11:8443</td><td class="num muted">3s 前</td><td class="r num">6</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="从 Hub 移除 node-a1？" data-confirm-msg="移除后该节点需重新注册（SproxySig 准入）。" data-confirm-ok="移除" data-confirm-toast="已移除 node-a1">移除</button></div></td></tr>
+                      <tr><td class="mono">node-b2</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.12:8443</td><td class="num muted">8s 前</td><td class="r num">3</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-d4</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.14:8443</td><td class="num muted">2m 前</td><td class="r num">0</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -1853,25 +1853,25 @@ time: 2026-11-24T18:41:02Z</div>
                 <div class="access">
                   <div class="acc-card">
                     <div class="ah">WebDAV <span class="pill pill-ok" style="margin-left:auto">已启用</span></div>
-                    <div class="acc-row"><span class="k">地址</span><code>https://sproxy.local:18083/dav/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 WebDAV 地址" data-toast-kind="ok">复制</button></div>
-                    <div class="acc-row"><span class="k">账号</span><code>skey-d6ff3f0f</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制账号" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">地址</span><code>https://sproxy.example.com:8443/dav/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 WebDAV 地址" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">账号</span><code>skey-example01</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制账号" data-toast-kind="ok">复制</button></div>
                     <div class="acc-row"><span class="k">密码</span><code class="masked">••••••••</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 Secret" data-toast-kind="ok">复制</button></div>
-                    <div class="acc-code">mount -t davfs https://sproxy.local:18083/dav/ /mnt/sproxy</div>
+                    <div class="acc-code">mount -t davfs https://sproxy.example.com:8443/dav/ /mnt/sproxy</div>
                     <div class="muted" style="font-size:11.5px">Windows: 映射网络驱动器 → 输入上面的地址与凭据。</div>
                   </div>
                   <div class="acc-card">
                     <div class="ah">S3 兼容 <span class="pill pill-ok" style="margin-left:auto">已启用</span></div>
-                    <div class="acc-row"><span class="k">Endpoint</span><code>https://sproxy.local:18083/s3/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 Endpoint" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">Endpoint</span><code>https://sproxy.example.com:8443/s3/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 Endpoint" data-toast-kind="ok">复制</button></div>
                     <div class="acc-row"><span class="k">Region</span><code>us-east-1（任意值）</code></div>
-                    <div class="acc-row"><span class="k">Bucket</span><code>leonli</code><span class="muted" style="font-size:11px">= Owner</span></div>
-                    <div class="acc-code">aws --endpoint-url https://sproxy.local:18083/s3/ s3 ls s3://leonli/</div>
+                    <div class="acc-row"><span class="k">Bucket</span><code>demo</code><span class="muted" style="font-size:11px">= Owner</span></div>
+                    <div class="acc-code">aws --endpoint-url https://sproxy.example.com:8443/s3/ s3 ls s3://demo/</div>
                     <div class="muted" style="font-size:11.5px">仅支持 path-style；SigV4 签名，AK/SK 同上。</div>
                   </div>
                   <div class="acc-card">
                     <div class="ah">CLI <span class="pill pill-mute" style="margin-left:auto">sclient</span></div>
-                    <div class="acc-code">sclient config set server https://sproxy.local:18083
-sclient upload ./NHDTB-864.mp4
-sclient list --subdir jav/NHDTB</div>
+                    <div class="acc-code">sclient config set server https://sproxy.example.com:8443
+sclient upload ./EXAMPLE-001.mp4
+sclient list --subdir jav/EXAMPLE</div>
                     <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button" data-toast="已复制 CLI 示例" data-toast-kind="ok">复制示例</button><button class="btn btn-sm btn-ghost" type="button">下载 sclient</button></div>
                   </div>
                 </div>
@@ -1880,7 +1880,7 @@ sclient list --subdir jav/NHDTB</div>
                   <table class="table">
                     <thead><tr><th>时间</th><th>协议</th><th>客户端</th><th>操作</th><th>结果</th></tr></thead>
                     <tbody>
-                      <tr><td class="num muted">18:40:12</td><td>WebDAV</td><td class="mono">davfs2/1.6</td><td>GET /dav/jav/NHDTB/</td><td><span class="pill pill-ok">200</span></td></tr>
+                      <tr><td class="num muted">18:40:12</td><td>WebDAV</td><td class="mono">davfs2/1.6</td><td>GET /dav/jav/EXAMPLE/</td><td><span class="pill pill-ok">200</span></td></tr>
                       <tr><td class="num muted">18:12:03</td><td>S3</td><td class="mono">aws-cli/2.15</td><td>ListObjectsV2</td><td><span class="pill pill-ok">200</span></td></tr>
                       <tr><td class="num muted">17:58:44</td><td>WebDAV</td><td class="mono">Finder/14.2</td><td>PUT /dav/tmp/x.bin</td><td><span class="pill pill-warn">403</span></td></tr>
                     </tbody>
@@ -1908,9 +1908,9 @@ sclient list --subdir jav/NHDTB</div>
                   <table class="table">
                     <thead><tr><th>路径</th><th style="width:140px">类型</th><th style="width:150px">期望</th><th style="width:150px">实际</th><th style="width:110px">状态</th><th style="width:180px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">secretdata:/NHDTB/NHDTB-861.mp4#3</td><td><span class="pill pill-bad">chunk_missing</span></td><td class="mono">9f2c…41ab</td><td class="mono muted">不可读</td><td><span class="pill pill-warn">可修复</span></td>
+                      <tr><td class="mono">secretdata:/EXAMPLE/EXAMPLE-002.mp4#3</td><td><span class="pill pill-bad">chunk_missing</span></td><td class="mono">example…checksum</td><td class="mono muted">不可读</td><td><span class="pill pill-warn">可修复</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已开始重建副本" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost" type="button">详情</button></div></td></tr>
-                      <tr><td class="mono">baidu:/jav/NHDTB/NHDTB-863.mp4</td><td><span class="pill pill-warn">md5_mismatch</span></td><td class="mono">7a10…c2</td><td class="mono">7a10…c3</td><td><span class="pill pill-warn">可修复</span></td>
+                      <tr><td class="mono">baidu:/jav/EXAMPLE/EXAMPLE-003.mp4</td><td><span class="pill pill-warn">md5_mismatch</span></td><td class="mono">7a10…c2</td><td class="mono">7a10…c3</td><td><span class="pill pill-warn">可修复</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已加入重传队列" data-toast-kind="ok">重传</button><button class="btn btn-sm btn-ghost" type="button">详情</button></div></td></tr>
                       <tr><td class="mono">baidu:/archive/tmp-20261120.tar</td><td><span class="pill pill-bad">size_mismatch</span></td><td class="num">2.10 GB</td><td class="num">2.09 GB</td><td><span class="pill pill-bad">需人工</span></td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已标记为忽略" data-toast-kind="warn">忽略</button></div></td></tr>
@@ -1968,10 +1968,10 @@ sclient list --subdir jav/NHDTB</div>
                   <div class="card-h"><h3>最近投递</h3><span class="hint">保留 7 天</span></div>
                   <div class="card-b" style="padding-top:4px">
                     <div class="feed">
-                      <div class="it"><span class="num muted">18:22:13</span><span class="pill pill-bad">失败</span><span>云端任务失败：MGT-102（content_mismatch）</span><span class="muted">Webhook · 已重试 3 次</span></div>
+                      <div class="it"><span class="num muted">18:22:13</span><span class="pill pill-bad">失败</span><span>云端任务失败：EXAMPLE-101（content_mismatch）</span><span class="muted">Webhook · 已重试 3 次</span></div>
                       <div class="it"><span class="num muted">17:40:02</span><span class="pill pill-warn">警告</span><span>存储水位 88%：archive（baidu/archive）</span><span class="muted">Email · 失败（SMTP 超时）</span></div>
-                      <div class="it"><span class="num muted">18:05:51</span><span class="pill pill-ok">成功</span><span>云端任务完成：NHDTB-863（6.05 GB）</span><span class="muted">站内 · 已送达</span></div>
-                      <div class="it"><span class="num muted">11:02:30</span><span class="pill pill-info">信息</span><span>凭据轮换：skey-d6ff3f0f</span><span class="muted">站内 · 已送达</span></div>
+                      <div class="it"><span class="num muted">18:05:51</span><span class="pill pill-ok">成功</span><span>云端任务完成：EXAMPLE-003（6.05 GB）</span><span class="muted">站内 · 已送达</span></div>
+                      <div class="it"><span class="num muted">11:02:30</span><span class="pill pill-info">信息</span><span>凭据轮换：skey-example01</span><span class="muted">站内 · 已送达</span></div>
                     </div>
                   </div>
                 </div>
@@ -2117,7 +2117,7 @@ sclient list --subdir jav/NHDTB</div>
 
 <!-- 文件检查器：详情 / 版本 / 分享 -->
 <div class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="文件详情">
-  <header><h3>NHDTB-864.mp4</h3><span class="pill pill-ok"><span class="dot"></span>一致</span>
+  <header><h3>EXAMPLE-001.mp4</h3><span class="pill pill-ok"><span class="dot"></span>一致</span>
     <div style="margin-left:auto"><button class="icon-btn" id="drawer-close" type="button" title="关闭">✕</button></div></header>
   <div class="dtabs" role="tablist">
     <button class="dtab" data-dtab="info" aria-current="page" type="button">详情</button>
@@ -2129,7 +2129,7 @@ sclient list --subdir jav/NHDTB</div>
       <dl class="kv">
         <dt>卷</dt><dd>baidu（外部 · mydisk/s）</dd>
         <dt>大小</dt><dd class="num">4.72 GB（5,068,546,048 B）</dd>
-        <dt>校验</dt><dd class="mono" style="overflow-wrap:anywhere">sha256:9f2c…41ab</dd>
+        <dt>校验</dt><dd class="mono" style="overflow-wrap:anywhere">sha256:example…checksum</dd>
         <dt>分块</dt><dd>12 / 12 · 64 MiB</dd>
         <dt>修改</dt><dd class="num">2026-11-24 17:10:22</dd>
         <dt>来源</dt><dd>cloud-download · pikpak</dd>
@@ -2168,18 +2168,18 @@ sclient list --subdir jav/NHDTB</div>
 
 <!-- 任务诊断抽屉 -->
 <div class="drawer" id="task-drawer" aria-hidden="true" role="dialog" aria-label="任务详情">
-  <header><h3>MGT-102 · 4.52 GB</h3><span class="pill pill-bad">failed</span>
+  <header><h3>EXAMPLE-101 · 4.52 GB</h3><span class="pill pill-bad">failed</span>
     <div style="margin-left:auto"><button class="icon-btn" id="task-close" type="button" title="关闭">✕</button></div></header>
   <div class="body">
     <div class="banner banner-bad"><div><b>content_mismatch</b><div class="muted" style="font-size:12px">转存完成但校验不一致；已保留部分产物，可换源重试。</div></div></div>
     <dl class="kv">
       <dt>任务 id</dt><dd class="mono">cloud-9c31aa07-1</dd>
-      <dt>来源</dt><dd>keepshare · [10] HD-mgt-102.mp4</dd>
+      <dt>来源</dt><dd>keepshare · [10] HD-EXAMPLE-101.mp4</dd>
       <dt>目标卷</dt><dd>baidu（外部）</dd>
       <dt>阶段</dt><dd>transferring</dd>
       <dt>尝试</dt><dd class="num">1 / 3</dd>
-      <dt>期望</dt><dd class="mono">541b612d…</dd>
-      <dt>实际</dt><dd class="mono">7a10f0c2…</dd>
+      <dt>期望</dt><dd class="mono">EXPECTED-CHECKSUM…</dd>
+      <dt>实际</dt><dd class="mono">ACTUAL-CHECKSUM…</dd>
     </dl>
     <div class="divider"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -2190,9 +2190,9 @@ sclient list --subdir jav/NHDTB</div>
     <div class="divider"></div>
     <div style="font-size:12px;font-weight:650">换源重试</div>
     <div class="src-list">
-      <label class="src sel"><span class="rdo"></span><span><b>pikpak · [6] MGT102C 3.61 GB</b><span class="muted" style="display:block;font-size:11.5px">上次成功 · 与期望大小一致</span></span><span class="pill pill-ok">推荐</span></label>
-      <label class="src"><span class="rdo"></span><span><b>keepshare · [1] MGT-102 2.88 GB</b><span class="muted" style="display:block;font-size:11.5px">当前来源 · 上次校验失败</span></span><span class="pill pill-warn">已失败</span></label>
-      <label class="src"><span class="rdo"></span><span><b>keepshare · [10] HD-mgt-102 4.52 GB</b><span class="muted" style="display:block;font-size:11.5px">体积最大 · 未尝试</span></span></label>
+      <label class="src sel"><span class="rdo"></span><span><b>pikpak · [6] EXAMPLE-101C 3.61 GB</b><span class="muted" style="display:block;font-size:11.5px">上次成功 · 与期望大小一致</span></span><span class="pill pill-ok">推荐</span></label>
+      <label class="src"><span class="rdo"></span><span><b>keepshare · [1] EXAMPLE-101 2.88 GB</b><span class="muted" style="display:block;font-size:11.5px">当前来源 · 上次校验失败</span></span><span class="pill pill-warn">已失败</span></label>
+      <label class="src"><span class="rdo"></span><span><b>keepshare · [10] HD-example-101 4.52 GB</b><span class="muted" style="display:block;font-size:11.5px">体积最大 · 未尝试</span></span></label>
     </div>
     <div style="font-size:12px;font-weight:650">最近事件</div>
     <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px">
@@ -2211,25 +2211,25 @@ sclient list --subdir jav/NHDTB</div>
     <div class="cmdk-list" id="cmdk-list">
       <div class="cmdk-recent" id="cmdk-recent">
         <span class="muted" style="font-size:11px;width:100%">最近搜索</span>
-        <span class="chip" data-q="NHDTB">NHDTB</span>
-        <span class="chip" data-q="MGT-102">MGT-102</span>
+        <span class="chip" data-q="EXAMPLE">EXAMPLE</span>
+        <span class="chip" data-q="EXAMPLE-101">EXAMPLE-101</span>
         <span class="chip" data-q="baidu">baidu</span>
       </div>
       <div class="cmdk-group" data-g="files">文件</div>
-      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="NHDTB-864.mp4 NHDTB baidu 4.72 GB">
+      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="EXAMPLE-001.mp4 EXAMPLE baidu 4.72 GB">
         <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
-        <span>NHDTB-864.mp4</span><span class="meta"><span>baidu</span><span class="num">4.72 GB</span></span></div>
-      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="NHDTB-861.mp4 NHDTB secretdata 2.28 GB">
+        <span>EXAMPLE-001.mp4</span><span class="meta"><span>baidu</span><span class="num">4.72 GB</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="EXAMPLE-002.mp4 EXAMPLE secretdata 2.28 GB">
         <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
-        <span>NHDTB-861.mp4</span><span class="meta"><span>secretdata</span><span class="num">2.28 GB</span></span></div>
+        <span>EXAMPLE-002.mp4</span><span class="meta"><span>secretdata</span><span class="num">2.28 GB</span></span></div>
       <div class="cmdk-item cmdk-result" data-cmd="files" data-label="archive-2026-11 目录 local">
         <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         <span>archive-2026-11</span><span class="meta"><span>local</span><span>目录</span></span></div>
       <div class="cmdk-group" data-g="tasks">任务</div>
-      <div class="cmdk-item cmdk-result" data-cmd="console" data-label="MGT-102 failed content_mismatch 云端任务">
-        <span>MGT-102</span><span class="meta"><span class="pill pill-bad">failed</span><span>content_mismatch</span></span></div>
-      <div class="cmdk-item cmdk-result" data-cmd="transfer" data-label="NHDTB-864 上传 62%">
-        <span>NHDTB-864.mp4</span><span class="meta"><span class="pill pill-info">上传中</span><span class="num">62%</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="console" data-label="EXAMPLE-101 failed content_mismatch 云端任务">
+        <span>EXAMPLE-101</span><span class="meta"><span class="pill pill-bad">failed</span><span>content_mismatch</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="transfer" data-label="EXAMPLE-001 上传 62%">
+        <span>EXAMPLE-001.mp4</span><span class="meta"><span class="pill pill-info">上传中</span><span class="num">62%</span></span></div>
       <div class="cmdk-group" data-g="volumes">卷</div>
       <div class="cmdk-item cmdk-result" data-cmd="console" data-label="baidu 外部卷 64%">
         <span>baidu</span><span class="meta"><span class="pill pill-info">外部</span><span class="num">64%</span></span></div>
@@ -2291,7 +2291,7 @@ sclient list --subdir jav/NHDTB</div>
     <h3 id="gc-title">创建任务组</h3>
     <p>组内任务共享来源策略与目标卷；失败项可整组重试。</p>
     <div class="form-grid">
-      <div class="form-row">组名<input class="input" value="mgt-102 系列"></div>
+      <div class="form-row">组名<input class="input" value="example-101 系列"></div>
       <div class="form-row">目标卷<select class="select"><option>baidu</option><option>secretdata</option><option>local</option></select></div>
     </div>
     <div class="form-row">来源策略<select class="select"><option>自动选源（按体积/校验优先）</option><option>固定来源（keepshare）</option><option>固定来源（pikpak）</option></select></div>
@@ -2316,7 +2316,7 @@ cloud-9c31aa07-1</textarea>
   <div class="modal-box" style="width:560px">
     <h3 id="ar-title">下载归档</h3>
     <p>把所选 2 项打包为 tar，生成下载链接；归档任务完成后可在传输页查看。</p>
-    <div class="form-row">归档名<input class="input" value="NHDTB-864-archive.tar"></div>
+    <div class="form-row">归档名<input class="input" value="EXAMPLE-001-archive.tar"></div>
     <div class="form-grid">
       <div class="form-row">保留目录结构<select class="select"><option>保留（推荐）</option><option>扁平化（重名自动改名）</option></select></div>
       <div class="form-row">压缩<select class="select"><option>不压缩（tar）</option><option>gzip</option></select></div>
@@ -2337,8 +2337,8 @@ cloud-9c31aa07-1</textarea>
     <div class="form-grid">
       <div class="form-row">方向<select class="select"><option>push</option><option>pull</option><option>both</option></select></div>
       <div class="form-row">远端节点<input class="input" placeholder="node-a1"></div>
-      <div class="form-row">源路径<input class="input" placeholder="jav/NHDTB"></div>
-      <div class="form-row">目标路径<input class="input" placeholder="jav/NHDTB"></div>
+      <div class="form-row">源路径<input class="input" placeholder="jav/EXAMPLE"></div>
+      <div class="form-row">目标路径<input class="input" placeholder="jav/EXAMPLE"></div>
     </div>
     <div class="form-grid">
       <div class="form-row">冲突策略<select class="select"><option>skip</option><option>overwrite</option><option>lww</option><option>conflict-rename</option></select></div>
@@ -2356,17 +2356,17 @@ cloud-9c31aa07-1</textarea>
 <!-- 任务组详情 -->
 <div class="modal" id="dlg-group" role="dialog" aria-modal="true" aria-labelledby="group-title" aria-hidden="true">
   <div class="modal-box" style="width:680px">
-    <h3 id="group-title">mgt-102 系列</h3>
+    <h3 id="group-title">example-101 系列</h3>
     <p>来源 keepshare · 目标卷 baidu · 创建于 11-24 18:02</p>
     <div style="display:flex;gap:14px;align-items:center;margin:12px 0">
       <div style="flex:1"><div class="bar"><i style="width:52%"></i></div></div>
       <span class="num" style="font-size:12.5px;color:var(--text-3)">2/4 完成 · 1 失败</span>
     </div>
     <div class="gmember" style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em"><span>成员</span><span>状态</span><span>操作</span></div>
-    <div class="gmember"><span class="mono">MGT-102 · 4.52 GB</span><span class="pill pill-bad">failed</span><span><button class="btn btn-sm" type="button" data-toast="已重试 MGT-102" data-toast-kind="ok">重试</button></span></div>
-    <div class="gmember"><span class="mono">MGT-102-C · 3.61 GB</span><span class="pill pill-info">running</span><span><button class="btn btn-sm btn-ghost" type="button">取消</button></span></div>
-    <div class="gmember"><span class="mono">MGT-102 特典 · 0.9 GB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
-    <div class="gmember"><span class="mono">MGT-102 字幕 · 12 MB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
+    <div class="gmember"><span class="mono">EXAMPLE-101 · 4.52 GB</span><span class="pill pill-bad">failed</span><span><button class="btn btn-sm" type="button" data-toast="已重试 EXAMPLE-101" data-toast-kind="ok">重试</button></span></div>
+    <div class="gmember"><span class="mono">EXAMPLE-101-C · 3.61 GB</span><span class="pill pill-info">running</span><span><button class="btn btn-sm btn-ghost" type="button">取消</button></span></div>
+    <div class="gmember"><span class="mono">EXAMPLE-101 特典 · 0.9 GB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
+    <div class="gmember"><span class="mono">EXAMPLE-101 字幕 · 12 MB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
     <div class="modal-actions">
       <button class="btn" type="button" data-close>关闭</button>
       <button class="btn" type="button" data-toast="已取消组内 1 个运行任务" data-toast-kind="warn">取消运行中</button>
@@ -2390,25 +2390,25 @@ cloud-9c31aa07-1</textarea>
   </div>
   <div class="body" style="padding:0">
     <div class="uq-row" data-uq="1">
-      <div><div class="uq-name">NHDTB-864.mp4</div>
+      <div><div class="uq-name">EXAMPLE-001.mp4</div>
         <div class="uq-meta"><span class="pill pill-info">上传中</span><span class="num">62%</span><span>11.4 MB/s</span><span>剩余 2m 08s</span><span class="pill pill-mute">续传</span></div></div>
       <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-toggle type="button">暂停</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
       <div style="grid-column:1/-1"><div class="bar"><i style="width:62%"></i></div></div>
     </div>
     <div class="uq-row" data-uq="2">
-      <div><div class="uq-name">NHDTB-863.mp4</div>
+      <div><div class="uq-name">EXAMPLE-003.mp4</div>
         <div class="uq-meta"><span class="pill pill-warn">已暂停</span><span class="num">18%</span><span>可续传</span></div></div>
       <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-toggle type="button">继续</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
       <div style="grid-column:1/-1"><div class="bar"><i style="width:18%"></i></div></div>
     </div>
     <div class="uq-row" data-uq="3">
-      <div><div class="uq-name">NHDTB-861.mp4</div>
+      <div><div class="uq-name">EXAMPLE-002.mp4</div>
         <div class="uq-meta"><span class="pill pill-bad">失败</span><span class="num">41%</span><span>network reset</span></div></div>
       <div class="uq-acts"><button class="btn btn-sm btn-primary" data-uq-retry type="button">重试</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
       <div style="grid-column:1/-1"><div class="bar bad"><i style="width:41%"></i></div></div>
     </div>
     <div class="uq-row" data-uq="4" data-done="1">
-      <div><div class="uq-name">NHDTB-860.mp4</div>
+      <div><div class="uq-name">EXAMPLE-005.mp4</div>
         <div class="uq-meta"><span class="pill pill-ok">已完成</span><span class="num">3.10 GB</span><span>11-24 18:05</span></div></div>
       <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
       <div style="grid-column:1/-1"><div class="bar ok"><i style="width:100%"></i></div></div>
@@ -2424,7 +2424,7 @@ cloud-9c31aa07-1</textarea>
 
 <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="文件操作">
   <div class="handle"></div>
-  <div class="stitle">NHDTB-864.mp4</div>
+  <div class="stitle">EXAMPLE-001.mp4</div>
   <button class="sheet-item" type="button" data-toast="开始下载" data-toast-kind="ok" data-close-sheet>下载</button>
   <button class="sheet-item" type="button" data-dialog="dlg-rename" data-close-sheet>重命名 / 移动</button>
   <button class="sheet-item" type="button" data-toast="已提交校验" data-toast-kind="info" data-close-sheet>校验</button>
@@ -2454,8 +2454,8 @@ cloud-9c31aa07-1</textarea>
 
 <div class="popover" id="account-menu" role="menu" aria-hidden="true">
   <div class="pop-head">
-    <div class="avatar">LL</div>
-    <div style="min-width:0"><div style="font-weight:600">leonli</div><div class="muted mono" style="font-size:11px">skey-d6ff3f0f · 10 天后过期</div></div>
+    <div class="avatar">DM</div>
+    <div style="min-width:0"><div style="font-weight:600">demo</div><div class="muted mono" style="font-size:11px">skey-example01 · 10 天后过期</div></div>
   </div>
   <div class="pop-sep"></div>
   <button role="menuitem" type="button" data-toast="已打开凭据切换" data-toast-kind="info">切换凭据 <span class="pop-badge">3</span></button>
@@ -2468,7 +2468,7 @@ cloud-9c31aa07-1</textarea>
 <!-- 凭据轮换向导 -->
 <div class="modal" id="dlg-rotate" role="dialog" aria-modal="true" aria-labelledby="rot-title" aria-hidden="true">
   <div class="modal-box" style="width:600px">
-    <h3 id="rot-title">轮换凭据 skey-d6ff3f0f</h3>
+    <h3 id="rot-title">轮换凭据 skey-example01</h3>
     <div class="wiz-steps">
       <div class="ws cur" data-rs="1"><span class="n">1</span>影响</div>
       <div class="ws" data-rs="2"><span class="n">2</span>新凭据</div>
@@ -2482,8 +2482,8 @@ cloud-9c31aa07-1</textarea>
     <div class="wiz-pane" data-rp="2">
       <div class="banner"><div><b>新凭据只展示一次</b><div class="muted" style="font-size:12px">AK 不变，Secret 重新生成；旧 Secret 在宽限期内仍可用。</div></div></div>
       <div class="auth-secret">
-        <span class="muted">AccessKey</span><code>skey-d6ff3f0f</code>
-        <span class="muted">New Secret</span><code>c1b8e4d2f601779f2c41ab7d0e55aa33c1b8e4d2f60177a9c4e5b8d1f30a2c6e</code>
+        <span class="muted">AccessKey</span><code>skey-example01</code>
+        <span class="muted">New Secret</span><code>example-secret-not-a-real-key</code>
       </div>
       <div style="display:flex;gap:8px"><button class="btn btn-sm" type="button" data-toast="已复制新 Secret" data-toast-kind="ok">复制</button><button class="btn btn-sm" type="button" data-toast="已下载 credentials.txt" data-toast-kind="ok">下载</button></div>
     </div>
@@ -2530,7 +2530,7 @@ cloud-9c31aa07-1</textarea>
   <div class="modal-box" style="width:540px">
     <h3 id="cred-title">新增凭据</h3>
     <p>AK/SK 由服务端 Ring 签发；留空则自动生成，Secret 只展示一次。</p>
-    <div class="form-row">Owner<input class="input" value="leonli"></div>
+    <div class="form-row">Owner<input class="input" value="demo"></div>
     <div class="form-row">AccessKey<input class="input" placeholder="留空自动生成"></div>
     <div class="form-row">Secret<input class="input" type="password" placeholder="留空自动生成"></div>
     <div class="form-row">备注<input class="input" placeholder="例如 macbook-pro / 备份脚本"></div>
@@ -2553,12 +2553,12 @@ cloud-9c31aa07-1</textarea>
     </div>
     <div class="form-row" data-chan-pane="webhook">地址<input class="input" value="https://hooks.example.com/sproxy"></div>
     <div class="form-row" data-chan-pane="webhook">签名 Header<input class="input" value="X-Sproxy-Signature" ></div>
-    <div class="form-row" data-chan-pane="webhook">密钥<input class="input" type="password" value="0000000000000000"></div>
+    <div class="form-row" data-chan-pane="webhook">密钥<input class="input" type="password" value="example-signing-key"></div>
     <div class="form-grid" data-chan-pane="email">
       <div class="form-row">SMTP<input class="input" value="smtp.example.com:587"></div>
       <div class="form-row">收件人<input class="input" value="ops@example.com"></div>
       <div class="form-row">用户名<input class="input" value="notify@example.com"></div>
-      <div class="form-row">密码<input class="input" type="password" value="00000000"></div>
+      <div class="form-row">密码<input class="input" type="password" value="example-pass"></div>
     </div>
     <div class="form-row" data-chan-pane="inbox">去抖<input class="input" value="5m"><span class="muted">窗口内的同类事件合并为一条，避免刷屏。</span></div>
     <div class="form-grid">
@@ -2641,9 +2641,9 @@ cloud-9c31aa07-1</textarea>
   "op": "cloud.verify",
   "result": "mismatch",
   "actor": "cloud-downloader",
-  "subject": { "task": "cloud-9c31aa07-1", "path": "baidu:/MGT-102" },
-  "expected": "sha256:541b612d…",
-  "actual": "sha256:7a10f0c2…",
+  "subject": { "task": "cloud-9c31aa07-1", "path": "baidu:/EXAMPLE-101" },
+  "expected": "sha256:EXPECTED-CHECKSUM…",
+  "actual": "sha256:ACTUAL-CHECKSUM…",
   "stage": "transferring",
   "duration_ms": 3,
   "request_id": "8f3a91c2"
@@ -2660,10 +2660,10 @@ cloud-9c31aa07-1</textarea>
 <!-- 预览 -->
 <div class="preview" id="preview" role="dialog" aria-modal="true" aria-label="预览" aria-hidden="true">
   <div class="pv-bar">
-    <div><div class="pv-title" id="pv-title">NHDTB-864.mp4</div><div class="pv-meta" id="pv-meta">4.72 GB · 1080p · sha256 一致</div></div>
+    <div><div class="pv-title" id="pv-title">EXAMPLE-001.mp4</div><div class="pv-meta" id="pv-meta">4.72 GB · 1080p · sha256 一致</div></div>
     <span class="sp"></span>
     <select class="select" id="pv-quality"><option>原画</option><option selected>1080p</option><option>720p</option></select>
-    <button class="btn btn-sm" type="button" data-toast="已开启字幕（ja.srt）" data-toast-kind="ok">字幕</button>
+    <button class="btn btn-sm" type="button" data-toast="已开启字幕（example.ja.srt）" data-toast-kind="ok">字幕</button>
     <button class="btn btn-sm" type="button" data-toast="开始下载" data-toast-kind="ok">下载</button>
     <button class="icon-btn" id="pv-close" type="button" title="关闭">✕</button>
   </div>
@@ -2690,11 +2690,11 @@ cloud-9c31aa07-1</textarea>
     </div>
     <div class="pv-text" id="pv-text">
       <pre>{
-  "code": "NHDTB-864",
+  "code": "EXAMPLE-001",
   "title_ja": "サンプルタイトル",
   "volume": "baidu",
   "size": 5068546048,
-  "checksum": "sha256:9f2c…41ab",
+  "checksum": "sha256:example…checksum",
   "chunks": 12,
   "source": "cloud-download · pikpak"
 }</pre>
@@ -2734,7 +2734,7 @@ cloud-9c31aa07-1</textarea>
 <div class="modal" id="dlg-mkdir" role="dialog" aria-modal="true" aria-labelledby="mkdir-title" aria-hidden="true">
   <div class="modal-box">
     <h3 id="mkdir-title">新建目录</h3>
-    <p>在 <code class="mono">jav/NHDTB</code> 下创建；名称不能包含 <code class="mono">/ \ .. : * ? " &lt; &gt; |</code>。</p>
+    <p>在 <code class="mono">jav/EXAMPLE</code> 下创建；名称不能包含 <code class="mono">/ \ .. : * ? " &lt; &gt; |</code>。</p>
     <div class="form-row">目录名
       <input class="input" id="mkdir-name" placeholder="例如 2026-11" value="2026-11">
       <span class="muted">已存在同名目录时会报错，不会自动合并。</span>
@@ -2750,9 +2750,9 @@ cloud-9c31aa07-1</textarea>
 <div class="modal" id="dlg-rename" role="dialog" aria-modal="true" aria-labelledby="rename-title" aria-hidden="true">
   <div class="modal-box" style="width:540px">
     <h3 id="rename-title">重命名 / 移动</h3>
-    <p>原路径 <code class="mono">jav/NHDTB/NHDTB-864.mp4</code></p>
+    <p>原路径 <code class="mono">jav/EXAMPLE/EXAMPLE-001.mp4</code></p>
     <div class="form-row">目标路径
-      <input class="input" value="jav/NHDTB/NHDTB-864-renamed.mp4">
+      <input class="input" value="jav/EXAMPLE/EXAMPLE-001-renamed.mp4">
       <span class="muted">支持移动到其它目录；父目录不存在会自动创建。</span>
     </div>
     <div class="form-row">目标已存在时
@@ -2769,16 +2769,16 @@ cloud-9c31aa07-1</textarea>
 <div class="modal" id="dlg-batch" role="dialog" aria-modal="true" aria-labelledby="batch-title" aria-hidden="true">
   <div class="modal-box" style="width:640px">
     <h3 id="batch-title">批量重命名（2 项）</h3>
-    <p>规则：查找 <code class="mono">NHDTB-</code> 替换为 <code class="mono">EXAMPLE-</code>；仅影响名称，不改目录。</p>
+    <p>规则：查找 <code class="mono">EXAMPLE-</code> 替换为 <code class="mono">EXAMPLE-</code>；仅影响名称，不改目录。</p>
     <div class="form-grid">
-      <div class="form-row">查找<input class="input" value="NHDTB-"></div>
+      <div class="form-row">查找<input class="input" value="EXAMPLE-"></div>
       <div class="form-row">替换为<input class="input" value="EXAMPLE-"></div>
     </div>
     <table class="br-table">
       <thead><tr><th>原名称</th><th>新名称</th><th style="width:70px">状态</th></tr></thead>
       <tbody>
-        <tr><td><code>NHDTB-864.mp4</code></td><td><code>EXAMPLE-864.mp4</code></td><td><span class="pill pill-ok">可改</span></td></tr>
-        <tr><td><code>NHDTB-863.mp4</code></td><td><code>EXAMPLE-863.mp4</code></td><td><span class="pill pill-warn">目标已存在</span></td></tr>
+        <tr><td><code>EXAMPLE-001.mp4</code></td><td><code>EXAMPLE-864.mp4</code></td><td><span class="pill pill-ok">可改</span></td></tr>
+        <tr><td><code>EXAMPLE-003.mp4</code></td><td><code>EXAMPLE-863.mp4</code></td><td><span class="pill pill-warn">目标已存在</span></td></tr>
       </tbody>
     </table>
     <div class="modal-actions">
@@ -2794,7 +2794,7 @@ cloud-9c31aa07-1</textarea>
   <div class="modal-box">
     <h3 id="connect-title">连接设置</h3>
     <p>修改服务器地址会重新校验 TLS 与版本。</p>
-    <div class="form-row">服务器地址<input class="input" value="https://sproxy.local:18083"></div>
+    <div class="form-row">服务器地址<input class="input" value="https://sproxy.example.com:8443"></div>
     <div class="form-row">TLS
       <select class="select"><option>严格校验（推荐）</option><option>跳过校验（仅调试）</option></select>
     </div>
@@ -3577,7 +3577,7 @@ cloud-9c31aa07-1</textarea>
   var ERRS = {
     '404': ['页面不存在', '该路径没有对应的页面或对象，可能是链接过期或卷已被移除。', 'request_id: 3f7c1a9e\npath: /ui/volumes/unknown'],
     '500': ['服务端错误', '请求处理失败，已记录审计；可重试或复制诊断信息反馈。', 'request_id: 8a21c004\nerror: internal\nstage: volume.resolve'],
-    'offline': ['无法连接服务器', '网络不可达或服务未启动；请检查地址、TLS 与代理设置。', 'addr: https://sproxy.local:18083\nlast_ok: 18:41:02Z\nretry: 3/5']
+    'offline': ['无法连接服务器', '网络不可达或服务未启动；请检查地址、TLS 与代理设置。', 'addr: https://sproxy.example.com:8443\nlast_ok: 18:41:02Z\nretry: 3/5']
   };
   var ERR_KEYS = ['404', '500', 'offline'];
   var errIdx = 0;
@@ -3658,7 +3658,7 @@ cloud-9c31aa07-1</textarea>
         return;
       }
       err.style.display = 'none';
-      toast('ok', '开始下载 NHDTB-864.mp4');
+      toast('ok', '开始下载 EXAMPLE-001.mp4');
     });
   }
 
@@ -3702,7 +3702,7 @@ cloud-9c31aa07-1</textarea>
       document.body.dataset.session = 'ok';
       document.body.dataset.replay = '1';
       id('dev-session').setAttribute('aria-pressed', 'false');
-      toast('ok', '已登录：leonli（凭据 10 天后过期）');
+      toast('ok', '已登录：demo（凭据 10 天后过期）');
       show('files');
     }, 650);
   });

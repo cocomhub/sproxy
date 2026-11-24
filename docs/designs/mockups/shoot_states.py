@@ -123,7 +123,7 @@ for skin in "abc":
             "document.querySelector('[data-dialog=dlg-rule]').click()"]),
         spec(f"{skin}-search", skin, actions=[
             "document.getElementById('search-trigger').click()",
-            "var i=document.getElementById('cmdk-input');i.value='NHDTB';i.dispatchEvent(new Event('input',{bubbles:true}));"]),
+            "var i=document.getElementById('cmdk-input');i.value='EXAMPLE';i.dispatchEvent(new Event('input',{bubbles:true}));"]),
     ]
     specs.append(spec(f"{skin}-session-expired", skin, actions=[
         "document.body.dataset.session='expired';",

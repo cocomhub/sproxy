@@ -67,3 +67,18 @@
 4. 卷选择的「全部卷 / auto」语义需与 `/api/files` 的 subdir+volume 参数对齐。
 
 > 结论：**设计覆盖已完成**；上述 4 项属契约确认，不是设计缺口。
+
+## 8. 数据脱敏复核（2026-11-24）
+
+按要求移除原型与文档中的敏感数据，全部替换为占位：
+
+| 原内容类型 | 处理 |
+| --- | --- |
+| 用户名 `leonli` → `demo`（头像 `DM`） | 15 处 |
+| 文件名/番号 `NHDTB-*` / `MGT-*` / `AVOP-*` / `HHD-*` → `EXAMPLE-001…301` | 71+ 处 |
+| 凭据 `skey-<hex>` → `skey-example01..09`；Secret → `example-secret-not-a-real-key` | 15 处 |
+| 主机/端口 `sproxy.local:18083` / `10.0.0.x` → `sproxy.example.com:8443` / `192.0.2.x:8443` | 14 处 |
+| 校验值 / 字幕名 → `example…checksum` / `example.ja.srt` | 8 处 |
+
+复核扫描（`skey-hex` / `private-ip` / `sproxy.local` / `leonli` / `long-hex` / 番号正则）**均 0 命中**；
+脱敏后重跑：审计 192 状态 × 2 视口 0 问题、对比度 0 失败、截图 133 张重新生成。

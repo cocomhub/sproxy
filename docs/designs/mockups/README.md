@@ -76,9 +76,28 @@ python docs/designs/mockups/shoot_states.py
 
 修改 token 后必须重跑对比度审计；修改布局后必须重跑结构探针与溢出检查。
 
+## 数据脱敏（强制）
+
+原型与文档中的所有示例均为**占位数据**，不含真实用户名、文件名、番号、凭据、地址：
+
+| 类型 | 占位形式 |
+| --- | --- |
+| 文件名 / 番号 | `EXAMPLE-001.mp4` … `EXAMPLE-301` |
+| 用户 / Owner | `demo`（头像 `DM`） |
+| 凭据 | `skey-example01..09`；Secret 为 `example-secret-not-a-real-key` |
+| 主机 / 端口 | `sproxy.example.com:8443`；节点 `192.0.2.11:8443`（TEST-NET-1） |
+| 校验值 | `example…checksum` / `EXPECTED-CHECKSUM` / `ACTUAL-CHECKSUM` |
+| 邮件 / Webhook | `ops@example.com`、`https://hooks.example.com/...` |
+
+提交前扫描（应无输出）：
+
+```bash
+grep -rnoE "skey-[0-9a-f]{6,}|[0-9a-f]{32,}|10\.[0-9]+\.[0-9]+\.[0-9]+|sproxy\.local" docs/designs/
+```
+
 ## 已知边界
 
-- 数据全部为假数据（`EXAMPLE-*` / `NHDTB-*` 占位），落地时字段名与错误分类必须对齐后端；
+- 数据全部为假数据（`EXAMPLE-*` / `EXAMPLE-*` 占位），落地时字段名与错误分类必须对齐后端；
 - 「网格视图」「密度切换」「深链筛选」「拖拽上传」属**新增能力**，不在 `webui-parity-matrix.md`；
 - 控制台 12 个分区均已画出，但表单校验、危险操作确认只是交互示意，不代表后端约束；
 - 移动端（≤640px）为列表/卡片自适应布局，未做原生手势与 PWA 能力。
