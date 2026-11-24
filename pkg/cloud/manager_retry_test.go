@@ -4,6 +4,10 @@
 package cloud
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -149,14 +153,41 @@ func TestVerifyExpectedChecksum(t *testing.T) {
 	t.Parallel()
 	m := &CloudDownloadManager{tasks: map[string]*CloudTask{}}
 	task := &CloudTask{ID: "t", ExpectedChecksum: "abc"}
-	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "abc"}); err != nil {
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "abc"}, ""); err != nil {
 		t.Fatalf("一致时应通过: %v", err)
 	}
-	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "def"}); err == nil {
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{Checksum: "def"}, ""); err == nil {
 		t.Fatal("不一致必须报错")
 	}
 	// 未指定期望值 ⇒ 不额外校验（零回归）。
-	if err := m.verifyExpectedChecksum(&CloudTask{ID: "t2"}, &downloaderResultView{Checksum: "x"}); err != nil {
+	if err := m.verifyExpectedChecksum(&CloudTask{ID: "t2"}, &downloaderResultView{Checksum: "x"}, ""); err != nil {
 		t.Fatalf("未指定期望值不应报错: %v", err)
+	}
+}
+
+// TestVerifyExpectedChecksum_FailClosed 锁定 fail-closed（2026-11-24 实测缺口）：
+// 调用方给了期望值，但下载器未提供 checksum 且本地也无法计算 ⇒ **必须判失败**，
+// 绝不能像早期实现那样"无 checksum 即跳过"（实测导致错误期望值的探针任务被判 completed）。
+func TestVerifyExpectedChecksum_FailClosed(t *testing.T) {
+	t.Parallel()
+	m := &CloudDownloadManager{tasks: map[string]*CloudTask{}}
+	task := &CloudTask{ID: "t", ExpectedChecksum: "abc"}
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{}, ""); err == nil {
+		t.Fatal("有期望值但 checksum 不可得时必须失败（fail-closed）")
+	}
+	// 本地补算路径：真实文件内容 ≠ 期望值 ⇒ 失败。
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(p, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := m.verifyExpectedChecksum(task, &downloaderResultView{}, p); err == nil {
+		t.Fatal("本地补算后不一致必须失败")
+	}
+	// 补算一致 ⇒ 通过。
+	sum := sha256.Sum256([]byte("hello"))
+	task2 := &CloudTask{ID: "t2", ExpectedChecksum: hex.EncodeToString(sum[:])}
+	if err := m.verifyExpectedChecksum(task2, &downloaderResultView{}, p); err != nil {
+		t.Fatalf("本地补算一致应通过: %v", err)
 	}
 }

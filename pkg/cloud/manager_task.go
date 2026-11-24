@@ -631,7 +631,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	m.markDownloadArtifactDone(task, destPath, result)
 	// 期望 checksum 校验（转存前；空 = 不校验）。不一致 ⇒ 按 content_mismatch 失败，
 	// 由事项中心/重试轮换来源（见 manager_multisource.go）。
-	if verr := m.verifyExpectedChecksum(task, resultViewOf(result)); verr != nil {
+	if verr := m.verifyExpectedChecksum(task, resultViewOf(result), destPath); verr != nil {
 		m.failTask(task, verr.Error())
 		return
 	}
