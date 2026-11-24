@@ -227,8 +227,8 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "#v2-cs-refresh", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("控制台未渲染: %v", err)
 	}
-	if n, _ := page.Locator(".cs-nav button").Count(); n != 9 {
-		t.Fatalf("控制台分区 = %d，期望 9", n)
+	if n, _ := page.Locator(".cs-nav button").Count(); n != 11 {
+		t.Fatalf("控制台分区 = %d，期望 11", n)
 	}
 	if _, err := page.WaitForFunction(
 		"() => document.querySelector('#v2-cs-kpis').children.length > 0 || !document.querySelector('#v2-cs-state').hidden",
@@ -372,6 +372,24 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已刷新'); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("单卷刷新未回显: %v", err)
+	}
+	// Mesh 分区：真实 /api/mesh/status 渲染面状态。
+	if err := page.Locator("[data-cs=mesh]").Click(); err != nil {
+		t.Fatalf("切换 Mesh 分区: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-mesh-body tr').length >= 3",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("Mesh 状态未渲染: %v", err)
+	}
+	// Hub 分区：未启用时给出明确提示（测试服务端无 hub）。
+	if err := page.Locator("[data-cs=hub]").Click(); err != nil {
+		t.Fatalf("切换 Hub 分区: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-hub-state'); const t = document.querySelector('#v2-hub-body'); return (b && !b.hidden) || (t && t.children.length > 0); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("Hub 分区既无数据也无提示: %v", err)
 	}
 	// 命令面板：⌘K/Ctrl+K → 搜索「配置」→ Enter 直达控制台配置分区。
 	if err := page.Keyboard().Press("Control+k"); err != nil {
