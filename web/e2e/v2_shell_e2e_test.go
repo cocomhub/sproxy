@@ -208,6 +208,19 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("控制台概览既无 KPI 也无提示: %v", err)
 	}
+	// 控制台分区：云端任务 / 待处理事项（复用同一数据源，允许为空或未装配提示）。
+	if err := page.Locator("[data-cs=tasks]").Click(); err != nil {
+		t.Fatalf("切换云端任务分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=tasks]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("控制台云端任务未渲染: %v", err)
+	}
+	if err := page.Locator("[data-cs=issues]").Click(); err != nil {
+		t.Fatalf("切换待处理事项分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=issues]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("控制台待处理事项未渲染: %v", err)
+	}
 
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)

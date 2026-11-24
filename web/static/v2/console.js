@@ -127,6 +127,130 @@
     if (empty) { empty.hidden = list.length > 0; }
   }
 
+  var pane = 'overview';
+
+  function setPane(name) {
+    pane = name;
+    Array.prototype.forEach.call(document.querySelectorAll('[data-cspane]'), function (p) {
+      p.hidden = p.getAttribute('data-cspane') !== name;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-cs]'), function (b) {
+      if (b.getAttribute('data-cs') === name) { b.setAttribute('aria-current', 'page'); }
+      else { b.removeAttribute('aria-current'); }
+    });
+    if (name === 'tasks') { loadTasks(); }
+    if (name === 'issues') { loadIssues(); }
+  }
+
+  function loadTasks() {
+    var tbody = el('v2-cs-tasks');
+    if (!tbody) { return; }
+    api.json('GET', '/api/cloud/tasks?limit=100')
+      .then(function (body) {
+        var list = (body && (body.tasks || body.items)) || [];
+        window.v2cloudTable.render(tbody, list, {
+          onAction: function (kind, t) {
+            window.v2cloudTable.perform(kind, t, api, function (ok, e) {
+              if (ok) { if (window.v2toast) { window.v2toast('ok', '已处理任务'); } loadTasks(); }
+              else if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); }
+            });
+          }
+        });
+        var empty = el('v2-cs-tasks-empty');
+        if (empty) { empty.hidden = list.length > 0; }
+      })
+      .catch(function (e) { banner('warn', '云端任务加载失败：' + (e.message || e)); });
+  }
+
+  function issueStatusClass(st) {
+    if (st === 'resolved') { return 'pill-ok'; }
+    if (st === 'ignored') { return 'pill-mute'; }
+    return 'pill-warn';
+  }
+
+  function renderIssues(items) {
+    var tbody = el('v2-cs-issues');
+    if (!tbody) { return; }
+    tbody.textContent = '';
+    items.forEach(function (it) {
+      var tr = document.createElement('tr');
+      var kind = document.createElement('td');
+      var kp = document.createElement('span');
+      kp.className = 'pill pill-bad';
+      kp.textContent = it.kind || '—';
+      kind.appendChild(kp);
+      tr.appendChild(kind);
+
+      var vol = document.createElement('td');
+      vol.textContent = it.volume || '—';
+      tr.appendChild(vol);
+
+      var path = document.createElement('td');
+      var p1 = document.createElement('div'); p1.className = 'mono'; p1.textContent = it.path || '—';
+      var p2 = document.createElement('div'); p2.className = 'muted'; p2.style.fontSize = '11px';
+      p2.textContent = it.detail || '';
+      path.appendChild(p1); path.appendChild(p2);
+      tr.appendChild(path);
+
+      var att = document.createElement('td'); att.className = 'r num'; att.textContent = String(it.attempts || 0);
+      tr.appendChild(att);
+
+      var last = document.createElement('td'); last.className = 'num muted';
+      last.textContent = it.last_seen ? fmt.formatTime(Date.parse(it.last_seen)) : '—';
+      tr.appendChild(last);
+
+      var st = document.createElement('td');
+      var sp = document.createElement('span');
+      sp.className = 'pill ' + issueStatusClass(it.status);
+      sp.textContent = it.status || '—';
+      st.appendChild(sp);
+      tr.appendChild(st);
+
+      var act = document.createElement('td');
+      act.className = 'r actions';
+      if (it.status !== 'resolved' && it.status !== 'ignored') {
+        var btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'btn btn-sm btn-ghost'; btn.textContent = '解决';
+        btn.addEventListener('click', function () { askResolve(it, act); });
+        act.appendChild(btn);
+      }
+      tr.appendChild(act);
+      tbody.appendChild(tr);
+    });
+    var empty = el('v2-cs-issues-empty');
+    if (empty) { empty.hidden = items.length > 0; }
+  }
+
+  function askResolve(it, cell) {
+    cell.textContent = '';
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = '处置说明（必填）';
+    input.style.cssText = 'height:26px;padding:0 6px;border:1px solid var(--border-strong);border-radius:6px;background:var(--surface);color:var(--text);font-size:12px;width:150px';
+    var ok = document.createElement('button');
+    ok.type = 'button'; ok.className = 'btn btn-sm'; ok.textContent = '确认';
+    var cancel = document.createElement('button');
+    cancel.type = 'button'; cancel.className = 'btn btn-sm btn-ghost'; cancel.textContent = '取消';
+    cancel.addEventListener('click', function () { loadIssues(); });
+    ok.addEventListener('click', function () {
+      var note = input.value.trim();
+      if (!note) { if (window.v2toast) { window.v2toast('warn', '请填写处置说明'); } return; }
+      api.json('POST', '/api/issues/resolve?id=' + encodeURIComponent(it.id) + '&note=' + encodeURIComponent(note), {})
+        .then(function () { if (window.v2toast) { window.v2toast('ok', '已标记解决'); } loadIssues(); })
+        .catch(function (e) { if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); } });
+    });
+    cell.appendChild(input); cell.appendChild(ok); cell.appendChild(cancel);
+    input.focus();
+  }
+
+  function loadIssues() {
+    var tbody = el('v2-cs-issues');
+    if (!tbody) { return; }
+    api.json('GET', '/api/issues?limit=100')
+      .then(function (body) { renderIssues((body && body.items) || []); })
+      .catch(function (e) { banner('warn', '待处理事项加载失败：' + (e.message || e)); });
+  }
+
   function load() {
     banner('', '');
     api.json('GET', '/api/stats')
@@ -155,10 +279,11 @@
     Array.prototype.forEach.call(document.querySelectorAll('[data-cs]'), function (b) {
       b.addEventListener('click', function () {
         if (b.disabled) { return; }
-        Array.prototype.forEach.call(document.querySelectorAll('[data-cs]'), function (x) { x.removeAttribute('aria-current'); });
-        b.setAttribute('aria-current', 'page');
+        setPane(b.getAttribute('data-cs'));
       });
     });
+    var tr = el('v2-cs-tasks-refresh'); if (tr) { tr.addEventListener('click', loadTasks); }
+    var ir = el('v2-cs-issues-refresh'); if (ir) { ir.addEventListener('click', loadIssues); }
     if (isActive()) { load(); }
   }
 

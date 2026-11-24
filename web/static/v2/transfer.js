@@ -69,68 +69,9 @@
   function render() {
     var body = el('v2-tf-body');
     if (!body) { return; }
-    body.textContent = '';
     var rows = state.tasks.filter(matchFilter);
-    rows.forEach(function (t) {
-      var tr = document.createElement('tr');
-      var nameTd = document.createElement('td');
-      nameTd.className = 'mono';
-      nameTd.textContent = t.filename || t.url || t.id;
-      if (t.filename && t.url) { nameTd.title = t.url; }
-      tr.appendChild(nameTd);
-
-      var stTd = document.createElement('td');
-      var pill = document.createElement('span');
-      pill.className = 'pill ' + statusClass(t.status);
-      pill.textContent = label(t.status);
-      stTd.appendChild(pill);
-      tr.appendChild(stTd);
-
-      var pgTd = document.createElement('td');
-      var p = pct(t);
-      var bar = document.createElement('div'); bar.className = 'bar';
-      var fill = document.createElement('i');
-      fill.style.width = (p == null ? 0 : p) + '%';
-      if (t.status === 'failed') { bar.className = 'bar bad'; }
-      bar.appendChild(fill);
-      var txt = document.createElement('div');
-      txt.className = 'muted'; txt.style.fontSize = '11px';
-      txt.textContent = p == null ? '—' : (p + '%');
-      pgTd.appendChild(bar); pgTd.appendChild(txt);
-      tr.appendChild(pgTd);
-
-      var szTd = document.createElement('td');
-      szTd.className = 'r num';
-      szTd.textContent = fmt.formatSize(t.total_size);
-      tr.appendChild(szTd);
-
-      var upTd = document.createElement('td');
-      upTd.className = 'num muted';
-      upTd.textContent = t.updated_at ? fmt.formatTime(Date.parse(t.updated_at)) : '—';
-      tr.appendChild(upTd);
-
-      var actTd = document.createElement('td');
-      actTd.className = 'r actions';
-      if (t.status === 'pending' || t.status === 'downloading') {
-        actTd.appendChild(actionBtn('取消', function () {
-          run(api.json('POST', '/api/cloud/tasks/' + encodeURIComponent(t.id) + '/cancel', {}), '已取消任务');
-        }));
-      }
-      if (t.status === 'failed') {
-        actTd.appendChild(actionBtn('重试', function () {
-          run(api.json('POST', '/api/cloud/tasks/retry', {
-            body: new TextEncoder().encode(JSON.stringify(ct && ct.ctRetryPayload ? ct.ctRetryPayload(t.id, true) : { task_id: t.id, force: true })),
-            contentType: 'application/json'
-          }), '已提交重试');
-        }));
-      }
-      if (t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed') {
-        actTd.appendChild(actionBtn('删除', function () {
-          run(api.json('DELETE', '/api/cloud/tasks/' + encodeURIComponent(t.id)), '已删除任务');
-        }));
-      }
-      tr.appendChild(actTd);
-      body.appendChild(tr);
+    window.v2cloudTable.render(body, rows, {
+      onAction: function (kind, t) { taskAction(kind, t); }
     });
     var empty = el('v2-tf-empty');
     if (empty) { empty.hidden = rows.length > 0; }
@@ -138,6 +79,13 @@
     var set = function (id, v) { var n = el(id); if (n) { n.textContent = String(v); } };
     set('v2-tf-all', s.total); set('v2-tf-running', s.running);
     set('v2-tf-failed', s.failed); set('v2-tf-completed', s.completed);
+  }
+
+  function taskAction(kind, t) {
+    window.v2cloudTable.perform(kind, t, api, function (ok, e) {
+      if (ok) { if (window.v2toast) { window.v2toast('ok', '已' + (kind === 'delete' ? '删除' : kind === 'retry' ? '重试' : '取消') + '任务'); } load(); }
+      else if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); }
+    });
   }
 
   function renderGroups() {

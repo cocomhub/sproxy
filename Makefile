@@ -280,6 +280,7 @@ web-test:
 	@node --check web/static/v2/files-actions.js
 	@node --check web/static/v2/preview.js
 	@node --check web/static/v2/transfer.js
+	@node --check web/static/v2/cloud-table.js
 	@node --check web/static/v2/console.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
