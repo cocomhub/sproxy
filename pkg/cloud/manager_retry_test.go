@@ -25,6 +25,8 @@ func TestClassifyCloudError(t *testing.T) {
 		{"integrity verify failed", ErrClassContentMismatch},
 		{"target file already exists", ErrClassTargetConflict},
 		{"no space left on device", ErrClassDiskFull},
+		{"转存失败: 目标卷 \"baidu\" 未装配", ErrClassTargetUnavailable},
+		{"volume not found: v", ErrClassTargetUnavailable},
 		{"HTTP 401 unauthorized", ErrClassAuth},
 		{"something weird", ErrClassUnknown},
 		{"", ErrClassUnknown},

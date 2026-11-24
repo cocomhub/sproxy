@@ -16,6 +16,7 @@ func TestRetryableCloudFailure(t *testing.T) {
 		cloud.ErrClassSourceUnreachable: true,
 		cloud.ErrClassThrottled:         true,
 		cloud.ErrClassContentMismatch:   true,
+		cloud.ErrClassTargetUnavailable: true,  // 装配顺序/后端抖动可自愈
 		cloud.ErrClassTargetConflict:    false, // 需人工/显式覆盖
 		cloud.ErrClassDiskFull:          false, // 需人工扩容
 		cloud.ErrClassAuth:              false, // 需人工处理凭据
