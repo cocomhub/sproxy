@@ -91,6 +91,18 @@ for skin in "abc":
         spec(f"{skin}-dialog-group-create", skin, actions=[
             "document.querySelector('[data-goto=transfer]').click()",
             "document.querySelector('[data-dialog=dlg-group-create]').click()"]),
+        spec(f"{skin}-vol-drawer", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=volumes]').click()",
+            "document.querySelector('[data-vol-open=secretdata][data-vol-mode=props]').click()"]),
+        spec(f"{skin}-diag", skin, actions=[
+            "document.getElementById('account-btn').click()",
+            "document.querySelector('#account-menu [data-dialog=dlg-connect]').click()",
+            "document.querySelector('#dlg-connect [data-goto=diag]').click()"]),
+        spec(f"{skin}-dialog-template", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=notify]').click()",
+            "document.querySelector('[data-dialog=dlg-template]').click()"]),
         spec(f"{skin}-issues", skin, actions=[
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=issues]').click()"]),

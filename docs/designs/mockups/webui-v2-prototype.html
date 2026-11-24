@@ -718,6 +718,30 @@ body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 .click-model .row:last-child{border-bottom:0}
 .click-model kbd{justify-self:start}
 
+
+/* ───── 卷属性抽屉 ───── */
+.vol-sec{display:flex;flex-direction:column;gap:8px}
+.vol-sec .h{font-size:12px;font-weight:650;color:var(--text)}
+.vol-list{width:100%;border-collapse:collapse;font-size:12px}
+.vol-list td{padding:6px 8px;border-bottom:1px solid var(--border)}
+.vol-list tr:last-child td{border-bottom:0}
+/* ───── 诊断 ───── */
+.diag-steps{display:flex;flex-direction:column}
+.diag-step{display:grid;grid-template-columns:28px 150px minmax(0,1fr) 80px;gap:10px;align-items:center;padding:10px 4px;border-bottom:1px solid var(--border);font-size:12.5px}
+.diag-step:last-child{border-bottom:0}
+.diag-step .st{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:11px;background:var(--surface-3);color:var(--text-3)}
+.diag-step[data-status=pass] .st{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.diag-step[data-status=warn] .st{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.diag-step[data-status=fail] .st{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.diag-step[data-status=running] .st{border:2px solid var(--accent);border-right-color:transparent;background:none;color:transparent;animation:spin .8s linear infinite}
+.diag-step .nm{font-weight:560}
+.diag-step .dt{color:var(--text-3);font-size:11.5px}
+/* ───── 模板编辑 ───── */
+.tpl-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tpl-vars{display:flex;gap:6px;flex-wrap:wrap}
+.tpl-vars .chip{cursor:pointer}
+.tpl-preview{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;font-size:12.5px;white-space:pre-wrap;color:var(--text-2);min-height:120px}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -889,7 +913,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <li><span class="k">当前凭据</span><span class="pill pill-warn">10 天后过期</span></li>
               <li><span class="k">上次连接</span><span class="num">11-24 18:41</span></li>
             </ul>
-            <div class="auth-help">连不上？<a>运行诊断</a> · <a>查看文档</a> · <a>切换服务器</a></div>
+            <div class="auth-help">连不上？<a data-goto="diag">运行诊断</a> · <a>查看文档</a> · <a>切换服务器</a></div>
           </aside>
 
           <div class="auth-card">
@@ -1171,6 +1195,44 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <b>此分享链接已过期或被撤销</b>
               <div>请联系分享者重新生成，或检查链接是否完整。</div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════ 连接诊断 ══════════ -->
+      <section class="view" id="view-diag">
+        <div class="toolbar">
+          <div class="crumbs"><span class="cur">连接诊断</span><span class="muted" style="font-size:12px">目标 https://sproxy.example.com:8443</span></div>
+          <div class="spacer"></div>
+          <button class="btn btn-sm btn-primary" type="button" id="diag-run">重新运行</button>
+          <button class="btn btn-sm" type="button" data-toast="已导出 diag-report.txt" data-toast-kind="ok">导出报告</button>
+          <button class="btn btn-sm btn-ghost" type="button" data-toast="已复制诊断信息" data-toast-kind="ok">复制</button>
+        </div>
+        <div class="banner" id="diag-summary">
+          <div><b>诊断完成：7 项通过，1 项警告</b><div class="muted" style="font-size:12px">警告：凭据将在 10 天后过期；其余链路正常。</div></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>检查项</h3><span class="hint">按顺序执行；失败会标注可操作建议</span></div>
+          <div class="card-b" style="padding-top:4px">
+            <div class="diag-steps" id="diag-steps">
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">DNS 解析</span><span class="dt">sproxy.example.com → 192.0.2.10</span><span class="num muted">12 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">TCP 连接</span><span class="dt">443 可建立连接</span><span class="num muted">18 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">TLS 握手</span><span class="dt">TLS 1.3 · 证书有效至 2027-03-01</span><span class="num muted">41 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">认证</span><span class="dt">SproxySig AK 校验通过（skey-example01）</span><span class="num muted">23 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">版本兼容</span><span class="dt">客户端 0.19.0 / 服务端 0.19.0</span><span class="num muted">8 ms</span></div>
+              <div class="diag-step" data-status="warn"><span class="st">!</span><span class="nm">凭据有效期</span><span class="dt">10 天后过期，建议提前轮换</span><span class="num muted">1 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">读写探测</span><span class="dt">写入 4 KiB 并读回校验一致（可清理）</span><span class="num muted">126 ms</span></div>
+              <div class="diag-step" data-status="pass"><span class="st">✓</span><span class="nm">Mesh 可达</span><span class="dt">4 个节点在线，出口 node-a1</span><span class="num muted">57 ms</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h3>环境</h3></div>
+          <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;font-size:12.5px">
+            <div><span class="muted">客户端</span> <span class="mono">sclient 0.19.0</span></div>
+            <div><span class="muted">代理</span> <span class="mono">none</span></div>
+            <div><span class="muted">DNS</span> <span class="mono">192.0.2.53</span></div>
+            <div><span class="muted">MTU</span> <span class="num">1500</span></div>
           </div>
         </div>
       </section>
@@ -1664,28 +1726,28 @@ time: 2026-11-24T18:41:02Z</div>
                     <div class="d" style="min-height:0"><span class="muted">mydisk/s</span></div>
                     <div class="bar" style="margin-top:6px"><i style="width:64%"></i></div>
                     <div class="d"><span class="num">1.02 TiB</span><span class="muted">/ 1.6 TiB</span><span class="pill pill-ok" style="margin-left:auto">健康</span></div>
-                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已开始一致性巡检" data-toast-kind="info">巡检</button></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="baidu" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已开始一致性巡检" data-toast-kind="info">巡检</button></div>
                   </div>
                   <div class="kpi">
                     <div class="k" style="justify-content:space-between"><span>secretdata</span><span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></div>
                     <div class="d" style="min-height:0"><span class="muted">4 副本 · erasure</span></div>
                     <div class="bar ok" style="margin-top:6px"><i style="width:31%"></i></div>
                     <div class="d"><span class="num">312 GiB</span><span class="muted">/ 2 TiB</span><span class="pill pill-warn" style="margin-left:auto">1 项异常</span></div>
-                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="secretdata" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="secretdata" data-vol-mode="props">属性</button></div>
                   </div>
                   <div class="kpi">
                     <div class="k" style="justify-content:space-between"><span>local</span><span class="pill pill-mute">本地</span></div>
                     <div class="d" style="min-height:0"><span class="muted">/srv/sproxy</span></div>
                     <div class="bar" style="margin-top:6px"><i style="width:12%"></i></div>
                     <div class="d"><span class="num">58 GiB</span><span class="muted">/ 480 GiB</span><span class="pill pill-ok" style="margin-left:auto">健康</span></div>
-                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="local" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="local" data-vol-mode="props">属性</button></div>
                   </div>
                   <div class="kpi">
                     <div class="k" style="justify-content:space-between"><span>archive</span><span class="pill pill-mute">封装</span></div>
                     <div class="d" style="min-height:0"><span class="muted">baidu/archive</span></div>
                     <div class="bar warn" style="margin-top:6px"><i style="width:88%"></i></div>
                     <div class="d"><span class="num">210 GiB</span><span class="muted">/ 240 GiB</span><span class="pill pill-warn" style="margin-left:auto">水位 88%</span></div>
-                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="archive" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="archive" data-vol-mode="props">属性</button></div>
                   </div>
                 </div>
                 <div class="empty" style="padding:16px">
@@ -2031,6 +2093,21 @@ sclient list --subdir jav/EXAMPLE</div>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
                       <tr><td>分块校验失败</td><td class="mono">verify.mismatch &gt; 0</td><td>Webhook</td><td class="num">10m</td><td><span class="pill pill-mute">停用</span></td><td class="num muted">—</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">启用</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="card" style="overflow:hidden">
+                  <div class="card-h"><h3>通知模板</h3><span class="hint">变量用 {{name}} 占位；发送前按事件填充</span></div>
+                  <table class="table">
+                    <thead><tr><th>事件</th><th style="width:150px">渠道</th><th style="width:140px">最后修改</th><th style="width:190px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">cloud.failed</td><td>Webhook · 站内</td><td class="num muted">11-24 10:02</td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送模板预览" data-toast-kind="ok">预览</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重置为默认模板" data-toast-kind="warn">重置</button></div></td></tr>
+                      <tr><td class="mono">vol.used_pct</td><td>Email · 站内</td><td class="num muted">11-20 08:30</td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button">预览</button><button class="btn btn-sm btn-ghost" type="button">重置</button></div></td></tr>
+                      <tr><td class="mono">credential.expiring</td><td>站内</td><td class="num muted">11-12 14:12</td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button">预览</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -2693,6 +2770,52 @@ cloud-9c31aa07-1</textarea>
   </div>
 </div>
 
+<!-- 编辑通知模板 -->
+<div class="modal" id="dlg-template" role="dialog" aria-modal="true" aria-labelledby="tpl-title" aria-hidden="true">
+  <div class="modal-box" style="width:640px">
+    <h3 id="tpl-title">编辑通知模板 · cloud.failed</h3>
+    <p>主题与正文支持变量；变量以 <code class="mono">{{name}}</code> 形式插入。</p>
+    <div class="form-grid">
+      <div class="form-row">事件<select class="select"><option>cloud.failed</option><option>vol.used_pct</option><option>credential.expiring</option><option>verify.mismatch</option></select></div>
+      <div class="form-row">渠道<select class="select"><option>Webhook</option><option>Email</option><option>站内</option></select></div>
+    </div>
+    <div class="form-row">主题<input class="input" value="[sproxy] 任务失败：{{task_id}}"></div>
+    <div class="form-row">正文
+      <textarea class="input" rows="6" style="height:auto;padding:8px;resize:vertical;font-family:var(--font-mono);font-size:12px">任务 {{task_id}}（{{path}}）在 {{stage}} 阶段失败。
+分类：{{error_class}}
+期望校验：{{expected}}
+实际校验：{{actual}}
+时间：{{time}}
+建议：{{suggestion}}</textarea>
+    </div>
+    <div class="form-row">可用变量
+      <div class="tpl-vars">
+        <span class="chip" data-toast="已插入 {{task_id}}" data-toast-kind="info">{{task_id}}</span>
+        <span class="chip" data-toast="已插入 {{path}}" data-toast-kind="info">{{path}}</span>
+        <span class="chip" data-toast="已插入 {{stage}}" data-toast-kind="info">{{stage}}</span>
+        <span class="chip" data-toast="已插入 {{error_class}}" data-toast-kind="info">{{error_class}}</span>
+        <span class="chip" data-toast="已插入 {{expected}}" data-toast-kind="info">{{expected}}</span>
+        <span class="chip" data-toast="已插入 {{actual}}" data-toast-kind="info">{{actual}}</span>
+        <span class="chip" data-toast="已插入 {{time}}" data-toast-kind="info">{{time}}</span>
+      </div>
+    </div>
+    <div class="form-row">预览
+      <div class="tpl-preview" id="tpl-preview">主题：[sproxy] 任务失败：cloud-example-01
+任务 cloud-example-01（/jav/EXAMPLE/EXAMPLE-001.mp4）在 transferring 阶段失败。
+分类：content_mismatch
+期望校验：example…checksum
+实际校验：example…checksum-b
+时间：2026-11-24 18:22:13Z
+建议：已自动换源重试</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="已发送测试通知" data-toast-kind="ok">测试发送</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已保存模板" data-toast-kind="ok" data-close>保存</button>
+    </div>
+  </div>
+</div>
+
 <!-- 通知渠道编辑 -->
 <div class="modal" id="dlg-channel" role="dialog" aria-modal="true" aria-labelledby="chan-title" aria-hidden="true">
   <div class="modal-box" style="width:560px">
@@ -2783,6 +2906,52 @@ cloud-9c31aa07-1</textarea>
 </div>
 
 <!-- 新建 / 编辑告警规则 -->
+<!-- 卷属性 / 列举 -->
+<div class="drawer" id="vol-drawer" role="dialog" aria-labelledby="vol-title" aria-hidden="true">
+  <header><h3 id="vol-title">baidu</h3><span class="pill pill-info" id="vol-type">外部</span>
+    <div style="margin-left:auto"><button class="icon-btn" id="vol-close" type="button" title="关闭">✕</button></div></header>
+  <div class="body">
+    <div class="vol-sec">
+      <div class="h">基本信息</div>
+      <dl class="kv">
+        <dt>后端</dt><dd class="mono" id="vol-backend">mydisk/s</dd>
+        <dt>挂载点</dt><dd class="mono" id="vol-mount">/mnt/baidu</dd>
+        <dt>容量</dt><dd class="num" id="vol-cap">1.02 / 1.6 TiB（64%）</dd>
+        <dt>健康</dt><dd><span class="pill pill-ok" id="vol-health">正常</span></dd>
+        <dt>创建</dt><dd class="num">2026-10-02 09:12</dd>
+      </dl>
+    </div>
+    <div class="divider"></div>
+    <div class="vol-sec">
+      <div class="h">策略</div>
+      <div class="ds-row" style="gap:6px">
+        <span class="pill pill-mute">读/写</span><span class="pill pill-mute">配额 1.6 TiB</span>
+        <span class="pill pill-mute" id="vol-crypto">不加密</span><span class="pill pill-mute" id="vol-copies">单副本</span>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="vol-sec">
+      <div class="h">列举预览 <span class="muted" style="font-weight:400">（前 5 项）</span></div>
+      <table class="vol-list" id="vol-preview">
+        <tbody>
+          <tr><td class="mono">jav/</td><td class="r muted">目录</td></tr>
+          <tr><td class="mono">archive-2026-11/</td><td class="r muted">目录</td></tr>
+          <tr><td class="mono">EXAMPLE-001.mp4</td><td class="r num">4.72 GB</td></tr>
+          <tr><td class="mono">EXAMPLE-002.mp4</td><td class="r num">2.28 GB</td></tr>
+          <tr><td class="mono">tmp/</td><td class="r muted">目录</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="divider"></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-sm btn-primary" type="button" data-goto="files" data-close>打开浏览</button>
+      <button class="btn btn-sm" type="button" data-toast="已刷新卷状态" data-toast-kind="ok">刷新状态</button>
+      <button class="btn btn-sm" type="button" data-toast="已开始一致性巡检" data-toast-kind="info">巡检</button>
+      <button class="btn btn-sm btn-ghost" type="button" data-confirm-title="卸载卷？" data-confirm-msg="卸载后该卷上的任务会暂停；数据保留在存储端。" data-confirm-ok="卸载" data-confirm-toast="已卸载卷">卸载</button>
+    </div>
+  </div>
+</div>
+
 <!-- 事项详情 -->
 <div class="drawer" id="issue-drawer" role="dialog" aria-labelledby="issue-title" aria-hidden="true">
   <header><h3 id="issue-title">chunk_missing</h3><span class="pill pill-warn" id="issue-state">open</span>
@@ -3010,6 +3179,7 @@ cloud-9c31aa07-1</textarea>
     <label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px"><input class="cb" type="checkbox" style="margin-top:2px"> <span>走隧道（调试）<span class="muted" style="display:block;font-size:11.5px">仅用于排查；生产环境请关闭，避免绕过直连策略。</span></span></label>
     <div class="modal-actions">
       <button class="btn" type="button" data-toast="连接成功：v0.19.0，TLS 有效" data-toast-kind="ok">测试连接</button>
+      <button class="btn" type="button" data-goto="diag">运行诊断</button>
       <button class="btn" type="button" data-close>取消</button>
       <button class="btn btn-primary" type="button" data-toast="已保存连接设置" data-toast-kind="ok" data-close>保存</button>
     </div>
@@ -3058,7 +3228,7 @@ cloud-9c31aa07-1</textarea>
   var titles = {
     files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'],
     trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿'],
-    auth: ['登录', '/ 凭据 Ring'], share: ['分享', '/ 公开链接'], error: ['出错了', '/ 错误页']
+    auth: ['登录', '/ 凭据 Ring'], share: ['分享', '/ 公开链接'], error: ['出错了', '/ 错误页'], diag: ['连接诊断', '/ 链路检查']
   };
   function show(go) {
     if (go === 'console') { openConsole(currentSec); return; }
@@ -3071,7 +3241,7 @@ cloud-9c31aa07-1</textarea>
   }
   function setNav(go) {
     var isConsole = go === 'console';
-    $$('[data-goto]').forEach(function (n) {
+    $$('.nav[data-goto], .top-tabs [data-goto], .mobile-nav [data-goto]').forEach(function (n) {
       // 同一目的地可能有多个入口（侧栏/顶部 tab/底部导航），只允许一个“当前”。
       // 控制台是容器：外层入口只标记 data-open（弱提示），当前分区由内部 .cnav 承担，
       // 否则会同时出现「控制台」和「概览」两个选中项。
@@ -3343,7 +3513,8 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'issue-drawer') { window.__closeIssue && window.__closeIssue(); }
+      if (top === 'vol-drawer') { window.__closeVolDrawer && window.__closeVolDrawer(); }
+      else if (top === 'issue-drawer') { window.__closeIssue && window.__closeIssue(); }
       else if (top === 'ctx') { window.__closeCtx && window.__closeCtx(); }
       else if (top === 'volume') { closeVol(); }
       else if (top === 'preview') { closePreview(); }
@@ -3989,6 +4160,135 @@ cloud-9c31aa07-1</textarea>
     });
   }
 
+  // ── 卷属性 / 列举 ──
+  (function () {
+    var VOLS = {
+      baidu: { type: '外部', cls: 'pill-info', backend: 'mydisk/s', mount: '/mnt/baidu', cap: '1.02 / 1.6 TiB（64%）', health: '正常', crypto: '不加密', copies: '单副本' },
+      secretdata: { type: '加密', cls: 'pill-warn', backend: 'baidu（分块）', mount: '/mnt/secretdata', cap: '312 GiB / 2 TiB（31%）', health: '1 项异常', crypto: 'AES-256-GCM', copies: '4 副本 · erasure' },
+      local: { type: '本地', cls: 'pill-mute', backend: '/srv/sproxy', mount: '/srv/sproxy', cap: '58 / 480 GiB（12%）', health: '正常', crypto: '不加密', copies: '单副本' },
+      archive: { type: '封装', cls: 'pill-mute', backend: 'baidu/archive', mount: '/mnt/archive', cap: '210 / 240 GiB（88%）', health: '水位偏高', crypto: '继承父卷', copies: '继承父卷' }
+    };
+    var d = id('vol-drawer');
+    function openVol(name, mode) {
+      var v = VOLS[name] || VOLS.baidu;
+      id('vol-title').textContent = name;
+      id('vol-type').textContent = v.type;
+      id('vol-type').className = 'pill ' + v.cls;
+      id('vol-backend').textContent = v.backend;
+      id('vol-mount').textContent = v.mount;
+      id('vol-cap').textContent = v.cap;
+      id('vol-health').textContent = v.health;
+      id('vol-health').className = 'pill ' + (v.health === '正常' ? 'pill-ok' : 'pill-warn');
+      id('vol-crypto').textContent = v.crypto;
+      id('vol-copies').textContent = v.copies;
+      lastFocus = document.activeElement;
+      d.classList.add('show'); d.setAttribute('aria-hidden', 'false');
+      layerStack.push('vol-drawer');
+      var f = d.querySelector('button'); if (f) { f.focus(); }
+      toast('info', mode === 'list' ? ('已打开 ' + name + ' 列举预览') : ('已打开 ' + name + ' 属性'));
+    }
+    function closeVolDrawer() {
+      d.classList.remove('show'); d.setAttribute('aria-hidden', 'true');
+      layerStack = layerStack.filter(function (x) { return x !== 'vol-drawer'; });
+    }
+    window.__closeVolDrawer = closeVolDrawer;
+    id('vol-close').addEventListener('click', closeVolDrawer);
+    $$('[data-vol-open]').forEach(function (b) {
+      b.addEventListener('click', function () { openVol(b.getAttribute('data-vol-open'), b.getAttribute('data-vol-mode')); });
+    });
+  })();
+
+  // ── 连接诊断：顺序执行 ──
+  (function () {
+    var steps = $$('#diag-steps .diag-step');
+    if (!steps.length) { return; }
+    function reset() {
+      steps.forEach(function (st) {
+        st.setAttribute('data-status', 'running');
+        st.querySelector('.st').textContent = '';
+        st.querySelector('.num').textContent = '…';
+      });
+    }
+    function run() {
+      reset();
+      var t = 0;
+      steps.forEach(function (st, i) {
+        t += 160 + i * 40;
+        setTimeout(function () {
+          var warn = st.querySelector('.nm').textContent.indexOf('凭据有效期') !== -1;
+          st.setAttribute('data-status', warn ? 'warn' : 'pass');
+          st.querySelector('.st').textContent = warn ? '!' : '✓';
+          st.querySelector('.num').textContent = (8 + i * 13) + ' ms';
+          if (i === steps.length - 1) {
+            id('diag-summary').innerHTML = '<div><b>诊断完成：' + (steps.length - 1) + ' 项通过，1 项警告</b><div class="muted" style="font-size:12px">警告：凭据将在 10 天后过期；其余链路正常。</div></div>';
+            toast('ok', '诊断完成');
+          }
+        }, t);
+      });
+    }
+    id('diag-run').addEventListener('click', run);
+  })();
+
+  // ── 回收站：恢复 / 彻底删除 / 清空 ──
+  (function () {
+    var view = id('view-trash');
+    if (!view) { return; }
+    view.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) { return; }
+      var label = b.textContent.trim();
+      var row = b.closest('tr');
+      if (label === '恢复' && row) {
+        e.stopPropagation();
+        row.remove(); toast('ok', '已恢复文件');
+      } else if (label === '彻底删除' && row) {
+        e.stopPropagation();
+        openConfirm({ title: '彻底删除该文件？', msg: '该操作不可恢复，也不再占用回收站配额。', ok: '彻底删除', toast: '已彻底删除' });
+        var onOk = function () { row.remove(); document.removeEventListener('click', onOk); };
+        document.addEventListener('click', onOk);
+      } else if (label === '清空回收站') {
+        e.stopPropagation();
+        openConfirm({ title: '清空回收站？', msg: '所有项目将被彻底删除，不可恢复。', ok: '清空', toast: '已清空回收站' });
+        var clear = function (ev) { if (ev.target.closest('#confirm-ok')) { $$('#view-trash tbody tr').forEach(function (r) { r.remove(); }); document.removeEventListener('click', clear); } };
+        document.addEventListener('click', clear);
+      } else if (label === '返回文件') {
+        e.stopPropagation(); show('files');
+      }
+    }, true);
+  })();
+
+  // ── 凭据：禁用 / 启用 ──
+  (function () {
+    var sec = document.querySelector('.csection[data-sec=credentials]');
+    if (!sec) { return; }
+    sec.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) { return; }
+      var label = b.textContent.trim();
+      if (label !== '禁用' && label !== '启用') { return; }
+      var row = b.closest('tr'); if (!row) { return; }
+      var pill = row.children[3].querySelector('.pill');
+      var off = label === '禁用';
+      pill.textContent = off ? 'disabled' : 'active';
+      pill.className = 'pill ' + (off ? 'pill-mute' : 'pill-info');
+      b.textContent = off ? '启用' : '禁用';
+      toast(off ? 'warn' : 'ok', off ? '已禁用凭据' : '已启用凭据');
+    });
+  })();
+
+  // ── 云任务：暂停 / 取消 行内状态 ──
+  (function () {
+    var table = id('cloud-table');
+    if (!table) { return; }
+    table.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) { return; }
+      var label = b.textContent.trim();
+      if (label !== '暂停' && label !== '取消') { return; }
+      var row = b.closest('tr'); var pill = row && row.children[5].querySelector('.pill');
+      if (!pill) { return; }
+      if (label === '暂停') { pill.textContent = 'paused'; pill.className = 'pill pill-warn'; b.textContent = '继续'; }
+      else { pill.textContent = 'cancelled'; pill.className = 'pill pill-mute'; row.style.opacity = '.6'; }
+    });
+  })();
+
   // ── 待处理事项：筛选 / 批量 / 详情 / 状态流转 ──
   (function () {
     var table = id('issue-table');
@@ -4117,6 +4417,7 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('click', function (e) {
     var b = e.target.closest('button');
     if (!b || b.closest('.devtools') || b.closest('.sheet')) { return; }
+    if (b.closest('#cloud-table') || b.closest('#view-trash') || b.closest('.csection[data-sec=credentials]') || b.closest('#issue-table')) { return; }
     if (b.id) { return; }
     var recognized = ['data-toast', 'data-dialog', 'data-goto', 'data-preview', 'data-sheet', 'data-confirm-title',
       'data-close', 'data-close-sheet', 'data-ctx', 'data-dtab', 'data-vol', 'data-lang-opt', 'data-auth-tab',
@@ -4246,7 +4547,13 @@ cloud-9c31aa07-1</textarea>
   });
   $$('[data-close]').forEach(function (b) {
     b.addEventListener('click', function () {
-      var m = b.closest('.modal'); if (m) { closeDialog(m); }
+      var m = b.closest('.modal, .drawer'); if (!m) { return; }
+      if (m.classList.contains('modal')) { closeDialog(m); return; }
+      if (m.id === 'vol-drawer' && window.__closeVolDrawer) { window.__closeVolDrawer(); return; }
+      if (m.id === 'issue-drawer' && window.__closeIssue) { window.__closeIssue(); return; }
+      if (m.id === 'task-drawer') { closeDrawer(taskDrawer); return; }
+      if (m.id === 'upload-drawer') { closeQueue(); return; }
+      closeDrawer(drawer);
     });
   });
   $$('.modal').forEach(function (m) {
@@ -4452,7 +4759,7 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu'), ctx: id('ctx'), 'issue-drawer': id('issue-drawer') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu'), ctx: id('ctx'), 'issue-drawer': id('issue-drawer'), 'vol-drawer': id('vol-drawer') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {
