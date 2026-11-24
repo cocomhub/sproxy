@@ -586,6 +586,41 @@ body[data-share="invalid"] #share-valid{display:none}
 body[data-share="invalid"] #share-invalid{display:block}
 body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 
+
+/* ───── 通知中心 ───── */
+.chan{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.chan .kpi{align-items:flex-start}
+.chan .row{display:flex;align-items:center;gap:8px;width:100%}
+.feed{display:flex;flex-direction:column}
+.feed .it{display:grid;grid-template-columns:120px 70px minmax(0,1fr) 120px;gap:10px;align-items:center;padding:9px 4px;border-bottom:1px solid var(--border);font-size:12.5px}
+.feed .it:last-child{border-bottom:0}
+
+/* ───── 多语言 ───── */
+.lang-menu{position:fixed;z-index:100;min-width:200px}
+.lang-menu button[aria-checked="true"]{color:var(--text);font-weight:600}
+.lang-menu button[aria-checked="true"]::after{content:"✓";margin-left:auto;color:var(--accent)}
+[data-lang="en"] .zh-only{display:none!important}
+
+/* ───── 移动端：下拉刷新 + 底部动作面板 ───── */
+.ptr{height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--text-3);font-size:12px;transition:height .16s var(--ease)}
+.ptr .dot{width:8px;height:8px;border:2px solid var(--accent);border-right-color:transparent;border-radius:50%}
+.ptr.on .dot{animation:spin .8s linear infinite}
+@media (max-width:640px){
+  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:95;background:var(--surface);border-top:1px solid var(--border);border-radius:16px 16px 0 0;box-shadow:var(--shadow-2);transform:translateY(102%);transition:transform 200ms var(--ease);padding:8px 12px calc(12px + env(safe-area-inset-bottom))}
+  .sheet.show{transform:none}
+  .sheet .handle{width:36px;height:4px;border-radius:2px;background:var(--border-strong);margin:6px auto 10px}
+  .sheet .stitle{font-size:12px;color:var(--text-3);padding:0 4px 8px}
+  .sheet button.sheet-item{display:flex;width:100%;align-items:center;gap:10px;padding:13px 8px;border:0;background:none;color:var(--text);font-size:14px;text-align:left;border-radius:var(--radius-md);cursor:pointer}
+  .sheet button.sheet-item:active{background:var(--surface-hover)}
+  .sheet button.sheet-item.danger{color:var(--bad)}
+}
+/* ───── 搜索分组 ───── */
+.cmdk-recent{display:flex;gap:6px;flex-wrap:wrap;padding:0 10px 8px}
+.cmdk-recent .chip{cursor:pointer}
+.cmdk-result .meta{margin-left:auto;font-size:11px;color:var(--text-3);display:flex;gap:8px;align-items:center}
+.cmdk-result .ico{width:16px;height:16px;color:var(--text-3);flex:0 0 auto}
+.cmdk-group[hidden]{display:none}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -683,20 +718,20 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     <div class="rail-group">工作区</div>
     <div class="nav" data-goto="files" aria-current="page" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-      <span class="label">文件</span><span class="count">128</span>
+      <span class="label" data-i18n="nav.files">文件</span><span class="count">128</span>
     </div>
     <div class="nav" data-goto="transfer" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>
-      <span class="label">传输</span><span class="count">3</span>
+      <span class="label" data-i18n="nav.transfer">传输</span><span class="count">3</span>
     </div>
     <div class="nav" data-goto="trash" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13h10l1-13"/></svg>
-      <span class="label">回收站</span><span class="count">4</span>
+      <span class="label" data-i18n="nav.trash">回收站</span><span class="count">4</span>
     </div>
     <div class="rail-group">系统</div>
     <div class="nav" data-goto="console" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V5m0 14h16M7 15l3.5-4 3 2.5L20 7"/></svg>
-      <span class="label">控制台</span><span class="count">5</span>
+      <span class="label" data-i18n="nav.console">控制台</span><span class="count">5</span>
     </div>
     <div class="rail-foot">
       <div class="who" tabindex="0">
@@ -718,9 +753,12 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       <div class="page-title" id="page-title">文件<span class="page-sub" id="page-sub">/ 全部卷</span></div>
       <div class="search-trigger" id="search-trigger" role="button" tabindex="0">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        搜索文件、任务、卷…
+        <span data-i18n="act.search">搜索文件、任务、卷…</span>
         <span style="margin-left:auto;display:flex;gap:3px"><kbd>⌘</kbd><kbd>K</kbd></span>
       </div>
+      <button class="icon-btn" id="lang-btn" type="button" title="语言 / Language" aria-haspopup="menu" aria-expanded="false">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>
+      </button>
       <button class="icon-btn" id="account-btn" type="button" title="账户与凭据" aria-haspopup="menu" aria-expanded="false">
         <span class="avatar" style="width:22px;height:22px">LL</span>
       </button>
@@ -729,7 +767,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       </button>
       <button class="btn btn-primary" type="button" data-write data-toast="已选择 2 个文件，准备上传" data-toast-kind="info">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
-        上传
+        <span data-i18n="act.upload">上传</span>
       </button>
     </header>
 
@@ -801,6 +839,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
 
       <!-- ══════════ 文件 ══════════ -->
       <section class="view active" id="view-files">
+        <div class="ptr" id="ptr"><span class="dot"></span><span>下拉刷新</span></div>
         <div class="banner banner-warn session-banner">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--warn);flex:0 0 auto"><path d="M12 8v5m0 3.5h.01"/><circle cx="12" cy="12" r="9"/></svg>
           <div><b>登录已过期（auth_failed）</b><div class="muted" style="font-size:12px">写操作已暂停；重新登录后会自动重试未完成的操作。</div></div>
@@ -861,8 +900,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <thead>
               <tr>
                 <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
-                <th>名称</th><th style="width:110px">卷</th><th style="width:96px" class="r">大小</th>
-                <th style="width:150px">修改时间</th><th style="width:130px">校验</th><th style="width:90px"></th>
+                <th> data-i18n="th.name">名称</th><th style="width:110px"> data-i18n="th.volume">卷</th><th style="width:96px" class="r"> data-i18n="th.size">大小</th>
+                <th style="width:150px"> data-i18n="th.mtime">修改时间</th><th style="width:130px"> data-i18n="th.checksum">校验</th><th style="width:90px"></th>
               </tr>
             </thead>
             <tbody class="real-rows">
@@ -873,7 +912,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <span class="t">NHDTB-864</span><span class="pill pill-mute">目录</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num sub">—</td>
                 <td class="num muted">11-24 18:32</td><td><span class="pill pill-ok"><span class="dot"></span>12/12</span></td>
-                <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
+                <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
               </tr>
               <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
@@ -882,7 +921,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <span class="t">NHDTB-864.mp4</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num">4.72 GB</td>
                 <td class="num muted">11-24 17:10</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td>
-                <td><div class="row-actions"><button class="icon-btn" data-drawer="1" title="详情">详情</button><button class="icon-btn" title="更多">⋯</button></div></td>
+                <td><div class="row-actions"><button class="icon-btn" data-drawer="1" title="详情">详情</button><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
               </tr>
               <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
@@ -891,7 +930,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <span class="t">NHDTB-863-uncensored-leak.mp4</span></div></td>
                 <td><span class="pill pill-info">baidu</span></td><td class="r num">6.05 GB</td>
                 <td class="num muted">11-24 15:48</td><td><span class="pill pill-warn"><span class="dot"></span>待校验</span></td>
-                <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
+                <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
               </tr>
               <tr tabindex="0">
                 <td><input class="cb" type="checkbox" checked aria-label="选择"></td>
@@ -901,7 +940,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <td><span class="pill" style="color:var(--accent);background:var(--accent-soft)">secretdata</span></td>
                 <td class="r num">2.28 GB</td><td class="num muted">11-23 22:04</td>
                 <td><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span></td>
-                <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
+                <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
               </tr>
               <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
@@ -910,7 +949,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <span class="t">archive-2026-11</span><span class="pill pill-mute">目录</span></div></td>
                 <td><span class="pill pill-mute">local</span></td><td class="r num sub">—</td>
                 <td class="num muted">11-20 09:15</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td>
-                <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
+                <td><div class="row-actions"><button class="icon-btn" title="更多" data-sheet="1">⋯</button></div></td>
               </tr>
             </tbody>
             <tbody class="skeleton" aria-hidden="true">
@@ -1030,10 +1069,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       <!-- ══════════ 传输 ══════════ -->
       <section class="view" id="view-transfer">
         <div class="toolbar">
-          <div class="chip active">全部 <span class="n num">12</span></div>
-          <div class="chip">进行中 <span class="n num">3</span></div>
-          <div class="chip">已完成 <span class="n num">7</span></div>
-          <div class="chip">失败 <span class="n num">2</span></div>
+          <div class="chip active" data-i18n="st.all">全部 <span class="n num">12</span></div>
+          <div class="chip" data-i18n="st.running">进行中 <span class="n num">3</span></div>
+          <div class="chip" data-i18n="st.done">已完成 <span class="n num">7</span></div>
+          <div class="chip" data-i18n="st.failed">失败 <span class="n num">2</span></div>
           <div class="spacer"></div>
           <button class="btn btn-sm" type="button" data-toast="已重试 2 个失败任务（自动换源）" data-toast-kind="ok">重试失败项</button>
           <button class="btn btn-sm" type="button">导出</button>
@@ -1177,6 +1216,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <div class="cnav" data-sec="sync" role="button" tabindex="0">同步冲突 <span class="count">2</span></div>
               <div class="cnav" data-sec="mesh" role="button" tabindex="0">Mesh</div>
               <div class="cnav" data-sec="hub" role="button" tabindex="0">Hub</div>
+              <div class="cnav" data-sec="notify" role="button" tabindex="0">通知 <span class="count">3</span></div>
             </nav>
             <div class="console-content">
               <div id="cs-demo" aria-hidden="true">
@@ -1660,6 +1700,63 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 </div>
                 <div class="banner"><div><b>注册准入</b><div class="muted" style="font-size:12px">节点使用凭据 Ring 的 AK + HMAC proof 注册；<span class="mono">relay_token</span> 已废除。</div></div></div>
               </section>
+
+              <!-- 通知中心 -->
+              <section class="csection" data-sec="notify">
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">3</span></span><span class="chip">未送达 <span class="n">1</span></span><span class="chip">已送达 <span class="n">2</span></span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已发送测试通知到 3 个渠道" data-toast-kind="ok">发送测试通知</button>
+                  <button class="btn btn-sm btn-primary" type="button" data-dialog="dlg-rule">新建规则</button>
+                </div>
+
+                <div class="chan">
+                  <div class="kpi"><div class="k" style="width:100%"><span>Webhook</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
+                    <div class="d"><span class="mono">https://hooks.example.com/sproxy</span></div>
+                    <div class="d"><span class="pill pill-ok">最近成功 3m 前</span><span class="muted">重试 3 次</span></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送测试请求" data-toast-kind="ok">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                  </div>
+                  <div class="kpi"><div class="k" style="width:100%"><span>Email</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
+                    <div class="d"><span class="mono">ops@example.com</span></div>
+                    <div class="d"><span class="pill pill-warn">最近失败 12m 前</span><span class="muted">SMTP 超时</span></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试投递" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                  </div>
+                  <div class="kpi"><div class="k" style="width:100%"><span>站内</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
+                    <div class="d"><span class="muted">控制台铃铛 + 待处理事项</span></div>
+                    <div class="d"><span class="pill pill-ok">正常</span><span class="muted">去抖 5m</span></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                  </div>
+                </div>
+
+                <div class="card" style="overflow:hidden">
+                  <div class="card-h"><h3>告警规则</h3><span class="hint">条件命中后按渠道分发，去抖窗口内合并</span></div>
+                  <table class="table">
+                    <thead><tr><th>规则</th><th style="width:180px">条件</th><th style="width:150px">渠道</th><th style="width:100px">去抖</th><th style="width:100px">状态</th><th style="width:130px">最近触发</th><th style="width:150px"></th></tr></thead>
+                    <tbody>
+                      <tr><td>云端任务失败</td><td class="mono">cloud.failed &gt; 0</td><td>Webhook · 站内</td><td class="num">5m</td><td><span class="pill pill-ok">启用</span></td><td class="num muted">18:22</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送测试" data-toast-kind="ok">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
+                      <tr><td>存储水位 &gt; 85%</td><td class="mono">vol.used_pct &gt; 85</td><td>Email · 站内</td><td class="num">30m</td><td><span class="pill pill-ok">启用</span></td><td class="num muted">17:40</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
+                      <tr><td>凭据即将过期</td><td class="mono">days_left &lt; 14</td><td>站内</td><td class="num">24h</td><td><span class="pill pill-ok">启用</span></td><td class="num muted">11-23</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
+                      <tr><td>分块校验失败</td><td class="mono">verify.mismatch &gt; 0</td><td>Webhook</td><td class="num">10m</td><td><span class="pill pill-mute">停用</span></td><td class="num muted">—</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">启用</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="card">
+                  <div class="card-h"><h3>最近投递</h3><span class="hint">保留 7 天</span></div>
+                  <div class="card-b" style="padding-top:4px">
+                    <div class="feed">
+                      <div class="it"><span class="num muted">18:22:13</span><span class="pill pill-bad">失败</span><span>云端任务失败：MGT-102（content_mismatch）</span><span class="muted">Webhook · 已重试 3 次</span></div>
+                      <div class="it"><span class="num muted">17:40:02</span><span class="pill pill-warn">警告</span><span>存储水位 88%：archive（baidu/archive）</span><span class="muted">Email · 失败（SMTP 超时）</span></div>
+                      <div class="it"><span class="num muted">18:05:51</span><span class="pill pill-ok">成功</span><span>云端任务完成：NHDTB-863（6.05 GB）</span><span class="muted">站内 · 已送达</span></div>
+                      <div class="it"><span class="num muted">11:02:30</span><span class="pill pill-info">信息</span><span>凭据轮换：skey-d6ff3f0f</span><span class="muted">站内 · 已送达</span></div>
+                    </div>
+                  </div>
+                </div>
+              </section>
             </div>
           </div>
         </div>
@@ -1886,6 +1983,32 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <div class="cmdk-box" role="dialog" aria-label="命令面板">
     <input id="cmdk-input" placeholder="输入命令或搜索…" aria-label="命令或搜索" autocomplete="off">
     <div class="cmdk-list" id="cmdk-list">
+      <div class="cmdk-recent" id="cmdk-recent">
+        <span class="muted" style="font-size:11px;width:100%">最近搜索</span>
+        <span class="chip" data-q="NHDTB">NHDTB</span>
+        <span class="chip" data-q="MGT-102">MGT-102</span>
+        <span class="chip" data-q="baidu">baidu</span>
+      </div>
+      <div class="cmdk-group" data-g="files">文件</div>
+      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="NHDTB-864.mp4 NHDTB baidu 4.72 GB">
+        <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
+        <span>NHDTB-864.mp4</span><span class="meta"><span>baidu</span><span class="num">4.72 GB</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="NHDTB-861.mp4 NHDTB secretdata 2.28 GB">
+        <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
+        <span>NHDTB-861.mp4</span><span class="meta"><span>secretdata</span><span class="num">2.28 GB</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="files" data-label="archive-2026-11 目录 local">
+        <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span>archive-2026-11</span><span class="meta"><span>local</span><span>目录</span></span></div>
+      <div class="cmdk-group" data-g="tasks">任务</div>
+      <div class="cmdk-item cmdk-result" data-cmd="console" data-label="MGT-102 failed content_mismatch 云端任务">
+        <span>MGT-102</span><span class="meta"><span class="pill pill-bad">failed</span><span>content_mismatch</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="transfer" data-label="NHDTB-864 上传 62%">
+        <span>NHDTB-864.mp4</span><span class="meta"><span class="pill pill-info">上传中</span><span class="num">62%</span></span></div>
+      <div class="cmdk-group" data-g="volumes">卷</div>
+      <div class="cmdk-item cmdk-result" data-cmd="console" data-label="baidu 外部卷 64%">
+        <span>baidu</span><span class="meta"><span class="pill pill-info">外部</span><span class="num">64%</span></span></div>
+      <div class="cmdk-item cmdk-result" data-cmd="console" data-label="secretdata 加密卷 31%">
+        <span>secretdata</span><span class="meta"><span class="pill pill-mute">加密</span><span class="num">31%</span></span></div>
       <div class="cmdk-group">跳转</div>
       <div class="cmdk-item" data-cmd="files" data-label="文件 files" aria-selected="true"><span>文件</span><span class="g">g f</span></div>
       <div class="cmdk-item" data-cmd="transfer" data-label="传输 transfer"><span>传输</span><span class="g">g t</span></div>
@@ -2003,6 +2126,24 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     <span class="muted">目标卷</span><span class="pill pill-info">baidu</span>
     <button class="btn btn-sm btn-ghost" style="margin-left:auto" id="uq-clear" type="button">清理已完成</button>
   </div>
+</div>
+
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-label="文件操作">
+  <div class="handle"></div>
+  <div class="stitle">NHDTB-864.mp4</div>
+  <button class="sheet-item" type="button" data-toast="开始下载" data-toast-kind="ok" data-close-sheet>下载</button>
+  <button class="sheet-item" type="button" data-dialog="dlg-rename" data-close-sheet>重命名 / 移动</button>
+  <button class="sheet-item" type="button" data-toast="已提交校验" data-toast-kind="info" data-close-sheet>校验</button>
+  <button class="sheet-item" type="button" data-toast="已复制分享链接" data-toast-kind="ok" data-close-sheet>分享</button>
+  <button class="sheet-item danger" type="button" data-toast="已移入回收站" data-toast-kind="ok" data-undo="1" data-close-sheet>删除</button>
+  <button class="sheet-item" type="button" data-close-sheet>取消</button>
+</div>
+
+<div class="popover lang-menu" id="lang-menu" role="menu" aria-hidden="true">
+  <button role="menuitemradio" type="button" data-lang-opt="zh-CN" aria-checked="true">简体中文</button>
+  <button role="menuitemradio" type="button" data-lang-opt="en-US" aria-checked="false">English</button>
+  <div class="pop-sep"></div>
+  <button role="menuitem" type="button" data-lang-opt="auto">跟随浏览器</button>
 </div>
 
 <div class="popover" id="account-menu" role="menu" aria-hidden="true">
@@ -2179,7 +2320,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     volumes: '卷 · 6 个（2 需关注）', config: '配置 · 有未保存改动',
     'vol-manage': '卷管理 · 6 个卷（1 未挂载）', credentials: '凭据 · 3 个 AK（1 即将到期）',
     secret: 'Secret · 副本与封印', sync: '同步冲突 · 2 待处理',
-    mesh: 'Mesh · 4 个活跃节点', hub: 'Hub · 7 个注册节点'
+    mesh: 'Mesh · 4 个活跃节点', hub: 'Hub · 7 个注册节点',
+    notify: '通知 · 3 个渠道（1 渠道异常）'
   };
   function openConsole(sec) {
     if (isModalConsole()) {
@@ -2349,9 +2491,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   function openCmdk() {
     layerStack.push('cmdk');
     cmdk.classList.add('show'); cmdkInput.value = '';
-    $$('.cmdk-item').forEach(function (i) { i.classList.remove('hide'); i.removeAttribute('aria-selected'); });
-    $('.cmdk-item').setAttribute('aria-selected', 'true');
-    cmdkIndex = 0; id('cmdk-empty').style.display = 'none';
+    // 交给搜索分组逻辑刷新可见性（空查询 = 最近搜索 + 命令）
+    cmdkInput.dispatchEvent(new Event('input', { bubbles: true }));
+    cmdkIndex = 0;
     cmdkInput.focus();
   }
   function closeCmdk() { cmdk.classList.remove('show'); layerStack = layerStack.filter(function (x) { return x !== 'cmdk'; }); }
@@ -2412,7 +2554,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'queue') { closeQueue(); }
+      if (top === 'sheet') { closeSheet(); }
+      else if (top === 'lang') { closeLang(); }
+      else if (top === 'queue') { closeQueue(); }
       else if (top === 'account') { closeAccount(); }
       else if (top === 'dlg') { var d = topDialog(); if (d) { closeDialog(d); } }
       else if (top === 'confirm') { closeConfirm(); }
@@ -2446,6 +2590,162 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       if (r2 && r2.querySelector('[data-drawer]')) { e.preventDefault(); openDrawer(drawer); }
     }
   });
+
+  // ── 多语言 ──
+  var I18N = {
+    en: {
+      'nav.files': 'Files', 'nav.transfer': 'Transfers', 'nav.trash': 'Trash', 'nav.console': 'Console',
+      'act.upload': 'Upload', 'act.search': 'Search files, tasks, volumes…',
+      'th.name': 'Name', 'th.volume': 'Volume', 'th.size': 'Size', 'th.mtime': 'Modified', 'th.checksum': 'Checksum',
+      'st.all': 'All', 'st.running': 'Running', 'st.done': 'Completed', 'st.failed': 'Failed'
+    }
+  };
+  var CNAV_EN = { overview: 'Overview', cloud: 'Cloud tasks', issues: 'Issues', audit: 'Audit', volumes: 'Volumes',
+    config: 'Settings', 'vol-manage': 'Volume admin', credentials: 'Credentials', secret: 'Secret', sync: 'Sync conflicts',
+    mesh: 'Mesh', hub: 'Hub', notify: 'Notifications' };
+  var TITLES_EN = { files: ['Files', '/ all volumes'], transfer: ['Transfers', '/ 3 running'],
+    trash: ['Trash', '/ kept 30 days'], console: ['Console', '/ overview'], auth: ['Sign in', '/ credential ring'],
+    share: ['Shared file', '/ public link'], ds: ['Design system', '/ design only'] };
+  function setText(el, txt) {
+    if (el.firstChild && el.firstChild.nodeType === 3) { el.firstChild.nodeValue = txt; } else { el.textContent = txt; }
+  }
+  function applyLang(lang) {
+    var en = lang === 'en';
+    document.documentElement.setAttribute('data-lang', en ? 'en' : 'zh');
+    $$('[data-i18n]').forEach(function (el) {
+      var k = el.getAttribute('data-i18n');
+      if (!el.hasAttribute('data-zh')) { el.setAttribute('data-zh', (el.firstChild && el.firstChild.nodeType === 3) ? el.firstChild.nodeValue : el.textContent); }
+      var zh = el.getAttribute('data-zh');
+      setText(el, en && I18N.en[k] ? I18N.en[k] : zh);
+    });
+    $$('.cnav[data-sec]').forEach(function (n) {
+      var k = n.getAttribute('data-sec');
+      if (!n.hasAttribute('data-zh')) { n.setAttribute('data-zh', n.firstChild && n.firstChild.nodeType === 3 ? n.firstChild.nodeValue : ''); }
+      if (en && CNAV_EN[k]) { setText(n, CNAV_EN[k]); } else { setText(n, n.getAttribute('data-zh')); }
+    });
+    var viewId = (document.querySelector('.view.active') || {}).id || 'view-files';
+    var go = viewId.replace('view-', '');
+    if (en && TITLES_EN[go]) {
+      id('page-title').firstChild.nodeValue = TITLES_EN[go][0];
+      id('page-sub').textContent = TITLES_EN[go][1];
+    } else if (titles[go]) {
+      id('page-title').firstChild.nodeValue = titles[go][0];
+      id('page-sub').textContent = titles[go][1];
+    }
+    $$('[data-lang-opt]').forEach(function (b) { b.setAttribute('aria-checked', String(b.getAttribute('data-lang-opt') === (en ? 'en-US' : 'zh-CN'))); });
+  }
+  var langMenu = id('lang-menu'), langBtn = id('lang-btn');
+  function openLang() {
+    var r = langBtn.getBoundingClientRect();
+    langMenu.style.left = Math.max(8, r.right - 200) + 'px';
+    langMenu.style.top = (r.bottom + 8) + 'px';
+    langMenu.classList.add('show'); langMenu.setAttribute('aria-hidden', 'false');
+    langBtn.setAttribute('aria-expanded', 'true'); layerStack.push('lang');
+  }
+  function closeLang() {
+    langMenu.classList.remove('show'); langMenu.setAttribute('aria-hidden', 'true');
+    langBtn.setAttribute('aria-expanded', 'false');
+    layerStack = layerStack.filter(function (x) { return x !== 'lang'; });
+  }
+  langBtn.addEventListener('click', function (e) {
+    e.stopPropagation(); langMenu.classList.contains('show') ? closeLang() : openLang();
+  });
+  $$('[data-lang-opt]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = b.getAttribute('data-lang-opt');
+      applyLang(v === 'en-US' ? 'en' : 'zh');
+      closeLang();
+      toast('info', v === 'en-US' ? 'Language: English (partial coverage)' : '语言：简体中文');
+    });
+  });
+  document.addEventListener('click', function (e) {
+    if (!langMenu.classList.contains('show')) { return; }
+    if (langMenu.contains(e.target) || langBtn.contains(e.target)) { return; }
+    closeLang();
+  });
+
+  // ── 移动端底部动作面板 ──
+  var sheet = id('sheet');
+  function openSheet() {
+    lastFocus = document.activeElement;
+    sheet.classList.add('show'); layerStack.push('sheet');
+    var f = sheet.querySelector('button'); if (f) { f.focus(); }
+  }
+  function closeSheet() {
+    sheet.classList.remove('show');
+    layerStack = layerStack.filter(function (x) { return x !== 'sheet'; });
+  }
+  $$('[data-sheet]').forEach(function (b) { b.addEventListener('click', openSheet); });
+  $$('[data-close-sheet]').forEach(function (b) { b.addEventListener('click', closeSheet); });
+
+  // ── 下拉刷新（触屏） ──
+  (function () {
+    var content = $('.content'), ptr = id('ptr'), startY = 0, pulling = false, dist = 0;
+    if (!content || !ptr) { return; }
+    content.addEventListener('touchstart', function (e) {
+      if (content.scrollTop > 0 || e.touches.length !== 1) { return; }
+      startY = e.touches[0].clientY; pulling = true; dist = 0;
+    }, { passive: true });
+    content.addEventListener('touchmove', function (e) {
+      if (!pulling) { return; }
+      var dy = e.touches[0].clientY - startY;
+      if (dy <= 0) { return; }
+      dist = Math.min(64, dy * 0.5);
+      ptr.style.height = dist + 'px';
+      ptr.classList.add('on');
+      e.preventDefault();
+    }, { passive: false });
+    content.addEventListener('touchend', function () {
+      if (!pulling) { return; }
+      pulling = false;
+      ptr.classList.remove('on');
+      ptr.style.height = '0px';
+      if (dist > 36) { toast('ok', '已刷新目录（当前卷 baidu）'); }
+      dist = 0;
+    });
+  })();
+
+  // ── 全局搜索分组 ──
+  (function () {
+    var list = id('cmdk-list'), recent = id('cmdk-recent');
+    function updateVisibility(q) {
+      var showResults = q !== '';
+      recent.style.display = showResults ? 'none' : 'flex';
+      var currentGroup = null, groupHasVisible = false;
+      Array.prototype.forEach.call(list.children, function (el) {
+        if (el.classList.contains('cmdk-group')) {
+          if (currentGroup) { currentGroup.hidden = !groupHasVisible; }
+          currentGroup = el; groupHasVisible = false;
+          return;
+        }
+        if (el === recent) { return; }
+        var isResult = el.classList.contains('cmdk-result');
+        var match = !showResults || (isResult ? false : true);
+        if (showResults) {
+          match = (el.getAttribute('data-label') || '').toLowerCase().indexOf(q) !== -1;
+          if (isResult && !match) { el.classList.add('hide'); }
+        }
+        if (isResult && !showResults) { el.classList.add('hide'); }
+        if (!isResult) { el.classList.toggle('hide', showResults && !match); }
+        if (!el.classList.contains('hide')) { groupHasVisible = true; }
+      });
+      if (currentGroup) { currentGroup.hidden = !groupHasVisible; }
+      var items = visibleItems();
+      id('cmdk-empty').style.display = items.length ? 'none' : 'block';
+      cmdkIndex = 0;
+      $$('.cmdk-item').forEach(function (i) { i.removeAttribute('aria-selected'); });
+      if (items[0]) { items[0].setAttribute('aria-selected', 'true'); }
+    }
+    cmdkInput.addEventListener('input', function () { updateVisibility(cmdkInput.value.trim().toLowerCase()); });
+    $$('#cmdk-recent .chip').forEach(function (c) {
+      c.addEventListener('click', function () {
+        cmdkInput.value = c.getAttribute('data-q');
+        updateVisibility(cmdkInput.value.trim().toLowerCase());
+        cmdkInput.focus();
+      });
+    });
+    updateVisibility('');
+  })();
 
   // ── 登录 / 注册 ──
   function authPane(name) {
@@ -2758,7 +3058,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {

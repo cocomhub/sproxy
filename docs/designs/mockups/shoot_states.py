@@ -61,6 +61,17 @@ for skin in "abc":
         spec(f"{skin}-share", skin, actions=[
             "document.getElementById('dev-share').click()"]),
     ]
+    specs += [
+        spec(f"{skin}-notify", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=notify]').click()"]),
+        spec(f"{skin}-files-en", skin, actions=[
+            "document.getElementById('lang-btn').click()",
+            "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-search", skin, actions=[
+            "document.getElementById('search-trigger').click()",
+            "var i=document.getElementById('cmdk-input');i.value='NHDTB';i.dispatchEvent(new Event('input',{bubbles:true}));"]),
+    ]
     specs.append(spec(f"{skin}-session-expired", skin, actions=[
         "document.body.dataset.session='expired';",
         'document.querySelector(\'.nav[data-goto="files"]\').click()']))
@@ -71,6 +82,10 @@ specs += [
     spec("m-a-files", "a", actions=['document.querySelector(\'.nav[data-goto="files"]\').click()']),
     spec("m-c-console", "c", actions=['document.querySelector(\'.nav[data-goto="console"]\').click()']),
     spec("m-a-auth", "a", actions=["document.getElementById('dev-auth').click()"]),
+    spec("m-c-sheet", "c", actions=["document.querySelector('[data-sheet]').click()"]),
+    spec("m-a-search", "a", actions=[
+        "document.getElementById('search-trigger').click()",
+        "var i=document.getElementById('cmdk-input');i.value='MGT';i.dispatchEvent(new Event('input',{bubbles:true}));"]),
 ]
 
 results = []
