@@ -95,6 +95,14 @@ for skin in "abc":
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=volumes]').click()",
             "document.querySelector('[data-vol-open=secretdata][data-vol-mode=props]').click()"]),
+        spec(f"{skin}-dialog-stats", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=hub]').click()",
+            "document.querySelector('.csection[data-sec=hub] [data-dialog=dlg-stats]').click()"]),
+        spec(f"{skin}-vol-drawer-manage", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=vol-manage]').click()",
+            "Array.prototype.find.call(document.querySelectorAll('.csection[data-sec=vol-manage] [data-vol-mode=props]'),function(b){return b.getAttribute('data-vol-open')==='media-audit';}).click()"]),
         spec(f"{skin}-diag", skin, actions=[
             "document.getElementById('account-btn').click()",
             "document.querySelector('#account-menu [data-dialog=dlg-connect]').click()",

@@ -1700,12 +1700,12 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th style="width:150px">时间</th><th style="width:170px">操作</th><th>对象</th><th style="width:110px">结果</th><th style="width:110px">耗时</th></tr></thead>
                     <tbody>
-                      <tr><td class="num muted">18:41:02.311</td><td class="mono">cloud.retry</td><td class="mono">EXAMPLE-101</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">12 ms</td></tr>
-                      <tr><td class="num muted">18:38:51.077</td><td class="mono">upload.chunk</td><td class="mono">EXAMPLE-001.mp4 #11</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">842 ms</td></tr>
-                      <tr><td class="num muted">18:22:13.902</td><td class="mono">cloud.verify</td><td class="mono">EXAMPLE-201</td><td><span class="pill pill-bad">mismatch</span></td><td class="num muted">3 ms</td></tr>
-                      <tr><td class="num muted">18:12:40.004</td><td class="mono">volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">1.2 s</td></tr>
-                      <tr><td class="num muted">18:05:22.618</td><td class="mono">cloud.complete</td><td class="mono">EXAMPLE-003</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">48 ms</td></tr>
-                      <tr><td class="num muted">17:58:10.233</td><td class="mono">cloud.submit</td><td class="mono">EXAMPLE-301</td><td><span class="pill pill-warn">rejected</span></td><td class="num muted">5 ms</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:41:02.311</td><td class="mono">cloud.retry</td><td class="mono">EXAMPLE-101</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">12 ms</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:38:51.077</td><td class="mono">upload.chunk</td><td class="mono">EXAMPLE-001.mp4 #11</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">842 ms</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:22:13.902</td><td class="mono">cloud.verify</td><td class="mono">EXAMPLE-201</td><td><span class="pill pill-bad">mismatch</span></td><td class="num muted">3 ms</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:12:40.004</td><td class="mono">volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">1.2 s</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:05:22.618</td><td class="mono">cloud.complete</td><td class="mono">EXAMPLE-003</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">48 ms</td></tr>
+                      <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">17:58:10.233</td><td class="mono">cloud.submit</td><td class="mono">EXAMPLE-301</td><td><span class="pill pill-warn">rejected</span></td><td class="num muted">5 ms</td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -1828,15 +1828,15 @@ time: 2026-11-24T18:41:02Z</div>
                     <thead><tr><th>名称</th><th style="width:110px">类型</th><th>后端 / 目标</th><th style="width:110px" class="r">容量</th><th style="width:100px">状态</th><th style="width:230px"></th></tr></thead>
                     <tbody>
                       <tr><td><div class="name"><span class="t">baidu</span></div></td><td><span class="pill pill-info">外部</span></td><td class="mono">mydisk/s</td><td class="r num">1.6 TiB</td><td><span class="pill pill-ok">已挂载</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 baidu？" data-confirm-msg="卷上仍有 1.02 TiB 数据；有活动任务或非空卷默认拒绝删除。" data-confirm-ok="删除卷" data-confirm-type="baidu" data-confirm-toast="已删除卷 baidu">删除</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="baidu" data-vol-mode="props">属性</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="baidu" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 baidu？" data-confirm-msg="卷上仍有 1.02 TiB 数据；有活动任务或非空卷默认拒绝删除。" data-confirm-ok="删除卷" data-confirm-type="baidu" data-confirm-toast="已删除卷 baidu">删除</button></div></td></tr>
                       <tr><td><div class="name"><span class="t">secretdata</span></div></td><td><span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></td><td class="mono">4 副本 · erasure</td><td class="r num">2 TiB</td><td><span class="pill pill-ok">已挂载</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 secretdata？" data-confirm-msg="加密卷删除后分块与目录元数据将不可恢复。" data-confirm-ok="删除卷" data-confirm-type="secretdata" data-confirm-toast="已删除卷 secretdata">删除</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="secretdata" data-vol-mode="props">属性</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="secretdata" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 secretdata？" data-confirm-msg="加密卷删除后分块与目录元数据将不可恢复。" data-confirm-ok="删除卷" data-confirm-type="secretdata" data-confirm-toast="已删除卷 secretdata">删除</button></div></td></tr>
                       <tr><td><div class="name"><span class="t">local</span></div></td><td><span class="pill pill-mute">本地</span></td><td class="mono">/srv/sproxy</td><td class="r num">480 GiB</td><td><span class="pill pill-ok">已挂载</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 local？" data-confirm-msg="本地卷只解除挂载，不删除磁盘文件。" data-confirm-ok="解除挂载" data-confirm-toast="已解除挂载 local">删除</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="local" data-vol-mode="props">属性</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="local" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 local？" data-confirm-msg="本地卷只解除挂载，不删除磁盘文件。" data-confirm-ok="解除挂载" data-confirm-toast="已解除挂载 local">删除</button></div></td></tr>
                       <tr><td><div class="name"><span class="t">archive</span></div></td><td><span class="pill pill-mute">封装</span></td><td class="mono">baidu/archive</td><td class="r num">240 GiB</td><td><span class="pill pill-ok">已挂载</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 archive？" data-confirm-msg="封装卷删除只移除声明，不删除父卷数据。" data-confirm-ok="删除卷" data-confirm-type="archive" data-confirm-toast="已删除卷 archive">删除</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-vol-open="archive" data-vol-mode="props">属性</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="archive" data-vol-mode="list">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 archive？" data-confirm-msg="封装卷删除只移除声明，不删除父卷数据。" data-confirm-ok="删除卷" data-confirm-type="archive" data-confirm-toast="已删除卷 archive">删除</button></div></td></tr>
                       <tr><td><div class="name"><span class="t">media-audit</span></div></td><td><span class="pill pill-mute">封装</span></td><td class="mono">baidu/audit</td><td class="r num sub">—</td><td><span class="pill pill-warn">未挂载</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已尝试挂载 media-audit" data-toast-kind="ok">挂载</button><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">删除</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已尝试挂载 media-audit" data-toast-kind="ok">挂载</button><button class="btn btn-sm btn-ghost" type="button" data-vol-open="media-audit" data-vol-mode="props">属性</button><button class="btn btn-sm btn-ghost" type="button">删除</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -1971,9 +1971,9 @@ time: 2026-11-24T18:41:02Z</div>
                   <table class="table">
                     <thead><tr><th>节点</th><th style="width:110px">角色</th><th style="width:180px">地址</th><th style="width:140px">最后心跳</th><th style="width:80px" class="r">流</th><th style="width:170px"></th></tr></thead>
                     <tbody>
-                      <tr><td class="mono">node-a1</td><td><span class="pill pill-info">exit</span></td><td class="mono">192.0.2.11:8443</td><td class="num muted">3s 前</td><td class="r num">6</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="从 Hub 移除 node-a1？" data-confirm-msg="移除后该节点需重新注册（SproxySig 准入）。" data-confirm-ok="移除" data-confirm-toast="已移除 node-a1">移除</button></div></td></tr>
-                      <tr><td class="mono">node-b2</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.12:8443</td><td class="num muted">8s 前</td><td class="r num">3</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
-                      <tr><td class="mono">node-d4</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.14:8443</td><td class="num muted">2m 前</td><td class="r num">0</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-a1</td><td><span class="pill pill-info">exit</span></td><td class="mono">192.0.2.11:8443</td><td class="num muted">3s 前</td><td class="r num">6</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-stats">统计</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="从 Hub 移除 node-a1？" data-confirm-msg="移除后该节点需重新注册（SproxySig 准入）。" data-confirm-ok="移除" data-confirm-toast="已移除 node-a1">移除</button></div></td></tr>
+                      <tr><td class="mono">node-b2</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.12:8443</td><td class="num muted">8s 前</td><td class="r num">3</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-stats">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-d4</td><td><span class="pill pill-mute">relay</span></td><td class="mono">192.0.2.14:8443</td><td class="num muted">2m 前</td><td class="r num">0</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-stats">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -2105,9 +2105,9 @@ sclient list --subdir jav/EXAMPLE</div>
                       <tr><td class="mono">cloud.failed</td><td>Webhook · 站内</td><td class="num muted">11-24 10:02</td>
                         <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送模板预览" data-toast-kind="ok">预览</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重置为默认模板" data-toast-kind="warn">重置</button></div></td></tr>
                       <tr><td class="mono">vol.used_pct</td><td>Email · 站内</td><td class="num muted">11-20 08:30</td>
-                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button">预览</button><button class="btn btn-sm btn-ghost" type="button">重置</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-template">预览</button><button class="btn btn-sm btn-ghost" type="button">重置</button></div></td></tr>
                       <tr><td class="mono">credential.expiring</td><td>站内</td><td class="num muted">11-12 14:12</td>
-                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button">预览</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-dialog="dlg-template">编辑</button><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-template">预览</button></div></td></tr>
                     </tbody>
                   </table>
                 </div>
@@ -2770,6 +2770,41 @@ cloud-9c31aa07-1</textarea>
   </div>
 </div>
 
+<!-- 节点 / 中继统计 -->
+<div class="modal" id="dlg-stats" role="dialog" aria-modal="true" aria-labelledby="stats-title" aria-hidden="true">
+  <div class="modal-box" style="width:640px">
+    <h3 id="stats-title">node-a1 · 统计</h3>
+    <p>近 1 小时；p95 延迟与错误率按 1 分钟窗口聚合。</p>
+    <div class="kpis" style="grid-template-columns:repeat(4,minmax(0,1fr));gap:8px">
+      <div class="kpi"><div class="k">活跃流</div><div class="v num">6</div><div class="d"><span class="muted">中继 4 · 直连 2</span></div></div>
+      <div class="kpi"><div class="k">出 / 入</div><div class="v num" style="font-size:18px">84 / 61</div><div class="d"><span class="muted">MiB/s</span></div></div>
+      <div class="kpi"><div class="k">延迟 p50/p95</div><div class="v num" style="font-size:18px">12 / 92</div><div class="d"><span class="muted">ms</span></div></div>
+      <div class="kpi"><div class="k">错误率</div><div class="v num" style="font-size:18px">0.4%</div><div class="d"><span class="muted">3 / 742 请求</span></div></div>
+    </div>
+    <div style="margin-top:12px">
+      <div class="muted" style="font-size:11.5px;margin-bottom:6px">吞吐（近 1 小时，每 5 分钟）</div>
+      <div class="spark" aria-hidden="true">
+        <i style="height:32%"></i><i style="height:48%"></i><i style="height:41%"></i><i style="height:66%"></i><i style="height:78%"></i><i style="height:55%"></i><i style="height:70%"></i><i class="hi" style="height:88%"></i><i style="height:64%"></i><i style="height:50%"></i><i style="height:72%"></i><i style="height:81%"></i>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px;overflow:hidden">
+      <table class="table" style="font-size:12px">
+        <thead><tr><th>流</th><th>来源</th><th style="width:90px" class="r">流量</th><th style="width:80px">时长</th><th style="width:80px">状态</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">st-91</td><td class="mono">node-b2 → node-a1</td><td class="r num">12.4 GiB</td><td class="num">18m</td><td><span class="pill pill-ok">active</span></td></tr>
+          <tr><td class="mono">st-90</td><td class="mono">node-c3 → node-a1</td><td class="r num">3.1 GiB</td><td class="num">6m</td><td><span class="pill pill-ok">active</span></td></tr>
+          <tr><td class="mono">st-88</td><td class="mono">local → node-a1</td><td class="r num">0.4 GiB</td><td class="num">2m</td><td><span class="pill pill-warn">retrying</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="已复制节点诊断" data-toast-kind="ok">复制诊断</button>
+      <button class="btn" type="button" data-confirm-title="断开 node-a1？" data-confirm-msg="该节点承载 4 条中继流，断开后自动重连其它出口。" data-confirm-ok="断开" data-confirm-toast="已断开 node-a1">断开</button>
+      <button class="btn btn-primary" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 编辑通知模板 -->
 <div class="modal" id="dlg-template" role="dialog" aria-modal="true" aria-labelledby="tpl-title" aria-hidden="true">
   <div class="modal-box" style="width:640px">
@@ -2947,7 +2982,7 @@ cloud-9c31aa07-1</textarea>
       <button class="btn btn-sm btn-primary" type="button" data-goto="files" data-close>打开浏览</button>
       <button class="btn btn-sm" type="button" data-toast="已刷新卷状态" data-toast-kind="ok">刷新状态</button>
       <button class="btn btn-sm" type="button" data-toast="已开始一致性巡检" data-toast-kind="info">巡检</button>
-      <button class="btn btn-sm btn-ghost" type="button" data-confirm-title="卸载卷？" data-confirm-msg="卸载后该卷上的任务会暂停；数据保留在存储端。" data-confirm-ok="卸载" data-confirm-toast="已卸载卷">卸载</button>
+      <button class="btn btn-sm btn-ghost" type="button" id="vol-mount-btn" data-confirm-title="卸载卷？" data-confirm-msg="卸载后该卷上的任务会暂停；数据保留在存储端。" data-confirm-ok="卸载" data-confirm-toast="已卸载卷">卸载</button>
     </div>
   </div>
 </div>
@@ -4160,13 +4195,25 @@ cloud-9c31aa07-1</textarea>
     });
   }
 
+  // ── 节点统计：标题取行内节点名 ──
+  (function () {
+    $$('[data-dialog=dlg-stats]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var tr = b.closest('tr');
+        var name = tr && tr.children[0] ? tr.children[0].textContent.trim() : 'node';
+        var t = id('stats-title'); if (t) { t.textContent = name + ' · 统计'; }
+      });
+    });
+  })();
+
   // ── 卷属性 / 列举 ──
   (function () {
     var VOLS = {
       baidu: { type: '外部', cls: 'pill-info', backend: 'mydisk/s', mount: '/mnt/baidu', cap: '1.02 / 1.6 TiB（64%）', health: '正常', crypto: '不加密', copies: '单副本' },
       secretdata: { type: '加密', cls: 'pill-warn', backend: 'baidu（分块）', mount: '/mnt/secretdata', cap: '312 GiB / 2 TiB（31%）', health: '1 项异常', crypto: 'AES-256-GCM', copies: '4 副本 · erasure' },
       local: { type: '本地', cls: 'pill-mute', backend: '/srv/sproxy', mount: '/srv/sproxy', cap: '58 / 480 GiB（12%）', health: '正常', crypto: '不加密', copies: '单副本' },
-      archive: { type: '封装', cls: 'pill-mute', backend: 'baidu/archive', mount: '/mnt/archive', cap: '210 / 240 GiB（88%）', health: '水位偏高', crypto: '继承父卷', copies: '继承父卷' }
+      archive: { type: '封装', cls: 'pill-mute', backend: 'baidu/archive', mount: '/mnt/archive', cap: '210 / 240 GiB（88%）', health: '水位偏高', crypto: '继承父卷', copies: '继承父卷' },
+      'media-audit': { type: '封装', cls: 'pill-mute', backend: 'baidu/audit', mount: '（未挂载）', cap: '—', health: '未挂载', crypto: '继承父卷', copies: '继承父卷' }
     };
     var d = id('vol-drawer');
     function openVol(name, mode) {
@@ -4181,6 +4228,15 @@ cloud-9c31aa07-1</textarea>
       id('vol-health').className = 'pill ' + (v.health === '正常' ? 'pill-ok' : 'pill-warn');
       id('vol-crypto').textContent = v.crypto;
       id('vol-copies').textContent = v.copies;
+      var mb = id('vol-mount-btn');
+      if (mb) {
+        var unmounted = v.mount.indexOf('未挂载') !== -1 || v.health === '未挂载';
+        mb.textContent = unmounted ? '挂载' : '卸载';
+        mb.setAttribute('data-confirm-title', unmounted ? '挂载卷？' : '卸载卷？');
+        mb.setAttribute('data-confirm-msg', unmounted ? '挂载前会做连通性与路径冲突检查。' : '卸载后该卷上的任务会暂停；数据保留在存储端。');
+        mb.setAttribute('data-confirm-ok', unmounted ? '挂载' : '卸载');
+        mb.setAttribute('data-confirm-toast', unmounted ? '已挂载卷' : '已卸载卷');
+      }
       lastFocus = document.activeElement;
       d.classList.add('show'); d.setAttribute('aria-hidden', 'false');
       layerStack.push('vol-drawer');
