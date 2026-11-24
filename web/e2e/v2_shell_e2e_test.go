@@ -49,6 +49,23 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if txt, _ := page.Locator("#v2-file-body").TextContent(); !strings.Contains(txt, "v2demo") {
 		t.Fatalf("列表缺少播种目录 v2demo: %q", txt)
 	}
+	// P1c：检查器（概览 / Meta / 版本 / 分享）可打开且切换页签。
+	if err := page.Locator("#v2-file-body tr[data-name=v2demo] [data-action=detail]").Click(); err != nil {
+		t.Fatalf("打开详情: %v", err)
+	}
+	if err := waitLoc(page, "#v2-drawer.show", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("检查器未打开: %v", err)
+	}
+	if txt, _ := page.Locator("#v2-dr-title").TextContent(); txt != "v2demo" {
+		t.Fatalf("检查器标题 = %q", txt)
+	}
+	if err := page.Locator("[data-drtab=meta]").Click(); err != nil {
+		t.Fatalf("切换到 Meta: %v", err)
+	}
+	if err := page.Locator("#v2-dr-close").Click(); err != nil {
+		t.Fatalf("关闭检查器: %v", err)
+	}
+
 	if err := page.Locator("#v2-file-body a").First().Click(); err != nil {
 		t.Fatalf("进入 v2demo: %v", err)
 	}

@@ -114,6 +114,43 @@
     </div>
   </div>
 </div>
+<div class="drawer-backdrop" id="v2-dr-backdrop" hidden></div>
+<aside class="drawer" id="v2-drawer" role="dialog" aria-labelledby="v2-dr-title" aria-hidden="true">
+  <header>
+    <h3 id="v2-dr-title">详情</h3>
+    <button class="icon-btn" id="v2-dr-close" type="button" title="关闭">✕</button>
+  </header>
+  <div class="dr-tabs" role="tablist">
+    <button type="button" data-drtab="info" aria-selected="true">概览</button>
+    <button type="button" data-drtab="meta" aria-selected="false">Meta</button>
+    <button type="button" data-drtab="ver" aria-selected="false">版本</button>
+    <button type="button" data-drtab="share" aria-selected="false">分享</button>
+  </div>
+  <div class="dr-body">
+    <div data-drpane="info"><dl class="kv" id="v2-dr-info"></dl></div>
+    <div data-drpane="meta" hidden>
+      <div class="dr-row"><span class="muted">只读元数据（卷 sidecar / 服务端缓存）</span>
+        <button class="btn btn-sm" id="v2-meta-reload" type="button">刷新</button></div>
+      <div id="v2-meta-state" class="banner" hidden role="status"></div>
+      <pre class="json" id="v2-meta-json">—</pre>
+    </div>
+    <div data-drpane="ver" hidden><div id="v2-ver-list">加载中…</div></div>
+    <div data-drpane="share" hidden>
+      <div class="dr-row"><label class="muted">有效期
+        <select id="v2-share-ttl"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option></select></label>
+        <label class="muted">下载上限
+          <input id="v2-share-max" type="number" min="0" value="0" style="width:70px"> 次</label>
+      </div>
+      <label class="dr-check"><input id="v2-share-one" type="checkbox"> 一次性链接（下载后失效）</label>
+      <button class="btn btn-primary btn-sm" id="v2-share-create" type="button">创建分享</button>
+      <div id="v2-share-result" class="muted" style="font-size:12px"></div>
+      <div class="dr-sep"></div>
+      <div class="muted" style="font-size:12px">已有链接</div>
+      <div id="v2-share-list">加载中…</div>
+    </div>
+  </div>
+</aside>
+
 <div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
 <script src="../sclient/crypto.js"></script>
 <script src="../sclient/sig.js"></script>
@@ -122,9 +159,11 @@
 <script src="auth.js"></script>
 <script src="files.js"></script>
 <script src="../sclient/util.js"></script>
+<script src="api.js"></script>
 <script src="files-ops.js"></script>
 <script src="files-view.js"></script>
 <script src="files-actions.js"></script>
+<script src="files-inspector.js"></script>
 <script src="shell.js"></script>
 </body>
 </html>

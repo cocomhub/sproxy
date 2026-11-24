@@ -278,6 +278,8 @@ web-test:
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
 	@node --check web/static/v2/files-actions.js
+	@node --check web/static/v2/api.js
+	@node --check web/static/v2/files-inspector.js
 	@node --check web/static/overview-cards.js
 	@node --check web/static/overview-cards.test.js
 	@node --check web/static/console-nav.test.js

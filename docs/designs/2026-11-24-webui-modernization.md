@@ -452,10 +452,13 @@
 | P0 壳层 | ✅ 已交付 | `web/static/v2/{index.html,tokens.css,components.css,shell.js,shell.test.js}`；`/ui/v2/` 由既有静态路由直接提供（无需改后端）；旧页顶栏新增「试用新版」（可回滚） |
 | P1a 文件列表 | ✅ 已交付 | `/api/files` 真实列表（复用旧版 SproxySig 凭据）、面包屑/子目录、空态/错误态/401 提示；上传/批量/检查器待 P1b |
 | P1b 文件写操作 | ✅ 已交付（无检查器） | 上传（简单上传，sha256 + 签名）、新建目录、重命名、删除、批量删除；检查器（Meta/版本/分享）仍待 P1c |
-| P1c 检查器 | ⬜ | Meta/分块/版本/分享抽屉 |
+| P1c 检查器 | ✅ 已交付 | 抽屉四页签：概览 / Meta（只读 JSON）/ 版本（列表+恢复+删除）/ 分享（创建/列表/撤销）；分块页签待 P1d（需分块 API） |
 | P2 传输页 | ⬜ | 云端任务/任务组/上传队列 |
 | P3 控制台 | ⬜ | 弹窗改善 → 页面化评估 |
 | P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+
+P1c 验收证据：e2e 打开 `v2demo` 详情抽屉 → 标题校验 → 切到 Meta 页签 → 关闭；
+`make web-test` 通过；`go test ./web/e2e -run TestV2Shell` 通过。
 
 P1b 验收证据：e2e 走真实 UI —— 新建目录 `uifolder` → 列表出现 → 勾选 → 批量删除 → 列表消失；
 `node --test v2/files-ops.test.js` 5 例；`make web-test` 513 断言；archcheck/build 通过。

@@ -25,26 +25,9 @@
     setTimeout(function () { t.remove(); }, 4000);
   }
 
-  function signedFetch(method, path, bodyBytes, contentType, extra) {
-    var creds = auth.loadCreds(window.sessionStorage);
-    return auth.authHeaders(method, path, bodyBytes || null, creds, sig.signHeader)
-      .then(function (h) {
-        var headers = Object.assign({}, extra || {}, h);
-        if (contentType) { headers['Content-Type'] = contentType; }
-        return fetch(path, { method: method, headers: headers, body: bodyBytes || undefined, credentials: 'same-origin' });
-      });
-  }
+  var api = window.v2api;
 
-  function readError(resp) {
-    return resp.text().then(function (txt) {
-      try { var j = JSON.parse(txt); return j.message || j.error || txt; } catch (e) { return txt || ('HTTP ' + resp.status); }
-    });
-  }
-
-  function ensureOk(resp) {
-    if (resp.ok) { return resp; }
-    return readError(resp).then(function (msg) { throw new Error(msg); });
-  }
+  window.v2toast = toast;
 
   // ---------- 对话框 ----------
   var dlg = null;
@@ -137,8 +120,8 @@
           return cryptoLib.sha256Hex(bytes).then(function (sum) {
             var rel = f.joinSubdir(sub, file.name);
             var mp = util.buildMultipart({}, { name: 'file', filename: rel, contentType: 'application/octet-stream', bytes: bytes });
-            return signedFetch('POST', '/upload', mp.body, mp.contentType, ops.uploadHeaders(rel, sum, file.lastModified))
-              .then(ensureOk)
+            return api.request('POST', '/upload', { body: mp.body, contentType: mp.contentType, headers: ops.uploadHeaders(rel, sum, file.lastModified) })
+              .then(api.ensureOk)
               .then(function (resp) { return resp.json().catch(function () { return {}; }); })
               .then(function (body) {
                 if (body && body.success === false) { throw new Error(body.message || '上传失败'); }
@@ -159,7 +142,7 @@
       onOk: function (name) {
         var sub = view() ? view().subdir() : '';
         var rel = f.joinSubdir(sub, name);
-        run(signedFetch('POST', '/mkdir?dirname=' + enc(rel), null, null, {}).then(ensureOk), '已创建目录 ' + name);
+        run(api.json('POST', '/mkdir?dirname=' + enc(rel)), '已创建目录 ' + name);
       }
     });
   }
@@ -173,7 +156,7 @@
       danger: true, okText: '删除',
       onOk: function () {
         var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel);
-        run(signedFetch('POST', path, null, null, ops.checksumHeader(checksum)).then(ensureOk), '已删除 ' + name);
+        run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), '已删除 ' + name);
       }
     });
   }
@@ -185,7 +168,7 @@
       title: '重命名', message: '当前：' + from, input: true, value: name, okText: '保存',
       onOk: function (newName) {
         var to = f.joinSubdir(sub, newName);
-        run(signedFetch('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), null, null, ops.checksumHeader(checksum)).then(ensureOk), '已重命名为 ' + newName);
+        run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), { headers: ops.checksumHeader(checksum) }), '已重命名为 ' + newName);
       }
     });
   }
@@ -218,7 +201,7 @@
                 var info = view() && view().rowInfo(name);
                 var rel = f.joinSubdir(sub, name);
                 var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel);
-                return signedFetch('POST', path, null, null, ops.checksumHeader(info ? info.checksum : '')).then(ensureOk);
+                return api.json('POST', path, { headers: ops.checksumHeader(info ? info.checksum : '') });
               });
             });
             run(chain, '已删除 ' + names.length + ' 项');
@@ -235,8 +218,10 @@
         var name = b.getAttribute('data-file');
         var info = view() && view().rowInfo(name);
         if (!info) { return; }
-        if (b.getAttribute('data-action') === 'delete') { doDelete(name, info.isDir, info.checksum); }
-        if (b.getAttribute('data-action') === 'rename') { doRename(name, info.checksum); }
+        var act = b.getAttribute('data-action');
+        if (act === 'detail' && window.v2inspector) { window.v2inspector.open(name); return; }
+        if (act === 'delete') { doDelete(name, info.isDir, info.checksum); }
+        if (act === 'rename') { doRename(name, info.checksum); }
       });
     }
   }

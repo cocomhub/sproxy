@@ -122,6 +122,7 @@
 
       var actTd = document.createElement('td');
       actTd.className = 'r actions';
+      actTd.appendChild(actionBtn('详情', file.name, 'detail'));
       if (!file.isDir) { actTd.appendChild(actionBtn('重命名', file.name, 'rename')); }
       actTd.appendChild(actionBtn('删除', file.name, 'delete'));
       tr.appendChild(actTd);
@@ -212,6 +213,12 @@
     state: state,
     subdir: function () { return state.subdir; },
     selected: function () { return Object.keys(state.selected); },
+    file: function (name) {
+      for (var i = 0; i < state.files.length; i += 1) {
+        if (state.files[i].name === name) { return state.files[i]; }
+      }
+      return null;
+    },
     rowInfo: function (name) {
       var tr = document.querySelector('#v2-file-body tr[data-name="' + String(name).replace(/"/g, '\\"') + '"]');
       if (!tr) { return null; }
