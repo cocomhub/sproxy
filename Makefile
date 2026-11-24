@@ -301,6 +301,7 @@ web-test:
 	@node --check web/static/v2/cloud-ops.js
 	@node --check web/static/v2/cloud-ops.test.js
 	@node --check web/static/v2/settings.js
+	@node --check web/static/v2/mesh-console.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js

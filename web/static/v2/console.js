@@ -148,6 +148,8 @@
     if (name === 'verify' && window.v2verify) { window.v2verify.init(); }
     if (name === 'access' && window.v2access) { window.v2access.init(); }
     if (name === 'volumes' && window.v2volumes) { window.v2volumes.init(); }
+    if (name === 'mesh' && window.v2mesh) { window.v2mesh.initMesh(); }
+    if (name === 'hub' && window.v2mesh) { window.v2mesh.initHub(); }
   }
 
   var tasks = { all: [], selected: Object.create(null), q: '', status: '' };

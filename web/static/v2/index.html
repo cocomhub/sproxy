@@ -220,6 +220,8 @@
             <button type="button" data-cs="notify">通知</button>
             <button type="button" data-cs="verify">巡检</button>
             <button type="button" data-cs="access">接入</button>
+            <button type="button" data-cs="mesh">Mesh</button>
+            <button type="button" data-cs="hub">Hub</button>
           </nav>
           <div class="cs-body">
             <div class="toolbar" style="margin-bottom:12px">
@@ -333,6 +335,41 @@
                 </table>
                 <div class="empty" id="v2-vl-user-empty" hidden><b>没有用户卷</b>
                   <div class="muted">sclient volume create 可创建外部后端卷。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="mesh" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>Mesh 状态</b><span class="muted" style="font-size:12px">只读：面启用/监听地址/pin 数/角色</span>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-mesh-refresh" type="button">刷新</button>
+              </div>
+              <div id="v2-mesh-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th style="width:150px">面 / 角色</th><th>状态</th><th style="width:220px">备注</th></tr></thead>
+                  <tbody id="v2-mesh-body"></tbody>
+                </table>
+                <div class="empty" id="v2-mesh-empty" hidden><b>无数据</b></div>
+              </div>
+            </div>
+
+            <div data-cspane="hub" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>Hub 节点</b><span class="muted" style="font-size:12px">只读：注册节点与转发统计</span>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-hub-refresh" type="button">刷新</button>
+              </div>
+              <div id="v2-hub-state" class="banner" hidden role="status"></div>
+              <div class="muted" id="v2-hub-stats" style="font-size:12px;margin-bottom:8px" hidden></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th>节点</th><th>服务</th><th style="width:90px">质量</th>
+                    <th style="width:110px">RTT</th><th style="width:130px">虚拟 IP</th></tr></thead>
+                  <tbody id="v2-hub-body"></tbody>
+                </table>
+                <div class="empty" id="v2-hub-empty" hidden><b>没有已注册节点</b>
+                  <div class="muted">Hub 未启用时此分区不可用。</div></div>
               </div>
             </div>
 
@@ -630,6 +667,7 @@
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
 <script src="settings.js"></script>
+<script src="mesh-console.js"></script>
 <script src="trash.js"></script>
 </body>
 </html>
