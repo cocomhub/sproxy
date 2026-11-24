@@ -40,3 +40,23 @@ func TestNewCmdCloudDownloadBatch_Flags(t *testing.T) {
 		}
 	}
 }
+
+// TestHasBatchPath 锁定「清单含转存路径 ⇒ 必须显式给卷」的前置判定。
+func TestHasBatchPath(t *testing.T) {
+	t.Parallel()
+	if hasBatchPath([]batchEntry{{URL: "u"}}) {
+		t.Fatal("无路径时不应要求卷")
+	}
+	if !hasBatchPath([]batchEntry{{URL: "u", Path: "p"}}) {
+		t.Fatal("有路径时必须要求卷")
+	}
+}
+
+// TestNewCmdCloudDownloadBatch_HasTransferVolume 锁定 --transfer-volume 参数存在。
+func TestNewCmdCloudDownloadBatch_HasTransferVolume(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdCloudDownloadBatch(nil, cli.IOStreams{})
+	if cmd.Flags().Lookup("transfer-volume") == nil {
+		t.Fatal("缺少 --transfer-volume")
+	}
+}

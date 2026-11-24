@@ -59,6 +59,7 @@ func parseBatchPlan(r *bufio.Scanner) ([]batchEntry, error) {
 // （成功/失败/超时 + 每个失败任务的错误类别），便于"修 24 个文件"这类批量作业一次跑完。
 func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var file string
+	var transferVolume string
 	var concurrency int
 	var wait bool
 	var timeout time.Duration
@@ -69,6 +70,7 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 		Args:  cobra.NoArgs,
 	}
 	cmd.Flags().StringVar(&file, "file", "", "清单文件（TSV：url<TAB>转存路径<TAB>期望checksum）")
+	cmd.Flags().StringVar(&transferVolume, "transfer-volume", "", "转存目标卷名（清单给了转存路径时**必填**）")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 2, "并发提交数（建议 2–3，避免源限流）")
 	cmd.Flags().BoolVar(&wait, "wait", true, "等待全部任务终态后汇总")
 	cmd.Flags().DurationVar(&timeout, "timeout", 6*time.Hour, "整体等待超时")
@@ -93,7 +95,10 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 		if cerr != nil {
 			return cerr
 		}
-		ids := submitBatch(cmd.Context(), c, entries, concurrency, ios)
+		if transferVolume == "" && hasBatchPath(entries) {
+			return fmt.Errorf("--transfer-volume 必填（清单含转存路径时必须有目标卷）")
+		}
+		ids := submitBatch(cmd.Context(), c, entries, transferVolume, concurrency, ios)
 		if !wait {
 			ios.WriteOutLine("已提交 %d 个任务（--wait=false，不等待）", len(ids))
 			return nil
@@ -104,7 +109,7 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 }
 
 // submitBatch 并发提交（有界并发），返回任务 ID。单条失败只打印、不中断（continue-on-error）。
-func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry, concurrency int, ios cli.IOStreams) []string {
+func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry, transferVolume string, concurrency int, ios cli.IOStreams) []string {
 	if concurrency <= 0 {
 		concurrency = 2
 	}
@@ -120,7 +125,9 @@ func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry
 			defer func() { <-sem }()
 			opts := []client.CloudDownloadOption{client.WithCloudDownloadSave(true)}
 			if e.Path != "" {
-				opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Path: e.Path}))
+				// Volume 必须显式给出：空 Volume 的 TransferSpec 服务端会判无效（2026-11-24 修正）。
+				opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{
+					Volume: transferVolume, Path: e.Path}))
 			}
 			if e.Expect != "" {
 				opts = append(opts, client.WithCloudDownloadExpectChecksum(e.Expect))
@@ -197,4 +204,14 @@ func reportBatch(ios cli.IOStreams, total, ok int, failed map[string]string, pen
 	for id := range pending {
 		ios.WriteErrLine("  未完成 %s（超时，可用 cloud-download list 查看/retry）", id)
 	}
+}
+
+// hasBatchPath 判断清单里是否出现转存路径（用于 --transfer-volume 必填校验）。
+func hasBatchPath(entries []batchEntry) bool {
+	for _, e := range entries {
+		if e.Path != "" {
+			return true
+		}
+	}
+	return false
 }
