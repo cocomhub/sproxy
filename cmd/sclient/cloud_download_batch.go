@@ -60,6 +60,7 @@ func parseBatchPlan(r *bufio.Scanner) ([]batchEntry, error) {
 func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) *cobra.Command {
 	var file string
 	var transferVolume string
+	var transferOverwrite bool
 	var concurrency int
 	var wait bool
 	var timeout time.Duration
@@ -71,6 +72,8 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 	}
 	cmd.Flags().StringVar(&file, "file", "", "清单文件（TSV：url<TAB>转存路径<TAB>期望checksum）")
 	cmd.Flags().StringVar(&transferVolume, "transfer-volume", "", "转存目标卷名（清单给了转存路径时**必填**）")
+	cmd.Flags().BoolVar(&transferOverwrite, "transfer-overwrite", false,
+		"允许覆盖已存在的目标（修复受损文件时必需；默认 false = 目标唯一语义）")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 2, "并发提交数（建议 2–3，避免源限流）")
 	cmd.Flags().BoolVar(&wait, "wait", true, "等待全部任务终态后汇总")
 	cmd.Flags().DurationVar(&timeout, "timeout", 6*time.Hour, "整体等待超时")
@@ -98,7 +101,7 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 		if transferVolume == "" && hasBatchPath(entries) {
 			return fmt.Errorf("--transfer-volume 必填（清单含转存路径时必须有目标卷）")
 		}
-		ids := submitBatch(cmd.Context(), c, entries, transferVolume, concurrency, ios)
+		ids := submitBatch(cmd.Context(), c, entries, transferVolume, transferOverwrite, concurrency, ios)
 		if !wait {
 			ios.WriteOutLine("已提交 %d 个任务（--wait=false，不等待）", len(ids))
 			return nil
@@ -109,7 +112,9 @@ func NewCmdCloudDownloadBatch(factory clientfactory.Factory, ios cli.IOStreams) 
 }
 
 // submitBatch 并发提交（有界并发），返回任务 ID。单条失败只打印、不中断（continue-on-error）。
-func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry, transferVolume string, concurrency int, ios cli.IOStreams) []string {
+func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry,
+	transferVolume string, transferOverwrite bool, concurrency int, ios cli.IOStreams,
+) []string {
 	if concurrency <= 0 {
 		concurrency = 2
 	}
@@ -127,7 +132,7 @@ func submitBatch(ctx context.Context, c *client.FileClient, entries []batchEntry
 			if e.Path != "" {
 				// Volume 必须显式给出：空 Volume 的 TransferSpec 服务端会判无效（2026-11-24 修正）。
 				opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{
-					Volume: transferVolume, Path: e.Path}))
+					Volume: transferVolume, Path: e.Path, Overwrite: transferOverwrite}))
 			}
 			if e.Expect != "" {
 				opts = append(opts, client.WithCloudDownloadExpectChecksum(e.Expect))
