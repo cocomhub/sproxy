@@ -43,8 +43,8 @@ body{
 [data-skin="a"][data-theme="dark"]{
   color-scheme:dark;
   --bg:#0a0b0e; --surface:#101216; --surface-2:#15181d; --surface-3:#1b1f26; --surface-hover:#1a1e25;
-  --border:rgba(255,255,255,.07); --border-strong:rgba(255,255,255,.13);
-  --text:#e7e9ee; --text-2:#9aa2af; --text-3:#6b7280;
+  --border:rgba(255,255,255,.07); --border-strong:rgba(255,255,255,.35);
+  --text:#e7e9ee; --text-2:#9aa2af; --text-3:#777e8c;
   --accent:#7c86ff; --accent-hover:#8f97ff; --accent-fg:#0b0c10; --accent-soft:rgba(124,134,255,.14);
   --ok:#3ecf8e; --warn:#e5a04a; --bad:#f16a72; --info:#5b9dff;
   --shadow-1:none; --shadow-2:0 16px 40px rgba(0,0,0,.5); --ring:0 0 0 3px rgba(124,134,255,.32);
@@ -53,10 +53,10 @@ body{
 [data-skin="a"][data-theme="light"]{
   color-scheme:light;
   --bg:#fbfbfc; --surface:#ffffff; --surface-2:#f6f7f9; --surface-3:#eef0f4; --surface-hover:#f2f4f7;
-  --border:#e6e8ec; --border-strong:#d5d9e0;
-  --text:#0e1116; --text-2:#5b6472; --text-3:#8a93a0;
+  --border:#e6e8ec; --border-strong:#90949b;
+  --text:#0e1116; --text-2:#5b6472; --text-3:#6c7582;
   --accent:#5b63e8; --accent-hover:#4a52d8; --accent-fg:#ffffff; --accent-soft:rgba(91,99,232,.10);
-  --ok:#1f9254; --warn:#a86400; --bad:#c6333c; --info:#2563eb;
+  --ok:#138648; --warn:#a86400; --bad:#c6333c; --info:#2563eb;
   --shadow-1:none; --shadow-2:0 18px 44px rgba(16,24,40,.16); --ring:0 0 0 3px rgba(91,99,232,.22);
   --overlay:rgba(16,24,40,.42); --batch-bg:#0e1116; --batch-fg:#ffffff;
 }
@@ -70,8 +70,8 @@ body{
 [data-skin="b"][data-theme="light"]{
   color-scheme:light;
   --bg:#f4f6f9; --surface:#ffffff; --surface-2:#f8fafc; --surface-3:#eef2f7; --surface-hover:#f1f5f9;
-  --border:#e3e8ef; --border-strong:#cfd8e3;
-  --text:#0f172a; --text-2:#475569; --text-3:#7b8794;
+  --border:#e3e8ef; --border-strong:#8a939e;
+  --text:#0f172a; --text-2:#475569; --text-3:#66727f;
   --accent:#2563eb; --accent-hover:#1d4ed8; --accent-fg:#ffffff; --accent-soft:rgba(37,99,235,.10);
   --ok:#15803d; --warn:#b45309; --bad:#dc2626; --info:#0369a1;
   --shadow-1:0 1px 2px rgba(15,23,42,.05),0 1px 3px rgba(15,23,42,.04);
@@ -81,8 +81,8 @@ body{
 [data-skin="b"][data-theme="dark"]{
   color-scheme:dark;
   --bg:#0d1117; --surface:#151b23; --surface-2:#1a212b; --surface-3:#222b37; --surface-hover:#1e2631;
-  --border:#262f3b; --border-strong:#35404e;
-  --text:#e6edf3; --text-2:#9db0c3; --text-3:#6e7f92;
+  --border:#262f3b; --border-strong:#5c6775;
+  --text:#e6edf3; --text-2:#9db0c3; --text-3:#748598;
   --accent:#4d8dff; --accent-hover:#66a0ff; --accent-fg:#06101f; --accent-soft:rgba(77,141,255,.14);
   --ok:#3fb950; --warn:#d29922; --bad:#f85149; --info:#58a6ff;
   --shadow-1:0 1px 0 rgba(255,255,255,.03); --shadow-2:0 16px 40px rgba(0,0,0,.5);
@@ -98,8 +98,8 @@ body{
 [data-skin="c"][data-theme="light"]{
   color-scheme:light;
   --bg:#f5f7fa; --surface:#ffffff; --surface-2:#f8f9fb; --surface-3:#eef1f6; --surface-hover:#f4f6f9;
-  --border:#e6eaf0; --border-strong:#d3dae4;
-  --text:#1f2733; --text-2:#5a6676; --text-3:#8b95a3;
+  --border:#e6eaf0; --border-strong:#8e959f;
+  --text:#1f2733; --text-2:#5a6676; --text-3:#67717f;
   --accent:#2b6cb5; --accent-hover:#24599a; --accent-fg:#ffffff; --accent-soft:rgba(43,108,181,.10);
   --ok:#1e8449; --warn:#9a6b00; --bad:#c0392b; --info:#2b6cb5;
   --shadow-1:0 1px 3px rgba(20,30,50,.06); --shadow-2:0 14px 36px rgba(20,30,50,.18);
@@ -109,7 +109,7 @@ body{
 [data-skin="c"][data-theme="dark"]{
   color-scheme:dark;
   --bg:#12122a; --surface:#1a1a3e; --surface-2:#1e1e45; --surface-3:#252550; --surface-hover:#232350;
-  --border:#3a3a60; --border-strong:#4a4a70;
+  --border:#3a3a60; --border-strong:#65658b;
   --text:#e8e8f0; --text-2:#c0c4d0; --text-3:#989aad;
   --accent:#5a9fd4; --accent-hover:#6fb0e2; --accent-fg:#08121e; --accent-soft:rgba(90,159,212,.16);
   --ok:#3ecf8e; --warn:#d8a93e; --bad:#e06a6a; --info:#6db3f0;
@@ -455,6 +455,22 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
 /* ───── 掩码凭据 ───── */
 .masked{letter-spacing:.18em;color:var(--text-2)}
 
+/* ───── 网格视图 ───── */
+.files-grid{display:none;grid-template-columns:repeat(auto-fill,minmax(var(--grid-min,180px),1fr));gap:12px}
+body[data-view="grid"] .files-grid{display:grid}
+body[data-view="grid"] .files-table-wrap{display:none}
+.fcard{position:relative;background:var(--surface);border:var(--card-border);border-radius:var(--radius-lg);box-shadow:var(--card-shadow);padding:12px;display:flex;flex-direction:column;gap:8px;cursor:pointer}
+.fcard:hover{border-color:var(--border-strong)}
+.fcard .thumb{height:86px;border-radius:var(--radius-md);background:var(--surface-3);display:grid;place-items:center;color:var(--text-3)}
+.fcard .nm{font-size:12.5px;font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fcard .mt{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--text-3);flex-wrap:wrap}
+.fcard .cb{position:absolute;top:8px;left:8px}
+[data-skin="a"] .files-grid{--grid-min:150px}
+[data-skin="b"] .files-grid{--grid-min:210px}
+[data-skin="c"] .files-grid{--grid-min:180px}
+[data-skin="b"] .fcard .thumb{height:112px}
+[data-skin="c"] .fcard{background:var(--surface-2)}
+
 @media (max-width:1100px){
   [data-skin="a"] .shell,[data-skin="b"] .shell{grid-template-columns:64px minmax(0,1fr)}
   .brand-name,.brand-tag,.nav .label,.rail-group,.who .txt,.nav .count{display:none}
@@ -465,6 +481,43 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
   .task .prog{grid-column:2/4}
   .task .when,.task .act{display:none}
   .drawer{width:100vw}
+}
+/* ───── 手机布局（≤640px）：顶部 tab 取代侧栏，表格转卡片行 ───── */
+@media (max-width:640px){
+  [data-skin="a"] .shell,[data-skin="b"] .shell,[data-skin="c"] .shell{display:block;padding:0;height:auto;min-height:100vh}
+  .rail{display:none}
+  [data-skin="c"] .main{max-width:none;margin:0;border-radius:0;min-height:100vh;box-shadow:none}
+  .top-tabs{display:flex;overflow-x:auto;padding:0 8px;white-space:nowrap}
+  .top-tabs button{padding:12px 12px;font-size:13px}
+  .topbar{padding:10px 14px;height:auto;flex-wrap:wrap;gap:8px}
+  .page-title{font-size:15px;order:1}
+  .search-trigger{order:3;min-width:0;flex:1 1 100%;margin-left:0}
+  .content{padding:12px 14px 28px}
+  .split{grid-template-columns:minmax(0,1fr)}
+  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  /* 文件表：只保留 名称 + 大小 + 操作 */
+  #view-files .table thead{display:none}
+  #view-files .table tr{display:flex;align-items:center;gap:8px;height:auto;padding:10px 12px;border-bottom:1px solid var(--border)}
+  #view-files .table td{border:0;padding:0}
+  #view-files .table th:nth-child(3),#view-files .table td:nth-child(3),
+  #view-files .table th:nth-child(5),#view-files .table td:nth-child(5),
+  #view-files .table th:nth-child(6),#view-files .table td:nth-child(6){display:none}
+  #view-files .table td:nth-child(2){flex:1;min-width:0}
+  #view-files .table td:nth-child(4){white-space:nowrap}
+  #view-files .table .row-actions{opacity:1}
+  .tasks .task{grid-template-columns:20px minmax(0,1fr) auto;gap:8px}
+  .tasks .task .prog{grid-column:2/4}
+  .tasks .task .when,.tasks .task .act{display:none}
+  /* 控制台弹窗全屏 + 分区横滑 */
+  [data-skin="b"] .console-frame,[data-skin="c"] .console-frame{width:100vw;height:100vh;max-width:none;max-height:none;border-radius:0}
+  .console-body{flex-direction:column}
+  .console-nav{width:100%;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border);padding:8px}
+  [data-skin="a"] .console-nav{margin-right:0;border-radius:0}
+  .cnav{white-space:nowrap}
+  .drawer{width:100vw}
+  .floatbar{left:12px;right:12px;transform:translateY(140%);bottom:12px}
+  .floatbar.show{transform:none}
+  .devtools{right:8px;bottom:8px;top:auto;left:auto;transform:scale(.92);transform-origin:bottom right}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -574,8 +627,8 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
             <span class="chip">大文件 <span class="n">3</span></span>
           </div>
           <div class="seg" role="group" aria-label="视图">
-            <button aria-pressed="true" type="button">列表</button>
-            <button aria-pressed="false" type="button">网格</button>
+            <button data-view="list" aria-pressed="true" type="button">列表</button>
+            <button data-view="grid" aria-pressed="false" type="button">网格</button>
           </div>
           <button class="btn btn-ghost btn-sm" type="button">排序</button>
           <button class="btn btn-ghost btn-sm" type="button" data-toast="已强制刷新卷状态缓存" data-toast-kind="ok">刷新</button>
@@ -591,7 +644,7 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
           <button class="btn btn-sm" type="button" id="topbatch-clear">取消选择</button>
         </div>
 
-        <div class="card" style="overflow:hidden">
+        <div class="card files-table-wrap" style="overflow:hidden">
           <table class="table" id="files-table">
             <thead>
               <tr>
@@ -657,6 +710,27 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
               </td></tr>
             </tbody>
           </table>
+        </div>
+
+        <div class="files-grid" id="files-grid">
+          <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+            <div class="nm">NHDTB-864</div><div class="mt"><span class="pill pill-mute">目录</span><span>12 项</span></div></div>
+          <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="nm">NHDTB-864.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">4.72 GB</span></div></div>
+          <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="nm">NHDTB-863-uncensored-leak.mp4</div><div class="mt"><span class="pill pill-warn"><span class="dot"></span>待校验</span><span class="num">6.05 GB</span></div></div>
+          <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="nm">NHDTB-861.mp4</div><div class="mt"><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span><span class="num">2.28 GB</span></div></div>
+          <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+            <div class="nm">archive-2026-11</div><div class="mt"><span class="pill pill-mute">目录</span><span>—</span></div></div>
+          <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="nm">NHDTB-860.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">3.10 GB</span></div></div>
         </div>
 
         <div class="card">
@@ -910,7 +984,7 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
               <!-- 云端任务 -->
               <section class="csection" data-sec="cloud">
                 <div class="filters">
-                  <select class="select" aria-label="目标卷"><option>全部卷</option><option>baidu</option><option>secretdata</option><option>local</option></select>
+                  <select class="select" id="cloud-volume" aria-label="目标卷"><option value="">全部卷</option><option value="baidu">baidu</option><option value="secretdata">secretdata</option><option value="local">local</option></select>
                   <select class="select" aria-label="状态"><option>全部状态</option><option>进行中</option><option>失败</option><option>已完成</option></select>
                   <div class="field" style="min-width:200px">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -921,14 +995,14 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
                   <button class="btn btn-sm" type="button">导入重试</button>
                 </div>
 
-                <div class="filters">
-                  <span class="chip active">全部 <span class="n">12</span></span>
-                  <span class="chip">运行中 <span class="n">3</span></span>
-                  <span class="chip">失败 <span class="n">2</span></span>
-                  <span class="chip">已完成 <span class="n">7</span></span>
+                <div class="filters" id="cloud-status-chips">
+                  <span class="chip active" role="button" tabindex="0" data-status="all" aria-pressed="true">全部 <span class="n">12</span></span>
+                  <span class="chip" role="button" tabindex="0" data-status="running" aria-pressed="false">运行中 <span class="n">3</span></span>
+                  <span class="chip" role="button" tabindex="0" data-status="failed" aria-pressed="false">失败 <span class="n">2</span></span>
+                  <span class="chip" role="button" tabindex="0" data-status="completed" aria-pressed="false">已完成 <span class="n">7</span></span>
                   <span class="divider" style="width:1px;height:18px"></span>
-                  <span class="chip">content_mismatch <span class="n">1</span></span>
-                  <span class="chip">target_unavailable <span class="n">1</span></span>
+                  <span class="chip" role="button" tabindex="0" data-class="content_mismatch">content_mismatch <span class="n">1</span></span>
+                  <span class="chip" role="button" tabindex="0" data-class="target_unavailable">target_unavailable <span class="n">1</span></span>
                 </div>
 
                 <div class="card" style="overflow:hidden">
@@ -979,9 +1053,9 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
                 </div>
                 <div class="pager">
                   <span>共 12 条 · 每页 5</span>
-                  <button class="pg" type="button" aria-current="true">1</button>
-                  <button class="pg" type="button">2</button>
-                  <button class="pg" type="button">3</button>
+                  <button class="pg" type="button" data-page="1" aria-current="true">1</button>
+                  <button class="pg" type="button" data-page="2">2</button>
+                  <button class="pg" type="button" data-page="3">3</button>
                 </div>
               </section>
 
@@ -1657,6 +1731,60 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     id('view-console').classList.remove('active');
     layerStack = layerStack.filter(function (x) { return x !== 'console'; });
   }
+  var currentSec = 'overview';
+  function cloudState() {
+    var sec = $('.csection[data-sec="cloud"]');
+    if (!sec) { return ''; }
+    var q = [];
+    var st = sec.querySelector('#cloud-status-chips .chip.active');
+    if (st && st.getAttribute('data-status') && st.getAttribute('data-status') !== 'all') { q.push('status=' + st.getAttribute('data-status')); }
+    var vol = $('#cloud-volume');
+    if (vol && vol.value) { q.push('volume=' + encodeURIComponent(vol.value)); }
+    var page = sec.querySelector('.pg[aria-current="true"]');
+    if (page && page.getAttribute('data-page') !== '1') { q.push('page=' + page.getAttribute('data-page')); }
+    return q.length ? '?' + q.join('&') : '';
+  }
+  function updateHash() {
+    if (!id('view-console').classList.contains('active')) { return; }
+    var h = '#/console/' + currentSec + (currentSec === 'cloud' ? cloudState() : '');
+    try { history.replaceState(null, '', h); } catch (err) { location.hash = h; }
+  }
+  function applyCloudParams(qs) {
+    if (!qs) { return; }
+    var p = {};
+    qs.split('&').forEach(function (kv) { var a = kv.split('='); p[decodeURIComponent(a[0])] = decodeURIComponent(a[1] || ''); });
+    if (p.status) {
+      $$('#cloud-status-chips .chip[data-status]').forEach(function (c) {
+        var on = c.getAttribute('data-status') === p.status;
+        c.classList.toggle('active', on); c.setAttribute('aria-pressed', String(on));
+      });
+    }
+    if (p.volume) { var v = $('#cloud-volume'); if (v) { v.value = p.volume; if (v.value !== p.volume) { v.value = ''; } } }
+    if (p.page) {
+      $$('.csection[data-sec="cloud"] .pg').forEach(function (b) {
+        if (b.getAttribute('data-page') === p.page) { b.setAttribute('aria-current', 'true'); } else { b.removeAttribute('aria-current'); }
+      });
+    }
+  }
+  $$('#cloud-status-chips .chip[data-status]').forEach(function (c) {
+    var act = function () {
+      $$('#cloud-status-chips .chip[data-status]').forEach(function (x) {
+        var on = x === c; x.classList.toggle('active', on); x.setAttribute('aria-pressed', String(on));
+      });
+      updateHash();
+    };
+    c.addEventListener('click', act);
+    c.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } });
+  });
+  var cloudVol = $('#cloud-volume');
+  if (cloudVol) { cloudVol.addEventListener('change', updateHash); }
+  $$('.csection[data-sec="cloud"] .pg').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('.csection[data-sec="cloud"] .pg').forEach(function (x) { x.removeAttribute('aria-current'); });
+      b.setAttribute('aria-current', 'true'); updateHash();
+    });
+  });
+
   function switchSection(sec) {
     $$('.csection').forEach(function (s) { s.classList.toggle('active', s.getAttribute('data-sec') === sec); });
     $$('.cnav[data-sec]').forEach(function (n) {
@@ -1664,9 +1792,8 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     });
     id('console-subtitle').textContent = SECTIONS[sec] || SECTIONS.overview;
     $$('#view-console .console-content').forEach(function (c) { c.scrollTop = 0; });
-    if (SECTIONS[sec] && id('view-console').classList.contains('active')) {
-      try { history.replaceState(null, '', '#/console/' + sec); } catch (err) { /* file:// 下可能不可用 */ }
-    }
+    currentSec = sec;
+    if (SECTIONS[sec]) { updateHash(); }
   }
   $$('.cnav[data-sec]').forEach(function (n) {
     var act = function () { switchSection(n.getAttribute('data-sec')); };
@@ -1681,11 +1808,22 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     if (e.target === id('view-console')) { closeConsole(); show('files'); }
   });
 
+  // ── 视图切换（列表 / 网格） ──
+  $$('.seg [data-view]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var v = b.getAttribute('data-view');
+      document.body.dataset.view = v;
+      $$('.seg [data-view]').forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      toast('info', v === 'grid' ? '已切换到网格视图' : '已切换到列表视图');
+      syncSelection();
+    });
+  });
+
   // ── 批量选择 ──
   var floatbar = id('floatbar'), topbatch = id('topbatch');
   function syncSelection() {
-    var boxes = $$('#view-files .table tbody.real-rows .cb');
-    var n = $$('#view-files .table tbody.real-rows .cb:checked').length;
+    var boxes = $$('#view-files .table tbody.real-rows .cb, #files-grid .cb');
+    var n = $$('#view-files .table tbody.real-rows .cb:checked, #files-grid .cb:checked').length;
     floatbar.classList.toggle('show', n > 0);
     topbatch.classList.toggle('show', n > 0);
     floatbar.querySelector('.cnt b').textContent = String(n);
@@ -1693,7 +1831,7 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     var head = $('#view-files thead .cb');
     if (head) { head.checked = n > 0 && n === boxes.length; }
   }
-  $$('#view-files .table .cb').forEach(function (cb) { cb.addEventListener('change', syncSelection); });
+  $$('#view-files .table .cb, #files-grid .cb').forEach(function (cb) { cb.addEventListener('change', syncSelection); });
   var headCb = $('#view-files thead .cb');
   if (headCb) {
     headCb.addEventListener('change', function () {
@@ -1702,7 +1840,7 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     });
   }
   function clearAll() {
-    $$('#view-files tbody.real-rows .cb').forEach(function (cb) { cb.checked = false; });
+    $$('#view-files tbody.real-rows .cb, #files-grid .cb').forEach(function (cb) { cb.checked = false; });
     if (headCb) { headCb.checked = false; }
     syncSelection();
   }
@@ -1920,13 +2058,35 @@ body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent
     toast('info', on ? '已切回紧凑密度' : '已切换舒适密度');
   });
 
-  // 深链：/ui/#/console/<section>
+  // ── 焦点陷阱（浮动层内 Tab 循环） ──
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') { return; }
+    var top = layerStack[layerStack.length - 1];
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer') };
+    var t = map[top] || (top === 'console' && isModalConsole() ? id('view-console') : null);
+    if (!t) { return; }
+    var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {
+      return !el.disabled && el.offsetParent !== null;
+    });
+    if (!f.length) { return; }
+    var first = f[0], last = f[f.length - 1];
+    if (!t.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  // 深链：/ui/#/console/<section>[?status=&volume=&page=]
   (function () {
-    var m = (location.hash || '').match(/#\/console\/([a-z-]+)/);
-    if (m && SECTIONS[m[1]]) { show('console'); openConsole(m[1]); }
+    var m = (location.hash || '').match(/#\/console\/([a-z-]+)(?:\?(.*))?/);
+    if (m && SECTIONS[m[1]]) {
+      show('console'); openConsole(m[1]);
+      if (m[2]) { applyCloudParams(m[2]); }
+      updateHash();
+    }
   })();
 
   id('dev-skin').value = root.dataset.skin;
+  document.body.dataset.view = 'list';
   syncSelection();
 })();
 </script>
