@@ -297,6 +297,11 @@ func (s *Service) CreateBatchDownload(w http.ResponseWriter, r *http.Request, ow
 		IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 		// MetaExtra 批量转存自定义元数据（同单条语义；batch 统一 apply 到每个条目）。
 		MetaExtra map[string]any `json:"meta_extra,omitempty"`
+		// ExpectedChecksum 批量期望产物 checksum（同单条语义；2026-11-24 补齐——
+		// 此前 batch 端点未解析，CLI `submit` 传的期望值被静默丢弃 ⇒ 错误期望值仍判 completed）。
+		ExpectedChecksum string `json:"expected_checksum,omitempty"`
+		// FallbackURLs 批量备选源（同单条语义）。
+		FallbackURLs []string `json:"fallback_urls,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeJSON(w, map[string]string{"error": msgInvalidRequestBody}, http.StatusBadRequest)
@@ -338,7 +343,7 @@ func (s *Service) CreateBatchDownload(w http.ResponseWriter, r *http.Request, ow
 
 		// 批量始终异步：nil context。transfer/save/download_local 批量统一 apply；
 		// 真空洞（不下载+无 transfer+save=false）由 CreateTask fail-closed 拒绝。
-		task, taskErr := s.deps.Tasks.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra})
+		task, taskErr := s.deps.Tasks.SubmitAndStart("url", cleanedURL, cleanedFilename, -1, nil, owner, cloud.TaskParams{Transfer: req.Transfer, DownloadLocal: req.DownloadLocal, Save: SaveOrDefault(req.Save), IntegrityMustPass: req.IntegrityMustPass, MetaExtra: req.MetaExtra, ExpectedChecksum: req.ExpectedChecksum, FallbackSources: req.FallbackURLs})
 		if taskErr != nil {
 			results = append(results, BatchTaskResult{
 				URL:      cleanedURL,
