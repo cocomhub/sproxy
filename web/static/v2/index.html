@@ -151,6 +151,21 @@
   </div>
 </aside>
 
+<div class="preview-backdrop" id="v2-pv-backdrop" hidden></div>
+<div class="preview" id="v2-preview" role="dialog" aria-modal="true" aria-labelledby="v2-pv-title" hidden>
+  <header>
+    <b id="v2-pv-title">预览</b>
+    <span id="v2-pv-meta" class="muted"></span>
+    <button class="icon-btn" id="v2-pv-close" type="button" title="关闭">✕</button>
+  </header>
+  <div class="pv-stage">
+    <img id="v2-pv-img" alt="" hidden>
+    <video id="v2-pv-video" controls hidden></video>
+    <pre id="v2-pv-text" hidden></pre>
+    <div id="v2-pv-msg" class="muted" hidden></div>
+  </div>
+</div>
+
 <div class="uploads" id="v2-uploads" hidden aria-live="polite"></div>
 
 <div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
@@ -167,7 +182,9 @@
 <script src="files-ops.js"></script>
 <script src="files-view.js"></script>
 <script src="files-actions.js"></script>
+<script src="../video-player.js"></script>
 <script src="files-inspector.js"></script>
+<script src="preview.js"></script>
 <script src="shell.js"></script>
 </body>
 </html>

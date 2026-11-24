@@ -278,6 +278,7 @@ web-test:
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
 	@node --check web/static/v2/files-actions.js
+	@node --check web/static/v2/preview.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js

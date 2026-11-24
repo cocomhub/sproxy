@@ -91,8 +91,8 @@
 
       var nameTd = document.createElement('td');
       var link = document.createElement('a');
-      link.href = file.isDir ? hashForSubdir(f.joinSubdir(subdir, file.name))
-        : '/download?filename=' + encodeURIComponent(f.joinSubdir(subdir, file.name));
+      link.href = file.isDir ? hashForSubdir(f.joinSubdir(subdir, file.name)) : '#';
+      if (!file.isDir) { link.setAttribute('data-preview', file.name); }
       link.textContent = file.name;
       link.className = 'mono';
       nameTd.appendChild(link);
@@ -123,7 +123,10 @@
       var actTd = document.createElement('td');
       actTd.className = 'r actions';
       actTd.appendChild(actionBtn('详情', file.name, 'detail'));
-      if (!file.isDir) { actTd.appendChild(actionBtn('重命名', file.name, 'rename')); }
+      if (!file.isDir) {
+        actTd.appendChild(actionBtn('下载', file.name, 'download'));
+        actTd.appendChild(actionBtn('重命名', file.name, 'rename'));
+      }
       actTd.appendChild(actionBtn('删除', file.name, 'delete'));
       tr.appendChild(actTd);
 
@@ -182,6 +185,10 @@
 
     var body = el('v2-file-body');
     if (body) {
+      body.addEventListener('click', function (e) {
+        var pv = e.target.closest('[data-preview]');
+        if (pv && window.v2preview) { e.preventDefault(); window.v2preview.open(pv.getAttribute('data-preview')); }
+      });
       body.addEventListener('change', function (e) {
         var cb = e.target.closest('.cb');
         if (!cb) { return; }

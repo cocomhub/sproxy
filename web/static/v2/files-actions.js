@@ -318,6 +318,7 @@
         if (!info) { return; }
         var act = b.getAttribute('data-action');
         if (act === 'detail' && window.v2inspector) { window.v2inspector.open(name); return; }
+        if (act === 'download' && window.v2preview) { window.v2preview.download(name); return; }
         if (act === 'delete') { doDelete(name, info.isDir, info.checksum); }
         if (act === 'rename') { doRename(name, info.checksum); }
       });

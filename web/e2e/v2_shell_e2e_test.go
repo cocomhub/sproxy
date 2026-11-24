@@ -120,6 +120,22 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("上传后列表未出现 e2e.txt: %v", err)
 	}
 
+	// P1e：文本文件点击预览（真实 /download 读取）。
+	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
+		t.Fatalf("打开预览: %v", err)
+	}
+	if err := waitLoc(page, "#v2-preview", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("预览未打开: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-pv-text').textContent.indexOf('hello e2e') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("文本预览内容不正确: %v", err)
+	}
+	if err := page.Locator("#v2-pv-close").Click(); err != nil {
+		t.Fatalf("关闭预览: %v", err)
+	}
+
 	// 切换路由：hash + 面板可见性。
 	if err := page.Locator(".nav[data-route='transfer']").Click(); err != nil {
 		t.Fatalf("点击传输: %v", err)

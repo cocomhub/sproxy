@@ -452,11 +452,15 @@
 | P0 壳层 | ✅ 已交付 | `web/static/v2/{index.html,tokens.css,components.css,shell.js,shell.test.js}`；`/ui/v2/` 由既有静态路由直接提供（无需改后端）；旧页顶栏新增「试用新版」（可回滚） |
 | P1a 文件列表 | ✅ 已交付 | `/api/files` 真实列表（复用旧版 SproxySig 凭据）、面包屑/子目录、空态/错误态/401 提示；上传/批量/检查器待 P1b |
 | P1b 文件写操作 | ✅ 已交付（无检查器） | 上传（简单上传，sha256 + 签名）、新建目录、重命名、删除、批量删除；检查器（Meta/版本/分享）仍待 P1c |
+| P1e 预览 | ✅ 已交付 | 图片/文本（签名请求）/浏览器可播视频（URL 票 `?spx_sig=`）；不支持格式提示下载；复用 video-player.js |
 | P1d 分块上传 | ✅ 已交付（页内暂停/继续） | >8MiB 走 init/status/chunk*/complete；分块进度、速度、剩余时间；暂停/继续/取消；跨刷新续传待补 |
 | P1c 检查器 | ✅ 已交付 | 抽屉四页签：概览 / Meta（只读 JSON）/ 版本（列表+恢复+删除）/ 分享（创建/列表/撤销）；分块页签待 P1d（需分块 API） |
 | P2 传输页 | ⬜ | 云端任务/任务组/上传队列 |
 | P3 控制台 | ⬜ | 弹窗改善 → 页面化评估 |
 | P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+
+P1e 验收证据：e2e 上传 `e2e.txt` → 点击文件名 → 预览浮层 → 文本内容含 `hello e2e` → 关闭；
+`make web-test`、archcheck、build、golangci-lint 通过。
 
 P1d 验收证据：`node --test v2/upload-chunked.test.js` 4 例；e2e 用 Playwright `SetInputFiles` 上传 `e2e.txt` → 列表出现；
 `make web-test` 通过；archcheck/build 通过。
