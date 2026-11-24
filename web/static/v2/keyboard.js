@@ -220,8 +220,45 @@
 
   var pendingG = 0;
 
+  var CS_ORDER = ['overview', 'tasks', 'issues', 'audit', 'config', 'notify', 'verify', 'access'];
+
+  function selectSectionByIndex(idx) {
+    var name = CS_ORDER[idx];
+    if (!name) { return; }
+    if ((window.location.hash || '').indexOf('#/console') !== 0) { goRoute('console'); }
+    setTimeout(function () { selectConsoleSection(name); }, 0);
+  }
+
+  function cycleSection(delta) {
+    var cur = 0;
+    var active = document.querySelector('[data-cs][aria-current="page"]');
+    if (active) {
+      var i = CS_ORDER.indexOf(active.getAttribute('data-cs'));
+      if (i >= 0) { cur = i; }
+    }
+    selectSectionByIndex(nextIndex(cur, CS_ORDER.length, delta));
+  }
+
+  function focusSearch() {
+    if ((window.location.hash || '').indexOf('#/files') !== 0) { goRoute('files'); }
+    setTimeout(function () {
+      var s = el('v2-search');
+      if (s) { s.focus(); s.select(); }
+    }, 0);
+  }
+
   function onKeyDown(ev) {
     var mod = ev.metaKey || ev.ctrlKey;
+    if (ev.altKey && !mod && /^[1-9]$/.test(ev.key)) {
+      ev.preventDefault();
+      selectSectionByIndex(Number(ev.key) - 1);
+      return;
+    }
+    if (ev.altKey && !mod && (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft')) {
+      ev.preventDefault();
+      cycleSection(ev.key === 'ArrowRight' ? 1 : -1);
+      return;
+    }
     if (mod && (ev.key === 'k' || ev.key === 'K')) {
       ev.preventDefault();
       openPalette();
@@ -240,6 +277,7 @@
       return;
     }
     if (isTyping(ev.target)) { return; }
+    if (ev.key === '/') { ev.preventDefault(); focusSearch(); return; }
     if (ev.key === '?') { ev.preventDefault(); toggleHelp(); return; }
     if (ev.key === 'g' || ev.key === 'G') {
       pendingG = Date.now();

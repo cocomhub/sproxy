@@ -253,7 +253,7 @@
       message: (isDir ? '目录及其内容将被删除' : '文件将从存储中删除') + '：' + rel,
       danger: true, okText: '删除',
       onOk: function () {
-        var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel);
+        var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
         run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), '已删除 ' + name);
       }
     });
@@ -298,7 +298,7 @@
               chain = chain.then(function () {
                 var info = view() && view().rowInfo(name);
                 var rel = f.joinSubdir(sub, name);
-                var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel);
+                var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
                 return api.json('POST', path, { headers: ops.checksumHeader(info ? info.checksum : '') });
               });
             });

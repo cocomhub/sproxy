@@ -73,11 +73,17 @@
             <div class="crumbs" id="v2-crumbs"></div>
             <span class="hint" id="v2-count"></span>
             <span class="spacer" style="flex:1"></span>
+            <select id="v2-volume" aria-label="按卷过滤" style="height:28px"></select>
+            <input id="v2-search" type="search" placeholder="搜索文件名（/ 聚焦）" aria-label="搜索文件名"
+              style="width:190px">
+            <button class="btn btn-ghost" id="v2-search-btn" type="button">搜索</button>
+            <button class="btn btn-ghost" id="v2-search-clear" type="button" hidden>清除</button>
             <label class="btn btn-primary" for="v2-upload-input">上传</label>
             <input id="v2-upload-input" type="file" multiple hidden>
             <button class="btn" id="v2-mkdir" type="button">新建目录</button>
             <button class="btn" id="v2-batch-delete" type="button" disabled>删除所选</button>
             <button class="btn" id="v2-refresh" type="button">刷新</button>
+            <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存">清缓存</button>
           </div>
           <div id="v2-files-state" class="banner" hidden role="status"></div>
           <table class="table">
@@ -182,11 +188,21 @@
       </div>
 
       <section class="panel" data-panel="trash" hidden>
-        <div class="card"><div class="card-b placeholder">
-          <b>回收站</b>
-          <div class="muted">P1 接入：恢复 / 彻底删除 / 清空。</div>
-          <div class="empty"><b>回收站为空</b><div>删除的文件会在这里保留 30 天。</div></div>
-        </div></div>
+        <div class="card">
+          <div class="card-h">
+            <b>回收站</b><span class="hint" id="v2-trash-count"></span>
+            <span style="flex:1"></span>
+            <button class="btn btn-ghost" id="v2-trash-refresh" type="button">刷新</button>
+            <button class="btn" id="v2-trash-empty" type="button">清空全部</button>
+          </div>
+          <div id="v2-trash-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>名称</th><th style="width:140px">卷</th><th style="width:220px"></th></tr></thead>
+            <tbody id="v2-trash-body"></tbody>
+          </table>
+          <div class="empty" id="v2-trash-empty-hint" hidden><b>回收站为空</b>
+            <div class="muted">删除的文件会保留 30 天，可在此恢复。</div></div>
+        </div>
       </section>
 
       <section class="panel" data-panel="console" aria-labelledby="v2-title">
@@ -518,5 +534,6 @@
 <script src="preview.js"></script>
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
+<script src="trash.js"></script>
 </body>
 </html>
