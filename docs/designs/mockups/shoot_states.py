@@ -91,6 +91,17 @@ for skin in "abc":
         spec(f"{skin}-dialog-group-create", skin, actions=[
             "document.querySelector('[data-goto=transfer]').click()",
             "document.querySelector('[data-dialog=dlg-group-create]').click()"]),
+        spec(f"{skin}-issues", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=issues]').click()"]),
+        spec(f"{skin}-issues-empty", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=issues]').click()",
+            "var q=document.getElementById('issue-q');q.value='zzz';q.dispatchEvent(new Event('input',{bubbles:true}));"]),
+        spec(f"{skin}-issue-drawer", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=issues]').click()",
+            "document.querySelector('#issue-table [data-issue=detail]').click()"]),
         spec(f"{skin}-dialog-move", skin, actions=[
             "document.querySelector('[data-dialog=dlg-move]').click()"]),
         spec(f"{skin}-dialog-archive", skin, actions=[

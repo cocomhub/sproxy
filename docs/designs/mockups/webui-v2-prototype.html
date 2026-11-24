@@ -1540,39 +1540,88 @@ time: 2026-11-24T18:41:02Z</div>
               <!-- 待处理事项 -->
               <section class="csection" data-sec="issues">
                 <div class="filters">
-                  <span class="chip active">全部 <span class="n">5</span></span>
-                  <span class="chip">可重试 <span class="n">2</span></span>
-                  <span class="chip">需人工 <span class="n">3</span></span>
-                  <span class="chip">已解决 <span class="n">18</span></span>
+                  <div class="field" style="min-width:220px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                    <input id="issue-q" placeholder="路径 / 原因 / 类型" aria-label="搜索事项">
+                  </div>
+                  <select class="select" id="issue-kind" aria-label="类型">
+                    <option value="">全部类型</option>
+                    <option value="chunk_missing">chunk_missing</option>
+                    <option value="dir_listing_empty">dir_listing_empty</option>
+                    <option value="credential_expiring">credential_expiring</option>
+                  </select>
+                  <select class="select" id="issue-vol" aria-label="卷">
+                    <option value="">全部卷</option><option value="baidu">baidu</option><option value="secretdata">secretdata</option>
+                  </select>
                   <span class="spacer" style="flex:1"></span>
-                  <button class="btn btn-sm" type="button" data-toast="已批量重试 2 项" data-toast-kind="ok">批量重试</button>
-                  <button class="btn btn-sm" type="button" data-toast="已导出 issues.csv" data-toast-kind="ok">导出 CSV</button>
+                  <span class="pill pill-info" id="issue-auto" role="button" tabindex="0" aria-pressed="true" style="cursor:pointer"><span class="dot"></span>自动重试 5m</span>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 issues.csv（含详情与重试历史）" data-toast-kind="ok">导出 CSV</button>
+                </div>
+                <div class="filters" id="issue-chips">
+                  <span class="chip active" data-ist="" role="button" tabindex="0">全部 <span class="n">5</span></span>
+                  <span class="chip" data-ist="open" role="button" tabindex="0">待处理 <span class="n">5</span></span>
+                  <span class="chip" data-ist="retryable" role="button" tabindex="0">可重试 <span class="n">2</span></span>
+                  <span class="chip" data-ist="manual" role="button" tabindex="0">需人工 <span class="n">3</span></span>
+                  <span class="chip" data-ist="resolved" role="button" tabindex="0">已解决 <span class="n">18</span></span>
+                  <span class="chip" data-ist="ignored" role="button" tabindex="0">已忽略 <span class="n">1</span></span>
+                </div>
+                <div class="batchbar" id="issue-batch">
+                  <span class="cnt">已选 <b class="num">0</b> 项</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已批量重试所选事项" data-toast-kind="ok">批量重试</button>
+                  <button class="btn btn-sm" type="button" data-toast="已标记所选为已解决" data-toast-kind="ok">标记解决</button>
+                  <button class="btn btn-sm" type="button" data-toast="已忽略所选事项" data-toast-kind="warn">忽略</button>
+                  <button class="btn btn-sm btn-ghost" type="button" id="issue-batch-clear">取消选择</button>
                 </div>
                 <div class="card" style="overflow:hidden">
-                  <table class="table">
-                    <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th style="width:150px">类型</th><th>路径 / 对象</th><th>原因</th><th style="width:110px">状态</th><th style="width:170px"></th></tr></thead>
+                  <table class="table" id="issue-table">
+                    <thead><tr>
+                      <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
+                      <th style="width:150px">类型</th><th>路径 / 对象</th><th>原因</th>
+                      <th style="width:70px" class="r">尝试</th><th style="width:120px">最近出现</th>
+                      <th style="width:100px">状态</th><th style="width:200px"></th>
+                    </tr></thead>
                     <tbody>
-                      <tr><td><input class="cb" type="checkbox" checked aria-label="选择"></td>
+                      <tr data-kind="chunk_missing" data-vol="secretdata" data-retryable="1" data-status="open">
+                        <td><input class="cb" type="checkbox" aria-label="选择"></td>
                         <td><span class="pill pill-bad">chunk_missing</span></td>
                         <td><div class="mono">secretdata:/EXAMPLE/EXAMPLE-002.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读；副本可修复</div></td>
-                        <td class="muted">副本重建需要 1 个可用源</td>
+                        <td class="muted">副本重建需要 1 个可用源</td><td class="r num">2</td><td class="num muted">18:22</td>
                         <td><span class="pill pill-warn">open</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已开始修复分块" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
-                      <tr><td><input class="cb" type="checkbox" checked aria-label="选择"></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-issue="detail">详情</button><button class="btn btn-sm" type="button" data-toast="已开始修复分块" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost" type="button" data-issue="resolve">解决</button><button class="btn btn-sm btn-ghost" type="button" data-issue="ignore">忽略</button></div></td>
+                      </tr>
+                      <tr data-kind="dir_listing_empty" data-vol="baidu" data-retryable="1" data-status="open">
+                        <td><input class="cb" type="checkbox" aria-label="选择"></td>
                         <td><span class="pill pill-warn">dir_listing_empty</span></td>
                         <td><div class="mono">baidu:/jav/_repair_probe</div><div class="muted" style="font-size:11px">列举为空，删除失败</div></td>
-                        <td class="muted">外部卷列举与删除语义不一致</td>
+                        <td class="muted">外部卷列举与删除语义不一致</td><td class="r num">5</td><td class="num muted">17:58</td>
                         <td><span class="pill pill-warn">open</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已重试删除" data-toast-kind="ok">重试删除</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
-                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-issue="detail">详情</button><button class="btn btn-sm" type="button" data-toast="已重试删除" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-issue="resolve">解决</button><button class="btn btn-sm btn-ghost" type="button" data-issue="ignore">忽略</button></div></td>
+                      </tr>
+                      <tr data-kind="credential_expiring" data-vol="" data-retryable="0" data-status="open">
+                        <td><input class="cb" type="checkbox" aria-label="选择"></td>
                         <td><span class="pill pill-info">credential_expiring</span></td>
                         <td><div class="mono">skey-example01</div><div class="muted" style="font-size:11px">10 天后过期</div></td>
-                        <td class="muted">建议在到期前轮换</td>
+                        <td class="muted">建议在到期前轮换</td><td class="r num">0</td><td class="num muted">11-24</td>
                         <td><span class="pill pill-info">open</span></td>
-                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已打开轮换流程" data-toast-kind="info">轮换</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-issue="detail">详情</button><button class="btn btn-sm" type="button" data-dialog="dlg-rotate">轮换</button><button class="btn btn-sm btn-ghost" type="button" data-issue="ignore">忽略</button></div></td>
+                      </tr>
+                      <tr data-kind="chunk_missing" data-vol="baidu" data-retryable="0" data-status="resolved" hidden>
+                        <td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><span class="pill pill-bad">chunk_missing</span></td>
+                        <td><div class="mono">baidu:/jav/EXAMPLE/EXAMPLE-003.mp4</div><div class="muted" style="font-size:11px">已重建副本并复验</div></td>
+                        <td class="muted">副本重建成功</td><td class="r num">1</td><td class="num muted">16:20</td>
+                        <td><span class="pill pill-ok">resolved</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-issue="detail">详情</button></div></td>
+                      </tr>
                     </tbody>
                   </table>
+                  <div class="empty" id="issue-empty" style="display:none;padding:32px">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M20 6 9 17l-5-5"/></svg>
+                    <b>没有匹配的事项</b><div class="muted" style="font-size:12px">调整筛选条件，或等待自动重试（5 分钟）。</div>
+                  </div>
                 </div>
+                <div class="muted" style="font-size:12px">自动重试每 5 分钟扫描一次到期事项；超过 5 次仍未解决会自动标记「需人工」，不再重试。</div>
               </section>
 
               <!-- 审计 -->
@@ -2734,6 +2783,37 @@ cloud-9c31aa07-1</textarea>
 </div>
 
 <!-- 新建 / 编辑告警规则 -->
+<!-- 事项详情 -->
+<div class="drawer" id="issue-drawer" role="dialog" aria-labelledby="issue-title" aria-hidden="true">
+  <header><h3 id="issue-title">chunk_missing</h3><span class="pill pill-warn" id="issue-state">open</span>
+    <div style="margin-left:auto"><button class="icon-btn" id="issue-close" type="button" title="关闭">✕</button></div></header>
+  <div class="body">
+    <dl class="kv">
+      <dt>对象</dt><dd class="mono" id="issue-path">secretdata:/EXAMPLE/EXAMPLE-002.mp4</dd>
+      <dt>卷</dt><dd id="issue-vol">secretdata</dd>
+      <dt>可重试</dt><dd id="issue-retryable">是</dd>
+      <dt>尝试次数</dt><dd class="num" id="issue-attempts">2</dd>
+      <dt>首次出现</dt><dd class="num">11-24 18:02</dd>
+      <dt>最近出现</dt><dd class="num" id="issue-last">11-24 18:22</dd>
+    </dl>
+    <div class="banner"><div><b>原因</b><div class="muted" style="font-size:12px" id="issue-reason">副本重建需要 1 个可用源</div></div></div>
+    <div class="divider"></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn btn-sm btn-primary" type="button" data-toast="已立即重试" data-toast-kind="ok">立即重试</button>
+      <button class="btn btn-sm" type="button" data-issue="resolve">标记解决</button>
+      <button class="btn btn-sm btn-ghost" type="button" data-issue="ignore">忽略</button>
+      <button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-audit">关联审计</button>
+    </div>
+    <div class="divider"></div>
+    <div style="font-size:12px;font-weight:650">处理历史</div>
+    <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px">
+      <div><span class="muted num">18:22</span> · 自动重试失败（无可读副本）</div>
+      <div><span class="muted num">18:12</span> · 自动重试失败（attempt 1）</div>
+      <div><span class="muted num">18:02</span> · 巡检报告缺失分块 3 处</div>
+    </div>
+  </div>
+</div>
+
 <!-- 审计事件详情 -->
 <div class="modal" id="dlg-audit" role="dialog" aria-modal="true" aria-labelledby="audit-title" aria-hidden="true">
   <div class="modal-box" style="width:620px">
@@ -3263,7 +3343,8 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'ctx') { window.__closeCtx && window.__closeCtx(); }
+      if (top === 'issue-drawer') { window.__closeIssue && window.__closeIssue(); }
+      else if (top === 'ctx') { window.__closeCtx && window.__closeCtx(); }
       else if (top === 'volume') { closeVol(); }
       else if (top === 'preview') { closePreview(); }
       else if (top === 'sheet') { closeSheet(); }
@@ -3908,6 +3989,158 @@ cloud-9c31aa07-1</textarea>
     });
   }
 
+  // ── 待处理事项：筛选 / 批量 / 详情 / 状态流转 ──
+  (function () {
+    var table = id('issue-table');
+    if (!table) { return; }
+    var rows = $$('#issue-table tbody tr');
+    var q = id('issue-q'), kind = id('issue-kind'), vol = id('issue-vol');
+    var empty = id('issue-empty');
+    var filter = '';
+    var currentRow = null;
+
+    function matches(row) {
+      var st = row.getAttribute('data-status');
+      var retryable = row.getAttribute('data-retryable') === '1';
+      if (filter === 'open' && st !== 'open') { return false; }
+      if (filter === 'retryable' && !(st === 'open' && retryable)) { return false; }
+      if (filter === 'manual' && !(st === 'open' && !retryable)) { return false; }
+      if (filter === 'resolved' && st !== 'resolved') { return false; }
+      if (filter === 'ignored' && st !== 'ignored') { return false; }
+      if (kind.value && row.getAttribute('data-kind') !== kind.value) { return false; }
+      if (vol.value && row.getAttribute('data-vol') !== vol.value) { return false; }
+      if (q.value.trim() && row.textContent.toLowerCase().indexOf(q.value.trim().toLowerCase()) === -1) { return false; }
+      return true;
+    }
+    function apply() {
+      var shown = 0;
+      rows.forEach(function (r) { var ok = matches(r); r.hidden = !ok; if (ok) { shown += 1; } });
+      empty.style.display = shown ? 'none' : 'block';
+    }
+    $$('#issue-chips .chip[data-ist]').forEach(function (c) {
+      c.addEventListener('click', function () {
+        $$('#issue-chips .chip[data-ist]').forEach(function (x) { x.classList.remove('active'); });
+        c.classList.add('active');
+        filter = c.getAttribute('data-ist');
+        apply();
+      });
+    });
+    [q, kind, vol].forEach(function (el) { if (el) { el.addEventListener('input', apply); el.addEventListener('change', apply); } });
+
+    var bar = id('issue-batch');
+    function syncBatch() {
+      var n = $$('#issue-table tbody tr:not([hidden]) .cb:checked').length;
+      bar.classList.toggle('show', n > 0);
+      bar.querySelector('.cnt b').textContent = String(n);
+    }
+    $$('#issue-table .cb').forEach(function (cb) { cb.addEventListener('change', syncBatch); });
+    var head = $('#issue-table thead .cb');
+    if (head) {
+      head.addEventListener('change', function () {
+        $$('#issue-table tbody tr:not([hidden]) .cb').forEach(function (cb) { cb.checked = head.checked; });
+        syncBatch();
+      });
+    }
+    id('issue-batch-clear').addEventListener('click', function () {
+      $$('#issue-table tbody .cb').forEach(function (cb) { cb.checked = false; });
+      if (head) { head.checked = false; }
+      syncBatch();
+    });
+
+    var drawerI = id('issue-drawer');
+    function openIssue(row) {
+      currentRow = row;
+      var cells = row.children;
+      id('issue-title').textContent = row.getAttribute('data-kind');
+      var st = row.getAttribute('data-status');
+      var pill = id('issue-state');
+      pill.textContent = st;
+      pill.className = 'pill ' + (st === 'resolved' ? 'pill-ok' : st === 'ignored' ? 'pill-mute' : 'pill-warn');
+      id('issue-path').textContent = (cells[2].querySelector('.mono') || {}).textContent || '';
+      id('issue-vol').textContent = row.getAttribute('data-vol') || '—';
+      id('issue-retryable').textContent = row.getAttribute('data-retryable') === '1' ? '是' : '否（需人工）';
+      id('issue-attempts').textContent = (cells[4] || {}).textContent || '0';
+      id('issue-last').textContent = (cells[5] || {}).textContent || '';
+      id('issue-reason').textContent = (cells[3] || {}).textContent || '';
+      lastFocus = document.activeElement;
+      drawerI.classList.add('show'); drawerI.setAttribute('aria-hidden', 'false');
+      layerStack.push('issue-drawer');
+      var f = drawerI.querySelector('button'); if (f) { f.focus(); }
+    }
+    function closeIssue() {
+      drawerI.classList.remove('show'); drawerI.setAttribute('aria-hidden', 'true');
+      layerStack = layerStack.filter(function (x) { return x !== 'issue-drawer'; });
+    }
+    window.__closeIssue = closeIssue;
+    id('issue-close').addEventListener('click', closeIssue);
+    function setStatus(row, st) {
+      row.setAttribute('data-status', st);
+      var pill = row.children[6].querySelector('.pill');
+      pill.textContent = st;
+      pill.className = 'pill ' + (st === 'resolved' ? 'pill-ok' : st === 'ignored' ? 'pill-mute' : 'pill-warn');
+      apply(); syncBatch();
+      if (currentRow === row) {
+        var ps = id('issue-state');
+        ps.textContent = st;
+        ps.className = 'pill ' + (st === 'resolved' ? 'pill-ok' : st === 'ignored' ? 'pill-mute' : 'pill-warn');
+      }
+    }
+    table.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-issue]'); if (!b) { return; }
+      var row = b.closest('tr');
+      var act = b.getAttribute('data-issue');
+      if (act === 'detail') { openIssue(row); return; }
+      if (act === 'resolve') { setStatus(row, 'resolved'); toast('ok', '已标记为已解决'); }
+      if (act === 'ignore') { setStatus(row, 'ignored'); toast('warn', '已忽略该事项'); }
+    });
+    drawerI.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-issue]'); if (!b || !currentRow) { return; }
+      var act = b.getAttribute('data-issue');
+      if (act === 'resolve') { setStatus(currentRow, 'resolved'); toast('ok', '已标记为已解决'); }
+      if (act === 'ignore') { setStatus(currentRow, 'ignored'); toast('warn', '已忽略该事项'); }
+    });
+
+    var auto = id('issue-auto');
+    if (auto) {
+      auto.addEventListener('click', function () {
+        var on = auto.getAttribute('aria-pressed') === 'true';
+        auto.setAttribute('aria-pressed', on ? 'false' : 'true');
+        auto.className = on ? 'pill pill-mute' : 'pill pill-info';
+        auto.innerHTML = (on ? '' : '<span class="dot"></span>') + (on ? '自动重试已关闭' : '自动重试 5m');
+        toast('info', on ? '已关闭自动重试' : '已开启自动重试（每 5 分钟）');
+      });
+    }
+    apply(); syncBatch();
+  })();
+
+  // ── 未绑定动作的保底反馈（避免设计稿出现死按钮） ──
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b || b.closest('.devtools') || b.closest('.sheet')) { return; }
+    if (b.id) { return; }
+    var recognized = ['data-toast', 'data-dialog', 'data-goto', 'data-preview', 'data-sheet', 'data-confirm-title',
+      'data-close', 'data-close-sheet', 'data-ctx', 'data-dtab', 'data-vol', 'data-lang-opt', 'data-auth-tab',
+      'data-chan', 'data-sec', 'data-task', 'data-drawer', 'data-view', 'data-page', 'data-issue', 'data-wiz'];
+    if (recognized.some(function (a) { return b.hasAttribute(a); })) { return; }
+    var cls = b.className || '';
+    if (/(^|\s)(chip|pg|cnav|dtab|ws|src|sheet-item|pv-ico|nav|cmdk-item|seg|sw)(\s|$)/.test(cls)) { return; }
+    var label = b.textContent.trim();
+    if (!label) { return; }
+    var map = {
+      '恢复': ['ok', '已恢复文件'], '彻底删除': ['warn', '已彻底删除（不可恢复）'], '删除': ['ok', '已删除'],
+      '列举': ['info', '已刷新列举结果'], '属性': ['info', '已打开属性面板'], '详情': ['info', '已打开详情'],
+      '统计': ['info', '已打开统计'], '诊断': ['info', '已开始诊断'], '移除': ['warn', '已移除'],
+      '暂停': ['info', '已暂停'], '取消': ['warn', '已取消'], '忽略': ['warn', '已忽略'],
+      '禁用': ['warn', '已禁用'], '启用': ['ok', '已启用'], '测试': ['ok', '测试请求已发送'],
+      '导出': ['ok', '已导出'], '导入重试': ['ok', '已导入并重试'], '校验': ['info', '已提交校验'],
+      '下载': ['ok', '开始下载'], '排序': ['info', '已切换排序'], '查看': ['info', '已打开'],
+      '切换': ['info', '已切换'], '返回文件': ['info', '已返回文件'], '新建下载': ['info', '已打开新建下载']
+    };
+    var m = map[label];
+    if (m) { toast(m[0], m[1]); }
+    else { toast('info', '已执行：' + label); }
+  });
+
   // ── 登录 / 注册 ──
   function authPane(name) {
     $$('.auth-pane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-auth-pane') === name); });
@@ -4219,7 +4452,7 @@ cloud-9c31aa07-1</textarea>
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu'), ctx: id('ctx') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview'), volume: id('volume-menu'), ctx: id('ctx'), 'issue-drawer': id('issue-drawer') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {
