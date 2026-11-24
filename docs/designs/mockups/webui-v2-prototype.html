@@ -56,7 +56,7 @@ body{
   --border:#e6e8ec; --border-strong:#90949b;
   --text:#0e1116; --text-2:#5b6472; --text-3:#6c7582;
   --accent:#5b63e8; --accent-hover:#4a52d8; --accent-fg:#ffffff; --accent-soft:rgba(91,99,232,.10);
-  --ok:#138648; --warn:#a86400; --bad:#c6333c; --info:#2563eb;
+  --ok:#077a3c; --warn:#9e5a00; --bad:#c4313a; --info:#215fe7;
   --shadow-1:none; --shadow-2:0 18px 44px rgba(16,24,40,.16); --ring:0 0 0 3px rgba(91,99,232,.22);
   --overlay:rgba(16,24,40,.42); --batch-bg:#0e1116; --batch-fg:#ffffff;
 }
@@ -73,7 +73,7 @@ body{
   --border:#e3e8ef; --border-strong:#8a939e;
   --text:#0f172a; --text-2:#475569; --text-3:#66727f;
   --accent:#2563eb; --accent-hover:#1d4ed8; --accent-fg:#ffffff; --accent-soft:rgba(37,99,235,.10);
-  --ok:#15803d; --warn:#b45309; --bad:#dc2626; --info:#0369a1;
+  --ok:#0f7a37; --warn:#ae4d03; --bad:#ce1818; --info:#0369a1;
   --shadow-1:0 1px 2px rgba(15,23,42,.05),0 1px 3px rgba(15,23,42,.04);
   --shadow-2:0 18px 44px rgba(15,23,42,.18); --ring:0 0 0 3px rgba(37,99,235,.22);
   --overlay:rgba(15,23,42,.44); --batch-bg:#ffffff; --batch-fg:#0f172a;
@@ -101,7 +101,7 @@ body{
   --border:#e6eaf0; --border-strong:#8e959f;
   --text:#1f2733; --text-2:#5a6676; --text-3:#67717f;
   --accent:#2b6cb5; --accent-hover:#24599a; --accent-fg:#ffffff; --accent-soft:rgba(43,108,181,.10);
-  --ok:#1e8449; --warn:#9a6b00; --bad:#c0392b; --info:#2b6cb5;
+  --ok:#147a3f; --warn:#906100; --bad:#c0392b; --info:#2b6cb5;
   --shadow-1:0 1px 3px rgba(20,30,50,.06); --shadow-2:0 14px 36px rgba(20,30,50,.18);
   --ring:0 0 0 3px rgba(43,108,181,.20); --overlay:rgba(15,23,42,.45);
   --batch-bg:#fff8e1; --batch-fg:#5a4a12;
@@ -112,7 +112,7 @@ body{
   --border:#3a3a60; --border-strong:#65658b;
   --text:#e8e8f0; --text-2:#c0c4d0; --text-3:#989aad;
   --accent:#5a9fd4; --accent-hover:#6fb0e2; --accent-fg:#08121e; --accent-soft:rgba(90,159,212,.16);
-  --ok:#3ecf8e; --warn:#d8a93e; --bad:#e06a6a; --info:#6db3f0;
+  --ok:#3ecf8e; --warn:#d8a93e; --bad:#e46e6e; --info:#6db3f0;
   --shadow-1:0 1px 2px rgba(0,0,0,.35); --shadow-2:0 14px 36px rgba(0,0,0,.5);
   --ring:0 0 0 3px rgba(90,159,212,.30); --overlay:rgba(0,0,0,.6);
   --batch-bg:#2a2a1e; --batch-fg:#e6dfc0;
@@ -226,7 +226,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 
 /* ───── 表格 ───── */
 .table{width:100%;border-collapse:separate;border-spacing:0;font-size:1em}
-.table th{text-align:left;font-size:11.5px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--text-3);padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.table th{text-align:left;font-size:11.5px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--text-2);padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2)}
 [data-skin="c"] .table th{text-transform:none;letter-spacing:0;font-size:13px}
 .table td{padding:var(--pad-row);border-bottom:1px solid var(--border);vertical-align:middle}
 .table tr{height:var(--row-h)}
@@ -461,7 +461,11 @@ body[data-view="grid"] .files-grid{display:grid}
 body[data-view="grid"] .files-table-wrap{display:none}
 .fcard{position:relative;background:var(--surface);border:var(--card-border);border-radius:var(--radius-lg);box-shadow:var(--card-shadow);padding:12px;display:flex;flex-direction:column;gap:8px;cursor:pointer}
 .fcard:hover{border-color:var(--border-strong)}
-.fcard .thumb{height:86px;border-radius:var(--radius-md);background:var(--surface-3);display:grid;place-items:center;color:var(--text-3)}
+.fcard .thumb{position:relative;height:86px;border-radius:var(--radius-md);background:var(--surface-3);display:grid;place-items:center;color:var(--text-3);overflow:hidden}
+.fcard .thumb.video{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 14%,var(--surface-3)),var(--surface-3))}
+.fcard .thumb .play{width:30px;height:30px;border-radius:50%;background:color-mix(in srgb,var(--surface) 72%,transparent);border:1px solid var(--border-strong);display:grid;place-items:center;color:var(--text-2);font-size:10px;padding-left:2px}
+.fcard .thumb .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.62);color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;font-variant-numeric:tabular-nums}
+.fcard .thumb .res{position:absolute;left:6px;top:6px;background:color-mix(in srgb,var(--surface) 80%,transparent);border:1px solid var(--border);color:var(--text-2);font-size:10px;padding:0 4px;border-radius:3px}
 .fcard .nm{font-size:12.5px;font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fcard .mt{display:flex;gap:6px;align-items:center;font-size:11px;color:var(--text-3);flex-wrap:wrap}
 .fcard .cb{position:absolute;top:8px;left:8px}
@@ -470,6 +474,13 @@ body[data-view="grid"] .files-table-wrap{display:none}
 [data-skin="c"] .files-grid{--grid-min:180px}
 [data-skin="b"] .fcard .thumb{height:112px}
 [data-skin="c"] .fcard{background:var(--surface-2)}
+
+/* ───── 控制台状态演示（设计稿） ───── */
+#cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
+body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
+body[data-cs-state="empty"] #cs-demo,body[data-cs-state="error"] #cs-demo,body[data-cs-state="loading"] #cs-demo{display:flex}
+#cs-demo .demo-pane{display:none}
+body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs-demo .demo-error,body[data-cs-state="loading"] #cs-demo .demo-loading{display:flex}
 
 @media (max-width:1100px){
   [data-skin="a"] .shell,[data-skin="b"] .shell{grid-template-columns:64px minmax(0,1fr)}
@@ -518,6 +529,15 @@ body[data-view="grid"] .files-table-wrap{display:none}
   .floatbar{left:12px;right:12px;transform:translateY(140%);bottom:12px}
   .floatbar.show{transform:none}
   .devtools{right:8px;bottom:8px;top:auto;left:auto;transform:scale(.92);transform-origin:bottom right}
+  /* 手机端底部导航（顶部 tab 隐藏） */
+  .top-tabs{display:none}
+  .mobile-nav{display:flex;position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:6px 4px calc(6px + env(safe-area-inset-bottom));z-index:66;justify-content:space-around}
+  .mobile-nav button{flex:1;border:0;background:none;color:var(--text-3);font-size:11px;padding:7px 2px;border-radius:var(--radius-sm);cursor:pointer}
+  .mobile-nav button[aria-current="page"]{color:var(--accent);font-weight:600;background:var(--accent-soft)}
+  body{padding-bottom:56px}
+  .content{padding-bottom:76px}
+  .floatbar{bottom:72px}
+  .devtools{bottom:72px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -535,6 +555,7 @@ body[data-view="grid"] .files-table-wrap{display:none}
   <button id="dev-theme" type="button">暗/亮</button>
   <button id="dev-loading" type="button" aria-pressed="false">加载态</button>
   <button id="dev-density" type="button" aria-pressed="false">密度</button>
+  <button id="dev-states" type="button">状态演示</button>
   <button id="dev-ds" type="button">组件库</button>
   <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
@@ -714,22 +735,22 @@ body[data-view="grid"] .files-table-wrap{display:none}
 
         <div class="files-grid" id="files-grid">
           <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
-            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
+            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="dur">12 项</span></div>
             <div class="nm">NHDTB-864</div><div class="mt"><span class="pill pill-mute">目录</span><span>12 项</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
-            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:14:07</span></div>
             <div class="nm">NHDTB-864.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">4.72 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
-            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:31:44</span></div>
             <div class="nm">NHDTB-863-uncensored-leak.mp4</div><div class="mt"><span class="pill pill-warn"><span class="dot"></span>待校验</span><span class="num">6.05 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" checked aria-label="选择">
-            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="thumb video"><span class="res">720p</span><span class="play">▶</span><span class="dur">01:58:12</span></div>
             <div class="nm">NHDTB-861.mp4</div><div class="mt"><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span><span class="num">2.28 GB</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
             <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div>
             <div class="nm">archive-2026-11</div><div class="mt"><span class="pill pill-mute">目录</span><span>—</span></div></div>
           <div class="fcard"><input class="cb" type="checkbox" aria-label="选择">
-            <div class="thumb"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg></div>
+            <div class="thumb video"><span class="res">1080p</span><span class="play">▶</span><span class="dur">02:06:33</span></div>
             <div class="nm">NHDTB-860.mp4</div><div class="mt"><span class="pill pill-ok"><span class="dot"></span>一致</span><span class="num">3.10 GB</span></div></div>
         </div>
 
@@ -912,6 +933,25 @@ body[data-view="grid"] .files-table-wrap{display:none}
               <div class="cnav" data-sec="hub" role="button" tabindex="0">Hub</div>
             </nav>
             <div class="console-content">
+              <div id="cs-demo" aria-hidden="true">
+                <div class="demo-pane demo-empty">
+                  <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+                    <b>暂无云端任务</b><div>提交第一个下载链接后，任务会出现在这里。</div>
+                    <div class="acts"><button class="btn btn-sm btn-primary" type="button">新建下载</button><button class="btn btn-sm" type="button">查看帮助</button></div></div>
+                </div>
+                <div class="demo-pane demo-error">
+                  <div class="banner banner-bad"><div><b>云端任务加载失败</b><div class="muted" style="font-size:12px">target_unavailable：目标卷尚未装配（请求 id 8f3a）</div></div>
+                    <div class="acts"><button class="btn btn-sm" type="button" data-toast="已重试加载" data-toast-kind="ok">重试</button></div></div>
+                  <div class="banner"><div><b>仍失败？</b><div class="muted" style="font-size:12px">可先检查「卷」分区是否已挂载，或查看审计日志定位。</div></div></div>
+                </div>
+                <div class="demo-pane demo-loading">
+                  <div class="card"><div class="card-h"><h3>正在加载</h3></div>
+                    <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk w60"></span><span class="sk w40"></span><span class="sk w80"></span></div>
+                    <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk w40"></span><span class="sk w60"></span><span class="sk w60"></span></div>
+                    <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk w80"></span><span class="sk w40"></span><span class="sk w40"></span></div>
+                  </div>
+                </div>
+              </div>
               <!-- 概览 -->
               <section class="csection active" data-sec="overview">
                 <div class="legacy-summary">
@@ -1494,6 +1534,13 @@ body[data-view="grid"] .files-table-wrap{display:none}
 </div>
 
 <!-- A：浮动批量条 -->
+<nav class="mobile-nav" aria-label="移动导航">
+  <button type="button" data-goto="files" aria-current="page">文件</button>
+  <button type="button" data-goto="transfer">传输</button>
+  <button type="button" data-goto="trash">回收站</button>
+  <button type="button" data-goto="console">控制台</button>
+</nav>
+
 <div class="floatbar" id="floatbar">
   <span class="cnt">已选 <b class="num">2</b> 项</span>
   <span class="sep"></span>
@@ -2049,6 +2096,17 @@ body[data-view="grid"] .files-table-wrap{display:none}
     document.body.dataset.loading = on ? '0' : '1';
     e.currentTarget.setAttribute('aria-pressed', on ? 'false' : 'true');
     toast('info', on ? '已恢复数据' : '已切换到骨架屏加载态');
+  });
+  // 控制台状态演示：数据 → 空态 → 错误态 → 加载态
+  var CS_STATES = ['data', 'empty', 'error', 'loading'];
+  var csIdx = 0;
+  id('dev-states').addEventListener('click', function (e) {
+    csIdx = (csIdx + 1) % CS_STATES.length;
+    var st = CS_STATES[csIdx];
+    if (st === 'data') { delete document.body.dataset.csState; } else { document.body.dataset.csState = st; }
+    var label = { data: '数据', empty: '空态', error: '错误态', loading: '加载态' }[st];
+    e.currentTarget.textContent = '状态：' + label;
+    toast('info', '控制台预览：' + label);
   });
   id('dev-ds').addEventListener('click', function () { show('ds'); });
   id('dev-density').addEventListener('click', function (e) {

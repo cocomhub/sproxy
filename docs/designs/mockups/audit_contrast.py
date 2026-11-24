@@ -15,6 +15,8 @@ PAIRS = [
     ("accent-fg", "accent", 4.5), ("accent", "surface", 3.0),
     ("ok", "surface", 4.5), ("warn", "surface", 4.5), ("bad", "surface", 4.5), ("info", "surface", 4.5),
     ("border-strong", "surface", 3.0),
+    # 表头：th 使用 text-2 on surface-2（v3 起从 text-3 上调）
+    ("text-2", "surface-2", 4.5),
 ]
 
 
@@ -57,6 +59,25 @@ def main():
         bg, _ = parse(props["--bg"])
         surf, a = parse(props["--surface"])
         surf = over(surf, a, bg)
+        # 状态 pill：文字色 on 12% 自身色 tint 叠在 surface 上
+        for status in ("ok", "warn", "bad", "info"):
+            fg, _ = parse(props["--" + status])
+            tint = over(fg, 0.12, surf)
+            r = ratio(fg, tint)
+            ok = r >= 4.5
+            if not ok:
+                failures += 1
+            print(f"{'PASS' if ok else 'FAIL'} {skin}/{theme} pill-{status}/tint = {r:.2f} (need 4.5)")
+        # 批量条：token 化皮肤直接比；C 的硬编码值在 CSS 里单独检查
+        if "--batch-fg" in props and "--batch-bg" in props:
+            fg, _ = parse(props["--batch-fg"])
+            bgb, _ = parse(props["--batch-bg"])
+            r = ratio(fg, bgb)
+            ok = r >= 4.5
+            if not ok:
+                failures += 1
+            print(f"{'PASS' if ok else 'FAIL'} {skin}/{theme} batch-fg/bg = {r:.2f} (need 4.5)")
+
         for fg_key, bg_key, need in PAIRS:
             if "--" + fg_key not in props or "--" + bg_key not in props:
                 continue

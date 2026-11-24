@@ -343,25 +343,27 @@
 
 | 区域 | 已覆盖 |
 | --- | --- |
-| 文件 | 列表 + 筛选 chips + 行选择 + 批量条 + 骨架屏 + 拖拽上传 + 检查器（详情/版本/分享） |
+| 文件 | 列表 + **网格视图（时长/分辨率徽标）** + 筛选 chips + 行选择 + 批量条 + 骨架屏 + 拖拽上传 + 检查器（详情/版本/分享） |
 | 传输 | 状态 chips + 任务行（速率/ETA/诊断）+ 任务诊断抽屉 + 汇总卡 |
 | 回收站 | 保留期 banner + 恢复/彻底删除 + 空态 |
 | 控制台 | 概览、云端任务、待处理事项、审计、卷、配置 |
 | 控制台（管理） | 卷管理（新建/删除确认）、凭据（掩码/轮换/新增）、Secret（副本/封印）、同步冲突（保留本地/远端/改名/传播删除）、Mesh（节点/断开）、Hub（节点/移除） |
-| 全局 | ⌘K 实搜索、`j/k/x/Enter`、`g` 前缀、`?` 帮助、Esc 层级关闭、焦点陷阱、Toast+撤销、危险确认、密度切换、`#/console/<section>?status=&volume=&page=` 深链、列表/网格切换、移动端布局、`aria-live`、设计系统页 |
+| 全局 | ⌘K 实搜索、`j/k/x/Enter`、`g` 前缀、`?` 帮助、Esc 层级关闭、焦点陷阱、Toast+撤销、危险确认、密度切换、`#/console/<section>?status=&volume=&page=` 深链、列表/网格切换、**手机端底部导航**、**控制台空/错/加载三态演示**、`aria-live`、设计系统页 |
 
 ## 12. 自检工具与命令（改设计稿前后必跑）
 
 | 检查 | 命令 | 通过标准 |
 | --- | --- | --- |
-| WCAG 对比度（6 套主题 × 13 组配对） | `python docs/designs/mockups/audit_contrast.py` | `OK: 0 failing pair(s)` |
+| WCAG 对比度（6 套主题 × 13 组配对 + 状态 pill 12% 叠底 + 表头 + 批量条） | `python docs/designs/mockups/audit_contrast.py` | `OK: 0 failing pair(s)` |
 | 结构差异（防“只换颜色”） | headless Chrome 读 `rail display / row height / radius / shadow / console position` | 三套五项均不同 |
 | 横向溢出 | 12 分区 × 3 皮肤 × 1280/1500；文件页 390 宽 | `scrollWidth-clientWidth <= 2` |
 | 交互回归 | 探针脚本：分区切换 / 确认框 typed-confirm / `j x Enter Esc` / 深链往返 | 全 pass |
 | JS 健康 | `node --check` 提取的 script + Chrome 无 `Uncaught/TypeError` | 无输出 |
 
-对比度审计已修掉的实际问题（v3）：`text-3` 在 a/light 3.00、b/light 3.38、c/light 2.83 均低于 4.5；
-`ok` 在 a/light 3.96；三套亮色 `border-strong` 仅 1.4–1.6（输入框边界需 3:1）。已逐项上调并复测 0 失败。
+对比度审计已修掉的实际问题：
+- v3 第一轮：`text-3` 在 a/light 3.00、b/light 3.38、c/light 2.83 均低于 4.5；`ok` a/light 3.96；三套亮色 `border-strong` 仅 1.4–1.6（输入框边界需 3:1）。
+- v3 第二轮（组件级）：状态 pill 文字叠在 12% 自身色 tint 上，a/light `ok` 3.95、`warn` 4.00、`info` 4.37，b/light `bad` 4.01，c/dark `bad` 4.38；表头 `text-3` on `surface-2` 在 a/light 4.35、a/dark 4.36、b/dark 4.28。
+已逐项上调 token / 表头改用 `text-2`，复测 0 失败。
 
 ## 13. 待你确认的收尾项
 
