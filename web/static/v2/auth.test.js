@@ -6,28 +6,6 @@ const test = require('node:test');
 const assert = require('node:assert');
 const m = require('./auth.js');
 
-function fakeStorage(map) {
-  return {
-    getItem(k) { return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null; }
-  };
-}
-
-test('loadCreds：缺 ak/sk 返回 null（匿名）', () => {
-  assert.strictEqual(m.loadCreds(null), null);
-  assert.strictEqual(m.loadCreds(fakeStorage({})), null);
-  assert.strictEqual(m.loadCreds(fakeStorage({ sproxy_access_key: 'ak' })), null);
-  assert.strictEqual(m.loadCreds({ getItem() { throw new Error('denied'); } }), null);
-});
-
-test('loadCreds：读取旧版 sessionStorage 键', () => {
-  const c = m.loadCreds(fakeStorage({
-    sproxy_access_key: 'skey-demo',
-    sproxy_access_key_secret: 'secret-demo',
-    sproxy_access_key_id: 'entry-1'
-  }));
-  assert.deepStrictEqual(c, { ak: 'skey-demo', sk: 'secret-demo', entryID: 'entry-1' });
-});
-
 test('authHeaders：无凭据返回空对象，不调用签名', async () => {
   let called = false;
   const h = await m.authHeaders('GET', '/api/files', null, null, () => { called = true; });

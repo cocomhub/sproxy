@@ -463,7 +463,30 @@ P1a 验收证据：`node --test v2/{auth,files}.test.js` 11 例通过；`make we
 P0 验收证据：`make web-test` 通过（含 `v2/shell.test.js` 5 例）；`go test ./internal/archcheck -run TestWebAssets` 通过；
 `go test ./web/e2e -run TestV2Shell` 通过（路由/深链刷新/主题/旧版入口）；`go build ./...` 通过。
 
-## 14. 待你确认的收尾项
+## 14. 前端代码复用与长期维护
+
+**结论：不复制文件；按「可直接复用 / 共享层 / v2 自有」三层收敛。**
+
+| 层 | 位置 | 规则 |
+| --- | --- | --- |
+| 直接复用 | `sclient/crypto.js`、`sclient/sig.js`（UMD，无 DOM 依赖） | v2 用相对路径 `<script src="../sclient/...">` 加载；**禁止复制** |
+| 共享层（单一事实源） | `web/static/shared/{format,creds}.js` | 新共享逻辑只准进这里；UMD（浏览器全局 + Node require）；必须配 `node --test` |
+| v2 自有 | `web/static/v2/*` | 只放视图/壳层/交互；不得反向 import `app.js` |
+| 不可复用 | `web/static/app.js`（4.5k 行 DOM 耦合） | 不引入；旧页下线时随页面一起删 |
+
+**已知重复与收编计划**：
+
+| 重复项 | 现状 | 计划 |
+| --- | --- | --- |
+| `formatSize` | 旧页 `app-render.js` / `quota-format.js` / `user-volumes.js` 各一份（精度/上限不同） | v2 统一用 `shared/format.js`；旧页保留到下线批次一次性换实现（避免改旧页显示精度与快照） |
+| 凭据存储键名 | 旧页 `app.js` 硬编码 3 个 sessionStorage 键 | 键名作为**契约**收敛在 `shared/creds.js`；旧页保持写入端不变（P1a 已验证同源可读） |
+| i18n 词条 | 设计稿 331 条为原型数据；旧页有 `i18n.js` | 落地时以旧页 `i18n.js` 为词条源，v2 复用其 `t()`，不另造字典 |
+
+**依赖方向**：`shared ← v2`、`shared ← legacy`；`shared` 不 import 任何页面模块；加载顺序在 HTML 中显式声明（无打包器）。
+
+**下线路径**：parity 表全绿 → 删除 `web/static/*`（旧页）→ `shared/` 保留并成为唯一来源；本设计稿原型目录不参与构建，不进入运行期。
+
+## 15. 待你确认的收尾项
 
 1. 双轨路径用 `/ui/v2/`（推荐，显式、可灰度）还是 `?ui=next`（同路径，便于对比）？
 2. P0 是否允许在旧页顶栏加「试用新版」入口（唯一旧页改动，可回滚）？

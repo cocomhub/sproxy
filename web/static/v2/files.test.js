@@ -6,23 +6,6 @@ const test = require('node:test');
 const assert = require('node:assert');
 const m = require('./files.js');
 
-test('formatSize：0/边界/单位', () => {
-  assert.strictEqual(m.formatSize(0), '0 B');
-  assert.strictEqual(m.formatSize(1023), '1023 B');
-  assert.strictEqual(m.formatSize(1024), '1.00 KB');
-  assert.strictEqual(m.formatSize(1536), '1.50 KB');
-  assert.strictEqual(m.formatSize(5 * 1024 ** 3), '5.00 GB');
-  assert.strictEqual(m.formatSize(-1), '—');
-  assert.strictEqual(m.formatSize('x'), '—');
-});
-
-test('formatTime：UnixNano → MM-DD HH:mm，0 为 —', () => {
-  assert.strictEqual(m.formatTime(0), '—');
-  assert.strictEqual(m.formatTime(NaN), '—');
-  const d = new Date(2026, 10, 24, 9, 5, 0);
-  assert.strictEqual(m.formatTime(d.getTime() * 1e6), '11-24 09:05');
-});
-
 test('normalizeFiles：目录在前、自然排序、过滤坏条目', () => {
   const out = m.normalizeFiles({
     files: [

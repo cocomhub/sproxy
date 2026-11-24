@@ -266,6 +266,10 @@ web-test:
 	@node --check web/static/console-nav.js
 	@node --check web/static/v2/shell.js
 	@node --check web/static/v2/shell.test.js
+	@node --check web/static/shared/format.js
+	@node --check web/static/shared/format.test.js
+	@node --check web/static/shared/creds.js
+	@node --check web/static/shared/creds.test.js
 	@node --check web/static/v2/auth.js
 	@node --check web/static/v2/auth.test.js
 	@node --check web/static/v2/files.js
@@ -296,6 +300,8 @@ web-test:
 	node --test web/static/transfer-render.test.js
 	node --test web/static/sync.test.js
 	node --test web/static/v2/shell.test.js
+	node --test web/static/shared/format.test.js
+	node --test web/static/shared/creds.test.js
 	node --test web/static/v2/auth.test.js
 	node --test web/static/v2/files.test.js
 	node --test web/static/app-render.test.js

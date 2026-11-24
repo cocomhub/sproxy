@@ -7,31 +7,14 @@
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../shared/creds.js'));
   } else {
-    root.v2auth = factory();
+    root.v2auth = factory(root.sharedCreds);
   }
-})(typeof self !== 'undefined' ? self : this, function () {
-  var KEYS = {
-    ak: 'sproxy_access_key',
-    sk: 'sproxy_access_key_secret',
-    id: 'sproxy_access_key_id'
-  };
-
-  /** 读取凭据；任一缺失返回 null（匿名请求）。 */
-  function loadCreds(storage) {
-    if (!storage) { return null; }
-    var ak = '', sk = '', id = '';
-    try {
-      ak = storage.getItem(KEYS.ak) || '';
-      sk = storage.getItem(KEYS.sk) || '';
-      id = storage.getItem(KEYS.id) || '';
-    } catch (e) {
-      return null;
-    }
-    if (!ak || !sk) { return null; }
-    return { ak: ak, sk: sk, entryID: id };
-  }
+})(typeof self !== 'undefined' ? self : this, function (creds) {
+  if (!creds) { throw new Error('auth.js 需要 shared/creds.js（请在之前加载）'); }
+  var KEYS = creds.KEYS;
+  var loadCreds = creds.loadCreds;
 
   /** 生成签名头；无凭据返回空对象（由服务端 401 或匿名兜底决定）。 */
   function authHeaders(method, pathWithQuery, body, creds, signFn) {

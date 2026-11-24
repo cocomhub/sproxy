@@ -6,31 +6,14 @@
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
+    module.exports = factory(require('../shared/format.js'));
   } else {
-    root.v2files = factory();
+    root.v2files = factory(root.sharedFormat);
   }
-})(typeof self !== 'undefined' ? self : this, function () {
-  var UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-
-  /** 人类可读大小；负数/非法按 0。 */
-  function formatSize(n) {
-    var v = Number(n);
-    if (!isFinite(v) || v <= 0) { return v === 0 ? '0 B' : '—'; }
-    var i = 0;
-    while (v >= 1024 && i < UNITS.length - 1) { v /= 1024; i += 1; }
-    return (i === 0 ? String(Math.round(v)) : v.toFixed(2)) + ' ' + UNITS[i];
-  }
-
-  /** UnixNano → 本地 MM-DD HH:mm；0/非法返回 '—'。 */
-  function formatTime(ns) {
-    var v = Number(ns);
-    if (!isFinite(v) || v <= 0) { return '—'; }
-    var d = new Date(Math.floor(v / 1e6));
-    if (isNaN(d.getTime())) { return '—'; }
-    var p = function (x) { return x < 10 ? '0' + x : String(x); };
-    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
-  }
+})(typeof self !== 'undefined' ? self : this, function (fmt) {
+  if (!fmt) { throw new Error('files.js 需要 shared/format.js（请在之前加载）'); }
+  var formatSize = fmt.formatSize;
+  var formatTime = fmt.formatTime;
 
   /** 规范化列表响应：目录在前、名称自然排序；坏数据返回空列表。 */
   function normalizeFiles(payload) {
