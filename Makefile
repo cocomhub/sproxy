@@ -264,6 +264,8 @@ web-test:
 	@node --check web/static/issues.js
 	@node --check web/static/cloud-tasks.js
 	@node --check web/static/console-nav.js
+	@node --check web/static/v2/shell.js
+	@node --check web/static/v2/shell.test.js
 	@node --check web/static/overview-cards.js
 	@node --check web/static/overview-cards.test.js
 	@node --check web/static/console-nav.test.js
@@ -288,6 +290,7 @@ web-test:
 	node --test web/static/transfer-store.test.js
 	node --test web/static/transfer-render.test.js
 	node --test web/static/sync.test.js
+	node --test web/static/v2/shell.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js

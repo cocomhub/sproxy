@@ -445,7 +445,20 @@
 - v3 第二轮（组件级）：状态 pill 文字叠在 12% 自身色 tint 上，a/light `ok` 3.95、`warn` 4.00、`info` 4.37，b/light `bad` 4.01，c/dark `bad` 4.38；表头 `text-3` on `surface-2` 在 a/light 4.35、a/dark 4.36、b/dark 4.28。
 已逐项上调 token / 表头改用 `text-2`，复测 0 失败。
 
-## 13. 待你确认的收尾项
+## 13. 实施进度
+
+| 批次 | 状态 | 交付物 |
+| --- | --- | --- |
+| P0 壳层 | ✅ 已交付 | `web/static/v2/{index.html,tokens.css,components.css,shell.js,shell.test.js}`；`/ui/v2/` 由既有静态路由直接提供（无需改后端）；旧页顶栏新增「试用新版」（可回滚） |
+| P1 文件页 | ⬜ | 接 `/api/files`、上传/批量/检查器 |
+| P2 传输页 | ⬜ | 云端任务/任务组/上传队列 |
+| P3 控制台 | ⬜ | 弹窗改善 → 页面化评估 |
+| P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+
+P0 验收证据：`make web-test` 通过（含 `v2/shell.test.js` 5 例）；`go test ./internal/archcheck -run TestWebAssets` 通过；
+`go test ./web/e2e -run TestV2Shell` 通过（路由/深链刷新/主题/旧版入口）；`go build ./...` 通过。
+
+## 14. 待你确认的收尾项
 
 1. 双轨路径用 `/ui/v2/`（推荐，显式、可灰度）还是 `?ui=next`（同路径，便于对比）？
 2. P0 是否允许在旧页顶栏加「试用新版」入口（唯一旧页改动，可回滚）？

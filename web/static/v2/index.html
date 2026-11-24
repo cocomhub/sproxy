@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<!-- Copyright 2026 The Cocomhub Authors. All rights reserved. SPDX-License-Identifier: Apache-2.0 -->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sproxy · v2</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="rail" aria-label="主导航">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">S</div>
+      <div class="brand-name">sproxy</div>
+      <div class="brand-tag">v2 · P0</div>
+    </div>
+
+    <div class="rail-group">工作区</div>
+    <div class="nav" data-route="files" role="link" tabindex="0">
+      <span>文件</span><span class="count num">128</span>
+    </div>
+    <div class="nav" data-route="transfer" role="link" tabindex="0">
+      <span>传输</span><span class="count num">3</span>
+    </div>
+    <div class="nav" data-route="trash" role="link" tabindex="0">
+      <span>回收站</span><span class="count num">4</span>
+    </div>
+
+    <div class="rail-group">系统</div>
+    <div class="nav" data-route="console" role="link" tabindex="0">
+      <span>控制台</span>
+    </div>
+
+    <div class="rail-foot">
+      <div class="who">
+        <div class="avatar" aria-hidden="true">DM</div>
+        <div><div style="font-size:12.5px;font-weight:600">demo</div>
+          <div class="muted" style="font-size:11px">demo · 示例凭据</div></div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <span class="page-title" id="v2-title">文件</span>
+        <span class="page-sub" id="v2-subtitle">/ 全部卷</span>
+      </div>
+      <span class="spacer"></span>
+      <span class="pill pill-info">v2 预览 · P0 壳层</span>
+      <a class="btn btn-ghost" href="/ui/" title="返回旧版">旧版</a>
+      <button class="icon-btn" id="v2-theme-toggle" type="button" title="切换亮/暗" aria-label="切换亮/暗">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </header>
+
+    <div class="content">
+      <div class="banner banner-warn" role="status">
+        <div><b>v2 预览版（P0 壳层）</b>
+          <div class="muted" style="font-size:12px">本页仅用于设计/壳层验收；数据为占位，文件、传输、控制台将在 P1–P3 接入现有 API。旧版入口保留。</div>
+        </div>
+        <a class="btn" href="/ui/" style="margin-left:auto">回到旧版</a>
+      </div>
+
+      <section class="panel" data-panel="files" aria-labelledby="v2-title">
+        <div class="card" style="overflow:hidden">
+          <div class="card-h"><h2>文件</h2><span class="hint">示例数据（P1 接入 /api/files）</span></div>
+          <table class="table">
+            <thead>
+              <tr><th>名称</th><th style="width:110px">卷</th><th style="width:96px" class="r">大小</th>
+                <th style="width:150px">修改时间</th><th style="width:130px">校验</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="mono">EXAMPLE-001.mp4</td><td><span class="pill pill-info">baidu</span></td><td class="r num">4.72 GB</td><td class="num muted">11-24 17:10</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td></tr>
+              <tr><td class="mono">EXAMPLE-002.mp4</td><td><span class="pill pill-info">baidu</span></td><td class="r num">2.28 GB</td><td class="num muted">11-23 22:04</td><td><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span></td></tr>
+              <tr><td class="mono">EXAMPLE-003.mp4</td><td><span class="pill pill-mute">local</span></td><td class="r num">6.05 GB</td><td class="num muted">11-24 15:48</td><td><span class="pill pill-warn"><span class="dot"></span>待校验</span></td></tr>
+              <tr><td class="mono">archive-2026-11/</td><td><span class="pill pill-mute">local</span></td><td class="r muted">—</td><td class="num muted">11-20 09:15</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="transfer" hidden>
+        <div class="card"><div class="card-b placeholder">
+          <b>传输</b>
+          <div class="muted">P2 接入：云端任务、任务组、上传队列与本地上传。</div>
+          <div class="empty"><b>暂无数据</b><div>设计稿中的交互会在 P2 落地。</div></div>
+        </div></div>
+      </section>
+
+      <section class="panel" data-panel="trash" hidden>
+        <div class="card"><div class="card-b placeholder">
+          <b>回收站</b>
+          <div class="muted">P1 接入：恢复 / 彻底删除 / 清空。</div>
+          <div class="empty"><b>回收站为空</b><div>删除的文件会在这里保留 30 天。</div></div>
+        </div></div>
+      </section>
+
+      <section class="panel" data-panel="console" hidden>
+        <div class="card"><div class="card-b placeholder">
+          <b>控制台</b>
+          <div class="muted">P3 接入：概览 / 云端任务 / 待处理事项 / 审计 / 卷 / 配置 / 通知 / 巡检 / 接入。</div>
+          <div class="empty"><b>控制台尚未迁移</b><div>当前请使用 <a href="/ui/">旧版控制台</a>。</div></div>
+        </div></div>
+      </section>
+    </div>
+  </div>
+</div>
+<script src="shell.js"></script>
+</body>
+</html>
