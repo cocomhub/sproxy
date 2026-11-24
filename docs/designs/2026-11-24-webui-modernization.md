@@ -445,49 +445,27 @@
 - v3 第二轮（组件级）：状态 pill 文字叠在 12% 自身色 tint 上，a/light `ok` 3.95、`warn` 4.00、`info` 4.37，b/light `bad` 4.01，c/dark `bad` 4.38；表头 `text-3` on `surface-2` 在 a/light 4.35、a/dark 4.36、b/dark 4.28。
 已逐项上调 token / 表头改用 `text-2`，复测 0 失败。
 
-## 13. 实施进度
+## 13. 已交付能力
 
-| 批次 | 状态 | 交付物 |
+| 能力 | 状态 | 要点 |
 | --- | --- | --- |
-| P0 壳层 | ✅ 已交付 | `web/static/v2/{index.html,tokens.css,components.css,shell.js,shell.test.js}`；`/ui/v2/` 由既有静态路由直接提供（无需改后端）；旧页顶栏新增「试用新版」（可回滚） |
-| P1a 文件列表 | ✅ 已交付 | `/api/files` 真实列表（复用旧版 SproxySig 凭据）、面包屑/子目录、空态/错误态/401 提示；上传/批量/检查器待 P1b |
-| P1b 文件写操作 | ✅ 已交付（无检查器） | 上传（简单上传，sha256 + 签名）、新建目录、重命名、删除、批量删除；检查器（Meta/版本/分享）仍待 P1c |
-| P1e 预览 | ✅ 已交付 | 图片/文本（签名请求）/浏览器可播视频（URL 票 `?spx_sig=`）；不支持格式提示下载；复用 video-player.js |
-| P1d 分块上传 | ✅ 已交付（页内暂停/继续） | >8MiB 走 init/status/chunk*/complete；分块进度、速度、剩余时间；暂停/继续/取消；跨刷新续传待补 |
-| P1c 检查器 | ✅ 已交付 | 抽屉四页签：概览 / Meta（只读 JSON）/ 版本（列表+恢复+删除）/ 分享（创建/列表/撤销）；分块页签待 P1d（需分块 API） |
-| P2a 云端任务 | ✅ 已交付 | 列表/筛选 chips（全部·进行中·失败·已完成）/取消·重试·删除/自动刷新；复用 cloud-tasks.js 纯函数 |
-| P2b 任务组 | ✅ 已交付 | 组列表（状态/进度/失败）、创建组（名称+多链接）、整组取消/重试/删除 |
-| P2c 同步任务 | ✅ 已交付 | 列表/新建（方向·远端·源/目标·冲突·删除策略·递归）/取消/删除 |
-| P3a 控制台概览 | ✅ 已交付 | 页面化控制台：分区导航 + KPI/存储水位/卷/最近审计；统计 503 与审计 403 均优雅降级 |
-| P3b 其余分区 | ⬜ | 云端任务/待处理/审计/配置/通知/巡检/接入 |
-| P4 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+| v2 壳层与设计 token | ✅ | 侧栏/顶栏/路由/主题；`/ui/v2/` 复用既有静态路由；旧页「试用新版」入口 |
+| 文件列表 | ✅ | `/api/files`、面包屑/子目录深链、空态/错误/401 |
+| 文件写操作 | ✅ | 上传、新建目录、重命名、删除、批量删除 |
+| 分块上传 | ✅ | >8MiB 走 init/status/chunk*/complete；进度/速度/剩余；页内暂停/继续 |
+| 文件检查器 | ✅ | 概览 / Meta / 版本（恢复·删除）/ 分享（创建·列表·撤销） |
+| 文件预览 | ✅ | 图片、文本、浏览器可播视频（URL 票）；不支持格式提示下载 |
+| 云端任务 | ✅ | 列表/筛选/取消·重试·删除/自动刷新（传输页与控制台共用表格） |
+| 任务组 | ✅ | 列表/创建/整组取消·重试·删除 |
+| 同步任务 | ✅ | 列表/新建/取消/删除 |
+| 控制台概览 | ✅ | 分区导航 + KPI/存储水位/卷/最近审计；统计 503、审计 403 优雅降级 |
+| 控制台 · 云端任务 | ✅ | 复用同一任务表格与动作 |
+| 控制台 · 待处理事项 | ✅ | 列表 + 行内「解决」填写处置说明（写入审计） |
+| 其余控制台分区 | ⬜ | 审计全量/配置/通知/巡检/接入 |
+| 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
 
-P3a 验收证据：e2e 控制台渲染、9 个分区入口、KPI 或 503 提示；`make web-test`/archcheck/build 通过。
-
-P2c 验收证据：e2e 同步任务空态可见 → 新建对话框打开 → 取消；`make web-test`/archcheck/build 通过。
-
-P2b 验收证据：e2e 任务组空态可见 → 创建组对话框打开/取消；`make web-test`/archcheck/build 通过。
-
-P2a 验收证据：e2e 进入传输页 → 空态可见 → 4 个筛选 chips；`make web-test`/archcheck/build 通过。
-
-P1e 验收证据：e2e 上传 `e2e.txt` → 点击文件名 → 预览浮层 → 文本内容含 `hello e2e` → 关闭；
-`make web-test`、archcheck、build、golangci-lint 通过。
-
-P1d 验收证据：`node --test v2/upload-chunked.test.js` 4 例；e2e 用 Playwright `SetInputFiles` 上传 `e2e.txt` → 列表出现；
-`make web-test` 通过；archcheck/build 通过。
-
-P1c 验收证据：e2e 打开 `v2demo` 详情抽屉 → 标题校验 → 切到 Meta 页签 → 关闭；
-`make web-test` 通过；`go test ./web/e2e -run TestV2Shell` 通过。
-
-P1b 验收证据：e2e 走真实 UI —— 新建目录 `uifolder` → 列表出现 → 勾选 → 批量删除 → 列表消失；
-`node --test v2/files-ops.test.js` 5 例；`make web-test` 513 断言；archcheck/build 通过。
-
-P1a 验收证据：`node --test v2/{auth,files}.test.js` 11 例通过；`make web-test` 通过（508 断言）；
-`go test ./web/e2e -run TestV2Shell` 通过（真实 `/mkdir` 播种 → 列表渲染 → 进入子目录 → 面包屑）；
-`go build ./...` 与 archcheck 通过。
-
-P0 验收证据：`make web-test` 通过（含 `v2/shell.test.js` 5 例）；`go test ./internal/archcheck -run TestWebAssets` 通过；
-`go test ./web/e2e -run TestV2Shell` 通过（路由/深链刷新/主题/旧版入口）；`go build ./...` 通过。
+验证：`make web-test`、`go test ./internal/archcheck -run TestWebAssets`、`go build ./...`、
+`go test ./web/e2e -run TestV2Shell` 全绿；e2e 覆盖列表/写操作/上传/预览/传输/任务组/同步/控制台分区。
 
 ## 14. 前端代码复用与长期维护
 
