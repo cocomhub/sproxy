@@ -18,6 +18,10 @@ const (
 	ErrClassContentMismatch = "content_mismatch"
 	// ErrClassTargetConflict 目标已存在且内容不同 ⇒ 需人工/显式覆盖，不自动重试。
 	ErrClassTargetConflict = "target_conflict"
+	// ErrClassTargetUnavailable 目标卷/后端**暂不可用**（未装配、卷不存在、后端不可达）——
+	// **可重试**：装配顺序（cloud 任务恢复早于封装卷 attach）与后端抖动都会自愈。
+	// 2026-11-24 实测：重启后任务恢复时转存报 `目标卷 "baidu" 未装配`，被归 unknown ⇒ 不重试 ✗。
+	ErrClassTargetUnavailable = "target_unavailable"
 	// ErrClassDiskFull 空间不足 ⇒ 需人工处理，不自动重试。
 	ErrClassDiskFull = "disk_full"
 	// ErrClassAuth 认证/权限问题 ⇒ 需人工处理，不自动重试。
@@ -68,6 +72,10 @@ func classifyCloudError(msg string) string {
 		return ErrClassAuth
 	case strings.Contains(s, "checksum") || strings.Contains(s, "integrity") || strings.Contains(s, "damaged"):
 		return ErrClassContentMismatch
+	case strings.Contains(s, "未装配") || strings.Contains(s, "not assembled") ||
+		strings.Contains(s, "not attached") || strings.Contains(s, "volume not found") ||
+		strings.Contains(s, "卷不存在") || strings.Contains(s, "backend unavailable"):
+		return ErrClassTargetUnavailable
 	case strings.Contains(s, "exists") || strings.Contains(s, "conflict") || strings.Contains(s, "overwrite"):
 		return ErrClassTargetConflict
 	case strings.Contains(s, "429") || strings.Contains(s, "throttl") || strings.Contains(s, "rate limit") ||

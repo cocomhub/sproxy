@@ -17,7 +17,8 @@ import (
 // 目标冲突/磁盘满/鉴权需人工处理，自动重试只会浪费时间并掩盖问题。
 func retryableCloudFailure(class string) bool {
 	switch class {
-	case cloud.ErrClassSourceUnreachable, cloud.ErrClassThrottled, cloud.ErrClassContentMismatch:
+	case cloud.ErrClassSourceUnreachable, cloud.ErrClassThrottled, cloud.ErrClassContentMismatch,
+		cloud.ErrClassTargetUnavailable:
 		return true
 	default:
 		return false
