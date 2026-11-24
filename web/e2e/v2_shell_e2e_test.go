@@ -392,6 +392,117 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("刷新后密度未保持: %v", err)
 	}
 
+	// 服务端搜索（真实 /api/files/search）：命中完整相对路径；清除后回到目录列表。
+	if err := page.Locator("#v2-search").Fill("e2e"); err != nil {
+		t.Fatalf("填写搜索: %v", err)
+	}
+	if err := page.Locator("#v2-search-btn").Click(); err != nil {
+		t.Fatalf("点击搜索: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"v2demo/e2e.txt\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("搜索未命中 v2demo/e2e.txt: %v", err)
+	}
+	if err := page.Locator("#v2-search-clear").Click(); err != nil {
+		t.Fatalf("清除搜索: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e.txt\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("清除搜索后未回到目录列表: %v", err)
+	}
+
+	// 卷过滤 + 强刷（真实 /api/volumes 与 /api/volumes/refresh）。
+	if n, _ := page.Locator("#v2-volume option").Count(); n < 2 {
+		t.Fatalf("卷选择器未加载卷列表（options=%d）", n)
+	}
+	if _, err := page.Evaluate(`() => { const s = document.querySelector('#v2-volume'); s.selectedIndex = 1; s.dispatchEvent(new Event('change')); }`, nil); err != nil {
+		t.Fatalf("选择卷: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-file-body tr[data-name]').length > 0 || !document.querySelector('#v2-files-state').hidden",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("按卷过滤后列表未响应: %v", err)
+	}
+	if err := page.Locator("#v2-vol-refresh").Click(); err != nil {
+		t.Fatalf("点击清缓存: %v", err)
+	}
+
+	// 回收站真实流程：删除 e2e.txt → 出现在回收站 → 恢复 → 回到列表。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("未找到删除按钮: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]").Click(); err != nil {
+		t.Fatalf("点击删除: %v", err)
+	}
+	if err := page.Locator(".modal-backdrop [data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("确认删除: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !document.querySelector('#v2-file-body tr[data-name=\"e2e.txt\"]')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("删除后列表仍存在条目: %v", err)
+	}
+	if err := page.Keyboard().Press("g"); err != nil {
+		t.Fatalf("g 前缀: %v", err)
+	}
+	if err := page.Keyboard().Press("r"); err != nil {
+		t.Fatalf("g r 跳回收站: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-trash-body'); return b && b.children.length > 0; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("回收站未列出刚删除的文件: %v", err)
+	}
+	if err := page.Locator("#v2-trash-body button").First().Click(); err != nil {
+		t.Fatalf("点击恢复: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-trash-body').children.length === 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("恢复后回收站未清空: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e.txt\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("恢复后文件未回到列表: %v", err)
+	}
+
+	// 再删除一次 → 清空回收站（原生确认框）。先把卷过滤复位为「全部卷」。
+	if _, err := page.Evaluate(`() => { const s = document.querySelector('#v2-volume'); if (s) { s.selectedIndex = 0; s.dispatchEvent(new Event('change')); } }`, nil); err != nil {
+		t.Fatalf("复位卷过滤: %v", err)
+	}
+	respondDialogs(page, func(d playwright.Dialog) { _ = d.Accept() })
+	if err := page.Locator("#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]").Click(); err != nil {
+		t.Fatalf("再次点击删除: %v", err)
+	}
+	if err := page.Locator(".modal-backdrop [data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("再次确认删除: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/trash'; }", nil); err != nil {
+		t.Fatalf("进入回收站: %v", err)
+	}
+	if err := waitLoc(page, "#v2-trash-empty", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("回收站按钮未渲染: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-trash-body').children.length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		state, _ := page.Locator("#v2-trash-state").TextContent()
+		count, _ := page.Locator("#v2-trash-count").TextContent()
+		fstate, _ := page.Locator("#v2-files-state").TextContent()
+		t.Fatalf("回收站未出现待清空条目: %v (trash_state=%q count=%q files_state=%q)", err, state, count, fstate)
+	}
+	if err := page.Locator("#v2-trash-empty").Click(); err != nil {
+		t.Fatalf("点击清空: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !document.querySelector('#v2-trash-empty-hint').hidden",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("清空后回收站未变为空: %v", err)
+	}
+
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
 	if err := page.Locator("#v2-theme-toggle").Click(); err != nil {

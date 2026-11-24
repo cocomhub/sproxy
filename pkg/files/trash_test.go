@@ -521,3 +521,67 @@ func TestTrash_EmptyEncryptedVolume_ReleasesSameAsWrite(t *testing.T) {
 		t.Fatalf("TTL 清理后 user 配额应精确 = %d（物理占用）, got %d", wantSmall, got)
 	}
 }
+
+// TestTrash_RestoreRestoresChecksumLedger 恢复后必须重建 checksum 台账：
+// 否则列表 checksum 为空，用户对该文件的再次删除/分享等依赖校验和的操作全部失败
+// （软删时台账被释放，恢复必须对称补回，数据源是随迁的 meta sidecar）。
+func TestTrash_RestoreRestoresChecksumLedger(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	env.fileMeta = true
+	env.enableWriteDefaults()
+	ctx := context.Background()
+	cs := testutil.SHA256Hex([]byte("hello"))
+	if _, err := env.svc.WriteFile(ctx, WriteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, ClientSize: 5,
+	}, strings.NewReader("hello")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// 测试替身只写占位 meta（"test-meta"）；这里覆盖为真实形状，供恢复路径读取 TotalSHA256。
+	tnt0 := env.tenantFor("alice")
+	metaAbs, _ := tnt0.Root().Abs("meta/a.txt.meta")
+	if err := os.MkdirAll(filepath.Dir(metaAbs), 0o755); err != nil {
+		t.Fatalf("建 meta 目录: %v", err)
+	}
+	if err := os.WriteFile(metaAbs, []byte(`{"total_sha256":"`+cs+`"}`), 0o644); err != nil {
+		t.Fatalf("写 meta: %v", err)
+	}
+	if _, err := env.svc.DeleteFile(ctx, DeleteFileInput{
+		Owner: "alice", RemotePath: "a.txt", ExpectedChecksum: cs, SoftDelete: true,
+	}); err != nil {
+		t.Fatalf("软删: %v", err)
+	}
+	tnt := env.tenantFor("alice")
+	trashAbs, _ := tnt.Root().Abs("trash")
+	flat := flattenRel("user/a.txt")
+	dirAbs := filepath.Join(trashAbs, filepath.FromSlash(path.Dir(flat)))
+	entries, err := os.ReadDir(dirAbs)
+	if err != nil || len(entries) != 2 { // 主文件 + meta
+		t.Fatalf("trash 应 2 条, got %d err=%v", len(entries), err)
+	}
+	var trashRel string
+	for _, e := range entries {
+		if !strings.Contains(e.Name(), ".meta.__deleted__") {
+			trashRel = trashPrefix + path.Dir(flat) + "/" + e.Name()
+		}
+	}
+	if trashRel == "" {
+		t.Fatal("未找到主文件回收站条目")
+	}
+	if rerr := env.svc.RestoreTrash(ctx, "alice", trashRel); rerr != nil {
+		t.Fatalf("恢复: %v", rerr)
+	}
+	res, err := env.svc.List(ctx, ListQuery{Owner: "alice"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, fi := range res.Files {
+		if fi.Name == "a.txt" {
+			if fi.Checksum != cs {
+				t.Fatalf("恢复后 checksum = %q，期望 %q", fi.Checksum, cs)
+			}
+			return
+		}
+	}
+	t.Fatal("恢复后列表未找到 a.txt")
+}

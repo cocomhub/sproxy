@@ -13,6 +13,7 @@ package files
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -211,7 +212,7 @@ func (s *Service) RestoreTrashIn(ctx context.Context, owner, volumeName, trashRe
 		if !s.trashEntryExists(vr.Root, trashRel) {
 			continue
 		}
-		if err := s.restoreTrashAt(ctx, vr.Root, trashRel); err != nil {
+		if err := s.restoreTrashAt(ctx, owner, vr.Volume, vr.Root, trashRel); err != nil {
 			s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
 			return err
 		}
@@ -231,7 +232,7 @@ func (s *Service) trashEntryExists(root *storage.Root, trashRel string) bool {
 }
 
 // restoreTrashAt 在给定卷根上恢复条目（原 RestoreTrash 主体）。
-func (s *Service) restoreTrashAt(ctx context.Context, root *storage.Root, trashRel string) error {
+func (s *Service) restoreTrashAt(ctx context.Context, owner, volumeName string, root *storage.Root, trashRel string) error {
 	// 解析原 rel：去掉 trash/ 前缀 + __deleted__ 后缀。
 	if !strings.HasPrefix(trashRel, trashPrefix) {
 		return &HTTPError{Status: 400, Message: "无效的回收站路径"}
@@ -268,7 +269,31 @@ func (s *Service) restoreTrashAt(ctx context.Context, root *storage.Root, trashR
 	if mt := restoreTrashMetaSuffix(root, flat, nano); mt != "" {
 		_ = atomicRenameRoot(root, trashPrefix+flat+trashMetaMarker+trashDeletedSuffix+mt, meta.MetaPath(origRel))
 	}
+	// 软删时校验和台账已释放；恢复必须对称补回，否则列表 checksum 为空 ⇒ 该文件后续
+	// 删除/分享等依赖校验和的操作恒失败（数据源 = 随迁 meta sidecar 的 TotalSHA256）。
+	s.restoreChecksumFromMeta(ctx, owner, volumeName, root, origRel)
 	return nil
+}
+
+// restoreChecksumFromMeta 用恢复后的 meta sidecar 重建 checksum 台账（键口径与写内核一致：
+// 卷维度键 `user/<rel>`）。sidecar 缺失/损坏/未启用 meta / 台账未装配 ⇒ 静默跳过（读侧零校验语义）。
+func (s *Service) restoreChecksumFromMeta(ctx context.Context, owner, volumeName string, root *storage.Root, origRel string) {
+	if !s.rt.fileMetaEnabled() {
+		return
+	}
+	raw, err := s.rt.readMetaSidecar(ctx, root, meta.MetaPath(origRel))
+	if err != nil {
+		return
+	}
+	var fm meta.FileMeta
+	if json.Unmarshal(raw, &fm) != nil || fm.TotalSHA256 == "" {
+		return
+	}
+	cs := s.rt.checksumStore(owner)
+	if cs == nil {
+		return
+	}
+	checksumSet(cs, volumeName, origRel, fm.TotalSHA256)
 }
 
 // restoreTrashMetaSuffix 定位 trash 桶中对应 flat 的 meta 条目并返回其删除后缀段。

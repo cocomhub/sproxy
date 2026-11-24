@@ -11,7 +11,8 @@
   var f = window.v2files;
   if (!auth || !f) { return; }
 
-  var state = { subdir: '', files: [], selected: Object.create(null) };
+  var VOL_KEY = 'sproxy_v2_volume';
+  var state = { subdir: '', volume: '', query: '', files: [], selected: Object.create(null) };
 
   function el(id) { return document.getElementById(id); }
 
@@ -91,7 +92,7 @@
 
       var nameTd = document.createElement('td');
       var link = document.createElement('a');
-      link.href = file.isDir ? hashForSubdir(f.joinSubdir(subdir, file.name)) : '#';
+      link.href = file.isDir ? hashForSubdir(state.query ? file.name : f.joinSubdir(subdir, file.name)) : '#';
       if (!file.isDir) { link.setAttribute('data-preview', file.name); }
       link.textContent = file.name;
       link.className = 'mono';
@@ -147,6 +148,15 @@
     if (count) { count.textContent = state.files.length + ' 项' + (n ? ' · 已选 ' + n : ''); }
   }
 
+  function listPath() {
+    if (state.query) {
+      return '/api/files/search?q=' + encodeURIComponent(state.query) + '&limit=200';
+    }
+    var path = '/api/files?subdir=' + encodeURIComponent(state.subdir) + '&limit=200';
+    if (state.volume) { path += '&volume=' + encodeURIComponent(state.volume); }
+    return path;
+  }
+
   function load() {
     var subdir = subdirFromHash();
     state.subdir = subdir;
@@ -157,20 +167,16 @@
     var count = el('v2-count');
     if (count) { count.textContent = '加载中…'; }
 
-    var path = '/api/files?subdir=' + encodeURIComponent(subdir) + '&limit=200';
-    var creds = auth.loadCreds(window.sessionStorage);
-    auth.authHeaders('GET', path, null, creds, window.sclientSig && window.sclientSig.signHeader)
-      .then(function (headers) { return fetch(path, { headers: headers, credentials: 'same-origin' }); })
-      .then(function (resp) {
-        if (resp.status === 401) { throw new Error('未登录：请先在旧版填写 AccessKey/Secret'); }
-        if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
-        return resp.json();
-      })
+    var path = listPath();
+    var api = window.v2api;
+    (api ? api.json('GET', path) : Promise.reject(new Error('api 未装配')))
       .then(function (payload) {
         state.files = f.normalizeFiles(payload);
         renderRows(subdir, state.files);
         syncSelection();
-        if (!state.files.length) { setState('empty', '此目录为空，可上传文件或新建目录。'); }
+        if (!state.files.length) {
+          setState('empty', state.query ? ('没有匹配「' + state.query + '」的文件。') : '此目录为空，可上传文件或新建目录。');
+        }
       })
       .catch(function (err) {
         if (count) { count.textContent = '—'; }
@@ -179,9 +185,73 @@
       });
   }
 
+  /** 强制刷新（清卷状态缓存）后重载列表；可针对当前卷。 */
+  function forceRefresh() {
+    var api = window.v2api;
+    if (!api) { return; }
+    var path = '/api/volumes/refresh' + (state.volume ? '?volume=' + encodeURIComponent(state.volume) : '');
+    api.json('POST', path).then(function () {
+      if (window.v2toast) { window.v2toast('ok', '已刷新卷状态'); }
+      load();
+    }).catch(function (e) {
+      if (window.v2toast) { window.v2toast('bad', '刷新失败：' + (e.message || e)); }
+    });
+  }
+
+  function loadVolumes() {
+    var sel = el('v2-volume');
+    var api = window.v2api;
+    if (!sel || !api) { return; }
+    api.json('GET', '/api/volumes').then(function (body) {
+      var vols = (body && body.volumes) || [];
+      sel.textContent = '';
+      var all = document.createElement('option');
+      all.value = ''; all.textContent = '全部卷';
+      sel.appendChild(all);
+      vols.forEach(function (v) {
+        if (!v || !v.name) { return; }
+        var o = document.createElement('option');
+        o.value = v.name; o.textContent = v.name;
+        sel.appendChild(o);
+      });
+      try { state.volume = localStorage.getItem(VOL_KEY) || ''; } catch (e) { state.volume = ''; }
+      sel.value = state.volume;
+    }).catch(function () { /* 列表仍可用，仅无卷过滤 */ });
+  }
+
   function init() {
     var refresh = el('v2-refresh');
-    if (refresh) { refresh.addEventListener('click', load); }
+    if (refresh) { refresh.addEventListener('click', function () { load(); }); }
+    var volRefresh = el('v2-vol-refresh');
+    if (volRefresh) { volRefresh.addEventListener('click', forceRefresh); }
+
+    var vol = el('v2-volume');
+    if (vol) {
+      vol.addEventListener('change', function () {
+        state.volume = vol.value;
+        try { localStorage.setItem(VOL_KEY, state.volume); } catch (e) { /* 忽略 */ }
+        load();
+      });
+    }
+    var search = el('v2-search');
+    var searchBtn = el('v2-search-btn');
+    var searchClear = el('v2-search-clear');
+    function runSearch() {
+      state.query = ((search && search.value) || '').trim();
+      if (searchClear) { searchClear.hidden = !state.query; }
+      load();
+    }
+    if (search) {
+      search.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
+    }
+    if (searchBtn) { searchBtn.addEventListener('click', runSearch); }
+    if (searchClear) {
+      searchClear.addEventListener('click', function () {
+        if (search) { search.value = ''; }
+        runSearch();
+      });
+    }
+    loadVolumes();
 
     var body = el('v2-file-body');
     if (body) {
@@ -219,6 +289,8 @@
     load: load,
     state: state,
     subdir: function () { return state.subdir; },
+    volume: function () { return state.volume; },
+    search: function () { return state.query; },
     selected: function () { return Object.keys(state.selected); },
     file: function (name) {
       for (var i = 0; i < state.files.length; i += 1) {
