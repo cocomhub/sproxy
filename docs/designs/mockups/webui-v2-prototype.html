@@ -432,6 +432,29 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
 .devtools select,.devtools button{height:26px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:var(--radius-sm);font-size:12px;padding:0 7px;cursor:pointer}
 .devtools button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:transparent}
 
+/* ───── 危险操作确认 ───── */
+.modal{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:110;padding:16px}
+.modal.show{display:flex}
+.modal-box{width:470px;max-width:94vw;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-2);padding:20px}
+.modal-box h3{margin:0 0 6px;font-size:15px}
+.modal-box p{margin:0;font-size:13px;color:var(--text-2)}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.modal-field{margin-top:14px;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.modal-field code{font-family:var(--font-mono);background:var(--surface-3);padding:1px 5px;border-radius:3px}
+
+/* ───── 拖拽上传 ───── */
+.dropzone{border:1px dashed var(--border-strong);border-radius:var(--radius-md);padding:10px 12px;display:flex;gap:10px;align-items:center;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease)}
+body[data-drag="1"] .content{outline:2px dashed var(--accent);outline-offset:-8px}
+body[data-drag="1"] .dropzone{border-color:var(--accent);background:var(--accent-soft)}
+
+/* ───── 密度（显式切换） ───── */
+:root{--row-extra:0px}
+[data-density="comfortable"]{--row-extra:10px}
+.table tr{height:calc(var(--row-h) + var(--row-extra))}
+
+/* ───── 掩码凭据 ───── */
+.masked{letter-spacing:.18em;color:var(--text-2)}
+
 @media (max-width:1100px){
   [data-skin="a"] .shell,[data-skin="b"] .shell{grid-template-columns:64px minmax(0,1fr)}
   .brand-name,.brand-tag,.nav .label,.rail-group,.who .txt,.nav .count{display:none}
@@ -458,6 +481,7 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
   </select>
   <button id="dev-theme" type="button">暗/亮</button>
   <button id="dev-loading" type="button" aria-pressed="false">加载态</button>
+  <button id="dev-density" type="button" aria-pressed="false">密度</button>
   <button id="dev-ds" type="button">组件库</button>
   <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
@@ -636,14 +660,17 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
         </div>
 
         <div class="card">
-          <div class="card-b" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-            <div class="empty" style="padding:4px 0;flex-direction:row;align-items:center;gap:10px;text-align:left">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 5v14M5 12h14"/></svg>
-              <div><b>拖拽文件到此处即可上传</b><div class="muted" style="font-size:12px">支持多选与目录保留；目标卷：baidu</div></div>
+          <div class="card-b">
+            <div class="dropzone" id="dropzone">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+              <div style="flex:1;min-width:0"><b>拖拽文件到此处即可上传</b><div class="muted" style="font-size:12px">支持多选与目录保留；目标卷：baidu · 单文件上限 1 GiB（普通上传）</div></div>
+              <button class="btn btn-sm" type="button" data-toast="请选择文件（原型不打开文件选择器）" data-toast-kind="info">选择文件</button>
             </div>
-            <div class="spacer" style="flex:1"></div>
-            <button class="btn btn-sm" type="button">新建目录</button>
-            <button class="btn btn-sm" type="button">下载归档</button>
+            <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+              <button class="btn btn-sm" type="button">新建目录</button>
+              <button class="btn btn-sm" type="button">下载归档</button>
+              <span class="muted" style="font-size:12px;margin-left:auto">上传会先创建分块会话，断网后可在传输页继续。</span>
+            </div>
           </div>
         </div>
       </section>
@@ -803,12 +830,12 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
               <div class="cnav" data-sec="audit" role="button" tabindex="0">审计</div>
               <div class="cnav" data-sec="volumes" role="button" tabindex="0">卷 <span class="count">6</span></div>
               <div class="cnav" data-sec="config" role="button" tabindex="0">配置</div>
-              <div class="cnav pending" title="设计待定（对照表中尚未展开）">卷管理 <span class="tag">待定</span></div>
-              <div class="cnav pending" title="设计待定">凭据 <span class="tag">待定</span></div>
-              <div class="cnav pending" title="设计待定">Secret <span class="tag">待定</span></div>
-              <div class="cnav pending" title="设计待定">同步冲突 <span class="tag">待定</span></div>
-              <div class="cnav pending" title="设计待定">Mesh <span class="tag">待定</span></div>
-              <div class="cnav pending" title="设计待定">Hub <span class="tag">待定</span></div>
+              <div class="cnav" data-sec="vol-manage" role="button" tabindex="0">卷管理</div>
+              <div class="cnav" data-sec="credentials" role="button" tabindex="0">凭据 <span class="count">3</span></div>
+              <div class="cnav" data-sec="secret" role="button" tabindex="0">Secret</div>
+              <div class="cnav" data-sec="sync" role="button" tabindex="0">同步冲突 <span class="count">2</span></div>
+              <div class="cnav" data-sec="mesh" role="button" tabindex="0">Mesh</div>
+              <div class="cnav" data-sec="hub" role="button" tabindex="0">Hub</div>
             </nav>
             <div class="console-content">
               <!-- 概览 -->
@@ -1110,6 +1137,169 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
                   <button class="btn btn-sm btn-primary" type="button" data-toast="配置校验失败：max_upload_bytes 过小" data-toast-kind="bad">保存</button>
                 </div>
               </section>
+
+              <!-- 卷管理 -->
+              <section class="csection" data-sec="vol-manage">
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">6</span></span>
+                  <span class="chip">本地</span><span class="chip">外部</span><span class="chip">加密</span><span class="chip">封装</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm btn-primary" type="button" data-toast="请先填写名称与后端目标" data-toast-kind="info">新建卷</button>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>新建卷</h3><span class="hint">创建后立即挂载；封装卷需指定父卷</span></div>
+                  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px">
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">名称<input class="input" placeholder="例如 media-audit"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">类型<select class="select"><option>local</option><option>external</option><option>secretdata</option><option>enclosure</option></select></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">后端 / 目标<input class="input" placeholder="mydisk/s 或 baidu/archive"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">容量<input class="input" placeholder="1 TiB（0 = 不限）"></label>
+                    <div style="display:flex;align-items:flex-end;gap:8px">
+                      <button class="btn btn-sm btn-primary" type="button" data-toast="卷校验中：名称可用、目标可达" data-toast-kind="info">创建</button>
+                      <button class="btn btn-sm" type="button" data-toast="已清空表单" data-toast-kind="info">重置</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th>名称</th><th style="width:110px">类型</th><th>后端 / 目标</th><th style="width:110px" class="r">容量</th><th style="width:100px">状态</th><th style="width:230px"></th></tr></thead>
+                    <tbody>
+                      <tr><td><div class="name"><span class="t">baidu</span></div></td><td><span class="pill pill-info">外部</span></td><td class="mono">mydisk/s</td><td class="r num">1.6 TiB</td><td><span class="pill pill-ok">已挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 baidu？" data-confirm-msg="卷上仍有 1.02 TiB 数据；有活动任务或非空卷默认拒绝删除。" data-confirm-ok="删除卷" data-confirm-type="baidu" data-confirm-toast="已删除卷 baidu">删除</button></div></td></tr>
+                      <tr><td><div class="name"><span class="t">secretdata</span></div></td><td><span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></td><td class="mono">4 副本 · erasure</td><td class="r num">2 TiB</td><td><span class="pill pill-ok">已挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 secretdata？" data-confirm-msg="加密卷删除后分块与目录元数据将不可恢复。" data-confirm-ok="删除卷" data-confirm-type="secretdata" data-confirm-toast="已删除卷 secretdata">删除</button></div></td></tr>
+                      <tr><td><div class="name"><span class="t">local</span></div></td><td><span class="pill pill-mute">本地</span></td><td class="mono">/srv/sproxy</td><td class="r num">480 GiB</td><td><span class="pill pill-ok">已挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 local？" data-confirm-msg="本地卷只解除挂载，不删除磁盘文件。" data-confirm-ok="解除挂载" data-confirm-toast="已解除挂载 local">删除</button></div></td></tr>
+                      <tr><td><div class="name"><span class="t">archive</span></div></td><td><span class="pill pill-mute">封装</span></td><td class="mono">baidu/archive</td><td class="r num">240 GiB</td><td><span class="pill pill-ok">已挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除卷 archive？" data-confirm-msg="封装卷删除只移除声明，不删除父卷数据。" data-confirm-ok="删除卷" data-confirm-type="archive" data-confirm-toast="已删除卷 archive">删除</button></div></td></tr>
+                      <tr><td><div class="name"><span class="t">media-audit</span></div></td><td><span class="pill pill-mute">封装</span></td><td class="mono">baidu/audit</td><td class="r num sub">—</td><td><span class="pill pill-warn">未挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-toast="已尝试挂载 media-audit" data-toast-kind="ok">挂载</button><button class="btn btn-sm btn-ghost" type="button">属性</button><button class="btn btn-sm btn-ghost" type="button">删除</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="muted" style="font-size:12px">删除卷需要输入卷名确认；有活动任务或非空卷默认拒绝（需迁移或显式 force）。</div>
+              </section>
+
+              <!-- 凭据 -->
+              <section class="csection" data-sec="credentials">
+                <div class="banner">
+                  <div><b>凭据 Ring</b><div class="muted" style="font-size:12px">主密钥来源：环境变量 · 快照存储于 <span class="mono">meta/credentials.json</span>；SK 永不回显。</div></div>
+                  <div class="acts"><button class="btn btn-sm" type="button" data-confirm-title="轮换主密钥？" data-confirm-msg="轮换后旧快照需重新加密；所有节点需同步重启。" data-confirm-ok="轮换" data-confirm-toast="已提交主密钥轮换">轮换主密钥</button></div>
+                </div>
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">3</span></span><span class="chip">即将到期 <span class="n">1</span></span><span class="chip">已禁用</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm btn-primary" type="button" data-toast="请填写 AK 与 Owner" data-toast-kind="info">新增凭据</button>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th>AK</th><th style="width:110px">Owner</th><th style="width:120px">SK</th><th style="width:100px">状态</th><th style="width:130px">创建</th><th style="width:130px">到期</th><th style="width:200px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">skey-d6ff3f0f</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-info">active</span></td><td class="num muted">11-02</td><td class="num" style="color:var(--warn)">12-04</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="轮换 skey-d6ff3f0f？" data-confirm-msg="旧 SK 在宽限期后可继续使用 24h。" data-confirm-ok="轮换" data-confirm-toast="已轮换凭据，宽限期 24h">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
+                      <tr><td class="mono">skey-7a21cc03</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-ok">active</span></td><td class="num muted">09-14</td><td class="num muted">2027-09-14</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
+                      <tr><td class="mono">skey-1b90eaff</td><td>ops</td><td class="mono masked">••••••••</td><td><span class="pill pill-mute">disabled</span></td><td class="num muted">08-01</td><td class="num muted">—</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">启用</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="删除凭据 skey-1b90eaff？" data-confirm-msg="删除后使用该 AK 的客户端将无法认证。" data-confirm-ok="删除" data-confirm-toast="已删除凭据">删除</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>新增凭据</h3><span class="hint">生成后一次性展示 SK</span></div>
+                  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px">
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">Owner<input class="input" placeholder="leonli"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">AK<input class="input" placeholder="留空自动生成"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">SK<input class="input" placeholder="留空自动生成" type="password"></label>
+                    <div style="display:flex;align-items:flex-end;gap:8px"><button class="btn btn-sm btn-primary" type="button" data-toast="已生成 AK/SK（仅展示一次）" data-toast-kind="ok">生成</button></div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Secret -->
+              <section class="csection" data-sec="secret">
+                <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+                  <div class="kpi"><div class="k">副本策略</div><div class="v num">4</div><div class="d"><span class="muted">RS(2,2) · 可容忍 1 副本损坏</span></div></div>
+                  <div class="kpi"><div class="k">分块大小</div><div class="v num">256<span style="font-size:13px;color:var(--text-3)"> KiB</span></div><div class="d"><span class="muted">低于 4 MiB，不触发网盘分片</span></div></div>
+                  <div class="kpi"><div class="k">目录元数据</div><div class="v num">sidecar</div><div class="d"><span class="muted">加密写入，支持批量校验</span></div></div>
+                  <div class="kpi"><div class="k">封印状态</div><div class="v num" style="color:var(--ok)">未封印</div><div class="d"><span class="muted">封印后只读</span></div></div>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th>卷</th><th style="width:140px">算法</th><th style="width:90px">副本</th><th style="width:110px">块大小</th><th style="width:100px">状态</th><th style="width:260px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">secretdata</td><td class="mono">AES-256-GCM</td><td class="num">4</td><td class="num">256 KiB</td><td><span class="pill pill-ok">已挂载</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已开始全量校验" data-toast-kind="info">校验</button><button class="btn btn-sm btn-ghost" type="button" style="color:var(--bad)" data-confirm-title="封印卷 secretdata？" data-confirm-msg="封印期间禁止写入与删除，仅允许读取。" data-confirm-ok="封印" data-confirm-type="secretdata" data-confirm-toast="已封印 secretdata">封印</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="banner banner-bad">
+                  <div><b>危险操作</b><div class="muted" style="font-size:12px">封印与密钥轮换需要输入卷名确认；密钥轮换不可逆，旧数据需后台重加密。</div></div>
+                </div>
+              </section>
+
+              <!-- 同步冲突 -->
+              <section class="csection" data-sec="sync">
+                <div class="filters">
+                  <span class="chip active">待处理 <span class="n">2</span></span><span class="chip">已解决 <span class="n">14</span></span>
+                  <select class="select" aria-label="冲突策略"><option>冲突策略：conflict-rename</option><option>skip</option><option>overwrite</option><option>lww</option></select>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已批量保留本地版本（2 项）" data-toast-kind="ok">批量保留本地</button>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 conflicts.csv" data-toast-kind="ok">导出</button>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th>任务</th><th>路径</th><th style="width:130px">类型</th><th style="width:120px">本地 / 远端</th><th style="width:120px">时间</th><th style="width:250px"></th></tr></thead>
+                    <tbody>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td><td class="mono">sync-a1</td><td class="mono">jav/NHDTB-864.mp4</td><td><span class="pill pill-warn">both_modified</span></td><td class="num">v3 / v2</td><td class="num muted">18:30</td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已保留本地版本" data-toast-kind="ok">保留本地</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已保留远端版本" data-toast-kind="ok">保留远端</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已改名保留两份" data-toast-kind="info">改名</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td><td class="mono">sync-b7</td><td class="mono">archive/2026-11/</td><td><span class="pill pill-bad">delete_vs_modify</span></td><td class="num">— / v5</td><td class="num muted">17:52</td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-confirm-title="传播删除到远端？" data-confirm-msg="远端 v5 将被删除，此操作不可撤销。" data-confirm-ok="传播删除" data-confirm-toast="已传播删除">传播删除</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已保留远端版本" data-toast-kind="ok">保留远端</button><button class="btn btn-sm btn-ghost" type="button">忽略</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="muted" style="font-size:12px">删除冲突默认不自动传播（delete_policy=skip）；显式传播需二次确认。</div>
+              </section>
+
+              <!-- Mesh -->
+              <section class="csection" data-sec="mesh">
+                <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
+                  <div class="kpi"><div class="k">本节点角色</div><div class="v num">exit</div><div class="d"><span class="muted">同时可作为中继</span></div></div>
+                  <div class="kpi"><div class="k">活跃节点</div><div class="v num">4</div><div class="d"><span class="trend-up">+1</span><span>近 1 小时</span></div></div>
+                  <div class="kpi"><div class="k">平均延迟</div><div class="v num">38<span style="font-size:13px;color:var(--text-3)"> ms</span></div><div class="d"><span class="muted">p95 92 ms</span></div></div>
+                  <div class="kpi"><div class="k">本月流量</div><div class="v num">1.2<span style="font-size:13px;color:var(--text-3)"> TiB</span></div><div class="d"><span class="muted">出口 84%</span></div></div>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th>节点</th><th style="width:170px">地址</th><th style="width:100px">角色</th><th style="width:90px" class="r">延迟</th><th style="width:110px" class="r">流量</th><th style="width:100px">状态</th><th style="width:180px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">node-a1</td><td class="mono">10.0.0.11:18083</td><td><span class="pill pill-info">exit</span></td><td class="r num">12 ms</td><td class="r num">620 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="断开 node-a1？" data-confirm-msg="该节点承载 3 条中继流，断开后自动重连其它出口。" data-confirm-ok="断开" data-confirm-toast="已断开 node-a1">断开</button></div></td></tr>
+                      <tr><td class="mono">node-b2</td><td class="mono">10.0.0.12:18083</td><td><span class="pill pill-mute">relay</span></td><td class="r num">44 ms</td><td class="r num">380 GiB</td><td><span class="pill pill-ok">在线</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">断开</button></div></td></tr>
+                      <tr><td class="mono">node-c3</td><td class="mono">10.0.0.13:18083</td><td><span class="pill pill-mute">relay</span></td><td class="r num">—</td><td class="r num">0</td><td><span class="pill pill-warn">心跳超时</span></td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">诊断</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="muted" style="font-size:12px">切换本节点为 exit 会影响所有 via-node 流量，需在低峰期操作。</div>
+              </section>
+
+              <!-- Hub -->
+              <section class="csection" data-sec="hub">
+                <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">
+                  <div class="kpi"><div class="k">注册节点</div><div class="v num">7</div><div class="d"><span class="muted">5 在线 · 2 离线</span></div></div>
+                  <div class="kpi"><div class="k">活跃流</div><div class="v num">12</div><div class="d"><span class="muted">中继 9 · 直连 3</span></div></div>
+                  <div class="kpi"><div class="k">中继带宽</div><div class="v num">84<span style="font-size:13px;color:var(--text-3)"> MiB/s</span></div><div class="d"><span class="muted">上限 200 MiB/s</span></div></div>
+                  <div class="kpi"><div class="k">拒绝注册</div><div class="v num">0</div><div class="d"><span class="muted">近 24 小时</span></div></div>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th>节点</th><th style="width:110px">角色</th><th style="width:180px">地址</th><th style="width:140px">最后心跳</th><th style="width:80px" class="r">流</th><th style="width:170px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">node-a1</td><td><span class="pill pill-info">exit</span></td><td class="mono">10.0.0.11:18083</td><td class="num muted">3s 前</td><td class="r num">6</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="从 Hub 移除 node-a1？" data-confirm-msg="移除后该节点需重新注册（SproxySig 准入）。" data-confirm-ok="移除" data-confirm-toast="已移除 node-a1">移除</button></div></td></tr>
+                      <tr><td class="mono">node-b2</td><td><span class="pill pill-mute">relay</span></td><td class="mono">10.0.0.12:18083</td><td class="num muted">8s 前</td><td class="r num">3</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                      <tr><td class="mono">node-d4</td><td><span class="pill pill-mute">relay</span></td><td class="mono">10.0.0.14:18083</td><td class="num muted">2m 前</td><td class="r num">0</td><td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">统计</button><button class="btn btn-sm btn-ghost" type="button">移除</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="banner"><div><b>注册准入</b><div class="muted" style="font-size:12px">节点使用凭据 Ring 的 AK + HMAC proof 注册；<span class="mono">relay_token</span> 已废除。</div></div></div>
+              </section>
             </div>
           </div>
         </div>
@@ -1212,6 +1402,10 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
                 <button class="btn btn-sm" type="button" data-toast="已重试 2 个失败任务" data-toast-kind="ok">成功 toast</button>
                 <button class="btn btn-sm" type="button" data-toast="校验失败：期望与实际不一致" data-toast-kind="bad" data-undo="1">失败 toast（可撤销）</button>
                 <button class="btn btn-sm" type="button" data-toast="目标卷未装配，已排队" data-toast-kind="warn">警告 toast</button>
+              </div>
+              <div class="ds-row">
+                <button class="btn btn-sm btn-danger" type="button" data-confirm-title="删除卷 baidu？" data-confirm-msg="卷上仍有 1.02 TiB 数据；有活动任务或非空卷默认拒绝删除。" data-confirm-ok="删除卷" data-confirm-type="baidu" data-confirm-toast="已删除卷 baidu">危险确认对话框</button>
+                <span class="muted" style="font-size:12px">需输入名称确认（不可撤销）</span>
               </div>
               <div class="banner"><div><b>普通提示 banner</b><div class="muted" style="font-size:12px">用于页面级说明，不阻断操作。</div></div></div>
               <div class="banner banner-bad"><div><b>错误 banner</b><div class="muted" style="font-size:12px">带重试动作，保留上下文。</div></div><div class="acts"><button class="btn btn-sm" type="button">重试</button></div></div>
@@ -1359,6 +1553,21 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
   </div>
 </div>
 
+<div class="modal" id="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-hidden="true">
+  <div class="modal-box">
+    <h3 id="confirm-title">确认操作</h3>
+    <p id="confirm-msg">该操作不可撤销。</p>
+    <div class="modal-field" id="confirm-type-wrap" style="display:none">
+      <span>请输入 <code id="confirm-type-name"></code> 确认</span>
+      <input class="input" id="confirm-type" autocomplete="off">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="confirm-cancel" type="button">取消</button>
+      <button class="btn btn-danger" id="confirm-ok" type="button" disabled>确认</button>
+    </div>
+  </div>
+</div>
+
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script>
@@ -1429,7 +1638,10 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
   var SECTIONS = {
     overview: '概览 · 最近 1 小时', cloud: '云端任务 · 12 条（2 失败）',
     issues: '待处理事项 · 5 项（2 可重试）', audit: '审计 · 最近 1 小时',
-    volumes: '卷 · 6 个（2 需关注）', config: '配置 · 有未保存改动'
+    volumes: '卷 · 6 个（2 需关注）', config: '配置 · 有未保存改动',
+    'vol-manage': '卷管理 · 6 个卷（1 未挂载）', credentials: '凭据 · 3 个 AK（1 即将到期）',
+    secret: 'Secret · 副本与封印', sync: '同步冲突 · 2 待处理',
+    mesh: 'Mesh · 4 个活跃节点', hub: 'Hub · 7 个注册节点'
   };
   function openConsole(sec) {
     if (isModalConsole()) {
@@ -1452,6 +1664,9 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
     });
     id('console-subtitle').textContent = SECTIONS[sec] || SECTIONS.overview;
     $$('#view-console .console-content').forEach(function (c) { c.scrollTop = 0; });
+    if (SECTIONS[sec] && id('view-console').classList.contains('active')) {
+      try { history.replaceState(null, '', '#/console/' + sec); } catch (err) { /* file:// 下可能不可用 */ }
+    }
   }
   $$('.cnav[data-sec]').forEach(function (n) {
     var act = function () { switchSection(n.getAttribute('data-sec')); };
@@ -1588,7 +1803,8 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'cmdk') { closeCmdk(); }
+      if (top === 'confirm') { closeConfirm(); }
+      else if (top === 'cmdk') { closeCmdk(); }
       else if (top === 'help') { closeHelp(); }
       else if (top === 'drawer') { closeDrawer(drawer); }
       else if (top === 'task-drawer') { closeDrawer(taskDrawer); }
@@ -1619,6 +1835,70 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
     }
   });
 
+  // ── 危险操作确认 ──
+  var confirmEl = id('confirm'), confirmType = id('confirm-type'), confirmOk = id('confirm-ok');
+  var confirmCfg = null;
+  function openConfirm(cfg) {
+    confirmCfg = cfg;
+    id('confirm-title').textContent = cfg.title;
+    id('confirm-msg').textContent = cfg.msg || '该操作不可撤销。';
+    var wrap = id('confirm-type-wrap');
+    confirmType.value = '';
+    if (cfg.type) {
+      wrap.style.display = 'flex';
+      id('confirm-type-name').textContent = cfg.type;
+      confirmOk.disabled = true;
+    } else {
+      wrap.style.display = 'none';
+      confirmOk.disabled = false;
+    }
+    confirmOk.textContent = cfg.ok || '确认';
+    layerStack.push('confirm');
+    confirmEl.classList.add('show'); confirmEl.setAttribute('aria-hidden', 'false');
+    (cfg.type ? confirmType : id('confirm-cancel')).focus();
+  }
+  function closeConfirm() {
+    confirmEl.classList.remove('show'); confirmEl.setAttribute('aria-hidden', 'true');
+    layerStack = layerStack.filter(function (x) { return x !== 'confirm'; });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-confirm-title]');
+    if (!b) { return; }
+    openConfirm({
+      title: b.getAttribute('data-confirm-title'),
+      msg: b.getAttribute('data-confirm-msg'),
+      ok: b.getAttribute('data-confirm-ok'),
+      type: b.getAttribute('data-confirm-type'),
+      toast: b.getAttribute('data-confirm-toast')
+    });
+  });
+  confirmType.addEventListener('input', function () {
+    confirmOk.disabled = !confirmCfg || confirmType.value.trim() !== confirmCfg.type;
+  });
+  confirmOk.addEventListener('click', function () {
+    var cfg = confirmCfg; closeConfirm();
+    toast('ok', (cfg && cfg.toast) || '已执行');
+  });
+  id('confirm-cancel').addEventListener('click', closeConfirm);
+  confirmEl.addEventListener('click', function (e) { if (e.target === confirmEl) { closeConfirm(); } });
+
+  // ── 拖拽上传 ──
+  var dragDepth = 0;
+  window.addEventListener('dragenter', function (e) {
+    if (!e.dataTransfer) { return; }
+    dragDepth++; document.body.dataset.drag = '1';
+  });
+  window.addEventListener('dragover', function (e) { if (e.dataTransfer) { e.preventDefault(); } });
+  window.addEventListener('dragleave', function () {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) { delete document.body.dataset.drag; }
+  });
+  window.addEventListener('drop', function (e) {
+    e.preventDefault(); dragDepth = 0; delete document.body.dataset.drag;
+    var n = e.dataTransfer && e.dataTransfer.files ? e.dataTransfer.files.length : 0;
+    toast('ok', n ? ('已接收 ' + n + ' 个文件，正在创建分块会话') : '未识别到文件');
+  });
+
   // ── 设计稿控制 ──
   id('dev-skin').addEventListener('change', function (e) {
     root.dataset.skin = e.target.value; closeConsole(); closeDrawer(drawer); closeDrawer(taskDrawer); show('files');
@@ -1633,6 +1913,18 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
     toast('info', on ? '已恢复数据' : '已切换到骨架屏加载态');
   });
   id('dev-ds').addEventListener('click', function () { show('ds'); });
+  id('dev-density').addEventListener('click', function (e) {
+    var on = root.dataset.density === 'comfortable';
+    if (on) { delete root.dataset.density; } else { root.dataset.density = 'comfortable'; }
+    e.currentTarget.setAttribute('aria-pressed', on ? 'false' : 'true');
+    toast('info', on ? '已切回紧凑密度' : '已切换舒适密度');
+  });
+
+  // 深链：/ui/#/console/<section>
+  (function () {
+    var m = (location.hash || '').match(/#\/console\/([a-z-]+)/);
+    if (m && SECTIONS[m[1]]) { show('console'); openConsole(m[1]); }
+  })();
 
   id('dev-skin').value = root.dataset.skin;
   syncSelection();
