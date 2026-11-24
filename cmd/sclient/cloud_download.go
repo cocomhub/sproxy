@@ -70,6 +70,12 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 		if extra, merr := parseMetaExtraFlag(raw); merr == nil && len(extra) > 0 {
 			opts = append(opts, client.WithChainMetaExtra(extra))
 		}
+		if sum, _ := cmd.Flags().GetString(flagExpectChecksum); sum != "" {
+			opts = append(opts, client.WithChainExpectedChecksum(sum))
+		}
+		if fb, _ := cmd.Flags().GetStringArray(flagFallbackURL); len(fb) > 0 {
+			opts = append(opts, client.WithChainFallbackURLs(fb...))
+		}
 	}
 	return opts
 }

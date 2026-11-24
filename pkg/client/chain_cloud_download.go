@@ -55,9 +55,12 @@ type CloudDownloadChain struct {
 	IntegrityMustPass bool `json:"integrity_must_pass,omitempty"`
 	// MetaExtra 转存产物的自定义元数据（透传服务端，与来源信息合并写目标卷）。
 	MetaExtra map[string]any `json:"meta_extra,omitempty"`
-	Completed int            `json:"completed"`
-	Failed    int            `json:"failed"`
-	Total     int            `json:"total"`
+	// ExpectedChecksum / FallbackURLs 透传给服务端（校验闭环 + 多源切换，2026-11-24）。
+	ExpectedChecksum string   `json:"expected_checksum,omitempty"`
+	FallbackURLs     []string `json:"fallback_urls,omitempty"`
+	Completed        int      `json:"completed"`
+	Failed           int      `json:"failed"`
+	Total            int      `json:"total"`
 	// Damaged 完整性损坏但放行完成的任务数（R3-I3：损坏副本不应被当可靠成功）。
 	Damaged int `json:"damaged,omitempty"`
 	// seenCompleted 已计数的 completed 任务 ID（R6-I1：防 storage-full 重试轮重复累计；
@@ -118,6 +121,8 @@ func NewCloudDownloadChain(client *FileClient, urls []string, archiveName, local
 		DownloadLocal:     opts.downloadLocal,
 		IntegrityMustPass: opts.forceIntegrity,
 		MetaExtra:         opts.metaExtra,
+		ExpectedChecksum:  opts.expectedChecksum,
+		FallbackURLs:      opts.fallbackURLs,
 		Total:             len(entries),
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -185,6 +190,8 @@ func (c *CloudDownloadChain) SetOptions(opts chainOptions) {
 	c.Save = opts.save
 	c.DownloadLocal = opts.downloadLocal
 	c.IntegrityMustPass = opts.forceIntegrity
+	c.ExpectedChecksum = opts.expectedChecksum
+	c.FallbackURLs = opts.fallbackURLs
 }
 
 // fixPollInterval 确保轮询间隔不为零，零值时使用默认值（5s）。

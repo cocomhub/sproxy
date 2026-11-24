@@ -163,16 +163,18 @@ func (r *ChainResult) DownloadedLocal() bool {
 
 // chainOptions 链式操作选项。
 type chainOptions struct {
-	pollInterval   time.Duration
-	timeout        time.Duration
-	keepFiles      bool
-	progressFn     ProgressFunc
-	entries        []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
-	transfer       *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
-	save           *bool                 // 保留 cloud 桶副本（nil = 默认 true）
-	metaExtra      map[string]any        // 转存产物的自定义元数据（服务端叠加来源后写目标卷）
-	downloadLocal  bool                  // 客户端是否下载本地（链式拉取）
-	forceIntegrity bool                  // 强制源文件完整性（语义校验失败阻断）
+	pollInterval     time.Duration
+	timeout          time.Duration
+	keepFiles        bool
+	progressFn       ProgressFunc
+	entries          []cloudfilename.Entry // 每个 URL 的可选保存文件名（nil = 由服务端自动生成）
+	transfer         *TransferSpec         // 转存目标（下载完成后转存到卷；nil = 不转存）
+	save             *bool                 // 保留 cloud 桶副本（nil = 默认 true）
+	metaExtra        map[string]any        // 转存产物的自定义元数据（服务端叠加来源后写目标卷）
+	downloadLocal    bool                  // 客户端是否下载本地（链式拉取）
+	forceIntegrity   bool                  // 强制源文件完整性（语义校验失败阻断）
+	expectedChecksum string                // 期望产物 checksum（服务端转存前校验）
+	fallbackURLs     []string              // 备选源（服务端按类别自动切换）
 }
 
 // ChainOption 链式操作选项函数。
@@ -454,4 +456,15 @@ func UnregisterRunner(typeName string) {
 	runnerRegistryMu.Lock()
 	defer runnerRegistryMu.Unlock()
 	delete(runnerRegistry, typeName)
+}
+
+// WithChainExpectedChecksum 链式云端下载的**期望产物 checksum**（服务端下载完成、转存前校验；
+// 不一致按 content_mismatch 处理 ⇒ 事项中心换源重试）。
+func WithChainExpectedChecksum(sum string) ChainOption {
+	return func(o *chainOptions) { o.expectedChecksum = sum }
+}
+
+// WithChainFallbackURLs 链式云端下载的**备选源**（同内容多条 URL；主源失败自动切换）。
+func WithChainFallbackURLs(urls ...string) ChainOption {
+	return func(o *chainOptions) { o.fallbackURLs = append(o.fallbackURLs, urls...) }
 }
