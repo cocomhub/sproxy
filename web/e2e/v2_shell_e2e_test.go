@@ -657,6 +657,60 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("最近操作未记录: %v", err)
 	}
 
+	// 概览趋势：近 1h 云任务失败数来自真实 /api/cloud/tasks?status=failed。
+	if err := page.Locator("[data-cs=overview]").Click(); err != nil {
+		t.Fatalf("回到概览: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const v = document.querySelector('#v2-cs-trend .v'); return v && v.textContent !== '—'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("概览趋势未加载: %v", err)
+	}
+
+	// 连接设置：保存并校验凭据（loopback 允许匿名验签）→ 退出登录；隧道开关保存。
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("打开连接设置: %v", err)
+	}
+	if err := waitLoc(page, "#v2-settings", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("连接设置未显示: %v", err)
+	}
+	if err := page.Locator("#v2-set-ak").Fill("EXAMPLE-AK"); err != nil {
+		t.Fatalf("填写 AK: %v", err)
+	}
+	if err := page.Locator("#v2-set-sk").Fill("skey-example01"); err != nil {
+		t.Fatalf("填写 SK: %v", err)
+	}
+	if err := page.Locator("#v2-set-save").Click(); err != nil {
+		t.Fatalf("保存凭据: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('凭据已保存'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("凭据保存未回显: %v", err)
+	}
+	if err := page.Locator("#v2-set-signout").Click(); err != nil {
+		t.Fatalf("退出登录: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已退出登录'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("退出登录未回显: %v", err)
+	}
+	if err := page.Locator("#v2-set-tunnel").Check(); err != nil {
+		t.Fatalf("勾选隧道开关: %v", err)
+	}
+	if err := page.Locator("#v2-set-tunnel-save").Click(); err != nil {
+		t.Fatalf("保存隧道开关: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('隧道开关已保存'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("隧道开关未回显: %v", err)
+	}
+	if err := page.Locator("#v2-settings-close").Click(); err != nil {
+		t.Fatalf("关闭设置: %v", err)
+	}
+
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
 	if err := page.Locator("#v2-theme-toggle").Click(); err != nil {

@@ -47,6 +47,9 @@
     box.appendChild(kpi('活跃连接', String((s && s.active_connections) || 0), '当前 HTTP/隧道'));
     var rc = (s && s.request_counts) || {};
     box.appendChild(kpi('请求', String(rc.total || 0), '2xx ' + (rc['2xx'] || 0) + ' · 4xx ' + (rc['4xx'] || 0) + ' · 5xx ' + (rc['5xx'] || 0)));
+    var trend = kpi('近 1h 失败', '—', '云任务失败数');
+    trend.id = 'v2-cs-trend';
+    box.appendChild(trend);
 
     var usage = el('v2-cs-storage');
     if (!usage) { return; }
@@ -394,10 +397,27 @@
       .catch(function (e) { banner('warn', '待处理事项加载失败：' + (e.message || e)); });
   }
 
+  /** 近 1 小时云任务失败数（真实 /api/cloud/tasks?status=failed，按 updated_at 过滤）。 */
+  function loadTrend() {
+    var box = el('v2-cs-trend');
+    if (!box) { return; }
+    var v = box.querySelector('.v');
+    api.json('GET', '/api/cloud/tasks?status=failed&limit=200')
+      .then(function (body) {
+        var since = Date.now() - 3600 * 1000;
+        var n = ((body && (body.tasks || body.items)) || []).filter(function (t) {
+          var ts = Date.parse(t.updated_at || t.created_at || '');
+          return !isNaN(ts) && ts >= since;
+        }).length;
+        if (v) { v.textContent = String(n); }
+      })
+      .catch(function () { if (v) { v.textContent = '—'; } });
+  }
+
   function load() {
     banner('', '');
     api.json('GET', '/api/stats')
-      .then(function (s) { renderStats(s); })
+      .then(function (s) { renderStats(s); loadTrend(); })
       .catch(function (e) {
         if (String(e.message || '').indexOf('尚未完成') !== -1 || String(e.message || '').indexOf('503') !== -1) {
           banner('warn', '存储统计尚未完成首次扫描，稍后刷新。');

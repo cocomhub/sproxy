@@ -53,6 +53,7 @@
       <button class="btn btn-ghost" id="v2-density-toggle" type="button" aria-pressed="false"
         title="切换表格密度">密度</button>
       <button class="btn btn-ghost" id="v2-cmdk-open" type="button" title="命令面板（⌘K / Ctrl+K）">⌘K</button>
+      <button class="btn btn-ghost" id="v2-settings-open" type="button" title="连接设置">设置</button>
       <a class="btn btn-ghost" href="/ui/" title="返回旧版">旧版</a>
       <button class="icon-btn" id="v2-theme-toggle" type="button" title="切换亮/暗" aria-label="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -539,6 +540,43 @@
 <div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
 <div class="sr-only" id="v2-live" role="status" aria-live="polite" aria-atomic="true"></div>
 
+
+<div class="cmdk-back" id="v2-settings-back" hidden></div>
+<div class="help-sheet" id="v2-settings" hidden role="dialog" aria-modal="true" aria-labelledby="v2-set-title">
+  <header><h3 id="v2-set-title">连接设置</h3>
+    <button class="btn btn-ghost" type="button" id="v2-settings-close">关闭</button></header>
+  <div class="sheet-body">
+    <div id="v2-set-state" class="banner" hidden role="status"></div>
+    <div class="card-title">AccessKey / Secret</div>
+    <div class="form-grid">
+      <label>AccessKey<input id="v2-set-ak" autocomplete="off"></label>
+      <label>Secret<input id="v2-set-sk" type="password" autocomplete="off"></label>
+      <label>Key ID（可选）<input id="v2-set-id" autocomplete="off"></label>
+    </div>
+    <div class="toolbar" style="margin:10px 0">
+      <button class="btn btn-primary" id="v2-set-save" type="button">保存并校验</button>
+      <button class="btn btn-ghost" id="v2-set-signout" type="button">退出登录</button>
+    </div>
+    <div class="card-title">TOTP 登录</div>
+    <div class="form-grid">
+      <label>AccessKey 或用户名<input id="v2-set-totp-ak" autocomplete="off"></label>
+      <label>动态码<input id="v2-set-totp-code" inputmode="numeric" autocomplete="one-time-code"></label>
+    </div>
+    <div class="toolbar" style="margin:10px 0">
+      <button class="btn" id="v2-set-login" type="button">登录</button>
+      <a class="btn btn-ghost" href="../index.html" title="旧版含 TOTP 注册与二维码">TOTP 注册（旧版）</a>
+    </div>
+    <div class="card-title">加密隧道</div>
+    <label class="dr-check"><input type="checkbox" id="v2-set-tunnel"> Web 域方法默认走加密隧道</label>
+    <div class="toolbar">
+      <button class="btn btn-ghost" id="v2-set-tunnel-save" type="button">保存隧道开关</button>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">
+      凭据写入与旧版相同的 sessionStorage 键；刷新/关闭浏览器后需重新登录。
+    </div>
+  </div>
+</div>
+
 <div class="cmdk-back" id="v2-cmdk-back" hidden></div>
 <div class="cmdk" id="v2-cmdk" hidden role="dialog" aria-modal="true" aria-label="命令面板">
   <input id="v2-cmdk-input" type="text" placeholder="搜索命令：文件 / 控制台 / 主题…" autocomplete="off"
@@ -565,6 +603,7 @@
 <script src="../sclient/sig.js"></script>
 <script src="../shared/format.js"></script>
 <script src="../shared/creds.js"></script>
+<script src="../login.js"></script>
 <script src="auth.js"></script>
 <script src="files.js"></script>
 <script src="../sclient/util.js"></script>
@@ -590,6 +629,7 @@
 <script src="preview.js"></script>
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
+<script src="settings.js"></script>
 <script src="trash.js"></script>
 </body>
 </html>
