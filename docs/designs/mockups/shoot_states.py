@@ -111,6 +111,20 @@ for skin in "abc":
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=notify]').click()",
             "document.querySelector('[data-dialog=dlg-template]').click()"]),
+        spec(f"{skin}-en-files", skin, actions=[
+            "document.getElementById('lang-btn').click()",
+            "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-en-issues", skin, actions=[
+            "document.getElementById('lang-btn').click()",
+            "document.querySelector('[data-lang-opt=\"en-US\"]').click()",
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=issues]').click()"]),
+        spec(f"{skin}-en-dialog", skin, actions=[
+            "document.getElementById('lang-btn').click()",
+            "document.querySelector('[data-lang-opt=\"en-US\"]').click()",
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=vol-manage]').click()",
+            "document.querySelector('[data-dialog=dlg-volume]').click()"]),
         spec(f"{skin}-issues", skin, actions=[
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=issues]').click()"]),
