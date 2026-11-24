@@ -192,12 +192,12 @@
             <button type="button" data-cs="overview" aria-current="page">概览</button>
             <button type="button" data-cs="tasks">云端任务</button>
             <button type="button" data-cs="issues">待处理事项</button>
-            <button type="button" data-cs="audit" disabled>审计 <span class="tag">P3b</span></button>
-            <button type="button" data-cs="volumes" disabled>卷 <span class="tag">P3b</span></button>
-            <button type="button" data-cs="config" disabled>配置 <span class="tag">P3b</span></button>
-            <button type="button" data-cs="notify" disabled>通知 <span class="tag">P3b</span></button>
-            <button type="button" data-cs="verify" disabled>巡检 <span class="tag">P3b</span></button>
-            <button type="button" data-cs="access" disabled>接入 <span class="tag">P3b</span></button>
+            <button type="button" data-cs="audit">审计</button>
+            <button type="button" data-cs="volumes" disabled>卷 <span class="tag">待接入</span></button>
+            <button type="button" data-cs="config">配置</button>
+            <button type="button" data-cs="notify" disabled>通知 <span class="tag">待接入</span></button>
+            <button type="button" data-cs="verify" disabled>巡检 <span class="tag">待接入</span></button>
+            <button type="button" data-cs="access" disabled>接入 <span class="tag">待接入</span></button>
           </nav>
           <div class="cs-body">
             <div class="toolbar" style="margin-bottom:12px">
@@ -254,6 +254,83 @@
                 </table>
                 <div class="empty" id="v2-cs-issues-empty" hidden><b>暂无待处理事项</b>
                   <div class="muted">存储审查与上传/重命名会自动登记。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="audit" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <input id="v2-au-action" placeholder="动作（ai. 为前缀族）" style="width:200px">
+                <input id="v2-au-actor" placeholder="主体" style="width:140px">
+                <input id="v2-au-volume" placeholder="卷" style="width:120px">
+                <input id="v2-au-since" type="datetime-local" aria-label="起始时间">
+                <select id="v2-au-limit" aria-label="条数">
+                  <option value="100">100 条</option>
+                  <option value="200">200 条</option>
+                  <option value="500">500 条</option>
+                </select>
+                <button class="btn" id="v2-au-apply" type="button">查询</button>
+                <button class="btn btn-ghost" id="v2-au-reset" type="button">重置</button>
+                <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-au-export" type="button">导出 NDJSON</button>
+              </div>
+              <div id="v2-au-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th style="width:150px">时间</th><th style="width:150px">动作</th>
+                    <th style="width:120px">主体</th><th style="width:90px">卷</th>
+                    <th>对象 / 详情</th><th style="width:90px">结果</th></tr></thead>
+                  <tbody id="v2-au-body"></tbody>
+                </table>
+                <div class="empty" id="v2-au-empty" hidden><b>暂无审计条目</b>
+                  <div class="muted">调整过滤条件或等待新的操作记录。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="config" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>运行时配置</b><span class="muted" style="font-size:12px">仅提交变更字段</span>
+                <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-cfg-reset" type="button">重新载入</button>
+                <button class="btn" id="v2-cfg-save" type="button">保存</button>
+              </div>
+              <div id="v2-cfg-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <div class="form-grid">
+                  <label>日志级别
+                    <select id="v2-cfg-log-level">
+                      <option value="debug">debug</option><option value="info">info</option>
+                      <option value="warn">warn</option><option value="error">error</option>
+                    </select>
+                  </label>
+                  <label>日志格式
+                    <select id="v2-cfg-log-format">
+                      <option value="text">text</option><option value="json">json</option>
+                    </select>
+                  </label>
+                  <label>存储上限（字节）
+                    <input id="v2-cfg-max-storage" inputmode="numeric" placeholder="0 = 不限制">
+                    <span class="muted" id="v2-cfg-max-storage-hint" style="font-size:11px"></span>
+                  </label>
+                  <label>上传上限（字节）
+                    <input id="v2-cfg-max-upload" inputmode="numeric">
+                    <span class="muted" id="v2-cfg-max-upload-hint" style="font-size:11px"></span>
+                  </label>
+                  <label>Meta 上限（字节）
+                    <input id="v2-cfg-max-meta" inputmode="numeric">
+                    <span class="muted" id="v2-cfg-max-meta-hint" style="font-size:11px"></span>
+                  </label>
+                  <label>限流请求数
+                    <input id="v2-cfg-rl-req" inputmode="numeric" placeholder="0 = 关闭">
+                  </label>
+                  <label>限流窗口
+                    <input id="v2-cfg-rl-win" placeholder="如 1m">
+                  </label>
+                  <label class="check"><input type="checkbox" id="v2-cfg-web-tunnel"> Web 域方法默认走加密隧道</label>
+                </div>
+              </div>
+              <div class="card" style="margin-top:14px">
+                <div class="card-title">只读信息</div>
+                <div id="v2-cfg-facts" class="kv-list"></div>
               </div>
             </div>
 
@@ -346,6 +423,8 @@
 <script src="files-inspector.js"></script>
 <script src="../cloud-tasks.js"></script>
 <script src="cloud-table.js"></script>
+<script src="audit-console.js"></script>
+<script src="config-console.js"></script>
 <script src="transfer.js"></script>
 <script src="console.js"></script>
 <script src="preview.js"></script>

@@ -281,3 +281,20 @@ body {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+.toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar input, .toolbar select { height: 30px; padding: 0 8px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-2); }
+.form-grid input, .form-grid select { height: 30px; padding: 0 8px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; }
+.form-grid .check { flex-direction: row; align-items: center; gap: 8px; }
+.form-grid .check input { height: auto; }
+.kv-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; font-size: 12.5px; }
+.kv-list .kv { display: flex; gap: 8px; }
+.kv-list .kv .k { flex: 0 0 92px; }
+@media (max-width: 760px) {
+  .form-grid, .kv-list { grid-template-columns: 1fr; }
+  .toolbar input[type="datetime-local"] { width: 100%; }
+}
