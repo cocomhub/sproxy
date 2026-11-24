@@ -36,6 +36,18 @@
     tbody.textContent = '';
     (Array.isArray(tasks) ? tasks : []).forEach(function (t) {
       var tr = document.createElement('tr');
+      if (o.selectable) {
+        var pickTd = document.createElement('td');
+        var cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.className = 'cb';
+        cb.setAttribute('aria-label', '选择任务 ' + (t.filename || t.id));
+        cb.checked = !!(o.isSelected && o.isSelected(t));
+        cb.addEventListener('change', function () {
+          if (o.onToggle) { o.onToggle(t, cb.checked); }
+        });
+        pickTd.appendChild(cb);
+        tr.appendChild(pickTd);
+      }
       var nameTd = document.createElement('td');
       nameTd.className = 'mono';
       nameTd.textContent = t.filename || t.url || t.id;
@@ -77,6 +89,9 @@
       var fire = function (kind) {
         if (o.onAction) { o.onAction(kind, t); }
       };
+      if (o.onDetail) {
+        actTd.appendChild(actionBtn('详情', function () { o.onDetail(t); }));
+      }
       if (t.status === 'pending' || t.status === 'downloading') {
         actTd.appendChild(actionBtn('取消', function () { fire('cancel'); }));
       }

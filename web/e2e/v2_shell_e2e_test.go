@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
 	serverconfig "github.com/cocomhub/sproxy/pkg/server/config"
@@ -27,6 +28,10 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}))
 	defer hook.Close()
 	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		// 云任务：允许回环源并快速失败，供控制台筛选/重试真实链路使用。
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
 		c.Notify.Enabled = true
 		c.Notify.Rules = []serverconfig.NotifyRule{{Action: "*", Channels: []string{"webhook"}}}
 		c.Notify.Channels.Webhook.URL = hook.URL
@@ -42,6 +47,14 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("seed mkdir: %v", mkErr)
 	}
 	resp.Body.Close()
+
+	// 造一个真实失败云任务（不可达端口），供控制台高级操作使用。
+	createTask, _ := http.NewRequest(http.MethodPost, baseURL+"/api/cloud/download",
+		strings.NewReader(`{"url":"http://127.0.0.1:1/nope.bin","filename":"nope.bin","download_local":true,"save":true}`))
+	createTask.Header.Set("Content-Type", "application/json")
+	if resp, err := http.DefaultClient.Do(createTask); err == nil {
+		resp.Body.Close()
+	}
 
 	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
 		t.Fatalf("打开 /ui/v2/: %v", err)
@@ -229,6 +242,52 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "[data-cspane=tasks]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("控制台云端任务未渲染: %v", err)
 	}
+	// 高级操作：关键字筛选 → 详情 → 选择 → 批量重试（真实 POST /api/cloud/tasks/retry）。
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr[data-name], #v2-cs-tasks tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("云端任务列表为空: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks-q").Fill("nope"); err != nil {
+		t.Fatalf("任务关键字筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr').length >= 1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("关键字筛选后无任务: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks tr").First().Locator("td.actions button").First().Click(); err != nil {
+		t.Fatalf("打开任务详情: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const p = document.querySelector('#v2-cs-tasks-detail-json'); return p && p.textContent.indexOf('\"id\"') >= 0; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("任务详情未渲染: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !!document.querySelector('#v2-cs-tasks .pill-bad')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(25000)}); err != nil {
+		t.Fatalf("云任务未进入失败态: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks tr .cb").First().Check(); err != nil {
+		t.Fatalf("选择任务: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !document.querySelector('#v2-cs-tasks-retry').disabled",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("批量重试按钮未启用: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks-retry").Click(); err != nil {
+		t.Fatalf("批量重试点击: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已处理'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("批量重试未回显结果: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks-q").Fill(""); err != nil {
+		t.Fatalf("清空任务筛选: %v", err)
+	}
 	if err := page.Locator("[data-cs=issues]").Click(); err != nil {
 		t.Fatalf("切换待处理事项分区: %v", err)
 	}
@@ -296,6 +355,23 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const b = document.querySelector('#v2-ac-state'); const t = document.querySelector('#v2-ac-body'); return (b && !b.hidden) || (t && t.children.length > 0); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("接入分区既无凭据也无提示: %v", err)
+	}
+	// 卷分区：真实 /api/volumes（默认卷可见）+ 单卷刷新（/api/volumes/refresh）。
+	if err := page.Locator("[data-cs=volumes]").Click(); err != nil {
+		t.Fatalf("切换卷分区: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-vl-body tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("卷列表为空: %v", err)
+	}
+	if err := page.Locator("#v2-vl-body tr").First().Locator("button").Click(); err != nil {
+		t.Fatalf("单卷刷新: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已刷新'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("单卷刷新未回显: %v", err)
 	}
 	// 命令面板：⌘K/Ctrl+K → 搜索「配置」→ Enter 直达控制台配置分区。
 	if err := page.Keyboard().Press("Control+k"); err != nil {

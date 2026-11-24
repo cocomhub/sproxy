@@ -144,26 +144,111 @@
     if (name === 'notify' && window.v2notify) { window.v2notify.init(); }
     if (name === 'verify' && window.v2verify) { window.v2verify.init(); }
     if (name === 'access' && window.v2access) { window.v2access.init(); }
+    if (name === 'volumes' && window.v2volumes) { window.v2volumes.init(); }
+  }
+
+  var tasks = { all: [], selected: Object.create(null), q: '', status: '' };
+
+  function taskMatches(t) {
+    if (tasks.status && t.status !== tasks.status) { return false; }
+    if (!tasks.q) { return true; }
+    var q = tasks.q.toLowerCase();
+    return ((t.filename || '') + ' ' + (t.id || '') + ' ' + (t.url || '')).toLowerCase().indexOf(q) !== -1;
+  }
+
+  function visibleTasks() { return tasks.all.filter(taskMatches); }
+
+  function selectedTaskList() {
+    return tasks.all.filter(function (t) { return tasks.selected[t.id]; });
+  }
+
+  function syncTaskActions() {
+    var sel = selectedTaskList();
+    var canRetry = sel.some(function (t) { return t.status === 'failed' || t.status === 'cancelled'; });
+    var canCancel = sel.some(function (t) { return t.status === 'pending' || t.status === 'downloading'; });
+    var r = el('v2-cs-tasks-retry'); if (r) { r.disabled = !canRetry; }
+    var c = el('v2-cs-tasks-cancel'); if (c) { c.disabled = !canCancel; }
+  }
+
+  function renderTaskRows() {
+    var tbody = el('v2-cs-tasks');
+    if (!tbody) { return; }
+    var list = visibleTasks();
+    window.v2cloudTable.render(tbody, list, {
+      selectable: true,
+      isSelected: function (t) { return !!tasks.selected[t.id]; },
+      onToggle: function (t, on) { if (on) { tasks.selected[t.id] = true; } else { delete tasks.selected[t.id]; } syncTaskActions(); },
+      onDetail: showTaskDetail,
+      onAction: function (kind, t) {
+        window.v2cloudTable.perform(kind, t, api, function (ok, e) {
+          if (ok) { if (window.v2toast) { window.v2toast('ok', '已处理任务'); } loadTasks(); }
+          else if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); }
+        });
+      }
+    });
+    var empty = el('v2-cs-tasks-empty');
+    if (empty) { empty.hidden = list.length > 0; }
+    syncTaskActions();
   }
 
   function loadTasks() {
-    var tbody = el('v2-cs-tasks');
-    if (!tbody) { return; }
-    api.json('GET', '/api/cloud/tasks?limit=100')
+    if (!el('v2-cs-tasks')) { return Promise.resolve(); }
+    return api.json('GET', '/api/cloud/tasks?limit=200')
       .then(function (body) {
-        var list = (body && (body.tasks || body.items)) || [];
-        window.v2cloudTable.render(tbody, list, {
-          onAction: function (kind, t) {
-            window.v2cloudTable.perform(kind, t, api, function (ok, e) {
-              if (ok) { if (window.v2toast) { window.v2toast('ok', '已处理任务'); } loadTasks(); }
-              else if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); }
-            });
-          }
-        });
-        var empty = el('v2-cs-tasks-empty');
-        if (empty) { empty.hidden = list.length > 0; }
+        tasks.all = (body && (body.tasks || body.items)) || [];
+        tasks.selected = Object.create(null);
+        renderTaskRows();
       })
       .catch(function (e) { banner('warn', '云端任务加载失败：' + (e.message || e)); });
+  }
+
+  function showTaskDetail(t) {
+    var box = el('v2-cs-tasks-detail');
+    var pre = el('v2-cs-tasks-detail-json');
+    if (!box || !pre) { return; }
+    api.json('GET', '/api/cloud/tasks/' + encodeURIComponent(t.id))
+      .then(function (resp) {
+        pre.textContent = JSON.stringify(resp, null, 2);
+        box.hidden = false;
+      })
+      .catch(function (e) { pre.textContent = '读取失败：' + (e.message || e); box.hidden = false; });
+  }
+
+  function batchTasks(kind) {
+    var target = selectedTaskList().filter(function (t) {
+      return kind === 'retry' ? (t.status === 'failed' || t.status === 'cancelled') : (t.status === 'pending' || t.status === 'downloading');
+    });
+    if (!target.length) { return Promise.resolve(0); }
+    var chain = Promise.resolve();
+    var done = 0;
+    target.forEach(function (t) {
+      chain = chain.then(function () {
+        return window.v2cloudTable.perform(kind, t, api, function (ok) { if (ok) { done += 1; } });
+      });
+    });
+    return chain.then(function () {
+      if (window.v2toast) { window.v2toast(done ? 'ok' : 'bad', '已处理 ' + done + '/' + target.length + ' 个任务'); }
+      loadTasks();
+      return done;
+    });
+  }
+
+  function exportTasks() {
+    var list = selectedTaskList();
+    if (!list.length) { list = visibleTasks(); }
+    var head = ['id', 'status', 'filename', 'total_size', 'url', 'updated_at'];
+    var lines = [head.join('	')];
+    list.forEach(function (t) {
+      lines.push([t.id || '', t.status || '', t.filename || '', String(t.total_size || 0), t.url || '', t.updated_at || ''].join('	'));
+    });
+    var nl = String.fromCharCode(10);
+    var blob = new Blob([lines.join(nl) + nl], { type: 'text/tab-separated-values' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'cloud-tasks-' + new Date().toISOString().slice(0, 10) + '.tsv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
   }
 
   function issueStatusClass(st) {
@@ -287,6 +372,13 @@
       });
     });
     var tr = el('v2-cs-tasks-refresh'); if (tr) { tr.addEventListener('click', loadTasks); }
+    var tq = el('v2-cs-tasks-q');
+    if (tq) { tq.addEventListener('input', function () { tasks.q = tq.value.trim(); renderTaskRows(); }); }
+    var ts = el('v2-cs-tasks-status');
+    if (ts) { ts.addEventListener('change', function () { tasks.status = ts.value; renderTaskRows(); }); }
+    var bRetry = el('v2-cs-tasks-retry'); if (bRetry) { bRetry.addEventListener('click', function () { batchTasks('retry'); }); }
+    var bCancel = el('v2-cs-tasks-cancel'); if (bCancel) { bCancel.addEventListener('click', function () { batchTasks('cancel'); }); }
+    var bExport = el('v2-cs-tasks-export'); if (bExport) { bExport.addEventListener('click', exportTasks); }
     var ir = el('v2-cs-issues-refresh'); if (ir) { ir.addEventListener('click', loadIssues); }
     if (isActive()) { load(); }
   }

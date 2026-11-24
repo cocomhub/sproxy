@@ -212,7 +212,7 @@
             <button type="button" data-cs="tasks">云端任务</button>
             <button type="button" data-cs="issues">待处理事项</button>
             <button type="button" data-cs="audit">审计</button>
-            <button type="button" data-cs="volumes" disabled>卷 <span class="tag">待接入</span></button>
+            <button type="button" data-cs="volumes">卷</button>
             <button type="button" data-cs="config">配置</button>
             <button type="button" data-cs="notify">通知</button>
             <button type="button" data-cs="verify">巡检</button>
@@ -300,16 +300,65 @@
               </div>
             </div>
 
+            <div data-cspane="volumes" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>卷</b><span class="muted" style="font-size:12px">只读展示 + 刷新卷状态</span>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-vl-refresh" type="button">刷新全部卷</button>
+              </div>
+              <div id="v2-vl-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th>名称</th><th style="width:110px">类型</th><th style="width:100px">模式</th>
+                    <th style="width:100px" class="r">容量</th><th style="width:180px">已用</th>
+                    <th style="width:90px">状态</th><th style="width:90px"></th></tr></thead>
+                  <tbody id="v2-vl-body"></tbody>
+                </table>
+                <div class="empty" id="v2-vl-empty" hidden><b>没有可用卷</b>
+                  <div class="muted">检查服务端卷配置或 ACL。</div></div>
+              </div>
+              <div class="card" style="margin-top:14px">
+                <div class="toolbar" style="margin-bottom:8px">
+                  <b>用户卷</b><span class="muted" style="font-size:12px">建/删卷请用 CLI 或 API（页面只读）</span>
+                  <span style="flex:1"></span>
+                  <button class="btn btn-ghost" id="v2-vl-user-refresh" type="button">刷新</button>
+                </div>
+                <table class="table">
+                  <thead><tr><th>名称</th><th style="width:130px">类型</th>
+                    <th style="width:110px" class="r">容量</th><th style="width:110px" class="r">已用</th></tr></thead>
+                  <tbody id="v2-vl-user-body"></tbody>
+                </table>
+                <div class="empty" id="v2-vl-user-empty" hidden><b>没有用户卷</b>
+                  <div class="muted">sclient volume create 可创建外部后端卷。</div></div>
+              </div>
+            </div>
+
             <div data-cspane="tasks" hidden>
               <div class="toolbar" style="margin-bottom:10px">
-                <b>云端任务</b><span class="muted" style="font-size:12px">与传输页同一数据源</span>
+                <b>云端任务</b>
+                <input id="v2-cs-tasks-q" placeholder="关键字（文件名/ID/URL）" style="width:200px">
+                <select id="v2-cs-tasks-status" aria-label="按状态筛选">
+                  <option value="">全部状态</option>
+                  <option value="pending">等待中</option>
+                  <option value="downloading">下载中</option>
+                  <option value="failed">失败</option>
+                  <option value="completed">已完成</option>
+                  <option value="cancelled">已取消</option>
+                </select>
                 <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-cs-tasks-retry" type="button" disabled>重试所选</button>
+                <button class="btn btn-ghost" id="v2-cs-tasks-cancel" type="button" disabled>取消所选</button>
+                <button class="btn btn-ghost" id="v2-cs-tasks-export" type="button">导出 TSV</button>
                 <button class="btn" id="v2-cs-tasks-refresh" type="button">刷新</button>
+              </div>
+              <div id="v2-cs-tasks-detail" class="card" hidden style="margin-bottom:10px">
+                <div class="card-title">任务详情</div>
+                <pre class="json" id="v2-cs-tasks-detail-json"></pre>
               </div>
               <div class="card">
                 <table class="table">
-                  <thead><tr><th>任务</th><th style="width:120px">状态</th><th style="width:150px">进度</th>
-                    <th style="width:90px" class="r">大小</th><th style="width:130px">更新</th><th style="width:160px"></th></tr></thead>
+                  <thead><tr><th style="width:30px"></th><th>任务</th><th style="width:120px">状态</th><th style="width:150px">进度</th>
+                    <th style="width:90px" class="r">大小</th><th style="width:130px">更新</th><th style="width:170px"></th></tr></thead>
                   <tbody id="v2-cs-tasks"></tbody>
                 </table>
                 <div class="empty" id="v2-cs-tasks-empty" hidden><b>暂无云端任务</b>
@@ -529,6 +578,7 @@
 <script src="notify-console.js"></script>
 <script src="verify-console.js"></script>
 <script src="access-console.js"></script>
+<script src="volumes-console.js"></script>
 <script src="transfer.js"></script>
 <script src="console.js"></script>
 <script src="preview.js"></script>
