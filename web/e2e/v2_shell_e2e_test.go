@@ -179,6 +179,19 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-grp-cancel").Click(); err != nil {
 		t.Fatalf("取消创建组: %v", err)
 	}
+	// P2c：同步任务空态 + 新建对话框可打开/取消。
+	if err := waitLoc(page, "#v2-sync-empty", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("同步任务空态未显示: %v", err)
+	}
+	if err := page.Locator("#v2-sync-create").Click(); err != nil {
+		t.Fatalf("打开新建同步: %v", err)
+	}
+	if err := waitLoc(page, "#v2-sync-backdrop .modal", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("同步对话框未打开: %v", err)
+	}
+	if err := page.Locator("#v2-sync-cancel").Click(); err != nil {
+		t.Fatalf("取消新建同步: %v", err)
+	}
 
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)

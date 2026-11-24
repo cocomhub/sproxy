@@ -181,6 +181,9 @@ body {
 .modal h3 { margin: 0 0 6px; font-size: 15px; }
 .modal p { margin: 0 0 12px; color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
 .modal .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.sync-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+.modal .field select { height: 32px; border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px; padding: 0 6px; }
 .modal .field textarea { min-height: 84px; padding: 8px 10px; resize: vertical;
   border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface);
   color: var(--text); font: inherit; font-size: 12.5px; }

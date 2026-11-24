@@ -127,6 +127,44 @@
         </div>
       </section>
 
+        <div class="card" style="margin-top:14px">
+          <div class="card-h">
+            <h2>同步任务</h2><span class="hint">push / pull / both；冲突与删除策略按任务独立</span>
+            <span style="flex:1"></span>
+            <button class="btn" id="v2-sync-refresh" type="button">刷新</button>
+            <button class="btn btn-primary" id="v2-sync-create" type="button">新建同步</button>
+          </div>
+          <div id="v2-sync-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>任务</th><th style="width:80px">方向</th><th>路径</th>
+              <th style="width:130px">状态</th><th style="width:130px">进度</th><th style="width:150px"></th></tr></thead>
+            <tbody id="v2-sync-body"></tbody>
+          </table>
+          <div class="empty" id="v2-sync-empty" hidden><b>暂无同步任务</b>
+            <div class="muted">在节点之间创建同步后可在此查看进度。</div></div>
+        </div>
+      </section>
+
+      <div class="modal-backdrop" id="v2-sync-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-sync-title">
+          <h3 id="v2-sync-title">新建同步任务</h3>
+          <p>目标路径相对远端节点；删除策略默认不传播。</p>
+          <div class="sync-grid">
+            <label class="field">方向<select id="v2-sync-dir"><option>push</option><option>pull</option><option>both</option></select></label>
+            <label class="field">远端节点<input id="v2-sync-remote" placeholder="node-a1" autocomplete="off"></label>
+            <label class="field">源路径<input id="v2-sync-src" placeholder="jav/EXAMPLE" autocomplete="off"></label>
+            <label class="field">目标路径<input id="v2-sync-dst" placeholder="jav/EXAMPLE" autocomplete="off"></label>
+            <label class="field">冲突策略<select id="v2-sync-conflict"><option>skip</option><option>overwrite</option><option>lww</option><option>conflict-rename</option></select></label>
+            <label class="field">删除传播<select id="v2-sync-delete"><option value="skip">skip（不传播）</option><option value="propagate">propagate（传播）</option></select></label>
+          </div>
+          <label class="dr-check"><input id="v2-sync-recursive" type="checkbox" checked> 递归子目录</label>
+          <div class="modal-actions">
+            <button class="btn" id="v2-sync-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="v2-sync-ok" type="button">创建</button>
+          </div>
+        </div>
+      </div>
+
       <div class="modal-backdrop" id="v2-grp-backdrop" hidden>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-grp-title">
           <h3 id="v2-grp-title">创建任务组</h3>

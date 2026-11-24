@@ -11,7 +11,7 @@
   var ct = window.ctStatusLabel ? window : null; // cloud-tasks.js 以全局函数暴露
   if (!api || !fmt) { return; }
 
-  var state = { tasks: [], groups: [], filter: '', timer: null, auto: true, loading: false };
+  var state = { tasks: [], groups: [], syncs: [], filter: '', timer: null, auto: true, loading: false };
 
   function el(id) { return document.getElementById(id); }
 
@@ -253,6 +253,108 @@
     });
   }
 
+  function syncStatusLabel(s) {
+    var m = { pending: '排队中', running: '同步中', syncing: '同步中', completed: '已完成', failed: '失败', cancelled: '已取消' };
+    return m[s] || s || '—';
+  }
+
+  function renderSyncs() {
+    var body = el('v2-sync-body');
+    if (!body) { return; }
+    body.textContent = '';
+    state.syncs.forEach(function (t) {
+      var tr = document.createElement('tr');
+      var idTd = document.createElement('td');
+      idTd.className = 'mono';
+      idTd.textContent = t.id;
+      tr.appendChild(idTd);
+
+      var dirTd = document.createElement('td');
+      dirTd.textContent = t.direction || '—';
+      tr.appendChild(dirTd);
+
+      var pathTd = document.createElement('td');
+      pathTd.className = 'mono';
+      pathTd.style.fontSize = '11.5px';
+      pathTd.textContent = (t.src || '') + ' → ' + (t.remote || '') + ':' + (t.dst || '');
+      tr.appendChild(pathTd);
+
+      var stTd = document.createElement('td');
+      var pill = document.createElement('span');
+      pill.className = 'pill ' + statusClass(t.status === 'running' ? 'downloading' : t.status);
+      pill.textContent = syncStatusLabel(t.status);
+      stTd.appendChild(pill);
+      tr.appendChild(stTd);
+
+      var pgTd = document.createElement('td');
+      pgTd.className = 'num muted';
+      pgTd.style.fontSize = '11.5px';
+      pgTd.textContent = (t.files_done || 0) + ' / ' + (t.files_total || 0) + ' 文件';
+      tr.appendChild(pgTd);
+
+      var actTd = document.createElement('td');
+      actTd.className = 'r actions';
+      if (t.status === 'running' || t.status === 'pending' || t.status === 'syncing') {
+        actTd.appendChild(actionBtn('取消', function () {
+          run(api.json('POST', '/api/sync/tasks/' + encodeURIComponent(t.id) + '/cancel', {}), '已取消同步');
+        }));
+      }
+      actTd.appendChild(actionBtn('删除', function () {
+        run(api.json('DELETE', '/api/sync/tasks/' + encodeURIComponent(t.id)), '已删除同步任务');
+      }));
+      tr.appendChild(actTd);
+      body.appendChild(tr);
+    });
+    var empty = el('v2-sync-empty');
+    if (empty) { empty.hidden = state.syncs.length > 0; }
+  }
+
+  function loadSyncs() {
+    if (!el('v2-sync-body')) { return; }
+    setSyncState('', '');
+    api.json('GET', '/api/sync/tasks')
+      .then(function (body) {
+        state.syncs = (body && (body.tasks || body.items)) || [];
+        renderSyncs();
+      })
+      .catch(function (e) { setSyncState('error', '同步任务加载失败：' + (e.message || e)); });
+  }
+
+  function setSyncState(kind, text) {
+    var box = el('v2-sync-state');
+    if (!box) { return; }
+    if (!kind) { box.hidden = true; box.textContent = ''; return; }
+    box.hidden = false;
+    box.className = 'banner' + (kind === 'error' ? ' banner-warn' : '');
+    box.textContent = text;
+  }
+
+  function openSyncDialog() { var d = el('v2-sync-backdrop'); if (d) { d.hidden = false; el('v2-sync-remote').focus(); } }
+  function closeSyncDialog() { var d = el('v2-sync-backdrop'); if (d) { d.hidden = true; } }
+
+  function submitSync() {
+    var body = {
+      direction: el('v2-sync-dir').value,
+      remote: el('v2-sync-remote').value.trim(),
+      src: el('v2-sync-src').value.trim(),
+      dst: el('v2-sync-dst').value.trim(),
+      recursive: el('v2-sync-recursive').checked,
+      conflict_policy: el('v2-sync-conflict').value,
+      delete_policy: el('v2-sync-delete').value
+    };
+    if (!body.remote) { if (window.v2toast) { window.v2toast('warn', '请填写远端节点'); } return; }
+    api.json('POST', '/api/sync/tasks', {
+      body: new TextEncoder().encode(JSON.stringify(body)),
+      contentType: 'application/json'
+    }).then(function () {
+      closeSyncDialog();
+      if (window.v2toast) { window.v2toast('ok', '已创建同步任务'); }
+      loadSyncs();
+    }).catch(function (e) {
+      if (window.v2toast) { window.v2toast('bad', '创建失败：' + (e.message || e)); }
+    });
+  }
+
   function load() {
     if (state.loading) { return; }
     state.loading = true;
@@ -267,6 +369,7 @@
       })
       .then(function () { state.loading = false; });
     loadGroups();
+    loadSyncs();
   }
 
   function setAuto(on) {
@@ -294,6 +397,18 @@
     });
     var refresh = el('v2-tf-refresh');
     if (refresh) { refresh.addEventListener('click', function () { load(); loadGroups(); }); }
+    var sr = el('v2-sync-refresh');
+    if (sr) { sr.addEventListener('click', loadSyncs); }
+    var sc = el('v2-sync-create');
+    if (sc) { sc.addEventListener('click', openSyncDialog); }
+    var sx = el('v2-sync-cancel');
+    if (sx) { sx.addEventListener('click', closeSyncDialog); }
+    var sok = el('v2-sync-ok');
+    if (sok) { sok.addEventListener('click', submitSync); }
+    var sb = el('v2-sync-backdrop');
+    if (sb) { sb.addEventListener('click', function (e) { if (e.target === sb) { closeSyncDialog(); } }); }
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeSyncDialog(); } });
+
     var gr = el('v2-grp-refresh');
     if (gr) { gr.addEventListener('click', loadGroups); }
     var gc = el('v2-grp-create');
