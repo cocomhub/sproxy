@@ -57,3 +57,28 @@ func TestRetryTasks_RejectsEmptySelector(t *testing.T) {
 
 // 编译期：选择器类型来自 pkg/cloud（避免调用侧自造同形结构）。
 var _ = cloud.RetrySelector{}
+
+// TestCreateBatchDownload_PassesExpectedChecksum 锁定批量端点**必须透传**期望校验与备选源
+// （2026-11-24 实测缺口：CLI submit 走 batch 端点，字段未解析 ⇒ 错误期望值仍判 completed）。
+func TestCreateBatchDownload_PassesExpectedChecksum(t *testing.T) {
+	t.Parallel()
+	tasks := &stubTasks{maxBatch: 10, submitResult: &cloud.CloudTask{ID: "t1", Status: "pending"}, tasks: map[string]*cloud.CloudTask{}}
+	svc := &Service{deps: Deps{Tasks: tasks, Audit: &stubAudit{}}}
+	body := `{"urls":[{"url":"https://example.com/a.mp4"}],"expected_checksum":"abc","fallback_urls":["https://b/x.mp4"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/cloud/download/batch", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	svc.CreateBatchDownload(rec, req, "o")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(tasks.submittedParams) != 1 {
+		t.Fatalf("应提交 1 个任务，got %d", len(tasks.submittedParams))
+	}
+	p := tasks.submittedParams[0]
+	if p.ExpectedChecksum != "abc" {
+		t.Fatalf("expected_checksum 未透传: %+v", p)
+	}
+	if len(p.FallbackSources) != 1 {
+		t.Fatalf("fallback_urls 未透传: %+v", p)
+	}
+}
