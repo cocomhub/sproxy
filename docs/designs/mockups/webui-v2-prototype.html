@@ -2159,6 +2159,35 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button role="menuitem" type="button" style="color:var(--bad)" data-confirm-title="退出登录？" data-confirm-msg="本机保存的 Secret 会被清除，下次需要重新输入。" data-confirm-ok="退出" data-confirm-toast="已退出登录">退出登录</button>
 </div>
 
+<!-- 新建 / 编辑告警规则 -->
+<div class="modal" id="dlg-rule" role="dialog" aria-modal="true" aria-labelledby="rule-title" aria-hidden="true">
+  <div class="modal-box" style="width:560px">
+    <h3 id="rule-title">新建告警规则</h3>
+    <p>条件按指标 + 阈值判断；命中后按渠道分发，去抖窗口内合并同类事件。</p>
+    <div class="form-row">规则名称<input class="input" value="云端任务失败"></div>
+    <div class="form-grid">
+      <div class="form-row">指标<select class="select"><option>cloud.failed</option><option>vol.used_pct</option><option>days_left</option><option>verify.mismatch</option></select></div>
+      <div class="form-row">阈值<input class="input" value="> 0"></div>
+    </div>
+    <div class="form-row">渠道
+      <div class="ds-row" style="gap:14px">
+        <label style="display:flex;gap:6px;align-items:center"><input class="cb" type="checkbox" checked> Webhook</label>
+        <label style="display:flex;gap:6px;align-items:center"><input class="cb" type="checkbox" checked> Email</label>
+        <label style="display:flex;gap:6px;align-items:center"><input class="cb" type="checkbox" checked> 站内</label>
+      </div>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">去抖<input class="input" value="5m"></div>
+      <div class="form-row">状态<select class="select"><option>启用</option><option>停用</option></select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="已发送测试通知到所选渠道" data-toast-kind="ok">测试</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已保存告警规则" data-toast-kind="ok" data-close>保存</button>
+    </div>
+  </div>
+</div>
+
 <!-- 新建目录 -->
 <div class="modal" id="dlg-mkdir" role="dialog" aria-modal="true" aria-labelledby="mkdir-title" aria-hidden="true">
   <div class="modal-box">

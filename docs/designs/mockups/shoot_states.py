@@ -68,6 +68,10 @@ for skin in "abc":
         spec(f"{skin}-files-en", skin, actions=[
             "document.getElementById('lang-btn').click()",
             "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-dialog-rule", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=notify]').click()",
+            "document.querySelector('[data-dialog=dlg-rule]').click()"]),
         spec(f"{skin}-search", skin, actions=[
             "document.getElementById('search-trigger').click()",
             "var i=document.getElementById('cmdk-input');i.value='NHDTB';i.dispatchEvent(new Event('input',{bubbles:true}));"]),

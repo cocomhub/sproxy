@@ -115,4 +115,7 @@
 
 多语言实测：切到 English 后导航（Files/Transfers/Trash/Console）、页面标题（Console）、表头（Name/Volume/Size/Modified/Checksum）均生效，`scrollWidth-clientWidth = 0`。
 
-截图扩到 **82 张**（新增 `*-notify`、`*-files-en`、`*-search`、`m-c-sheet`、`m-a-search`）。
+截图扩到 **85 张**（新增 `*-notify`、`*-dialog-rule`、`*-files-en`、`*-search`、`m-c-sheet`、`m-a-search`）。
+
+补充：告警规则编辑器（`#dlg-rule`）在 390px 三套皮肤下命中区与横向溢出均为 0；
+修复了一个悬空触发器——「新建规则」曾指向不存在的对话框。
