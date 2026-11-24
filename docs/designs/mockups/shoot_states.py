@@ -91,6 +91,8 @@ for skin in "abc":
         spec(f"{skin}-dialog-group-create", skin, actions=[
             "document.querySelector('[data-goto=transfer]').click()",
             "document.querySelector('[data-dialog=dlg-group-create]').click()"]),
+        spec(f"{skin}-dialog-move", skin, actions=[
+            "document.querySelector('[data-dialog=dlg-move]').click()"]),
         spec(f"{skin}-dialog-archive", skin, actions=[
             "document.querySelector('[data-dialog=dlg-archive]').click()"]),
         spec(f"{skin}-console-access", skin, actions=[

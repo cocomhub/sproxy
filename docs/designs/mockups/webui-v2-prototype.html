@@ -406,8 +406,9 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
 .help-box h3{margin:0 0 4px;font-size:15px}
 .help-grid{display:grid;grid-template-columns:auto 1fr;gap:10px 16px;margin-top:14px;font-size:13px}
 .help-grid kbd{justify-self:start}
-.toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:150;max-width:400px}
-.toast{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:var(--radius-md);background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-2);font-size:13px;animation:toast-in 160ms var(--ease)}
+.toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:150;max-width:400px;pointer-events:none}
+.toast{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:var(--radius-md);background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-2);font-size:13px;animation:toast-in 160ms var(--ease);pointer-events:none}
+.toast .undo{pointer-events:auto}
 @keyframes toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .toast .bar{width:3px;align-self:stretch;border-radius:2px;background:var(--info);flex:0 0 auto}
 .toast.ok .bar{background:var(--ok)} .toast.bad .bar{background:var(--bad)} .toast.warn .bar{background:var(--warn)}
@@ -610,8 +611,9 @@ body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 .ptr{height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;gap:8px;color:var(--text-3);font-size:12px;transition:height .16s var(--ease)}
 .ptr .dot{width:8px;height:8px;border:2px solid var(--accent);border-right-color:transparent;border-radius:50%}
 .ptr.on .dot{animation:spin .8s linear infinite}
+.sheet{display:none}
 @media (max-width:640px){
-  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:95;background:var(--surface);border-top:1px solid var(--border);border-radius:16px 16px 0 0;box-shadow:var(--shadow-2);transform:translateY(102%);transition:transform 200ms var(--ease);padding:8px 12px calc(12px + env(safe-area-inset-bottom))}
+  .sheet{display:block;position:fixed;left:0;right:0;bottom:0;z-index:95;background:var(--surface);border-top:1px solid var(--border);border-radius:16px 16px 0 0;box-shadow:var(--shadow-2);transform:translateY(102%);transition:transform 200ms var(--ease);padding:8px 12px calc(12px + env(safe-area-inset-bottom))}
   .sheet.show{transform:none}
   .sheet .handle{width:36px;height:4px;border-radius:2px;background:var(--border-strong);margin:6px auto 10px}
   .sheet .stitle{font-size:12px;color:var(--text-3);padding:0 4px 8px}
@@ -741,10 +743,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   [data-skin="c"] .main{max-width:none;margin:0;border-radius:0;min-height:100vh;box-shadow:none}
   /* 手机端统一用底部导航，顶部 tab 一律隐藏（含 C 的高优先级规则） */
   .top-tabs,[data-skin="c"] .top-tabs{display:none}
-  .topbar{padding:10px 14px;height:auto;flex-wrap:wrap;gap:8px}
-  .page-title{font-size:15px;order:1}
-  .search-trigger{order:3;min-width:0;flex:1 1 100%;margin-left:0}
-  .content{padding:12px 14px 28px}
+  .shell .topbar{padding:10px 14px;height:auto;flex-wrap:wrap;gap:8px}
+  .shell .page-title{font-size:15px;order:1}
+  .shell .search-trigger{order:3;min-width:0;flex:1 1 100%;margin-left:0}
+  .shell .content{padding:12px 14px 28px}
   .split{grid-template-columns:minmax(0,1fr)}
   .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
   /* 文件表：只保留 名称 + 大小 + 操作 */
@@ -776,8 +778,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   .mobile-nav button{flex:1;border:0;background:none;color:var(--text-3);font-size:11px;padding:7px 2px;border-radius:var(--radius-sm);cursor:pointer}
   .mobile-nav button[aria-current="page"]{color:var(--accent);font-weight:600;background:var(--accent-soft)}
   body{padding-bottom:56px}
-  .content{padding-bottom:76px}
+  .shell .content{padding-bottom:150px}
   .floatbar{bottom:72px}
+  .toasts{left:12px;right:12px;bottom:76px;max-width:none}
   .devtools{bottom:72px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
@@ -989,7 +992,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <span class="cnt">已选 <b class="num">0</b> 项</span>
           <span class="spacer"></span>
           <button class="btn btn-sm" type="button">下载</button>
-          <button class="btn btn-sm" type="button">移动</button>
+          <button class="btn btn-sm" type="button" data-dialog="dlg-move">移动</button>
           <button class="btn btn-sm" type="button">校验</button>
           <button class="btn btn-sm" type="button" data-dialog="dlg-batch">批量重命名</button>
           <button class="btn btn-sm" type="button" data-write data-confirm-title="删除已选的 2 项？" data-confirm-msg="将移入回收站，30 天内可恢复；关联的分享链接会立即失效。" data-confirm-ok="删除" data-confirm-toast="已删除 2 项，可在回收站恢复">删除</button>
@@ -2142,7 +2145,7 @@ sclient list --subdir jav/EXAMPLE</div>
   <span class="cnt">已选 <b class="num">2</b> 项</span>
   <span class="sep"></span>
   <button class="btn btn-sm btn-ghost" type="button">下载</button>
-  <button class="btn btn-sm btn-ghost" type="button">移动</button>
+  <button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-move">移动</button>
   <button class="btn btn-sm btn-ghost" type="button" data-toast="已提交校验任务" data-toast-kind="info">校验</button>
   <button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-batch">重命名</button>
   <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93" data-confirm-title="删除已选的 2 项？" data-confirm-msg="将移入回收站，30 天内可恢复。" data-confirm-ok="删除" data-confirm-toast="已删除 2 项，可在回收站恢复">删除</button>
@@ -2841,6 +2844,32 @@ cloud-9c31aa07-1</textarea>
     <div class="modal-actions">
       <button class="btn" type="button" data-close>取消</button>
       <button class="btn btn-primary" type="button" data-toast="已创建目录 2026-11" data-toast-kind="ok" data-close>创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 移动到目录 -->
+<div class="modal" id="dlg-move" role="dialog" aria-modal="true" aria-labelledby="move-title" aria-hidden="true">
+  <div class="modal-box" style="width:540px">
+    <h3 id="move-title">移动 2 项到目录</h3>
+    <p>目标目录不存在时会自动创建；重名按冲突策略处理。</p>
+    <div class="form-row">目标目录
+      <input class="input" value="jav/EXAMPLE" list="move-dirs">
+      <datalist id="move-dirs">
+        <option value="jav/EXAMPLE"></option>
+        <option value="archive/2026-11"></option>
+        <option value="/tmp/import"></option>
+      </datalist>
+      <span class="muted">支持绝对路径（以 / 开头）与相对当前目录路径。</span>
+    </div>
+    <div class="form-grid">
+      <div class="form-row">冲突策略<select class="select"><option>报错并保留原文件</option><option>覆盖目标</option><option>自动改名（-1）</option></select></div>
+      <div class="form-row">目标卷<select class="select"><option>保持当前卷</option><option>baidu</option><option>secretdata</option><option>local</option></select></div>
+    </div>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;margin-top:10px"><input class="cb" type="checkbox" checked> 保留相对目录结构</label>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已移动 2 项到 jav/EXAMPLE" data-toast-kind="ok" data-close>移动</button>
     </div>
   </div>
 </div>

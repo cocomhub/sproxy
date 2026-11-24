@@ -173,3 +173,17 @@
 `Space` → 预览；`m` → Meta；`Shift+勾选` → 区间选择。
 
 截图扩到 **145 张**（新增 `*-ctx-menu`、`*-drawer-meta`、`*-drawer-chunks`、`*-design-system`）。
+
+## 14. 第九轮审计（用户反馈：底部残留面板 / 无法操作）
+
+用户反馈「左下角出现 下载/重命名/校验/分享/删除/取消」+「无法体验创建目录/移动/切换卷」。
+
+| # | 缺陷 | 证据 | 根因 | 修复 |
+| --- | --- | --- | --- | --- |
+| R8 | 桌面左下角出现底部动作面板的全部按钮 | `#sheet` 计算样式 `display:block`，rect `0,855,1469x44` | `.sheet` 只在 `@media (max-width:640px)` 定义，**缺桌面 `display:none`**（与早期 `.mobile-nav` 同类） | 补基线 `.sheet{display:none}`；媒体查询内 `display:block` |
+| R9 | 底部面板遮挡文件页底部按钮（新建目录点不到） | `elementFromPoint` 在按钮中心命中面板 | R8 的连带结果 | 同上；审计新增 `overlay-leak`（>640px 时 `.sheet`/`.mobile-nav` 必须 `display:none`） |
+| R10 | 批量「移动」按钮无任何反应 | 浮动条/顶部条「移动」无 `data-*` 也无处理器 | 设计遗漏 | 新增 `#dlg-move`（目标目录 datalist/冲突策略/目标卷/保留结构），两处按钮接入 |
+| R11 | 移动端 toast/devtools/bottom-nav 覆盖内容，按钮点不到 | `elementFromPoint` 命中 `toasts` / `mobile-nav` | toast 容器拦截点击；固定底栏覆盖滚动内容 | `.toasts` 与 `.toast` 设 `pointer-events:none`（撤销按钮单独放开）；底部导航覆盖属固定栏预期，审计跳过 |
+| R12 | 移动端 `.topbar` / `.content` 内边距规则不生效 | 皮肤规则 `[data-skin=x] .content` 特异性高于媒体查询 | 同特异性覆盖 | 媒体查询改用 `.shell .content` / `.shell .topbar`，并加大底部留白 |
+
+修复后：**210 状态 × 2 视口 = 420 次检查，0 问题**；截图 **148 张**重新生成（新增 `*-dialog-move`）。
