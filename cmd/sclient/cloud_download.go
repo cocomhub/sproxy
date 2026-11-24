@@ -51,7 +51,8 @@ func buildCloudDownloadChainOpts(cmd *cobra.Command, pollInterval time.Duration,
 	}
 	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
 		p, _ := cmd.Flags().GetString(flagTransferPath)
-		opts = append(opts, client.WithChainTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+		ow, _ := cmd.Flags().GetBool(flagTransferOverwrite)
+		opts = append(opts, client.WithChainTransfer(&client.TransferSpec{Volume: vol, Path: p, Overwrite: ow}))
 	}
 	if cmd.Flags().Changed(flagSave) {
 		s, _ := cmd.Flags().GetBool(flagSave)
@@ -174,6 +175,7 @@ func NewCmdCloudDownload(factory clientfactory.Factory, ios cli.IOStreams, st *s
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
 	cmd.Flags().String(flagExpectChecksum, "", "期望产物 checksum（下载完成、转存前校验；不一致按 content_mismatch 换源重试）")
+	cmd.Flags().Bool(flagTransferOverwrite, false, "允许覆盖已存在的转存目标（修复受损文件时必需）")
 	cmd.Flags().StringArray(flagFallbackURL, nil, "备选源 URL（可重复；主源失败自动切换）")
 
 	// 注册子命令
@@ -250,6 +252,7 @@ func NewCmdCloudSubmit(factory clientfactory.Factory, ios cli.IOStreams, cfgSvc 
 	cmd.Flags().Bool(flagIntegrityMustPass, false, "完整性必须通过（语义校验失败则任务阻断，不放行标记 damaged）")
 	cmd.Flags().String(flagMetaExtra, "", "转存产物的自定义元数据（JSON 或 @file.json；仅转存时有意义，与来源信息合并写入目标卷）")
 	cmd.Flags().String(flagExpectChecksum, "", "期望产物 checksum（下载完成、转存前校验；不一致按 content_mismatch 换源重试）")
+	cmd.Flags().Bool(flagTransferOverwrite, false, "允许覆盖已存在的转存目标（修复受损文件时必需）")
 	cmd.Flags().StringArray(flagFallbackURL, nil, "备选源 URL（可重复；主源失败自动切换）")
 	return cmd
 }
@@ -456,7 +459,8 @@ func cloudDownloadSubmitOpts(cmd *cobra.Command) []client.CloudDownloadOption {
 	var opts []client.CloudDownloadOption
 	if vol, _ := cmd.Flags().GetString(flagTransferVolume); vol != "" {
 		p, _ := cmd.Flags().GetString(flagTransferPath)
-		opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p}))
+		ow, _ := cmd.Flags().GetBool(flagTransferOverwrite)
+		opts = append(opts, client.WithCloudDownloadTransfer(&client.TransferSpec{Volume: vol, Path: p, Overwrite: ow}))
 	}
 	if cmd.Flags().Changed(flagSave) {
 		s, _ := cmd.Flags().GetBool(flagSave)

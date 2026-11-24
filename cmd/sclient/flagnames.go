@@ -28,4 +28,6 @@ const (
 	flagExpectChecksum = "expect-checksum"
 	// flagFallbackURL 备选源（可重复；主源失败自动切换）。
 	flagFallbackURL = "fallback-url"
+	// flagTransferOverwrite 允许覆盖已存在的转存目标（修复受损文件必需）。
+	flagTransferOverwrite = "transfer-overwrite"
 )
