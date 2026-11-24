@@ -19,6 +19,8 @@ import (
 type TransferSpec struct {
 	Volume string `json:"volume"`
 	Path   string `json:"path,omitempty"`
+	// Overwrite 允许覆盖已存在的目标（默认 false = 目标唯一语义）。
+	Overwrite bool `json:"overwrite,omitempty"`
 }
 
 // CloudTask 表示一个云端下载任务。

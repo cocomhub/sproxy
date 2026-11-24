@@ -754,8 +754,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 |---|---|
 | `expected_checksum` | 期望产物 checksum；非空时**下载完成、转存前**必须一致，否则任务失败并归类 `content_mismatch`（事项中心按"换源"重试） |
 | `fallback_urls[]` | 备选源（同内容多条 URL）；主源失败且归类为 `source_unreachable`/`throttled`/`content_mismatch` 时**自动切下一条**重试 |
+| `transfer.overwrite` | 允许**覆盖已存在的转存目标**（默认 false = 目标唯一语义）。修复受损文件时必需，否则会因「已存在且幂等」失败（归类 `target_conflict`，需人工） |
 
-CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）。
+CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-overwrite`。
 
 #### 批量编排与观测（2026-11-21 P5）
 

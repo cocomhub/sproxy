@@ -76,7 +76,8 @@ func classifyCloudError(msg string) string {
 		strings.Contains(s, "not attached") || strings.Contains(s, "volume not found") ||
 		strings.Contains(s, "卷不存在") || strings.Contains(s, "backend unavailable"):
 		return ErrClassTargetUnavailable
-	case strings.Contains(s, "exists") || strings.Contains(s, "conflict") || strings.Contains(s, "overwrite"):
+	case strings.Contains(s, "exists") || strings.Contains(s, "conflict") || strings.Contains(s, "overwrite") ||
+		strings.Contains(s, "已存在") || strings.Contains(s, "幂等"):
 		return ErrClassTargetConflict
 	case strings.Contains(s, "429") || strings.Contains(s, "throttl") || strings.Contains(s, "rate limit") ||
 		strings.Contains(s, "too many") || strings.Contains(s, "31034"):

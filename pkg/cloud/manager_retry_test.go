@@ -193,3 +193,31 @@ func TestVerifyExpectedChecksum_FailClosed(t *testing.T) {
 		t.Fatalf("本地补算一致应通过: %v", err)
 	}
 }
+
+// TestClassifyCloudError_TargetConflictCN 锁定中文幂等冲突归类（2026-11-24 实测：
+// 转存失败文案「已存在且幂等」此前归 unknown ⇒ 不可识别为 target_conflict）。
+func TestClassifyCloudError_TargetConflictCN(t *testing.T) {
+	t.Parallel()
+	for _, msg := range []string{
+		`transfers: 转存目标 "a/b.mp4" 已存在且幂等`,
+		"target already exists",
+	} {
+		if got := classifyCloudError(msg); got != ErrClassTargetConflict {
+			t.Errorf("classifyCloudError(%q) = %q, want %q", msg, got, ErrClassTargetConflict)
+		}
+	}
+}
+
+// TestWantOverwrite 锁定覆盖语义的取值（默认 false = 目标唯一；显式 true 才覆盖）。
+func TestWantOverwrite(t *testing.T) {
+	t.Parallel()
+	if wantOverwrite(nil) || wantOverwrite(&CloudTask{}) {
+		t.Fatal("无 TransferSpec 时不得覆盖")
+	}
+	if wantOverwrite(&CloudTask{Transfer: &TransferSpec{Volume: "v"}}) {
+		t.Fatal("未显式 Overwrite 时不得覆盖（默认目标唯一）")
+	}
+	if !wantOverwrite(&CloudTask{Transfer: &TransferSpec{Volume: "v", Overwrite: true}}) {
+		t.Fatal("显式 Overwrite=true 时应允许覆盖")
+	}
+}

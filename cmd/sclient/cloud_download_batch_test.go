@@ -60,3 +60,12 @@ func TestNewCmdCloudDownloadBatch_HasTransferVolume(t *testing.T) {
 		t.Fatal("缺少 --transfer-volume")
 	}
 }
+
+// TestNewCmdCloudDownloadBatch_HasTransferOverwrite 锁定批量覆盖开关存在（修复受损文件必需）。
+func TestNewCmdCloudDownloadBatch_HasTransferOverwrite(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdCloudDownloadBatch(nil, cli.IOStreams{})
+	if cmd.Flags().Lookup("transfer-overwrite") == nil {
+		t.Fatal("缺少 --transfer-overwrite")
+	}
+}

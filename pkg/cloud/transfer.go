@@ -78,6 +78,8 @@ type transferEnv struct {
 	// resumeSelfOverwrite 是 damaged 任务 Resume 重下自愈标记（E-M2）：目标卷旧损坏
 	// 副本允许被本任务覆盖（W1/W3 只对他人生效）。来自 task.resumeSelfOverwrite。
 	resumeSelfOverwrite bool
+	// overwrite 是调用方显式声明的「允许覆盖已存在目标」（TransferSpec.Overwrite）。
+	overwrite bool
 }
 
 // transferDone 把下载产物 destPath 转存到目标卷（TransferSpec 指定）。
@@ -137,6 +139,7 @@ func (m *CloudDownloadManager) transferDone(ctx context.Context, task *CloudTask
 		destPath: destPath, task: task, result: result, retryDownload: retryDownload,
 		targetWriteLock:     m.targetWriteLock,
 		resumeSelfOverwrite: task.resumeSelfOverwrite,
+		overwrite:           wantOverwrite(task),
 	}
 	// 文件异常重下载循环：两次「校验和一致但转存仍失败」→ 终止。
 	tr, lerr := m.transferLoop(env)
@@ -824,7 +827,7 @@ func writeTransferOnce(env *transferEnv, r io.Reader, size, mtime int64) (bool, 
 	}
 	// E-M2（damaged 自愈）：resumeSelfOverwrite（damaged 任务重下）允许首写覆盖本任务
 	// 先前写过的目标卷副本——旧损坏副本需被新下载内容替换，不走唯一性拒绝。
-	if env.resumeSelfOverwrite || env.writeCount > 0 {
+	if env.overwrite || env.resumeSelfOverwrite || env.writeCount > 0 {
 		if err := env.targetFS.WriteFile(env.ctx, syncpkg.LogicalKey{}, env.rel, r, size, mtime); err != nil {
 			return false, fmt.Errorf("%w: 写目标卷 %q %s: %v", ErrTransferTarget, env.task.Transfer.Volume, env.rel, err)
 		}
@@ -989,4 +992,11 @@ func (m *CloudDownloadManager) stagingQuotaWrap(owner string, fs syncpkg.FS) syn
 		return fs
 	}
 	return syncpkg.ApplyStagingQuota(fs, m.stagingQuotaFor(owner))
+}
+
+// wantOverwrite 判断该任务是否显式要求覆盖已存在目标（TransferSpec.Overwrite）。
+//
+// 抽成函数：覆盖语义影响「目标唯一性」这一安全不变量，必须可单测（避免改错方向）。
+func wantOverwrite(task *CloudTask) bool {
+	return task != nil && task.Transfer != nil && task.Transfer.Overwrite
 }

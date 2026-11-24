@@ -981,6 +981,12 @@ type TransferSpec struct {
 	Volume string `json:"volume"`
 	// Path 是目标路径（含文件名；空 = 自动派生：pikpak/<owner>/<taskID>/<filename>）。
 	Path string `json:"path,omitempty"`
+	// Overwrite 允许**覆盖已存在的目标**（默认 false = 目标唯一语义，拒绝静默覆盖）。
+	//
+	// 为什么需要（2026-11-24 实测）：修复受损文件时目标必然已存在 ⇒ 默认语义下转存被拒
+	// （"已存在且幂等"），修复流程无法自动完成，只能人工先改名。显式 opt-in 覆盖把该场景
+	// 变成可编排：调用方声明"我知道要替换"，服务端按覆盖语义写（版本化卷仍保留旧版本）。
+	Overwrite bool `json:"overwrite,omitempty"`
 	// 注：曾有 OwnerPrefix 字段（注释称「共享卷的 owner 隔离前缀，服务端注入」）——**无任何
 	// 生产者/消费者**（独立审核 2026-10-18 确证）⇒ 已删除。owner 隔离由 `volume.ResolveLocation`
 	// 恒 owner 前缀承担（pkg/volume/volume_path.go），该字段声称的「注入」从未存在。
