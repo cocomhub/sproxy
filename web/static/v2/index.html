@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<!-- Copyright 2026 The Cocomhub Authors. All rights reserved. SPDX-License-Identifier: Apache-2.0 -->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sproxy · v2</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="rail" aria-label="主导航">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">S</div>
+      <div class="brand-name">sproxy</div>
+      <div class="brand-tag">v2 · P0</div>
+    </div>
+
+    <div class="rail-group">工作区</div>
+    <div class="nav" data-route="files" role="link" tabindex="0">
+      <span>文件</span><span class="count num">128</span>
+    </div>
+    <div class="nav" data-route="transfer" role="link" tabindex="0">
+      <span>传输</span><span class="count num">3</span>
+    </div>
+    <div class="nav" data-route="trash" role="link" tabindex="0">
+      <span>回收站</span><span class="count num">4</span>
+    </div>
+
+    <div class="rail-group">系统</div>
+    <div class="nav" data-route="console" role="link" tabindex="0">
+      <span>控制台</span>
+    </div>
+
+    <div class="rail-foot">
+      <div class="who">
+        <div class="avatar" aria-hidden="true">DM</div>
+        <div><div style="font-size:12.5px;font-weight:600">demo</div>
+          <div class="muted" style="font-size:11px">demo · 示例凭据</div></div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <span class="page-title" id="v2-title">文件</span>
+        <span class="page-sub" id="v2-subtitle">/ 全部卷</span>
+      </div>
+      <span class="spacer"></span>
+      <span class="pill pill-info">v2 预览 · P0 壳层</span>
+      <a class="btn btn-ghost" href="/ui/" title="返回旧版">旧版</a>
+      <button class="icon-btn" id="v2-theme-toggle" type="button" title="切换亮/暗" aria-label="切换亮/暗">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+      </button>
+    </header>
+
+    <div class="content">
+      <div class="banner banner-warn" role="status">
+        <div><b>v2 预览版（P1a 文件列表）</b>
+          <div class="muted" style="font-size:12px">文件列表已接入 /api/files（凭据复用旧版 SproxySig）；上传/批量/检查器与控制台仍走旧版。</div>
+        </div>
+        <a class="btn" href="/ui/" style="margin-left:auto">回到旧版</a>
+      </div>
+
+      <section class="panel" data-panel="files" aria-labelledby="v2-title">
+        <div class="card">
+          <div class="card-h">
+            <div class="crumbs" id="v2-crumbs"></div>
+            <span class="hint" id="v2-count"></span>
+            <span class="spacer" style="flex:1"></span>
+            <label class="btn btn-primary" for="v2-upload-input">上传</label>
+            <input id="v2-upload-input" type="file" multiple hidden>
+            <button class="btn" id="v2-mkdir" type="button">新建目录</button>
+            <button class="btn" id="v2-batch-delete" type="button" disabled>删除所选</button>
+            <button class="btn" id="v2-refresh" type="button">刷新</button>
+          </div>
+          <div id="v2-files-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead>
+              <tr><th style="width:34px"><input class="cb" id="v2-select-all" type="checkbox" aria-label="全选"></th>
+                <th>名称</th><th style="width:110px">卷</th><th style="width:96px" class="r">大小</th>
+                <th style="width:150px">修改时间</th><th style="width:70px">校验</th><th style="width:150px"></th></tr>
+            </thead>
+            <tbody id="v2-file-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" data-panel="transfer" aria-labelledby="v2-title">
+        <div class="card">
+          <div class="card-h">
+            <button class="chip" data-tf="" aria-pressed="true">全部 <span class="num" id="v2-tf-all">0</span></button>
+            <button class="chip" data-tf="running" aria-pressed="false">进行中 <span class="num" id="v2-tf-running">0</span></button>
+            <button class="chip" data-tf="failed" aria-pressed="false">失败 <span class="num" id="v2-tf-failed">0</span></button>
+            <button class="chip" data-tf="completed" aria-pressed="false">已完成 <span class="num" id="v2-tf-completed">0</span></button>
+            <span style="flex:1"></span>
+            <span class="pill pill-ok" id="v2-tf-auto" role="button" tabindex="0" aria-pressed="true"><span class="dot"></span>自动刷新 5s</span>
+            <button class="btn" id="v2-tf-refresh" type="button">刷新</button>
+          </div>
+          <div id="v2-tf-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>任务</th><th style="width:130px">状态</th><th style="width:170px">进度</th>
+              <th style="width:100px" class="r">大小</th><th style="width:140px">更新</th><th style="width:180px"></th></tr></thead>
+            <tbody id="v2-tf-body"></tbody>
+          </table>
+          <div class="empty" id="v2-tf-empty" hidden><b>暂无云端任务</b>
+            <div class="muted">提交下载链接后，任务会出现在这里。</div></div>
+        </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-h">
+            <h2>任务组</h2><span class="hint">组内任务共享来源与目标卷；组链式即按组批量下载</span>
+            <span style="flex:1"></span>
+            <button class="btn" id="v2-grp-refresh" type="button">刷新</button>
+            <button class="btn btn-primary" id="v2-grp-create" type="button">创建组</button>
+          </div>
+          <div id="v2-grp-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>组</th><th style="width:130px">状态</th><th style="width:150px">进度</th>
+              <th style="width:90px" class="r">失败</th><th style="width:140px">更新</th><th style="width:210px"></th></tr></thead>
+            <tbody id="v2-grp-body"></tbody>
+          </table>
+          <div class="empty" id="v2-grp-empty" hidden><b>暂无任务组</b>
+            <div class="muted">创建组后可整组取消/重试。</div></div>
+        </div>
+      </section>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-h">
+            <h2>同步任务</h2><span class="hint">push / pull / both；冲突与删除策略按任务独立</span>
+            <span style="flex:1"></span>
+            <button class="btn" id="v2-sync-refresh" type="button">刷新</button>
+            <button class="btn btn-primary" id="v2-sync-create" type="button">新建同步</button>
+          </div>
+          <div id="v2-sync-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>任务</th><th style="width:80px">方向</th><th>路径</th>
+              <th style="width:130px">状态</th><th style="width:130px">进度</th><th style="width:150px"></th></tr></thead>
+            <tbody id="v2-sync-body"></tbody>
+          </table>
+          <div class="empty" id="v2-sync-empty" hidden><b>暂无同步任务</b>
+            <div class="muted">在节点之间创建同步后可在此查看进度。</div></div>
+        </div>
+      </section>
+
+      <div class="modal-backdrop" id="v2-sync-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-sync-title">
+          <h3 id="v2-sync-title">新建同步任务</h3>
+          <p>目标路径相对远端节点；删除策略默认不传播。</p>
+          <div class="sync-grid">
+            <label class="field">方向<select id="v2-sync-dir"><option>push</option><option>pull</option><option>both</option></select></label>
+            <label class="field">远端节点<input id="v2-sync-remote" placeholder="node-a1" autocomplete="off"></label>
+            <label class="field">源路径<input id="v2-sync-src" placeholder="jav/EXAMPLE" autocomplete="off"></label>
+            <label class="field">目标路径<input id="v2-sync-dst" placeholder="jav/EXAMPLE" autocomplete="off"></label>
+            <label class="field">冲突策略<select id="v2-sync-conflict"><option>skip</option><option>overwrite</option><option>lww</option><option>conflict-rename</option></select></label>
+            <label class="field">删除传播<select id="v2-sync-delete"><option value="skip">skip（不传播）</option><option value="propagate">propagate（传播）</option></select></label>
+          </div>
+          <label class="dr-check"><input id="v2-sync-recursive" type="checkbox" checked> 递归子目录</label>
+          <div class="modal-actions">
+            <button class="btn" id="v2-sync-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="v2-sync-ok" type="button">创建</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-backdrop" id="v2-grp-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-grp-title">
+          <h3 id="v2-grp-title">创建任务组</h3>
+          <p>每行一个下载链接；同组任务按提交顺序执行。</p>
+          <label class="field">组名<input id="v2-grp-name" value="示例任务组" autocomplete="off"></label>
+          <label class="field">链接<textarea id="v2-grp-urls" rows="4" placeholder="https://…"></textarea></label>
+          <div class="modal-actions">
+            <button class="btn" id="v2-grp-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="v2-grp-ok" type="button">创建并开始</button>
+          </div>
+        </div>
+      </div>
+
+      <section class="panel" data-panel="trash" hidden>
+        <div class="card"><div class="card-b placeholder">
+          <b>回收站</b>
+          <div class="muted">P1 接入：恢复 / 彻底删除 / 清空。</div>
+          <div class="empty"><b>回收站为空</b><div>删除的文件会在这里保留 30 天。</div></div>
+        </div></div>
+      </section>
+
+      <section class="panel" data-panel="console" hidden>
+        <div class="card"><div class="card-b placeholder">
+          <b>控制台</b>
+          <div class="muted">P3 接入：概览 / 云端任务 / 待处理事项 / 审计 / 卷 / 配置 / 通知 / 巡检 / 接入。</div>
+          <div class="empty"><b>控制台尚未迁移</b><div>当前请使用 <a href="/ui/">旧版控制台</a>。</div></div>
+        </div></div>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="drawer-backdrop" id="v2-dr-backdrop" hidden></div>
+<aside class="drawer" id="v2-drawer" role="dialog" aria-labelledby="v2-dr-title" aria-hidden="true">
+  <header>
+    <h3 id="v2-dr-title">详情</h3>
+    <button class="icon-btn" id="v2-dr-close" type="button" title="关闭">✕</button>
+  </header>
+  <div class="dr-tabs" role="tablist">
+    <button type="button" data-drtab="info" aria-selected="true">概览</button>
+    <button type="button" data-drtab="meta" aria-selected="false">Meta</button>
+    <button type="button" data-drtab="ver" aria-selected="false">版本</button>
+    <button type="button" data-drtab="share" aria-selected="false">分享</button>
+  </div>
+  <div class="dr-body">
+    <div data-drpane="info"><dl class="kv" id="v2-dr-info"></dl></div>
+    <div data-drpane="meta" hidden>
+      <div class="dr-row"><span class="muted">只读元数据（卷 sidecar / 服务端缓存）</span>
+        <button class="btn btn-sm" id="v2-meta-reload" type="button">刷新</button></div>
+      <div id="v2-meta-state" class="banner" hidden role="status"></div>
+      <pre class="json" id="v2-meta-json">—</pre>
+    </div>
+    <div data-drpane="ver" hidden><div id="v2-ver-list">加载中…</div></div>
+    <div data-drpane="share" hidden>
+      <div class="dr-row"><label class="muted">有效期
+        <select id="v2-share-ttl"><option value="1">1 天</option><option value="7" selected>7 天</option><option value="30">30 天</option></select></label>
+        <label class="muted">下载上限
+          <input id="v2-share-max" type="number" min="0" value="0" style="width:70px"> 次</label>
+      </div>
+      <label class="dr-check"><input id="v2-share-one" type="checkbox"> 一次性链接（下载后失效）</label>
+      <button class="btn btn-primary btn-sm" id="v2-share-create" type="button">创建分享</button>
+      <div id="v2-share-result" class="muted" style="font-size:12px"></div>
+      <div class="dr-sep"></div>
+      <div class="muted" style="font-size:12px">已有链接</div>
+      <div id="v2-share-list">加载中…</div>
+    </div>
+  </div>
+</aside>
+
+<div class="preview-backdrop" id="v2-pv-backdrop" hidden></div>
+<div class="preview" id="v2-preview" role="dialog" aria-modal="true" aria-labelledby="v2-pv-title" hidden>
+  <header>
+    <b id="v2-pv-title">预览</b>
+    <span id="v2-pv-meta" class="muted"></span>
+    <button class="icon-btn" id="v2-pv-close" type="button" title="关闭">✕</button>
+  </header>
+  <div class="pv-stage">
+    <img id="v2-pv-img" alt="" hidden>
+    <video id="v2-pv-video" controls hidden></video>
+    <pre id="v2-pv-text" hidden></pre>
+    <div id="v2-pv-msg" class="muted" hidden></div>
+  </div>
+</div>
+
+<div class="uploads" id="v2-uploads" hidden aria-live="polite"></div>
+
+<div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
+<script src="../sclient/crypto.js"></script>
+<script src="../sclient/sig.js"></script>
+<script src="../shared/format.js"></script>
+<script src="../shared/creds.js"></script>
+<script src="auth.js"></script>
+<script src="files.js"></script>
+<script src="../sclient/util.js"></script>
+<script src="api.js"></script>
+<script src="../sclient/sha256.js"></script>
+<script src="upload-chunked.js"></script>
+<script src="files-ops.js"></script>
+<script src="files-view.js"></script>
+<script src="files-actions.js"></script>
+<script src="../video-player.js"></script>
+<script src="files-inspector.js"></script>
+<script src="../cloud-tasks.js"></script>
+<script src="transfer.js"></script>
+<script src="preview.js"></script>
+<script src="shell.js"></script>
+</body>
+</html>
