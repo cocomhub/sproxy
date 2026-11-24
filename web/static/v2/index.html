@@ -49,7 +49,10 @@
         <span class="page-sub" id="v2-subtitle">/ 全部卷</span>
       </div>
       <span class="spacer"></span>
-      <span class="pill pill-info">v2 预览 · P0 壳层</span>
+      <span class="pill pill-info">v2 预览</span>
+      <button class="btn btn-ghost" id="v2-density-toggle" type="button" aria-pressed="false"
+        title="切换表格密度">密度</button>
+      <button class="btn btn-ghost" id="v2-cmdk-open" type="button" title="命令面板（⌘K / Ctrl+K）">⌘K</button>
       <a class="btn btn-ghost" href="/ui/" title="返回旧版">旧版</a>
       <button class="icon-btn" id="v2-theme-toggle" type="button" title="切换亮/暗" aria-label="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -464,6 +467,30 @@
 <div class="uploads" id="v2-uploads" hidden aria-live="polite"></div>
 
 <div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
+<div class="sr-only" id="v2-live" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<div class="cmdk-back" id="v2-cmdk-back" hidden></div>
+<div class="cmdk" id="v2-cmdk" hidden role="dialog" aria-modal="true" aria-label="命令面板">
+  <input id="v2-cmdk-input" type="text" placeholder="搜索命令：文件 / 控制台 / 主题…" autocomplete="off"
+    aria-controls="v2-cmdk-list" aria-autocomplete="list">
+  <div id="v2-cmdk-list" role="listbox" aria-label="命令列表"></div>
+  <div class="cmdk-hint muted">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
+</div>
+
+<div class="cmdk-back" id="v2-help-back" hidden></div>
+<div class="help-sheet" id="v2-help" hidden role="dialog" aria-modal="true" aria-labelledby="v2-help-title">
+  <header><h3 id="v2-help-title">快捷键</h3>
+    <button class="btn btn-ghost" type="button" data-close-help>关闭</button></header>
+  <div class="sheet-body">
+    <div class="kv"><span>⌘K / Ctrl+K</span><span>命令面板</span></div>
+    <div class="kv"><span>g f / t / r / c</span><span>跳到 文件 / 传输 / 回收站 / 控制台</span></div>
+    <div class="kv"><span>j / k</span><span>列表下一行 / 上一行</span></div>
+    <div class="kv"><span>x</span><span>选中/取消选中当前行</span></div>
+    <div class="kv"><span>Enter</span><span>打开当前行（目录进入 / 文件预览）</span></div>
+    <div class="kv"><span>?</span><span>本帮助</span></div>
+    <div class="kv"><span>Esc</span><span>关闭面板/帮助/预览</span></div>
+  </div>
+</div>
 <script src="../sclient/crypto.js"></script>
 <script src="../sclient/sig.js"></script>
 <script src="../shared/format.js"></script>
@@ -490,5 +517,6 @@
 <script src="console.js"></script>
 <script src="preview.js"></script>
 <script src="shell.js"></script>
+<script src="keyboard.js"></script>
 </body>
 </html>

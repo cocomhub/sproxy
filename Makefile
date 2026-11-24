@@ -292,6 +292,8 @@ web-test:
 	@node --check web/static/v2/verify-console.test.js
 	@node --check web/static/v2/access-console.js
 	@node --check web/static/v2/access-console.test.js
+	@node --check web/static/v2/keyboard.js
+	@node --check web/static/v2/keyboard.test.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js
@@ -325,6 +327,7 @@ web-test:
 	node --test web/static/v2/notify-console.test.js
 	node --test web/static/v2/verify-console.test.js
 	node --test web/static/v2/access-console.test.js
+	node --test web/static/v2/keyboard.test.js
 	node --test web/static/v2/shell.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js

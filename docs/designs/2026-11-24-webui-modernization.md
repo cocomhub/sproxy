@@ -466,7 +466,7 @@
 | 控制台 · 通知 | ✅ | 历史 + 渠道自检（真实外发，未启用时降级） |
 | 控制台 · 巡检 | ✅ | 触发 checksum 巡检并展示核对/一致/不符/缺失/错误/跳过 |
 | 控制台 · 接入 | ✅ | 凭据摘要（admin）+ 接入指引（sclient/dav/s3）；非管理员降级 |
-| 键盘与 a11y | ⬜ | ⌘K、j/k、aria-live |
+| 键盘与 a11y | ✅ | ⌘K 命令面板、g 前缀跳转、j/k/x/Enter 列表操作、? 帮助、密度切换持久化、aria-live 播报 |
 
 验证：`make web-test`、`go test ./internal/archcheck -run TestWebAssets`、`go build ./...`、
 `go test ./web/e2e -run TestV2Shell` 全绿；e2e 覆盖列表/写操作/上传/预览/传输/任务组/同步/控制台分区。
