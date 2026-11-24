@@ -24,6 +24,12 @@
 键盘：`⌘K` 命令面板、`/` 搜索、`g f/t/r/c` 跳转、`j/k` 行焦点、`x` 选中、`Enter` 详情、`Esc` 逐层关闭。
 深链：`#/console/<section>`，云端任务支持 `?status=&volume=&page=`。
 
+## 导航约定
+
+- 侧栏只有**一个**「控制台」入口；12 个分区在控制台内部导航，不重复出现在侧栏；
+- 打开控制台时，外层入口只有弱提示（`data-open`），当前态只给内部当前分区；
+- 手机端（≤640px）用底部导航，顶部 tab 隐藏。
+
 ## 三套方案的结构差异（不是配色）
 
 | 轴 | A 工程控制台 | B 运维仪表盘 | C 精修既有 |
@@ -44,7 +50,11 @@ python docs/designs/mockups/audit_contrast.py
 # 2) 结构探针（headless Chrome，读取 rail/row/radius/shadow/console）
 chrome --headless --disable-gpu --window-size=1500,950 --dump-dom file:///$PWD/docs/designs/mockups/webui-v2-prototype.html
 
-# 3) 横向溢出（12 分区 × 3 皮肤，1280/1500/390 宽度；需注入探针脚本，见设计文档 §13）
+# 3) 全状态结构审计（57 状态 × 1500/1280/1024/768/390）：多选中/溢出/裁切/命中区/遮挡
+#    详见 ui-audit.md
+
+# 4) 按状态批量截图（输出到 %TEMP%/webui-shots）
+python docs/designs/mockups/shoot_states.py
 ```
 
 修改 token 后必须重跑对比度审计；修改布局后必须重跑结构探针与溢出检查。

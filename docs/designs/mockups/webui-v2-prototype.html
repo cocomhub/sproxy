@@ -133,6 +133,8 @@ body{
 .nav{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:var(--radius-sm);color:var(--text-2);cursor:pointer;border:1px solid transparent;user-select:none}
 .nav:hover{background:var(--surface-hover);color:var(--text)}
 .nav[aria-current="page"]{background:var(--accent-soft);color:var(--text);border-color:color-mix(in srgb,var(--accent) 24%,transparent);font-weight:600}
+.nav[data-open="1"]{background:var(--surface-3);color:var(--text)}
+[data-skin="c"] .top-tabs button[data-open="1"]{color:var(--text);font-weight:600}
 .nav .ic{opacity:.85;flex:0 0 auto}
 .nav .count{margin-left:auto;font-size:11px;color:var(--text-3);font-variant-numeric:tabular-nums;background:var(--surface-3);padding:1px 6px;border-radius:999px}
 .rail-foot{margin-top:auto;border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:2px}
@@ -246,10 +248,10 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
 .row-actions{display:flex;gap:2px;justify-content:flex-end}
 [data-skin="a"] .row-actions{opacity:0;transition:opacity var(--dur) var(--ease)}
 [data-skin="a"] tr:hover .row-actions,[data-skin="a"] .row-actions:focus-within{opacity:1}
-[data-skin="a"] .row-actions .icon-btn{width:24px;height:22px;border-radius:var(--radius-xs)}
+[data-skin="a"] .row-actions .icon-btn{width:26px;height:24px;border-radius:var(--radius-xs)}
 [data-skin="b"] .row-actions .icon-btn{width:28px;height:28px;border-radius:var(--radius-sm)}
 [data-skin="c"] .row-actions{gap:8px}
-[data-skin="c"] .row-actions .icon-btn{width:auto;height:auto;padding:0 4px;font-size:13px;color:var(--info)}
+[data-skin="c"] .row-actions .icon-btn{width:auto;height:auto;min-width:24px;min-height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0 4px;font-size:13px;color:var(--info)}
 [data-skin="c"] .row-actions .icon-btn svg{display:none}
 
 /* ───── 空态 / 骨架 / banner ───── */
@@ -374,6 +376,7 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
 .filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
 /* ───── 抽屉 / 浮层 ───── */
+.mobile-nav{display:none}
 .drawer{position:fixed;top:0;right:0;height:100vh;width:420px;max-width:94vw;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);transform:translateX(105%);transition:transform 200ms var(--ease);z-index:70;display:flex;flex-direction:column}
 .drawer.show{transform:none}
 .drawer header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border)}
@@ -429,7 +432,7 @@ tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft
 /* ───── 设计稿控制条 ───── */
 .devtools{position:fixed;right:14px;bottom:14px;z-index:200;display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border-strong);border-radius:999px;padding:6px 8px 6px 12px;box-shadow:var(--shadow-2);font-size:12px}
 .devtools .lbl{color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.devtools select,.devtools button{height:26px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:var(--radius-sm);font-size:12px;padding:0 7px;cursor:pointer}
+.devtools select,.devtools button{height:26px;min-width:26px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:var(--radius-sm);font-size:12px;padding:0 7px;cursor:pointer}
 .devtools button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:transparent}
 
 /* ───── 危险操作确认 ───── */
@@ -498,8 +501,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   [data-skin="a"] .shell,[data-skin="b"] .shell,[data-skin="c"] .shell{display:block;padding:0;height:auto;min-height:100vh}
   .rail{display:none}
   [data-skin="c"] .main{max-width:none;margin:0;border-radius:0;min-height:100vh;box-shadow:none}
-  .top-tabs{display:flex;overflow-x:auto;padding:0 8px;white-space:nowrap}
-  .top-tabs button{padding:12px 12px;font-size:13px}
+  /* 手机端统一用底部导航，顶部 tab 一律隐藏（含 C 的高优先级规则） */
+  .top-tabs,[data-skin="c"] .top-tabs{display:none}
   .topbar{padding:10px 14px;height:auto;flex-wrap:wrap;gap:8px}
   .page-title{font-size:15px;order:1}
   .search-trigger{order:3;min-width:0;flex:1 1 100%;margin-left:0}
@@ -528,7 +531,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   .drawer{width:100vw}
   .floatbar{left:12px;right:12px;transform:translateY(140%);bottom:12px}
   .floatbar.show{transform:none}
-  .devtools{right:8px;bottom:8px;top:auto;left:auto;transform:scale(.92);transform-origin:bottom right}
+  .devtools{right:8px;bottom:8px;top:auto;left:8px;max-width:calc(100vw - 16px);flex-wrap:wrap;border-radius:14px;justify-content:center;padding:6px 8px}
   /* 手机端底部导航（顶部 tab 隐藏） */
   .top-tabs{display:none}
   .mobile-nav{display:flex;position:fixed;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);padding:6px 4px calc(6px + env(safe-area-inset-bottom));z-index:66;justify-content:space-around}
@@ -576,30 +579,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13h10l1-13"/></svg>
       <span class="label">回收站</span><span class="count">4</span>
     </div>
-    <div class="rail-group">控制台</div>
+    <div class="rail-group">系统</div>
     <div class="nav" data-goto="console" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V5m0 14h16M7 15l3.5-4 3 2.5L20 7"/></svg>
-      <span class="label">概览</span>
-    </div>
-    <div class="nav" data-goto="console" data-sec="cloud" tabindex="0">
-      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h14v6H5zM5 14h14v6H5z"/><path d="M9 7h.01M9 17h.01"/></svg>
-      <span class="label">云端任务</span><span class="count">12</span>
-    </div>
-    <div class="nav" data-goto="console" data-sec="issues" tabindex="0">
-      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 4v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V7z"/><path d="M9.5 12l1.8 1.8 3.4-3.6"/></svg>
-      <span class="label">待处理事项</span><span class="count">5</span>
-    </div>
-    <div class="nav" data-goto="console" data-sec="audit" tabindex="0">
-      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/></svg>
-      <span class="label">审计</span>
-    </div>
-    <div class="nav" data-goto="console" data-sec="volumes" tabindex="0">
-      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
-      <span class="label">卷</span><span class="count">6</span>
-    </div>
-    <div class="nav" data-goto="console" data-sec="config" tabindex="0">
-      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3a1.7 1.7 0 0 0 1-1.6V1a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 3c.7.3 1.5.2 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9c.3.7.9 1.1 1.6 1.1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-      <span class="label">配置</span>
+      <span class="label">控制台</span><span class="count">5</span>
     </div>
     <div class="rail-foot">
       <div class="who" tabindex="0">
@@ -1731,26 +1714,34 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿']
   };
   function show(go) {
-    if (go === 'console' && isModalConsole()) { openConsole(); return; }
-    if (go === 'console') { closeConsole(); }
+    if (go === 'console') { openConsole(currentSec); return; }
+    closeConsole();
     $$('.view').forEach(function (v) { v.classList.toggle('active', v.id === 'view-' + go); });
-    $$('[data-goto]').forEach(function (n) {
-      if (n.getAttribute('data-goto') === go) { n.setAttribute('aria-current', 'page'); } else { n.removeAttribute('aria-current'); }
-    });
-    var t = titles[go] || titles.files;
-    id('page-title').firstChild.nodeValue = t[0];
-    id('page-sub').textContent = t[1];
-    if (go !== 'console') { closeConsole(); }
+    setNav(go);
+    setTitle(go);
     var list = $('#view-' + go + ' .table tbody tr');
     if (list) { list.setAttribute('tabindex', '0'); }
   }
+  function setNav(go) {
+    var isConsole = go === 'console';
+    $$('[data-goto]').forEach(function (n) {
+      // 同一目的地可能有多个入口（侧栏/顶部 tab/底部导航），只允许一个“当前”。
+      // 控制台是容器：外层入口只标记 data-open（弱提示），当前分区由内部 .cnav 承担，
+      // 否则会同时出现「控制台」和「概览」两个选中项。
+      var match = n.getAttribute('data-goto') === go && !n.hasAttribute('data-sec');
+      n.removeAttribute('aria-current');
+      if (!match) { n.removeAttribute('data-open'); return; }
+      if (isConsole) { n.setAttribute('data-open', '1'); } else { n.removeAttribute('data-open'); n.setAttribute('aria-current', 'page'); }
+    });
+  }
+  function setTitle(go) {
+    var t = titles[go] || titles.files;
+    id('page-title').firstChild.nodeValue = t[0];
+    id('page-sub').textContent = t[1];
+  }
   $$('[data-goto]').forEach(function (nav) {
     var go = nav.getAttribute('data-goto');
-    var act = function () {
-      var sec = nav.getAttribute('data-sec');
-      show(go);
-      if (sec) { openConsole(sec); }
-    };
+    var act = function () { show(go); };
     nav.addEventListener('click', act);
     nav.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } });
   });
@@ -1766,13 +1757,20 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   };
   function openConsole(sec) {
     if (isModalConsole()) {
-      lastFocus = document.activeElement;
+      if (!id('view-console').classList.contains('active')) {
+        lastFocus = document.activeElement;
+        layerStack.push('console');
+      }
       id('view-console').classList.add('active');
-      layerStack.push('console');
+    } else {
+      $$('.view').forEach(function (v) { v.classList.toggle('active', v.id === 'view-console'); });
     }
+    setNav('console'); setTitle('console');
     switchSection(sec || 'overview');
-    var first = $('#view-console .cnav');
-    if (first) { setTimeout(function () { first.focus(); }, 30); }
+    if (isModalConsole()) {
+      var first = $('#view-console .cnav');
+      if (first) { setTimeout(function () { first.focus(); }, 30); }
+    }
   }
   function closeConsole() {
     id('view-console').classList.remove('active');
