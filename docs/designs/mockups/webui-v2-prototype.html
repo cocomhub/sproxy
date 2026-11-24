@@ -621,6 +621,60 @@ body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 .cmdk-result .ico{width:16px;height:16px;color:var(--text-3);flex:0 0 auto}
 .cmdk-group[hidden]{display:none}
 
+
+/* ───── 预览（视频/图片/文本） ───── */
+.preview{position:fixed;inset:0;z-index:105;background:color-mix(in srgb,var(--bg) 82%,#000);backdrop-filter:blur(6px);display:none;flex-direction:column}
+.preview.show{display:flex}
+.pv-bar{display:flex;align-items:center;gap:10px;padding:10px 16px;background:color-mix(in srgb,var(--surface) 88%,transparent);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.pv-title{font-weight:600;font-size:14px}
+.pv-meta{font-size:11.5px;color:var(--text-3)}
+.pv-bar .sp{flex:1}
+.pv-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:16px}
+.pv-video{width:min(1100px,100%);aspect-ratio:16/9;background:linear-gradient(135deg,#12141a,#1d2230 60%,#0f1218);border-radius:var(--radius-lg);position:relative;display:flex;align-items:center;justify-content:center;border:1px solid var(--border);overflow:hidden}
+.pv-video .big-play{width:64px;height:64px;border-radius:50%;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);color:#fff;display:grid;place-items:center;font-size:20px;padding-left:4px}
+.pv-video .tc{position:absolute;left:14px;bottom:52px;color:#fff;font-size:12px;font-variant-numeric:tabular-nums}
+.pv-controls{position:absolute;left:0;right:0;bottom:0;padding:10px 14px 12px;background:linear-gradient(transparent,rgba(0,0,0,.72));display:flex;flex-direction:column;gap:8px}
+.pv-seek{height:5px;border-radius:3px;background:rgba(255,255,255,.22);position:relative}
+.pv-seek i{position:absolute;left:0;top:0;bottom:0;width:34%;background:var(--accent);border-radius:3px}
+.pv-ctrl-row{display:flex;align-items:center;gap:10px;color:#fff;font-size:12px}
+.pv-ctrl-row .grow{flex:1}
+.pv-ico{width:28px;height:28px;display:grid;place-items:center;border:0;background:none;color:#fff;cursor:pointer;border-radius:4px}
+.pv-ico:hover{background:rgba(255,255,255,.14)}
+.pv-image{width:min(900px,100%);aspect-ratio:4/3;background:linear-gradient(135deg,#20242c,#3a4152);border-radius:var(--radius-lg);display:grid;place-items:center;color:#fff;border:1px solid var(--border)}
+.pv-text{width:min(1000px,100%);height:100%;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:auto;padding:16px}
+.pv-text pre{margin:0;font-family:var(--font-mono);font-size:12.5px;line-height:1.6;white-space:pre-wrap}
+[data-skin="a"] .pv-video .big-play{border-radius:12px}
+#pv-video,#pv-image,#pv-text{display:none}
+.preview[data-pv="video"] #pv-video{display:flex}
+.preview[data-pv="image"] #pv-image{display:grid}
+.preview[data-pv="text"] #pv-text{display:block}
+
+/* ───── 巡检 ───── */
+.verify-stat{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.vstat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;box-shadow:var(--card-shadow)}
+.vstat .k{font-size:12px;color:var(--text-2)}
+.vstat .v{font-size:24px;font-weight:680;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.vstat.bad .v{color:var(--bad)}
+.vstat.warn .v{color:var(--warn)}
+
+/* ───── 错误页 ───── */
+.error-page{max-width:520px;margin:10vh auto;text-align:center;display:flex;flex-direction:column;align-items:center;gap:12px}
+.error-code{font-size:52px;font-weight:750;letter-spacing:-.03em;line-height:1;color:var(--text-3)}
+.error-page h2{margin:0;font-size:20px}
+.error-page .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:6px}
+.error-detail{width:100%;text-align:left;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);padding:12px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-3);overflow:auto}
+
+/* ───── 向导 ───── */
+.wiz-steps{display:flex;gap:8px;margin:4px 0 16px}
+.wiz-steps .ws{flex:1;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-3)}
+.wiz-steps .ws .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:var(--surface-3);font-size:11px;font-weight:700}
+.wiz-steps .ws.cur{color:var(--text);font-weight:600}
+.wiz-steps .ws.cur .n{background:var(--accent);color:var(--accent-fg)}
+.wiz-steps .ws.done .n{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.wiz-pane{display:none;flex-direction:column;gap:12px}
+.wiz-pane.active{display:flex}
+.wiz-summary{display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px 12px;font-size:12.5px;padding:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md)}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -708,6 +762,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button id="dev-share" type="button">分享页</button>
   <button id="dev-onboard" type="button" aria-pressed="false">首次引导</button>
   <button id="dev-ro" type="button" aria-pressed="false">只读卷</button>
+  <button id="dev-preview" type="button">预览</button>
+  <button id="dev-error" type="button">错误页</button>
   <button id="dev-ds" type="button">组件库</button>
   <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
@@ -1049,9 +1105,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <dt class="muted">校验</dt><dd class="mono">sha256:9f2c…41ab</dd>
             </dl>
             <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">访问密码（可选）
-              <input class="input" type="password" value="1234">
+              <input class="input" type="password" id="share-pw" value="1234">
+              <span class="hint-err" id="share-pw-err" style="display:none">密码不正确，还可尝试 4 次。</span>
             </label>
-            <button class="btn btn-primary" style="width:100%;height:40px;margin-top:14px" type="button" data-toast="开始下载 NHDTB-864.mp4" data-toast-kind="ok">下载</button>
+            <button class="btn btn-primary" style="width:100%;height:40px;margin-top:14px" type="button" id="share-dl">下载</button>
             <div class="muted" style="font-size:11.5px;margin-top:8px">下载即代表同意站点的使用条款；链接失效后可向分享者索取新链接。</div>
           </div>
 
@@ -1063,6 +1120,23 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <div>请联系分享者重新生成，或检查链接是否完整。</div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <!-- ══════════ 错误页 ══════════ -->
+      <section class="view" id="view-error">
+        <div class="error-page">
+          <div class="error-code" id="err-code">404</div>
+          <h2 id="err-title">页面不存在</h2>
+          <div class="muted" id="err-desc">该路径没有对应的页面或对象，可能是链接过期或卷已被移除。</div>
+          <div class="acts">
+            <button class="btn btn-primary" type="button" data-goto="files">返回文件</button>
+            <button class="btn" type="button" data-toast="已复制诊断信息" data-toast-kind="info">复制诊断</button>
+          </div>
+          <div class="error-detail" id="err-detail">request_id: 3f7c1a9e
+path: /ui/volumes/unknown
+volume: (none)
+time: 2026-11-24T18:41:02Z</div>
         </div>
       </section>
 
@@ -1217,6 +1291,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <div class="cnav" data-sec="mesh" role="button" tabindex="0">Mesh</div>
               <div class="cnav" data-sec="hub" role="button" tabindex="0">Hub</div>
               <div class="cnav" data-sec="notify" role="button" tabindex="0">通知 <span class="count">3</span></div>
+              <div class="cnav" data-sec="verify" role="button" tabindex="0">巡检 <span class="count">3</span></div>
             </nav>
             <div class="console-content">
               <div id="cs-demo" aria-hidden="true">
@@ -1544,7 +1619,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <span class="chip active">全部 <span class="n">6</span></span>
                   <span class="chip">本地</span><span class="chip">外部</span><span class="chip">加密</span><span class="chip">封装</span>
                   <span class="spacer" style="flex:1"></span>
-                  <button class="btn btn-sm btn-primary" type="button" data-toast="请先填写名称与后端目标" data-toast-kind="info">新建卷</button>
+                  <button class="btn btn-sm btn-primary" type="button" data-dialog="dlg-volume">新建卷</button>
                 </div>
                 <div class="card">
                   <div class="card-h"><h3>新建卷</h3><span class="hint">创建后立即挂载；封装卷需指定父卷</span></div>
@@ -1588,7 +1663,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <div class="filters">
                   <span class="chip active">全部 <span class="n">3</span></span><span class="chip">即将到期 <span class="n">1</span></span><span class="chip">已禁用</span>
                   <span class="spacer" style="flex:1"></span>
-                  <button class="btn btn-sm btn-primary" type="button" data-toast="请填写 AK 与 Owner" data-toast-kind="info">新增凭据</button>
+                  <button class="btn btn-sm btn-primary" type="button" data-dialog="dlg-credential">新增凭据</button>
                 </div>
                 <div class="card" style="overflow:hidden">
                   <table class="table">
@@ -1701,6 +1776,38 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                 <div class="banner"><div><b>注册准入</b><div class="muted" style="font-size:12px">节点使用凭据 Ring 的 AK + HMAC proof 注册；<span class="mono">relay_token</span> 已废除。</div></div></div>
               </section>
 
+              <!-- 一致性巡检 -->
+              <section class="csection" data-sec="verify">
+                <div class="filters">
+                  <span class="chip active">全部卷 <span class="n">6</span></span>
+                  <span class="chip">baidu</span><span class="chip">secretdata</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm btn-primary" type="button" data-toast="已开始全量巡检（后台任务）" data-toast-kind="ok">全量巡检</button>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 verify-report.csv" data-toast-kind="ok">导出报告</button>
+                </div>
+                <div class="verify-stat">
+                  <div class="vstat"><div class="k">已扫描对象</div><div class="v">12,480</div><div class="muted" style="font-size:11.5px">最近 41m 前完成</div></div>
+                  <div class="vstat"><div class="k">校验一致</div><div class="v">12,477</div><div class="muted" style="font-size:11.5px">99.98%</div></div>
+                  <div class="vstat bad"><div class="k">不一致</div><div class="v">3</div><div class="muted" style="font-size:11.5px">2 可修复 · 1 需人工</div></div>
+                  <div class="vstat warn"><div class="k">跳过分块</div><div class="v">218</div><div class="muted" style="font-size:11.5px">外部卷不支持 md5</div></div>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <div class="card-h"><h3>不一致项</h3><span class="hint">按卷 + 路径定位；修复会重传或重建副本</span></div>
+                  <table class="table">
+                    <thead><tr><th>路径</th><th style="width:140px">类型</th><th style="width:150px">期望</th><th style="width:150px">实际</th><th style="width:110px">状态</th><th style="width:180px"></th></tr></thead>
+                    <tbody>
+                      <tr><td class="mono">secretdata:/NHDTB/NHDTB-861.mp4#3</td><td><span class="pill pill-bad">chunk_missing</span></td><td class="mono">9f2c…41ab</td><td class="mono muted">不可读</td><td><span class="pill pill-warn">可修复</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已开始重建副本" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost" type="button">详情</button></div></td></tr>
+                      <tr><td class="mono">baidu:/jav/NHDTB/NHDTB-863.mp4</td><td><span class="pill pill-warn">md5_mismatch</span></td><td class="mono">7a10…c2</td><td class="mono">7a10…c3</td><td><span class="pill pill-warn">可修复</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已加入重传队列" data-toast-kind="ok">重传</button><button class="btn btn-sm btn-ghost" type="button">详情</button></div></td></tr>
+                      <tr><td class="mono">baidu:/archive/tmp-20261120.tar</td><td><span class="pill pill-bad">size_mismatch</span></td><td class="num">2.10 GB</td><td class="num">2.09 GB</td><td><span class="pill pill-bad">需人工</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已标记为忽略" data-toast-kind="warn">忽略</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="banner"><div><b>巡检口径</b><div class="muted" style="font-size:12px">块级 md5 与台账比对；外部卷不支持 md5 时分块计入「跳过」；修复动作全部走审计。</div></div></div>
+              </section>
+
               <!-- 通知中心 -->
               <section class="csection" data-sec="notify">
                 <div class="filters">
@@ -1714,17 +1821,17 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
                   <div class="kpi"><div class="k" style="width:100%"><span>Webhook</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
                     <div class="d"><span class="mono">https://hooks.example.com/sproxy</span></div>
                     <div class="d"><span class="pill pill-ok">最近成功 3m 前</span><span class="muted">重试 3 次</span></div>
-                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送测试请求" data-toast-kind="ok">测试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已发送测试请求" data-toast-kind="ok">测试</button><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-channel">编辑</button></div>
                   </div>
                   <div class="kpi"><div class="k" style="width:100%"><span>Email</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
                     <div class="d"><span class="mono">ops@example.com</span></div>
                     <div class="d"><span class="pill pill-warn">最近失败 12m 前</span><span class="muted">SMTP 超时</span></div>
-                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试投递" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试投递" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-channel">编辑</button></div>
                   </div>
                   <div class="kpi"><div class="k" style="width:100%"><span>站内</span><label style="margin-left:auto;display:flex;gap:6px;align-items:center;font-size:12px"><input class="cb" type="checkbox" checked> 启用</label></div>
                     <div class="d"><span class="muted">控制台铃铛 + 待处理事项</span></div>
                     <div class="d"><span class="pill pill-ok">正常</span><span class="muted">去抖 5m</span></div>
-                    <div class="row"><button class="btn btn-sm btn-ghost" type="button">编辑</button></div>
+                    <div class="row"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-channel">编辑</button></div>
                   </div>
                 </div>
 
@@ -1917,6 +2024,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       </dl>
       <div class="divider"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button" data-preview="video">预览</button>
         <button class="btn btn-sm" type="button">下载</button>
         <button class="btn btn-sm" type="button" data-dialog="dlg-rename">重命名</button>
         <button class="btn btn-sm" type="button" data-toast="已提交校验" data-toast-kind="info">校验</button>
@@ -2159,7 +2267,158 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button role="menuitem" type="button" style="color:var(--bad)" data-confirm-title="退出登录？" data-confirm-msg="本机保存的 Secret 会被清除，下次需要重新输入。" data-confirm-ok="退出" data-confirm-toast="已退出登录">退出登录</button>
 </div>
 
+<!-- 新增凭据 -->
+<div class="modal" id="dlg-credential" role="dialog" aria-modal="true" aria-labelledby="cred-title" aria-hidden="true">
+  <div class="modal-box" style="width:540px">
+    <h3 id="cred-title">新增凭据</h3>
+    <p>AK/SK 由服务端 Ring 签发；留空则自动生成，Secret 只展示一次。</p>
+    <div class="form-row">Owner<input class="input" value="leonli"></div>
+    <div class="form-row">AccessKey<input class="input" placeholder="留空自动生成"></div>
+    <div class="form-row">Secret<input class="input" type="password" placeholder="留空自动生成"></div>
+    <div class="form-row">备注<input class="input" placeholder="例如 macbook-pro / 备份脚本"></div>
+    <div class="banner"><div><b>权限范围</b><div class="muted" style="font-size:12px">凭据继承 Owner 的卷权限；如需限制，请在服务端配置 owner_quotas 与卷访问策略。</div></div></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已生成凭据（Secret 仅展示一次）" data-toast-kind="ok" data-close>生成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 通知渠道编辑 -->
+<div class="modal" id="dlg-channel" role="dialog" aria-modal="true" aria-labelledby="chan-title" aria-hidden="true">
+  <div class="modal-box" style="width:560px">
+    <h3 id="chan-title">编辑通知渠道</h3>
+    <div class="seg" style="margin-bottom:6px" role="group" aria-label="渠道类型">
+      <button aria-pressed="true" type="button" data-chan="webhook">Webhook</button>
+      <button aria-pressed="false" type="button" data-chan="email">Email</button>
+      <button aria-pressed="false" type="button" data-chan="inbox">站内</button>
+    </div>
+    <div class="form-row" data-chan-pane="webhook">地址<input class="input" value="https://hooks.example.com/sproxy"></div>
+    <div class="form-row" data-chan-pane="webhook">签名 Header<input class="input" value="X-Sproxy-Signature" ></div>
+    <div class="form-row" data-chan-pane="webhook">密钥<input class="input" type="password" value="0000000000000000"></div>
+    <div class="form-grid" data-chan-pane="email">
+      <div class="form-row">SMTP<input class="input" value="smtp.example.com:587"></div>
+      <div class="form-row">收件人<input class="input" value="ops@example.com"></div>
+      <div class="form-row">用户名<input class="input" value="notify@example.com"></div>
+      <div class="form-row">密码<input class="input" type="password" value="00000000"></div>
+    </div>
+    <div class="form-row" data-chan-pane="inbox">去抖<input class="input" value="5m"><span class="muted">窗口内的同类事件合并为一条，避免刷屏。</span></div>
+    <div class="form-grid">
+      <div class="form-row">重试次数<select class="select"><option>3</option><option>5</option><option>不重试</option></select></div>
+      <div class="form-row">状态<select class="select"><option>启用</option><option>停用</option></select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="测试消息已发送，请检查接收端" data-toast-kind="ok">发送测试</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已保存渠道设置" data-toast-kind="ok" data-close>保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 卷创建向导 -->
+<div class="modal" id="dlg-volume" role="dialog" aria-modal="true" aria-labelledby="vol-title" aria-hidden="true">
+  <div class="modal-box" style="width:620px">
+    <h3 id="vol-title">新建卷</h3>
+    <div class="wiz-steps">
+      <div class="ws cur" data-ws="1"><span class="n">1</span>类型</div>
+      <div class="ws" data-ws="2"><span class="n">2</span>后端</div>
+      <div class="ws" data-ws="3"><span class="n">3</span>容量与副本</div>
+      <div class="ws" data-ws="4"><span class="n">4</span>确认</div>
+    </div>
+
+    <div class="wiz-pane active" data-wp="1">
+      <div class="form-row">卷类型
+        <select class="select" id="wiz-type">
+          <option value="local">local · 本机磁盘</option>
+          <option value="external">external · 外部后端（百度网盘等）</option>
+          <option value="secretdata">secretdata · 加密卷（多副本）</option>
+          <option value="enclosure">enclosure · 封装卷（复用父卷）</option>
+        </select>
+        <span class="muted">加密卷与封装卷需要额外的目标/副本配置。</span>
+      </div>
+      <div class="form-row">卷名<input class="input" id="wiz-name" placeholder="例如 media-audit" value="media-audit"></div>
+    </div>
+
+    <div class="wiz-pane" data-wp="2">
+      <div class="form-row" data-wiz-only="external,enclosure">后端 / 目标<input class="input" id="wiz-target" placeholder="mydisk/s 或 baidu/archive"></div>
+      <div class="form-row" data-wiz-only="local">本地路径<input class="input" value="/srv/sproxy/volumes/media-audit"></div>
+      <div class="form-row" data-wiz-only="secretdata">父卷<input class="input" value="baidu"></div>
+      <div class="banner"><div><b>挂载前会做连通性检查</b><div class="muted" style="font-size:12px">检查后端可读、容量可用、路径不冲突；失败会直接拒绝创建。</div></div></div>
+    </div>
+
+    <div class="wiz-pane" data-wp="3">
+      <div class="form-grid">
+        <div class="form-row">容量上限<input class="input" id="wiz-cap" value="500 GiB"></div>
+        <div class="form-row" data-wiz-only="secretdata">副本数<select class="select"><option>4</option><option>6</option><option>8</option></select></div>
+      </div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input class="cb" type="checkbox" checked> 创建后立即挂载</label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input class="cb" type="checkbox"> 设为默认写入卷</label>
+    </div>
+
+    <div class="wiz-pane" data-wp="4">
+      <div class="wiz-summary">
+        <span class="muted">类型</span><span id="sum-type">external</span>
+        <span class="muted">名称</span><span class="mono" id="sum-name">media-audit</span>
+        <span class="muted">后端</span><span class="mono" id="sum-target">（未填写）</span>
+        <span class="muted">容量</span><span class="num" id="sum-cap">500 GiB</span>
+      </div>
+      <div class="banner banner-warn"><div><b>创建后不可改名</b><div class="muted" style="font-size:12px">卷 ID 会写入对象元数据；如需改名请重建并迁移。</div></div></div>
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn" type="button" id="wiz-back">上一步</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" id="wiz-next">下一步</button>
+    </div>
+  </div>
+</div>
+
 <!-- 新建 / 编辑告警规则 -->
+<!-- 预览 -->
+<div class="preview" id="preview" role="dialog" aria-modal="true" aria-label="预览" aria-hidden="true">
+  <div class="pv-bar">
+    <div><div class="pv-title" id="pv-title">NHDTB-864.mp4</div><div class="pv-meta" id="pv-meta">4.72 GB · 1080p · sha256 一致</div></div>
+    <span class="sp"></span>
+    <select class="select" id="pv-quality"><option>原画</option><option selected>1080p</option><option>720p</option></select>
+    <button class="btn btn-sm" type="button" data-toast="已开启字幕（ja.srt）" data-toast-kind="ok">字幕</button>
+    <button class="btn btn-sm" type="button" data-toast="开始下载" data-toast-kind="ok">下载</button>
+    <button class="icon-btn" id="pv-close" type="button" title="关闭">✕</button>
+  </div>
+  <div class="pv-stage">
+    <div class="pv-video" id="pv-video">
+      <div class="big-play">▶</div>
+      <div class="tc">00:42:18 / 02:14:07</div>
+      <div class="pv-controls">
+        <div class="pv-seek"><i></i></div>
+        <div class="pv-ctrl-row">
+          <button class="pv-ico" type="button">▶</button>
+          <span class="num">00:42:18</span>
+          <span style="opacity:.6">/</span><span class="num">02:14:07</span>
+          <span class="grow"></span>
+          <button class="pv-ico" type="button" title="静音">🔇</button>
+          <select class="select" style="height:26px;background:transparent;color:#fff;border-color:rgba(255,255,255,.3)"><option>1x</option><option>1.25x</option><option>1.5x</option><option>2x</option></select>
+          <button class="pv-ico" type="button" title="画中画">▭</button>
+          <button class="pv-ico" type="button" title="全屏">⛶</button>
+        </div>
+      </div>
+    </div>
+    <div class="pv-image" id="pv-image">
+      <div style="text-align:center"><div style="font-size:13px">cover.jpg · 1920×1080 · 1.2 MB</div><div class="muted" style="font-size:11.5px;margin-top:6px">滚轮缩放 · 拖拽平移 · Esc 关闭</div></div>
+    </div>
+    <div class="pv-text" id="pv-text">
+      <pre>{
+  "code": "NHDTB-864",
+  "title_ja": "サンプルタイトル",
+  "volume": "baidu",
+  "size": 5068546048,
+  "checksum": "sha256:9f2c…41ab",
+  "chunks": 12,
+  "source": "cloud-download · pikpak"
+}</pre>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="dlg-rule" role="dialog" aria-modal="true" aria-labelledby="rule-title" aria-hidden="true">
   <div class="modal-box" style="width:560px">
     <h3 id="rule-title">新建告警规则</h3>
@@ -2307,7 +2566,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   var titles = {
     files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'],
     trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿'],
-    auth: ['登录', '/ 凭据 Ring'], share: ['分享', '/ 公开链接']
+    auth: ['登录', '/ 凭据 Ring'], share: ['分享', '/ 公开链接'], error: ['出错了', '/ 错误页']
   };
   function show(go) {
     if (go === 'console') { openConsole(currentSec); return; }
@@ -2350,7 +2609,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     'vol-manage': '卷管理 · 6 个卷（1 未挂载）', credentials: '凭据 · 3 个 AK（1 即将到期）',
     secret: 'Secret · 副本与封印', sync: '同步冲突 · 2 待处理',
     mesh: 'Mesh · 4 个活跃节点', hub: 'Hub · 7 个注册节点',
-    notify: '通知 · 3 个渠道（1 渠道异常）'
+    notify: '通知 · 3 个渠道（1 渠道异常）',
+    verify: '巡检 · 12,480 对象（3 项不一致）'
   };
   function openConsole(sec) {
     if (isModalConsole()) {
@@ -2583,7 +2843,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'sheet') { closeSheet(); }
+      if (top === 'preview') { closePreview(); }
+      else if (top === 'sheet') { closeSheet(); }
       else if (top === 'lang') { closeLang(); }
       else if (top === 'queue') { closeQueue(); }
       else if (top === 'account') { closeAccount(); }
@@ -2775,6 +3036,123 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     });
     updateVisibility('');
   })();
+
+  // ── 预览 ──
+  var pv = id('preview');
+  function openPreview(kind) {
+    lastFocus = document.activeElement;
+    pv.classList.add('show'); pv.setAttribute('aria-hidden', 'false');
+    pv.setAttribute('data-pv', kind || 'video');
+    layerStack.push('preview');
+    var c = pv.querySelector('#pv-close'); if (c) { c.focus(); }
+  }
+  function closePreview() {
+    pv.classList.remove('show'); pv.setAttribute('aria-hidden', 'true');
+    layerStack = layerStack.filter(function (x) { return x !== 'preview'; });
+  }
+  $$('[data-preview]').forEach(function (b) {
+    b.addEventListener('click', function () { openPreview(b.getAttribute('data-preview') || 'video'); });
+  });
+  $$('#files-grid .fcard').forEach(function (c) {
+    c.addEventListener('click', function (e) { if (!e.target.closest('.cb')) { openPreview('video'); } });
+  });
+  id('pv-close').addEventListener('click', closePreview);
+  var PV_KINDS = ['video', 'image', 'text'];
+  var pvIdx = 0;
+  id('dev-preview').addEventListener('click', function () {
+    openPreview(PV_KINDS[pvIdx]);
+    toast('info', '预览：' + { video: '视频', image: '图片', text: '文本元数据' }[PV_KINDS[pvIdx]]);
+    pvIdx = (pvIdx + 1) % PV_KINDS.length;
+  });
+
+  // ── 错误页 ──
+  var ERRS = {
+    '404': ['页面不存在', '该路径没有对应的页面或对象，可能是链接过期或卷已被移除。', 'request_id: 3f7c1a9e\npath: /ui/volumes/unknown'],
+    '500': ['服务端错误', '请求处理失败，已记录审计；可重试或复制诊断信息反馈。', 'request_id: 8a21c004\nerror: internal\nstage: volume.resolve'],
+    'offline': ['无法连接服务器', '网络不可达或服务未启动；请检查地址、TLS 与代理设置。', 'addr: https://sproxy.local:18083\nlast_ok: 18:41:02Z\nretry: 3/5']
+  };
+  var ERR_KEYS = ['404', '500', 'offline'];
+  var errIdx = 0;
+  function showError(code) {
+    var e = ERRS[code];
+    id('err-code').textContent = code;
+    id('err-title').textContent = e[0];
+    id('err-desc').textContent = e[1];
+    id('err-detail').textContent = e[2];
+    show('error');
+  }
+  id('dev-error').addEventListener('click', function () {
+    showError(ERR_KEYS[errIdx]);
+    toast('info', '错误页：' + ERR_KEYS[errIdx]);
+    errIdx = (errIdx + 1) % ERR_KEYS.length;
+  });
+
+  // ── 卷创建向导 ──
+  (function () {
+    var step = 1, type = 'local';
+    var next = id('wiz-next'), back = id('wiz-back');
+    function syncType() {
+      $$('[data-wiz-only]').forEach(function (el) {
+        var list = el.getAttribute('data-wiz-only').split(',');
+        el.style.display = list.indexOf(type) === -1 ? 'none' : '';
+      });
+      id('sum-type').textContent = type;
+      id('sum-name').textContent = id('wiz-name').value || '（未命名）';
+      id('sum-target').textContent = (id('wiz-target') && id('wiz-target').value) || '（未填写）';
+      id('sum-cap').textContent = id('wiz-cap').value || '（未设置）';
+    }
+    function render() {
+      $$('.wiz-pane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-wp') === String(step)); });
+      $$('.wiz-steps .ws').forEach(function (w) {
+        var n = Number(w.getAttribute('data-ws'));
+        w.classList.toggle('cur', n === step); w.classList.toggle('done', n < step);
+      });
+      next.textContent = step === 4 ? '创建卷' : '下一步';
+      back.style.visibility = step === 1 ? 'hidden' : 'visible';
+    }
+    id('wiz-type').addEventListener('change', function () { type = this.value; syncType(); });
+    next.addEventListener('click', function () {
+      if (step === 4) {
+        closeDialog(id('dlg-volume'));
+        toast('ok', '已创建并挂载卷 ' + (id('wiz-name').value || 'media-audit'));
+        return;
+      }
+      if (step === 1 && !id('wiz-name').value.trim()) { toast('bad', '卷名不能为空'); return; }
+      step += 1; syncType(); render();
+    });
+    back.addEventListener('click', function () { if (step > 1) { step -= 1; render(); } });
+    $$('[data-dialog="dlg-volume"]').forEach(function (b) {
+      b.addEventListener('click', function () { step = 1; type = id('wiz-type').value; syncType(); render(); });
+    });
+    syncType(); render();
+  })();
+
+  // ── 通知渠道编辑 ──
+  $$('[data-chan]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      $$('[data-chan]').forEach(function (x) { x.setAttribute('aria-pressed', String(x === b)); });
+      var kind = b.getAttribute('data-chan');
+      $$('[data-chan-pane]').forEach(function (pane) {
+        pane.style.display = pane.getAttribute('data-chan-pane') === kind ? '' : 'none';
+      });
+      id('chan-title').textContent = '编辑通知渠道 · ' + (kind === 'webhook' ? 'Webhook' : kind === 'email' ? 'Email' : '站内');
+    });
+  });
+
+  // ── 公开分享：密码校验 ──
+  var shareDl = id('share-dl');
+  if (shareDl) {
+    shareDl.addEventListener('click', function () {
+      var pw = id('share-pw'), err = id('share-pw-err');
+      if (!pw.value.trim()) {
+        err.style.display = 'block';
+        toast('bad', '需要访问密码才能下载');
+        return;
+      }
+      err.style.display = 'none';
+      toast('ok', '开始下载 NHDTB-864.mp4');
+    });
+  }
 
   // ── 登录 / 注册 ──
   function authPane(name) {
@@ -3087,7 +3465,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer'), sheet: id('sheet'), lang: id('lang-menu'), preview: id('preview') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {

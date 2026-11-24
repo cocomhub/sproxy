@@ -68,6 +68,23 @@ for skin in "abc":
         spec(f"{skin}-files-en", skin, actions=[
             "document.getElementById('lang-btn').click()",
             "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-preview-video", skin, actions=[
+            "document.querySelector('[data-preview]').click()"]),
+        spec(f"{skin}-preview-text", skin, actions=[
+            "document.getElementById('dev-preview').click()",
+            "document.getElementById('dev-preview').click()",
+            "document.getElementById('dev-preview').click()"]),
+        spec(f"{skin}-error-404", skin, actions=[
+            "document.getElementById('dev-error').click()"]),
+        spec(f"{skin}-wizard-volume", skin, actions=[
+            "document.querySelector('[data-dialog=dlg-volume]').click()"]),
+        spec(f"{skin}-console-verify", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=verify]').click()"]),
+        spec(f"{skin}-share-pw-error", skin, actions=[
+            "document.getElementById('dev-share').click()",
+            "document.getElementById('share-pw').value='';",
+            "document.getElementById('share-dl').click()"]),
         spec(f"{skin}-dialog-rule", skin, actions=[
             "document.querySelector('[data-goto=console]').click()",
             "document.querySelector('[data-sec=notify]').click()",
