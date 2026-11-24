@@ -12,49 +12,66 @@ CHROME = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 SHOT_DIR.mkdir(parents=True, exist_ok=True)
 html_base = BASE.read_text(encoding="utf-8")
 
+
+def spec(name, skin, theme="light", actions=()):
+    return {"name": name, "skin": skin, "theme": theme, "actions": list(actions)}
+
+
 specs = []
 for skin in "abc":
     specs += [
-        (f"{skin}-files", skin, "light", "files", "", 0),
-        (f"{skin}-grid", skin, "light", "grid", "", 0),
-        (f"{skin}-transfer", skin, "light", "transfer", "", 0),
-        (f"{skin}-trash", skin, "light", "trash", "", 0),
-        (f"{skin}-console-overview", skin, "light", "console", "overview", 0),
-        (f"{skin}-console-cloud", skin, "light", "console", "cloud", 0),
+        spec(f"{skin}-files", skin, actions=['document.querySelector(\'.nav[data-goto="files"]\').click()']),
+        spec(f"{skin}-grid", skin, actions=['document.querySelector(\'[data-view="grid"]\').click()']),
+        spec(f"{skin}-transfer", skin, actions=['document.querySelector(\'.nav[data-goto="transfer"]\').click()']),
+        spec(f"{skin}-trash", skin, actions=['document.querySelector(\'.nav[data-goto="trash"]\').click()']),
+        spec(f"{skin}-console-overview", skin, actions=['document.querySelector(\'.nav[data-goto="console"]\').click()']),
+        spec(f"{skin}-console-cloud", skin, actions=[
+            'document.querySelector(\'.nav[data-goto="console"]\').click()',
+            'document.querySelector(\'.cnav[data-sec="cloud"]\').click()']),
+        spec(f"{skin}-auth-login", skin, actions=["document.getElementById('dev-auth').click()"]),
+        spec(f"{skin}-auth-register", skin, actions=[
+            "document.getElementById('dev-auth').click()",
+            'document.querySelector(\'[data-auth-tab="register"]\').click()']),
+        spec(f"{skin}-account-menu", skin, actions=["document.getElementById('account-btn').click()"]),
+        spec(f"{skin}-dialog-mkdir", skin, actions=[
+            'document.querySelector(\'[data-dialog="dlg-mkdir"]\').click()']),
+        spec(f"{skin}-dialog-rename", skin, actions=[
+            'document.querySelector(\'[data-dialog="dlg-rename"]\').click()']),
+        spec(f"{skin}-dialog-batch", skin, actions=[
+            'document.querySelector(\'[data-dialog="dlg-batch"]\').click()']),
     ]
     for st, clicks in (("empty", 1), ("error", 2), ("loading", 3)):
-        specs.append((f"{skin}-console-{st}", skin, "light", "console", "cloud", clicks))
+        specs.append(spec(f"{skin}-console-{st}", skin, actions=[
+            'document.querySelector(\'.nav[data-goto="console"]\').click()',
+            'document.querySelector(\'.cnav[data-sec="cloud"]\').click()',
+            f"for(var i=0;i<{clicks};i++){{document.getElementById('dev-states').click();}}"]))
+    specs.append(spec(f"{skin}-session-expired", skin, actions=[
+        "document.body.dataset.session='expired';",
+        'document.querySelector(\'.nav[data-goto="files"]\').click()']))
+
 specs += [
-    ("a-dark-files", "a", "dark", "files", "", 0),
-    ("c-dark-console", "c", "dark", "console", "overview", 0),
-    ("m-a-files", "a", "light", "files", "", 0),
-    ("m-c-console", "c", "light", "console", "overview", 0),
+    spec("a-dark-files", "a", "dark", ['document.querySelector(\'.nav[data-goto="files"]\').click()']),
+    spec("c-dark-console", "c", "dark", ['document.querySelector(\'.nav[data-goto="console"]\').click()']),
+    spec("m-a-files", "a", actions=['document.querySelector(\'.nav[data-goto="files"]\').click()']),
+    spec("m-c-console", "c", actions=['document.querySelector(\'.nav[data-goto="console"]\').click()']),
+    spec("m-a-auth", "a", actions=["document.getElementById('dev-auth').click()"]),
 ]
 
 results = []
-for name, skin, theme, view, sec, clicks in specs:
-    js = f"document.documentElement.dataset.skin='{skin}';document.documentElement.dataset.theme='{theme}';"
-    if view == "grid":
-        js += "document.querySelector('[data-view=\"grid\"]').click();"
-    elif view in ("files", "transfer", "trash"):
-        js += f"document.querySelector('.nav[data-goto=\"{view}\"]').click();"
-    elif view == "console":
-        js += "document.querySelector('.nav[data-goto=\"console\"]').click();"
-        if sec:
-            js += f"document.querySelector('.cnav[data-sec=\"{sec}\"]').click();"
-        if clicks:
-            js += f"for(var i=0;i<{clicks};i++){{document.getElementById('dev-states').click();}}"
+for sp in specs:
+    js = f"document.documentElement.dataset.skin='{sp['skin']}';document.documentElement.dataset.theme='{sp['theme']}';"
+    js += "".join(sp["actions"])
     inject = f"<script>setTimeout(function(){{{js}}},200);</script>"
-    src = SHOT_DIR / (name + ".html")
+    src = SHOT_DIR / (sp["name"] + ".html")
     src.write_text(html_base.replace("</body>", inject + "\n</body>"), encoding="utf-8")
-    png = SHOT_DIR / (name + ".png")
-    size = "390,844" if name.startswith("m-") else "1500,950"
+    png = SHOT_DIR / (sp["name"] + ".png")
+    size = "390,844" if sp["name"].startswith("m-") else "1500,950"
     subprocess.run(
         [CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-         "--window-size=" + size, "--virtual-time-budget=2500",
+         "--window-size=" + size, "--virtual-time-budget=2800",
          "--screenshot=" + str(png), Path(src).as_uri()],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-    results.append((name, png.stat().st_size if png.exists() else 0))
+    results.append((sp["name"], png.stat().st_size if png.exists() else 0))
 
 print(json.dumps({"count": len(results), "min_size": min(r[1] for r in results),
                   "max_size": max(r[1] for r in results), "dir": str(SHOT_DIR),

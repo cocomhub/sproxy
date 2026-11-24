@@ -478,6 +478,60 @@ body[data-view="grid"] .files-table-wrap{display:none}
 [data-skin="b"] .fcard .thumb{height:112px}
 [data-skin="c"] .fcard{background:var(--surface-2)}
 
+
+/* ───── 登录 / 注册 ───── */
+.auth{display:grid;grid-template-columns:minmax(320px,1fr) minmax(360px,420px);gap:32px;max-width:980px;margin:5vh auto 0;align-items:start}
+.auth-side h2{margin:14px 0 8px;font-size:26px;letter-spacing:-.02em;line-height:1.2}
+.auth-side p{margin:0 0 8px}
+.auth-facts{list-style:none;padding:0;margin:22px 0;display:flex;flex-direction:column;gap:2px;font-size:13px}
+.auth-facts li{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)}
+.auth-facts .k{color:var(--text-3)}
+.auth-help{font-size:12px;color:var(--text-3)}
+.auth-help a{color:var(--accent);cursor:pointer;text-decoration:none}
+.auth-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-2);padding:22px}
+[data-skin="a"] .auth-card{border-color:var(--border-strong);box-shadow:none}
+.auth-tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin-bottom:18px}
+.auth-tabs button{border:0;background:none;padding:10px 12px;margin-bottom:-1px;border-bottom:2px solid transparent;color:var(--text-2);font-size:14px;cursor:pointer}
+.auth-tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.auth-pane{display:none;flex-direction:column;gap:12px}
+.auth-pane.active{display:flex}
+.auth-pane label{display:flex;flex-direction:column;gap:6px;font-size:12.5px;color:var(--text-2)}
+.pw-wrap{position:relative;display:flex;align-items:center}
+.pw-wrap .input{padding-right:62px}
+.pw-toggle{position:absolute;right:4px;height:max(26px, calc(var(--input-h) - 6px));min-width:44px;padding:0 8px;border:0;background:var(--surface-3);color:var(--text-2);border-radius:var(--radius-sm);font-size:11.5px;cursor:pointer}
+.auth-err{display:none;align-items:flex-start;gap:8px;padding:8px 10px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--bad) 10%,transparent);border:1px solid color-mix(in srgb,var(--bad) 30%,transparent);color:var(--bad);font-size:12.5px}
+.auth-err.show{display:flex}
+.auth-foot{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--text-3);flex-wrap:wrap}
+.auth-secret{display:grid;grid-template-columns:82px minmax(0,1fr);gap:8px 10px;font-size:12.5px;padding:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md)}
+.auth-secret code{font-family:var(--font-mono);overflow-wrap:anywhere}
+@media (max-width:900px){.auth{grid-template-columns:1fr;margin:0 auto}.auth-side{display:none}}
+[data-skin="c"] .auth{grid-template-columns:1fr;max-width:460px;margin:3vh auto 0}
+[data-skin="c"] .auth-side{display:none}
+[data-skin="a"] .auth{margin-top:6vh}
+
+/* ───── 用户菜单 ───── */
+.popover{position:fixed;z-index:100;min-width:240px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-lg);box-shadow:var(--shadow-2);padding:6px;display:none}
+.popover.show{display:block}
+.popover button{display:flex;width:100%;align-items:center;gap:8px;border:0;background:none;padding:8px 10px;border-radius:var(--radius-sm);color:var(--text-2);font-size:13px;cursor:pointer;text-align:left}
+.popover button:hover{background:var(--surface-hover);color:var(--text)}
+.pop-head{display:flex;gap:10px;align-items:center;padding:8px 10px}
+.pop-sep{height:1px;background:var(--border);margin:6px 4px}
+.pop-badge{margin-left:auto;font-size:11px;color:var(--text-3)}
+
+/* ───── 会话过期 ───── */
+.session-banner{display:none}
+body[data-session="expired"] .session-banner{display:flex}
+
+/* ───── 对话框表单 ───── */
+.form-row{display:flex;flex-direction:column;gap:6px;font-size:12.5px;margin-top:12px}
+.form-row .muted{font-size:11.5px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.br-table{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px;margin-top:10px}
+.br-table th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-3);padding:6px 8px;border-bottom:1px solid var(--border)}
+.br-table td{padding:6px 8px;border-bottom:1px solid var(--border)}
+.br-table code{font-family:var(--font-mono)}
+.br-table .warn{color:var(--warn)}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -559,6 +613,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button id="dev-loading" type="button" aria-pressed="false">加载态</button>
   <button id="dev-density" type="button" aria-pressed="false">密度</button>
   <button id="dev-states" type="button">状态演示</button>
+  <button id="dev-auth" type="button">登录页</button>
+  <button id="dev-session" type="button" aria-pressed="false">会话过期</button>
   <button id="dev-ds" type="button">组件库</button>
   <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
@@ -607,6 +663,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
         搜索文件、任务、卷…
         <span style="margin-left:auto;display:flex;gap:3px"><kbd>⌘</kbd><kbd>K</kbd></span>
       </div>
+      <button class="icon-btn" id="account-btn" type="button" title="账户与凭据" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar" style="width:22px;height:22px">LL</span>
+      </button>
       <button class="icon-btn" id="theme-quick" type="button" title="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
@@ -617,8 +676,77 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     </header>
 
     <div class="content">
+      <!-- ══════════ 登录 / 注册 ══════════ -->
+      <section class="view" id="view-auth">
+        <div class="auth">
+          <aside class="auth-side">
+            <div class="brand" style="padding:0"><div class="brand-mark">S</div><div class="brand-name">sproxy</div><div class="brand-tag">v0.19.0</div></div>
+            <h2>连接到你自己的存储</h2>
+            <p class="sub">凭据由服务端 Ring 签发，Secret 只在本机保存；服务端不存明文。</p>
+            <ul class="auth-facts">
+              <li><span class="k">服务器</span><span class="mono">https://sproxy.local:18083</span></li>
+              <li><span class="k">TLS</span><span class="pill pill-ok">已启用</span></li>
+              <li><span class="k">当前凭据</span><span class="pill pill-warn">10 天后过期</span></li>
+              <li><span class="k">上次连接</span><span class="num">11-24 18:41</span></li>
+            </ul>
+            <div class="auth-help">连不上？<a>运行诊断</a> · <a>查看文档</a> · <a>切换服务器</a></div>
+          </aside>
+
+          <div class="auth-card">
+            <div class="auth-tabs" role="tablist">
+              <button type="button" role="tab" data-auth-tab="login" aria-selected="true">登录</button>
+              <button type="button" role="tab" data-auth-tab="register" aria-selected="false">注册</button>
+            </div>
+
+            <form class="auth-pane active" data-auth-pane="login" novalidate>
+              <div class="auth-err" id="auth-err"><span>!</span><div><b>认证失败</b><div style="font-size:11.5px">AccessKey 或 Secret 不正确（auth_failed）。若刚轮换过凭据，请使用新 Secret。</div></div></div>
+              <label>Owner<input class="input" id="auth-owner" placeholder="例如 leonli" value="leonli"></label>
+              <label>AccessKey<input class="input" id="auth-ak" placeholder="skey-xxxxxxxx" value="skey-d6ff3f0f"></label>
+              <label>Secret
+                <span class="pw-wrap">
+                  <input class="input" id="auth-sk" type="password" placeholder="64 位 hex" value="00000000000000000000000000000000">
+                  <button class="pw-toggle" id="pw-toggle" type="button" aria-label="显示/隐藏 Secret">显示</button>
+                </span>
+              </label>
+              <label style="flex-direction:row;align-items:center;gap:8px"><input class="cb" id="auth-remember" type="checkbox" checked> <span>记住此设备（Secret 存本机，下次免输）</span></label>
+              <button class="btn btn-primary" id="auth-submit" type="submit" style="width:100%;height:38px">登录</button>
+              <div class="auth-foot"><span>没有凭据？切到「注册」使用注册码。</span><span style="margin-left:auto"><a style="color:var(--accent);cursor:pointer" data-auth-tab="register">去注册</a></span></div>
+            </form>
+
+            <form class="auth-pane" data-auth-pane="register" novalidate>
+              <div class="auth-err" id="reg-err" style="background:color-mix(in srgb,var(--warn) 10%,transparent);border-color:color-mix(in srgb,var(--warn) 30%,transparent);color:var(--warn)"><span>!</span><div><b>注册码无效</b><div style="font-size:11.5px">注册码由管理员一次性签发，有效期 30 分钟。</div></div></div>
+              <label>Owner<input class="input" placeholder="与管理员约定，例如 leonli"></label>
+              <label>注册码<input class="input" placeholder="6 位数字或邀请码"></label>
+              <label>设备名<input class="input" placeholder="例如 macbook-pro（用于区分凭据）"></label>
+              <button class="btn btn-primary" id="reg-submit" type="submit" style="width:100%;height:38px">生成凭据</button>
+              <div class="auth-foot"><span>注册后 AK/SK 只展示一次，请立即保存。</span></div>
+            </form>
+
+            <div class="auth-pane" data-auth-pane="result">
+              <div class="banner banner-warn"><div><b>凭据只展示一次</b><div class="muted" style="font-size:12px">关闭后无法再次查看 Secret；丢失需重新轮换。</div></div></div>
+              <div class="auth-secret">
+                <span class="muted">AccessKey</span><code id="new-ak">skey-7f2c1ab9</code>
+                <span class="muted">Secret</span><code id="new-sk">9f2c41ab7d0e55aa33c1b8e4d2f60177a9c4e5b8d1f30a2c6e7b8495d0a1f3c2</code>
+                <span class="muted">Owner</span><code>leonli</code>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn btn-sm" type="button" data-toast="已复制 Secret" data-toast-kind="ok">复制 Secret</button>
+                <button class="btn btn-sm" type="button" data-toast="已下载 credentials.txt" data-toast-kind="ok">下载 txt</button>
+                <button class="btn btn-sm btn-primary" type="button" data-goto="files">我已保存，进入文件</button>
+              </div>
+              <div class="auth-foot"><span>建议把 Secret 存进系统钥匙串；不要提交到代码仓库。</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- ══════════ 文件 ══════════ -->
       <section class="view active" id="view-files">
+        <div class="banner banner-warn session-banner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--warn);flex:0 0 auto"><path d="M12 8v5m0 3.5h.01"/><circle cx="12" cy="12" r="9"/></svg>
+          <div><b>登录已过期（auth_failed）</b><div class="muted" style="font-size:12px">写操作已暂停；重新登录后会自动重试未完成的操作。</div></div>
+          <div class="acts"><button class="btn btn-sm btn-primary" type="button" data-goto="auth">重新登录</button><button class="btn btn-sm" type="button" data-toast="已复制诊断信息" data-toast-kind="info">诊断</button></div>
+        </div>
         <div class="toolbar">
           <div class="crumbs">
             <a>全部卷</a><span class="sep">/</span><a>anonymous</a><span class="sep">/</span>
@@ -644,6 +772,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <button class="btn btn-sm" type="button">下载</button>
           <button class="btn btn-sm" type="button">移动</button>
           <button class="btn btn-sm" type="button">校验</button>
+          <button class="btn btn-sm" type="button" data-dialog="dlg-batch">批量重命名</button>
           <button class="btn btn-sm" type="button" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
           <button class="btn btn-sm" type="button" id="topbatch-clear">取消选择</button>
         </div>
@@ -745,7 +874,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
               <button class="btn btn-sm" type="button" data-toast="请选择文件（原型不打开文件选择器）" data-toast-kind="info">选择文件</button>
             </div>
             <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-              <button class="btn btn-sm" type="button">新建目录</button>
+              <button class="btn btn-sm" type="button" data-dialog="dlg-mkdir">新建目录</button>
               <button class="btn btn-sm" type="button">下载归档</button>
               <span class="muted" style="font-size:12px;margin-left:auto">上传会先创建分块会话，断网后可在传输页继续。</span>
             </div>
@@ -1530,6 +1659,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button class="btn btn-sm btn-ghost" type="button">下载</button>
   <button class="btn btn-sm btn-ghost" type="button">移动</button>
   <button class="btn btn-sm btn-ghost" type="button" data-toast="已提交校验任务" data-toast-kind="info">校验</button>
+  <button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-batch">重命名</button>
   <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
   <span class="sep"></span>
   <button class="btn btn-sm btn-ghost" type="button" id="float-clear">取消</button>
@@ -1557,7 +1687,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       <div class="divider"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-sm" type="button">下载</button>
-        <button class="btn btn-sm" type="button">重命名</button>
+        <button class="btn btn-sm" type="button" data-dialog="dlg-rename">重命名</button>
         <button class="btn btn-sm" type="button" data-toast="已提交校验" data-toast-kind="info">校验</button>
         <button class="btn btn-sm" type="button" style="color:var(--bad)" data-toast="已移入回收站" data-toast-kind="ok" data-undo="1">删除</button>
       </div>
@@ -1672,6 +1802,96 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   </div>
 </div>
 
+<div class="popover" id="account-menu" role="menu" aria-hidden="true">
+  <div class="pop-head">
+    <div class="avatar">LL</div>
+    <div style="min-width:0"><div style="font-weight:600">leonli</div><div class="muted mono" style="font-size:11px">skey-d6ff3f0f · 10 天后过期</div></div>
+  </div>
+  <div class="pop-sep"></div>
+  <button role="menuitem" type="button" data-toast="已打开凭据切换" data-toast-kind="info">切换凭据 <span class="pop-badge">3</span></button>
+  <button role="menuitem" type="button" data-dialog="dlg-connect">连接设置</button>
+  <button role="menuitem" type="button" data-goto="console">凭据管理</button>
+  <div class="pop-sep"></div>
+  <button role="menuitem" type="button" style="color:var(--bad)" data-confirm-title="退出登录？" data-confirm-msg="本机保存的 Secret 会被清除，下次需要重新输入。" data-confirm-ok="退出" data-confirm-toast="已退出登录">退出登录</button>
+</div>
+
+<!-- 新建目录 -->
+<div class="modal" id="dlg-mkdir" role="dialog" aria-modal="true" aria-labelledby="mkdir-title" aria-hidden="true">
+  <div class="modal-box">
+    <h3 id="mkdir-title">新建目录</h3>
+    <p>在 <code class="mono">jav/NHDTB</code> 下创建；名称不能包含 <code class="mono">/ \ .. : * ? " &lt; &gt; |</code>。</p>
+    <div class="form-row">目录名
+      <input class="input" id="mkdir-name" placeholder="例如 2026-11" value="2026-11">
+      <span class="muted">已存在同名目录时会报错，不会自动合并。</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已创建目录 2026-11" data-toast-kind="ok" data-close>创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 重命名 / 移动 -->
+<div class="modal" id="dlg-rename" role="dialog" aria-modal="true" aria-labelledby="rename-title" aria-hidden="true">
+  <div class="modal-box" style="width:540px">
+    <h3 id="rename-title">重命名 / 移动</h3>
+    <p>原路径 <code class="mono">jav/NHDTB/NHDTB-864.mp4</code></p>
+    <div class="form-row">目标路径
+      <input class="input" value="jav/NHDTB/NHDTB-864-renamed.mp4">
+      <span class="muted">支持移动到其它目录；父目录不存在会自动创建。</span>
+    </div>
+    <div class="form-row">目标已存在时
+      <select class="select"><option>报错并保留原文件</option><option>覆盖目标</option><option>自动改名（-1）</option></select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已重命名并更新校验台账" data-toast-kind="ok" data-close>保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量重命名 -->
+<div class="modal" id="dlg-batch" role="dialog" aria-modal="true" aria-labelledby="batch-title" aria-hidden="true">
+  <div class="modal-box" style="width:640px">
+    <h3 id="batch-title">批量重命名（2 项）</h3>
+    <p>规则：查找 <code class="mono">NHDTB-</code> 替换为 <code class="mono">EXAMPLE-</code>；仅影响名称，不改目录。</p>
+    <div class="form-grid">
+      <div class="form-row">查找<input class="input" value="NHDTB-"></div>
+      <div class="form-row">替换为<input class="input" value="EXAMPLE-"></div>
+    </div>
+    <table class="br-table">
+      <thead><tr><th>原名称</th><th>新名称</th><th style="width:70px">状态</th></tr></thead>
+      <tbody>
+        <tr><td><code>NHDTB-864.mp4</code></td><td><code>EXAMPLE-864.mp4</code></td><td><span class="pill pill-ok">可改</span></td></tr>
+        <tr><td><code>NHDTB-863.mp4</code></td><td><code>EXAMPLE-863.mp4</code></td><td><span class="pill pill-warn">目标已存在</span></td></tr>
+      </tbody>
+    </table>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn" type="button" data-toast="已跳过 1 项冲突" data-toast-kind="warn">仅应用可改项</button>
+      <button class="btn btn-primary" type="button" data-toast="已重命名 2 项" data-toast-kind="ok" data-close>全部应用</button>
+    </div>
+  </div>
+</div>
+
+<!-- 连接设置 -->
+<div class="modal" id="dlg-connect" role="dialog" aria-modal="true" aria-labelledby="connect-title" aria-hidden="true">
+  <div class="modal-box">
+    <h3 id="connect-title">连接设置</h3>
+    <p>修改服务器地址会重新校验 TLS 与版本。</p>
+    <div class="form-row">服务器地址<input class="input" value="https://sproxy.local:18083"></div>
+    <div class="form-row">TLS
+      <select class="select"><option>严格校验（推荐）</option><option>跳过校验（仅调试）</option></select>
+    </div>
+    <div class="form-row">超时<input class="input" value="10s"></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="连接成功：v0.19.0，TLS 有效" data-toast-kind="ok">测试连接</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="已保存连接设置" data-toast-kind="ok" data-close>保存</button>
+    </div>
+  </div>
+</div>
+
 <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script>
@@ -1698,7 +1918,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       undo.addEventListener('click', function () { toast('info', '已撤销：' + msg); box.remove(); });
       box.appendChild(undo);
     }
-    id('toasts').appendChild(box);
+    var box2 = id('toasts');
+    box2.appendChild(box);
+    while (box2.children.length > 3) { box2.removeChild(box2.firstElementChild); }
     announce(msg);
     setTimeout(function () { box.remove(); }, withUndo ? 7000 : 4200);
   }
@@ -1711,7 +1933,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   // ── 视图切换 ──
   var titles = {
     files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'],
-    trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿']
+    trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿'],
+    auth: ['登录', '/ 凭据 Ring']
   };
   function show(go) {
     if (go === 'console') { openConsole(currentSec); return; }
@@ -1986,7 +2209,9 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'confirm') { closeConfirm(); }
+      if (top === 'account') { closeAccount(); }
+      else if (top === 'dlg') { var d = topDialog(); if (d) { closeDialog(d); } }
+      else if (top === 'confirm') { closeConfirm(); }
       else if (top === 'cmdk') { closeCmdk(); }
       else if (top === 'help') { closeHelp(); }
       else if (top === 'drawer') { closeDrawer(drawer); }
@@ -2016,6 +2241,108 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       var r2 = document.activeElement.closest ? document.activeElement.closest('tr') : null;
       if (r2 && r2.querySelector('[data-drawer]')) { e.preventDefault(); openDrawer(drawer); }
     }
+  });
+
+  // ── 登录 / 注册 ──
+  function authPane(name) {
+    $$('.auth-pane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-auth-pane') === name); });
+    $$('[data-auth-tab]').forEach(function (t) { t.setAttribute('aria-selected', String(t.getAttribute('data-auth-tab') === name)); });
+  }
+  $$('[data-auth-tab]').forEach(function (t) {
+    t.addEventListener('click', function (e) { e.preventDefault(); authPane(t.getAttribute('data-auth-tab')); });
+  });
+  var pwToggle = id('pw-toggle');
+  pwToggle.addEventListener('click', function () {
+    var inp = id('auth-sk');
+    var show = inp.type === 'password';
+    inp.type = show ? 'text' : 'password';
+    pwToggle.textContent = show ? '隐藏' : '显示';
+  });
+  id('auth-submit').addEventListener('click', function (e) {
+    e.preventDefault();
+    var btn = e.currentTarget;
+    btn.classList.add('loading'); btn.disabled = true;
+    setTimeout(function () {
+      btn.classList.remove('loading'); btn.disabled = false;
+      var ak = id('auth-ak').value.trim(), sk = id('auth-sk').value.trim();
+      if (!ak || sk.length < 8) {
+        id('auth-err').classList.add('show');
+        toast('bad', '登录失败：AccessKey 或 Secret 不正确');
+        return;
+      }
+      id('auth-err').classList.remove('show');
+      document.body.dataset.session = 'ok';
+      id('dev-session').setAttribute('aria-pressed', 'false');
+      toast('ok', '已登录：leonli（凭据 10 天后过期）');
+      show('files');
+    }, 650);
+  });
+  id('reg-submit') && id('reg-submit').addEventListener('click', function (e) {
+    e.preventDefault();
+    var btn = e.currentTarget;
+    btn.classList.add('loading'); btn.disabled = true;
+    setTimeout(function () {
+      btn.classList.remove('loading'); btn.disabled = false;
+      authPane('result');
+      toast('ok', '注册成功：请立即保存 Secret');
+    }, 650);
+  });
+
+  // ── 账户菜单 ──
+  var accountMenu = id('account-menu'), accountBtn = id('account-btn');
+  function openAccount() {
+    var r = accountBtn.getBoundingClientRect();
+    accountMenu.style.left = Math.max(8, r.right - 240) + 'px';
+    accountMenu.style.top = (r.bottom + 8) + 'px';
+    accountMenu.classList.add('show'); accountMenu.setAttribute('aria-hidden', 'false');
+    accountBtn.setAttribute('aria-expanded', 'true');
+    layerStack.push('account');
+    var first = accountMenu.querySelector('button'); if (first) { first.focus(); }
+  }
+  function closeAccount() {
+    accountMenu.classList.remove('show'); accountMenu.setAttribute('aria-hidden', 'true');
+    accountBtn.setAttribute('aria-expanded', 'false');
+    layerStack = layerStack.filter(function (x) { return x !== 'account'; });
+  }
+  accountBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    accountMenu.classList.contains('show') ? closeAccount() : openAccount();
+  });
+  document.addEventListener('click', function (e) {
+    if (!accountMenu.classList.contains('show')) { return; }
+    if (accountMenu.contains(e.target) || accountBtn.contains(e.target)) { return; }
+    closeAccount();
+  });
+
+  // ── 通用对话框 ──
+  function openDialog(el) {
+    lastFocus = document.activeElement;
+    layerStack.push('dlg');
+    el.classList.add('show'); el.setAttribute('aria-hidden', 'false');
+    var f = el.querySelector('input,select,button');
+    if (f) { f.focus(); }
+  }
+  function closeDialog(el) {
+    el.classList.remove('show'); el.setAttribute('aria-hidden', 'true');
+    layerStack = layerStack.filter(function (x) { return x !== 'dlg'; });
+  }
+  function topDialog() {
+    var all = $$('.modal.show').filter(function (m) { return m.id !== 'confirm'; });
+    return all[all.length - 1] || null;
+  }
+  $$('[data-dialog]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var el = id(b.getAttribute('data-dialog'));
+      if (el) { openDialog(el); }
+    });
+  });
+  $$('[data-close]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var m = b.closest('.modal'); if (m) { closeDialog(m); }
+    });
+  });
+  $$('.modal').forEach(function (m) {
+    m.addEventListener('click', function (e) { if (e.target === m) { closeDialog(m); } });
   });
 
   // ── 危险操作确认 ──
@@ -2107,6 +2434,13 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     toast('info', '控制台预览：' + label);
   });
   id('dev-ds').addEventListener('click', function () { show('ds'); });
+  id('dev-auth').addEventListener('click', function () { show('auth'); toast('info', '预览登录 / 注册页'); });
+  id('dev-session').addEventListener('click', function (e) {
+    var on = document.body.dataset.session === 'expired';
+    if (on) { delete document.body.dataset.session; show('files'); } else { document.body.dataset.session = 'expired'; show('files'); }
+    e.currentTarget.setAttribute('aria-pressed', String(!on));
+    toast(on ? 'ok' : 'warn', on ? '已恢复会话' : '已模拟会话过期（写操作暂停）');
+  });
   id('dev-density').addEventListener('click', function (e) {
     var on = root.dataset.density === 'comfortable';
     if (on) { delete root.dataset.density; } else { root.dataset.density = 'comfortable'; }
@@ -2118,8 +2452,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer') };
-    var t = map[top] || (top === 'console' && isModalConsole() ? id('view-console') : null);
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu') };
+    var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {
       return !el.disabled && el.offsetParent !== null;
