@@ -195,9 +195,9 @@
             <button type="button" data-cs="audit">审计</button>
             <button type="button" data-cs="volumes" disabled>卷 <span class="tag">待接入</span></button>
             <button type="button" data-cs="config">配置</button>
-            <button type="button" data-cs="notify" disabled>通知 <span class="tag">待接入</span></button>
-            <button type="button" data-cs="verify" disabled>巡检 <span class="tag">待接入</span></button>
-            <button type="button" data-cs="access" disabled>接入 <span class="tag">待接入</span></button>
+            <button type="button" data-cs="notify">通知</button>
+            <button type="button" data-cs="verify">巡检</button>
+            <button type="button" data-cs="access">接入</button>
           </nav>
           <div class="cs-body">
             <div class="toolbar" style="margin-bottom:12px">
@@ -221,6 +221,64 @@
               </table>
               <div class="empty" id="v2-cs-volumes-empty" hidden><b>暂无卷</b><div class="muted">未装配任何卷。</div></div>
             </div>
+            </div>
+
+            <div data-cspane="notify" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>通知历史</b><span class="muted" style="font-size:12px">渠道自检会真实外发一条测试消息</span>
+                <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-nt-refresh" type="button">刷新</button>
+                <button class="btn" id="v2-nt-test" type="button">渠道自检</button>
+              </div>
+              <div id="v2-nt-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th style="width:150px">时间</th><th style="width:130px">动作</th><th>对象</th>
+                    <th style="width:110px">渠道</th><th style="width:90px">状态</th><th>详情</th></tr></thead>
+                  <tbody id="v2-nt-body"></tbody>
+                </table>
+                <div class="empty" id="v2-nt-empty" hidden><b>暂无通知记录</b>
+                  <div class="muted">告警规则命中或渠道自检后会在此留痕。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="verify" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>checksum 巡检</b>
+                <input id="v2-vf-volume" placeholder="卷（留空 = 全部）" style="width:180px">
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-vf-run" type="button">开始巡检</button>
+              </div>
+              <div id="v2-vf-state" class="banner" hidden role="status"></div>
+              <div class="kpis" id="v2-vf-kpis" style="margin-bottom:12px"></div>
+              <div class="card">
+                <div class="card-title">问题明细（只隔离不删除）</div>
+                <div id="v2-vf-detail" class="kv-list" hidden></div>
+                <div class="muted" id="v2-vf-note" style="font-size:12px">巡检会重算每个台账文件的 SHA-256；
+                  不符的文件被隔离到租户 meta/quarantine/。</div>
+              </div>
+            </div>
+
+            <div data-cspane="access" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>凭据</b><span class="muted" style="font-size:12px">仅管理员可见 AK 摘要（不下发明文 SK）</span>
+                <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-ac-refresh" type="button">刷新</button>
+              </div>
+              <div id="v2-ac-state" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th>AK</th><th>Owner</th><th style="width:110px" class="r">SK 数</th>
+                    <th style="width:110px" class="r">存活 SK</th></tr></thead>
+                  <tbody id="v2-ac-body"></tbody>
+                </table>
+                <div class="empty" id="v2-ac-empty" hidden><b>暂无凭据</b>
+                  <div class="muted">用 sclient trust 或 POST /api/credentials/register 登记。</div></div>
+              </div>
+              <div class="card" style="margin-top:14px">
+                <div class="card-title">接入指引</div>
+                <div id="v2-ac-guide" class="kv-list"></div>
+              </div>
             </div>
 
             <div data-cspane="tasks" hidden>
@@ -425,6 +483,9 @@
 <script src="cloud-table.js"></script>
 <script src="audit-console.js"></script>
 <script src="config-console.js"></script>
+<script src="notify-console.js"></script>
+<script src="verify-console.js"></script>
+<script src="access-console.js"></script>
 <script src="transfer.js"></script>
 <script src="console.js"></script>
 <script src="preview.js"></script>

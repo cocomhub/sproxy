@@ -6,17 +6,31 @@ package e2e
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	serverconfig "github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/mxschmitt/playwright-go"
 )
 
 // TestV2Shell_RouteThemeAndEntry 验证 /ui/v2/ 可用且不破坏旧版入口。
 func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
-	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {})
+	// 真实通知渠道：本地 webhook 接收端，验证「渠道自检」真的外发。
+	var hookHits atomic.Int64
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hookHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer hook.Close()
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.Notify.Enabled = true
+		c.Notify.Rules = []serverconfig.NotifyRule{{Action: "*", Channels: []string{"webhook"}}}
+		c.Notify.Channels.Webhook.URL = hook.URL
+	})
 	defer cleanup()
 
 	page, stop := pageFixture(t)
@@ -236,6 +250,52 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const f = document.querySelector('#v2-cfg-facts'); return (f && f.children.length > 0) || !document.querySelector('#v2-cfg-state').hidden; }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("配置分区既无字段也无提示: %v", err)
+	}
+	// 通知分区：真实渠道自检 → 本地 webhook 收到请求 + 页面回显 ok + 历史留痕。
+	if err := page.Locator("[data-cs=notify]").Click(); err != nil {
+		t.Fatalf("切换通知分区: %v", err)
+	}
+	if err := waitLoc(page, "#v2-nt-test", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("通知分区未渲染: %v", err)
+	}
+	if err := page.Locator("#v2-nt-test").Click(); err != nil {
+		t.Fatalf("渠道自检点击: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-nt-state'); return b && !b.hidden && b.textContent.includes('webhook'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("渠道自检未回显 webhook 结果: %v", err)
+	}
+	if hookHits.Load() == 0 {
+		t.Fatalf("本地 webhook 未收到自检消息")
+	}
+
+	// 巡检分区：真实 POST /api/verify —— 前面已上传 e2e.txt，台账至少 1 项且一致。
+	if err := page.Locator("[data-cs=verify]").Click(); err != nil {
+		t.Fatalf("切换巡检分区: %v", err)
+	}
+	if err := page.Locator("#v2-vf-run").Click(); err != nil {
+		t.Fatalf("触发巡检: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const ks = document.querySelectorAll('#v2-vf-kpis .kpi .v'); return ks.length >= 6 && ks[0].textContent !== '—'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("巡检报告未渲染: %v", err)
+	}
+	totalText, _ := page.Locator("#v2-vf-kpis .kpi").First().Locator(".v").TextContent()
+	okText, _ := page.Locator("#v2-vf-kpis .kpi").Nth(1).Locator(".v").TextContent()
+	if strings.TrimSpace(totalText) == "0" || strings.TrimSpace(okText) == "0" {
+		t.Fatalf("巡检未核对到已上传文件：total=%q ok=%q", totalText, okText)
+	}
+
+	// 接入分区：凭据清单（admin）或 403 降级提示，二者都须可见。
+	if err := page.Locator("[data-cs=access]").Click(); err != nil {
+		t.Fatalf("切换接入分区: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-ac-state'); const t = document.querySelector('#v2-ac-body'); return (b && !b.hidden) || (t && t.children.length > 0); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("接入分区既无凭据也无提示: %v", err)
 	}
 
 	// 主题切换。
