@@ -108,7 +108,37 @@
           <div class="empty" id="v2-tf-empty" hidden><b>暂无云端任务</b>
             <div class="muted">提交下载链接后，任务会出现在这里。</div></div>
         </div>
+
+        <div class="card" style="margin-top:14px">
+          <div class="card-h">
+            <h2>任务组</h2><span class="hint">组内任务共享来源与目标卷；组链式即按组批量下载</span>
+            <span style="flex:1"></span>
+            <button class="btn" id="v2-grp-refresh" type="button">刷新</button>
+            <button class="btn btn-primary" id="v2-grp-create" type="button">创建组</button>
+          </div>
+          <div id="v2-grp-state" class="banner" hidden role="status"></div>
+          <table class="table">
+            <thead><tr><th>组</th><th style="width:130px">状态</th><th style="width:150px">进度</th>
+              <th style="width:90px" class="r">失败</th><th style="width:140px">更新</th><th style="width:210px"></th></tr></thead>
+            <tbody id="v2-grp-body"></tbody>
+          </table>
+          <div class="empty" id="v2-grp-empty" hidden><b>暂无任务组</b>
+            <div class="muted">创建组后可整组取消/重试。</div></div>
+        </div>
       </section>
+
+      <div class="modal-backdrop" id="v2-grp-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-grp-title">
+          <h3 id="v2-grp-title">创建任务组</h3>
+          <p>每行一个下载链接；同组任务按提交顺序执行。</p>
+          <label class="field">组名<input id="v2-grp-name" value="示例任务组" autocomplete="off"></label>
+          <label class="field">链接<textarea id="v2-grp-urls" rows="4" placeholder="https://…"></textarea></label>
+          <div class="modal-actions">
+            <button class="btn" id="v2-grp-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="v2-grp-ok" type="button">创建并开始</button>
+          </div>
+        </div>
+      </div>
 
       <section class="panel" data-panel="trash" hidden>
         <div class="card"><div class="card-b placeholder">

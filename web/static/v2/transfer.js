@@ -11,7 +11,7 @@
   var ct = window.ctStatusLabel ? window : null; // cloud-tasks.js 以全局函数暴露
   if (!api || !fmt) { return; }
 
-  var state = { tasks: [], filter: '', timer: null, auto: true, loading: false };
+  var state = { tasks: [], groups: [], filter: '', timer: null, auto: true, loading: false };
 
   function el(id) { return document.getElementById(id); }
 
@@ -140,6 +140,119 @@
     set('v2-tf-failed', s.failed); set('v2-tf-completed', s.completed);
   }
 
+  function renderGroups() {
+    var body = el('v2-grp-body');
+    if (!body) { return; }
+    body.textContent = '';
+    state.groups.forEach(function (g) {
+      var tr = document.createElement('tr');
+      var nameTd = document.createElement('td');
+      nameTd.textContent = g.name || g.id;
+      nameTd.className = 'mono';
+      tr.appendChild(nameTd);
+
+      var stTd = document.createElement('td');
+      var pill = document.createElement('span');
+      pill.className = 'pill ' + statusClass(g.status);
+      pill.textContent = label(g.status);
+      stTd.appendChild(pill);
+      tr.appendChild(stTd);
+
+      var pgTd = document.createElement('td');
+      var total = Number(g.total_tasks) || 0;
+      var done = Number(g.completed) || 0;
+      var p = total ? Math.round(done / total * 100) : 0;
+      var bar = document.createElement('div'); bar.className = 'bar';
+      var fill = document.createElement('i'); fill.style.width = p + '%';
+      bar.appendChild(fill);
+      var txt = document.createElement('div');
+      txt.className = 'muted'; txt.style.fontSize = '11px';
+      txt.textContent = done + ' / ' + total + ' · ' + p + '%';
+      pgTd.appendChild(bar); pgTd.appendChild(txt);
+      tr.appendChild(pgTd);
+
+      var failTd = document.createElement('td');
+      failTd.className = 'r num';
+      failTd.textContent = String(g.failed || 0);
+      tr.appendChild(failTd);
+
+      var upTd = document.createElement('td');
+      upTd.className = 'num muted';
+      upTd.textContent = g.updated_at ? fmt.formatTime(Date.parse(g.updated_at)) : '—';
+      tr.appendChild(upTd);
+
+      var actTd = document.createElement('td');
+      actTd.className = 'r actions';
+      if (g.status === 'downloading' || g.status === 'pending') {
+        actTd.appendChild(actionBtn('取消', function () {
+          run(api.json('POST', '/api/cloud/groups/' + encodeURIComponent(g.id) + '/cancel', {}), '已取消组');
+        }));
+      }
+      if (g.status === 'failed' || g.status === 'cancelled') {
+        actTd.appendChild(actionBtn('整组重试', function () {
+          run(api.json('POST', '/api/cloud/groups/' + encodeURIComponent(g.id) + '/resume', {
+            body: new TextEncoder().encode(JSON.stringify({ force: true })),
+            contentType: 'application/json'
+          }), '已提交整组重试');
+        }));
+      }
+      if (g.status !== 'downloading' && g.status !== 'pending') {
+        actTd.appendChild(actionBtn('删除', function () {
+          run(api.json('DELETE', '/api/cloud/groups/' + encodeURIComponent(g.id)), '已删除组');
+        }));
+      }
+      tr.appendChild(actTd);
+      body.appendChild(tr);
+    });
+    var empty = el('v2-grp-empty');
+    if (empty) { empty.hidden = state.groups.length > 0; }
+  }
+
+  function loadGroups() {
+    setGroupState('', '');
+    api.json('GET', '/api/cloud/groups?limit=50')
+      .then(function (body) {
+        state.groups = (body && (body.groups || body.items)) || [];
+        renderGroups();
+      })
+      .catch(function (e) { setGroupState('error', '任务组加载失败：' + (e.message || e)); });
+  }
+
+  function setGroupState(kind, text) {
+    var box = el('v2-grp-state');
+    if (!box) { return; }
+    if (!kind) { box.hidden = true; box.textContent = ''; return; }
+    box.hidden = false;
+    box.className = 'banner' + (kind === 'error' ? ' banner-warn' : '');
+    box.textContent = text;
+  }
+
+  function openGroupDialog() {
+    var d = el('v2-grp-backdrop');
+    if (d) { d.hidden = false; el('v2-grp-name').focus(); }
+  }
+  function closeGroupDialog() {
+    var d = el('v2-grp-backdrop');
+    if (d) { d.hidden = true; }
+  }
+  function submitGroup() {
+    var name = el('v2-grp-name').value.trim();
+    var urls = el('v2-grp-urls').value.split(String.fromCharCode(10)).map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!name) { if (window.v2toast) { window.v2toast('warn', '组名不能为空'); } return; }
+    if (!urls.length) { if (window.v2toast) { window.v2toast('warn', '至少一个下载链接'); } return; }
+    api.json('POST', '/api/cloud/groups', {
+      body: new TextEncoder().encode(JSON.stringify({ name: name, urls: urls })),
+      contentType: 'application/json'
+    }).then(function () {
+      closeGroupDialog();
+      el('v2-grp-urls').value = '';
+      if (window.v2toast) { window.v2toast('ok', '已创建任务组：' + name); }
+      loadGroups();
+    }).catch(function (e) {
+      if (window.v2toast) { window.v2toast('bad', '创建失败：' + (e.message || e)); }
+    });
+  }
+
   function load() {
     if (state.loading) { return; }
     state.loading = true;
@@ -153,6 +266,7 @@
         setState('error', '云端任务加载失败：' + (e.message || e));
       })
       .then(function () { state.loading = false; });
+    loadGroups();
   }
 
   function setAuto(on) {
@@ -179,7 +293,18 @@
       });
     });
     var refresh = el('v2-tf-refresh');
-    if (refresh) { refresh.addEventListener('click', load); }
+    if (refresh) { refresh.addEventListener('click', function () { load(); loadGroups(); }); }
+    var gr = el('v2-grp-refresh');
+    if (gr) { gr.addEventListener('click', loadGroups); }
+    var gc = el('v2-grp-create');
+    if (gc) { gc.addEventListener('click', openGroupDialog); }
+    var gx = el('v2-grp-cancel');
+    if (gx) { gx.addEventListener('click', closeGroupDialog); }
+    var gok = el('v2-grp-ok');
+    if (gok) { gok.addEventListener('click', submitGroup); }
+    var gb = el('v2-grp-backdrop');
+    if (gb) { gb.addEventListener('click', function (e) { if (e.target === gb) { closeGroupDialog(); } }); }
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeGroupDialog(); } });
     var auto = el('v2-tf-auto');
     if (auto) {
       auto.addEventListener('click', function () { setAuto(!state.auto); });

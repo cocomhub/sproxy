@@ -181,6 +181,9 @@ body {
 .modal h3 { margin: 0 0 6px; font-size: 15px; }
 .modal p { margin: 0 0 12px; color: var(--text-2); font-size: 13px; overflow-wrap: anywhere; }
 .modal .field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
+.modal .field textarea { min-height: 84px; padding: 8px 10px; resize: vertical;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--surface);
+  color: var(--text); font: inherit; font-size: 12.5px; }
 .modal .field input { height: 32px; padding: 0 10px; border: 1px solid var(--border-strong);
   border-radius: var(--radius-md); background: var(--surface); color: var(--text); font: inherit; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }

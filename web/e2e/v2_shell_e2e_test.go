@@ -166,6 +166,19 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if n, _ := page.Locator("[data-tf]").Count(); n != 4 {
 		t.Fatalf("传输筛选 chips = %d，期望 4", n)
 	}
+	// P2b：任务组空态 + 创建对话框可打开/取消。
+	if err := waitLoc(page, "#v2-grp-empty", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("任务组空态未显示: %v", err)
+	}
+	if err := page.Locator("#v2-grp-create").Click(); err != nil {
+		t.Fatalf("打开创建组: %v", err)
+	}
+	if err := waitLoc(page, "#v2-grp-backdrop .modal", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("创建组对话框未打开: %v", err)
+	}
+	if err := page.Locator("#v2-grp-cancel").Click(); err != nil {
+		t.Fatalf("取消创建组: %v", err)
+	}
 
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
