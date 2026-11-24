@@ -68,6 +68,23 @@ for skin in "abc":
         spec(f"{skin}-files-en", skin, actions=[
             "document.getElementById('lang-btn').click()",
             "document.querySelector('[data-lang-opt=\"en-US\"]').click()"]),
+        spec(f"{skin}-console-access", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=access]').click()"]),
+        spec(f"{skin}-wizard-rotate", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=credentials]').click()",
+            "document.querySelector('[data-dialog=dlg-rotate]').click()"]),
+        spec(f"{skin}-dialog-audit", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-dialog=dlg-audit]').click()"]),
+        spec(f"{skin}-dialog-config", skin, actions=[
+            "document.querySelector('[data-goto=console]').click()",
+            "document.querySelector('[data-sec=config]').click()",
+            "document.querySelector('[data-dialog=dlg-config]').click()"]),
+        spec(f"{skin}-task-source", skin, actions=[
+            "document.querySelector('[data-goto=transfer]').click()",
+            "document.querySelector('[data-task]').click()"]),
         spec(f"{skin}-preview-video", skin, actions=[
             "document.querySelector('[data-preview]').click()"]),
         spec(f"{skin}-preview-text", skin, actions=[

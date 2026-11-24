@@ -675,6 +675,23 @@ body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
 .wiz-pane.active{display:flex}
 .wiz-summary{display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px 12px;font-size:12.5px;padding:12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md)}
 
+
+/* ───── 接入信息 ───── */
+.access{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.acc-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:14px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--card-shadow)}
+.acc-card .ah{display:flex;align-items:center;gap:8px;font-weight:650;font-size:13px}
+.acc-row{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:12.5px}
+.acc-row .k{color:var(--text-3)}
+.acc-row code{font-family:var(--font-mono);font-size:11.5px;overflow-wrap:anywhere}
+.acc-code{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);padding:8px 10px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-2);overflow:auto;white-space:pre}
+/* ───── 换源选择 ───── */
+.src-list{display:flex;flex-direction:column;gap:8px}
+.src{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-md);font-size:12.5px;cursor:pointer}
+.src:hover{border-color:var(--border-strong)}
+.src.sel{border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-soft)}
+.src .rdo{width:14px;height:14px;border-radius:50%;border:1px solid var(--border-strong);display:inline-block}
+.src.sel .rdo{border:4px solid var(--accent)}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -1292,6 +1309,7 @@ time: 2026-11-24T18:41:02Z</div>
               <div class="cnav" data-sec="hub" role="button" tabindex="0">Hub</div>
               <div class="cnav" data-sec="notify" role="button" tabindex="0">通知 <span class="count">3</span></div>
               <div class="cnav" data-sec="verify" role="button" tabindex="0">巡检 <span class="count">3</span></div>
+              <div class="cnav" data-sec="access" role="button" tabindex="0">接入</div>
             </nav>
             <div class="console-content">
               <div id="cs-demo" aria-hidden="true">
@@ -1353,7 +1371,7 @@ time: 2026-11-24T18:41:02Z</div>
                         <tbody>
                           <tr><td class="num muted">18:41:02</td><td>cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td></tr>
                           <tr><td class="num muted">18:38:51</td><td>upload.chunk</td><td class="mono">NHDTB-864.mp4</td><td><span class="pill pill-ok">ok</span></td></tr>
-                          <tr><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td></tr>
+                          <tr data-dialog="dlg-audit" style="cursor:pointer"><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td></tr>
                           <tr><td class="num muted">18:12:40</td><td>volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td></tr>
                         </tbody>
                       </table>
@@ -1608,6 +1626,7 @@ time: 2026-11-24T18:41:02Z</div>
                 </div>
                 <div class="toolbar" style="justify-content:flex-end">
                   <span class="muted" style="font-size:12px;margin-right:auto">有未保存改动 · 保存后立即生效（部分项需重启）</span>
+                  <button class="btn btn-sm" type="button" data-dialog="dlg-config">导入 / 导出</button>
                   <button class="btn btn-sm" type="button" data-toast="已放弃改动" data-toast-kind="info">重置</button>
                   <button class="btn btn-sm btn-primary" type="button" data-toast="配置校验失败：max_upload_bytes 过小" data-toast-kind="bad">保存</button>
                 </div>
@@ -1670,7 +1689,7 @@ time: 2026-11-24T18:41:02Z</div>
                     <thead><tr><th>AK</th><th style="width:110px">Owner</th><th style="width:120px">SK</th><th style="width:100px">状态</th><th style="width:130px">创建</th><th style="width:130px">到期</th><th style="width:200px"></th></tr></thead>
                     <tbody>
                       <tr><td class="mono">skey-d6ff3f0f</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-info">active</span></td><td class="num muted">11-02</td><td class="num" style="color:var(--warn)">12-04</td>
-                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-confirm-title="轮换 skey-d6ff3f0f？" data-confirm-msg="旧 SK 在宽限期后可继续使用 24h。" data-confirm-ok="轮换" data-confirm-toast="已轮换凭据，宽限期 24h">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-dialog="dlg-rotate">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
                       <tr><td class="mono">skey-7a21cc03</td><td>leonli</td><td class="mono masked">••••••••</td><td><span class="pill pill-ok">active</span></td><td class="num muted">09-14</td><td class="num muted">2027-09-14</td>
                         <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button">轮换</button><button class="btn btn-sm btn-ghost" type="button">禁用</button></div></td></tr>
                       <tr><td class="mono">skey-1b90eaff</td><td>ops</td><td class="mono masked">••••••••</td><td><span class="pill pill-mute">disabled</span></td><td class="num muted">08-01</td><td class="num muted">—</td>
@@ -1774,6 +1793,47 @@ time: 2026-11-24T18:41:02Z</div>
                   </table>
                 </div>
                 <div class="banner"><div><b>注册准入</b><div class="muted" style="font-size:12px">节点使用凭据 Ring 的 AK + HMAC proof 注册；<span class="mono">relay_token</span> 已废除。</div></div></div>
+              </section>
+
+              <!-- 接入信息 -->
+              <section class="csection" data-sec="access">
+                <div class="banner"><div><b>用现有工具直接挂载</b><div class="muted" style="font-size:12px">WebDAV 与 S3 都走凭据 Ring 认证；AK/SK 与文件页登录一致，无需额外开通。</div></div></div>
+                <div class="access">
+                  <div class="acc-card">
+                    <div class="ah">WebDAV <span class="pill pill-ok" style="margin-left:auto">已启用</span></div>
+                    <div class="acc-row"><span class="k">地址</span><code>https://sproxy.local:18083/dav/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 WebDAV 地址" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">账号</span><code>skey-d6ff3f0f</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制账号" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">密码</span><code class="masked">••••••••</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 Secret" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-code">mount -t davfs https://sproxy.local:18083/dav/ /mnt/sproxy</div>
+                    <div class="muted" style="font-size:11.5px">Windows: 映射网络驱动器 → 输入上面的地址与凭据。</div>
+                  </div>
+                  <div class="acc-card">
+                    <div class="ah">S3 兼容 <span class="pill pill-ok" style="margin-left:auto">已启用</span></div>
+                    <div class="acc-row"><span class="k">Endpoint</span><code>https://sproxy.local:18083/s3/</code><button class="btn btn-sm btn-ghost" type="button" data-toast="已复制 Endpoint" data-toast-kind="ok">复制</button></div>
+                    <div class="acc-row"><span class="k">Region</span><code>us-east-1（任意值）</code></div>
+                    <div class="acc-row"><span class="k">Bucket</span><code>leonli</code><span class="muted" style="font-size:11px">= Owner</span></div>
+                    <div class="acc-code">aws --endpoint-url https://sproxy.local:18083/s3/ s3 ls s3://leonli/</div>
+                    <div class="muted" style="font-size:11.5px">仅支持 path-style；SigV4 签名，AK/SK 同上。</div>
+                  </div>
+                  <div class="acc-card">
+                    <div class="ah">CLI <span class="pill pill-mute" style="margin-left:auto">sclient</span></div>
+                    <div class="acc-code">sclient config set server https://sproxy.local:18083
+sclient upload ./NHDTB-864.mp4
+sclient list --subdir jav/NHDTB</div>
+                    <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button" data-toast="已复制 CLI 示例" data-toast-kind="ok">复制示例</button><button class="btn btn-sm btn-ghost" type="button">下载 sclient</button></div>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>接入审计</h3><span class="hint">最近 24 小时</span></div>
+                  <table class="table">
+                    <thead><tr><th>时间</th><th>协议</th><th>客户端</th><th>操作</th><th>结果</th></tr></thead>
+                    <tbody>
+                      <tr><td class="num muted">18:40:12</td><td>WebDAV</td><td class="mono">davfs2/1.6</td><td>GET /dav/jav/NHDTB/</td><td><span class="pill pill-ok">200</span></td></tr>
+                      <tr><td class="num muted">18:12:03</td><td>S3</td><td class="mono">aws-cli/2.15</td><td>ListObjectsV2</td><td><span class="pill pill-ok">200</span></td></tr>
+                      <tr><td class="num muted">17:58:44</td><td>WebDAV</td><td class="mono">Finder/14.2</td><td>PUT /dav/tmp/x.bin</td><td><span class="pill pill-warn">403</span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
               </section>
 
               <!-- 一致性巡检 -->
@@ -2076,6 +2136,12 @@ time: 2026-11-24T18:41:02Z</div>
       <button class="btn btn-sm btn-ghost" type="button" data-toast="已忽略该任务" data-toast-kind="warn">忽略</button>
     </div>
     <div class="divider"></div>
+    <div style="font-size:12px;font-weight:650">换源重试</div>
+    <div class="src-list">
+      <label class="src sel"><span class="rdo"></span><span><b>pikpak · [6] MGT102C 3.61 GB</b><span class="muted" style="display:block;font-size:11.5px">上次成功 · 与期望大小一致</span></span><span class="pill pill-ok">推荐</span></label>
+      <label class="src"><span class="rdo"></span><span><b>keepshare · [1] MGT-102 2.88 GB</b><span class="muted" style="display:block;font-size:11.5px">当前来源 · 上次校验失败</span></span><span class="pill pill-warn">已失败</span></label>
+      <label class="src"><span class="rdo"></span><span><b>keepshare · [10] HD-mgt-102 4.52 GB</b><span class="muted" style="display:block;font-size:11.5px">体积最大 · 未尝试</span></span></label>
+    </div>
     <div style="font-size:12px;font-weight:650">最近事件</div>
     <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px">
       <div><span class="muted num">18:22:13</span> · 校验失败（content_mismatch）</div>
@@ -2267,6 +2333,66 @@ time: 2026-11-24T18:41:02Z</div>
   <button role="menuitem" type="button" style="color:var(--bad)" data-confirm-title="退出登录？" data-confirm-msg="本机保存的 Secret 会被清除，下次需要重新输入。" data-confirm-ok="退出" data-confirm-toast="已退出登录">退出登录</button>
 </div>
 
+<!-- 凭据轮换向导 -->
+<div class="modal" id="dlg-rotate" role="dialog" aria-modal="true" aria-labelledby="rot-title" aria-hidden="true">
+  <div class="modal-box" style="width:600px">
+    <h3 id="rot-title">轮换凭据 skey-d6ff3f0f</h3>
+    <div class="wiz-steps">
+      <div class="ws cur" data-rs="1"><span class="n">1</span>影响</div>
+      <div class="ws" data-rs="2"><span class="n">2</span>新凭据</div>
+      <div class="ws" data-rs="3"><span class="n">3</span>宽限期</div>
+    </div>
+    <div class="wiz-pane active" data-rp="1">
+      <div class="banner banner-warn"><div><b>旧 SK 将在宽限期后失效</b><div class="muted" style="font-size:12px">所有使用该 AK 的客户端（CLI / WebDAV / S3 / 备份脚本）都需要更新。</div></div></div>
+      <div class="form-row">影响范围<div class="ds-row" style="gap:12px"><span class="pill pill-info">sclient ×2</span><span class="pill pill-info">WebDAV ×1</span><span class="pill pill-info">S3 ×1</span></div></div>
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px"><input class="cb" type="checkbox"> 我已了解需要更新客户端</label>
+    </div>
+    <div class="wiz-pane" data-rp="2">
+      <div class="banner"><div><b>新凭据只展示一次</b><div class="muted" style="font-size:12px">AK 不变，Secret 重新生成；旧 Secret 在宽限期内仍可用。</div></div></div>
+      <div class="auth-secret">
+        <span class="muted">AccessKey</span><code>skey-d6ff3f0f</code>
+        <span class="muted">New Secret</span><code>c1b8e4d2f601779f2c41ab7d0e55aa33c1b8e4d2f60177a9c4e5b8d1f30a2c6e</code>
+      </div>
+      <div style="display:flex;gap:8px"><button class="btn btn-sm" type="button" data-toast="已复制新 Secret" data-toast-kind="ok">复制</button><button class="btn btn-sm" type="button" data-toast="已下载 credentials.txt" data-toast-kind="ok">下载</button></div>
+    </div>
+    <div class="wiz-pane" data-rp="3">
+      <div class="form-row">宽限期
+        <select class="select"><option>24 小时（默认）</option><option>7 天</option><option>立即失效（不推荐）</option></select>
+        <span class="muted">宽限期内新旧 Secret 同时有效；到期后仅新 Secret 可用。</span>
+      </div>
+      <div class="banner banner-bad"><div><b>立即失效会让在线客户端中断</b><div class="muted" style="font-size:12px">仅在确认所有客户端已更新时使用。</div></div></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" type="button" id="rot-back">上一步</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" id="rot-next">下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- 配置导入导出 -->
+<div class="modal" id="dlg-config" role="dialog" aria-modal="true" aria-labelledby="cfg-title" aria-hidden="true">
+  <div class="modal-box" style="width:640px">
+    <h3 id="cfg-title">导入 / 导出配置</h3>
+    <p>只导出可安全迁移的字段；凭据、密钥与卷数据不包含在内。</p>
+    <div class="seg" style="margin-bottom:8px"><button aria-pressed="true" type="button">导出</button><button aria-pressed="false" type="button">导入</button></div>
+    <div class="acc-code" style="max-height:220px">{
+  "log_level": "info",
+  "log_format": "text",
+  "server_timeouts": { "read": "30s", "write": "30s", "idle": "60s" },
+  "max_upload_bytes": "1GiB",
+  "chunk_size": "4MiB",
+  "rate_limit": { "enabled": true, "requests": 120, "window": "1m" }
+}</div>
+    <div class="banner" style="margin-top:10px"><div><b>导入会做校验</b><div class="muted" style="font-size:12px">字段类型/取值范围不合法会整体拒绝，不会部分生效。</div></div></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="已复制配置 JSON" data-toast-kind="ok">复制</button>
+      <button class="btn" type="button" data-close>取消</button>
+      <button class="btn btn-primary" type="button" data-toast="配置校验通过，保存后部分项需重启" data-toast-kind="ok" data-close>校验并保存</button>
+    </div>
+  </div>
+</div>
+
 <!-- 新增凭据 -->
 <div class="modal" id="dlg-credential" role="dialog" aria-modal="true" aria-labelledby="cred-title" aria-hidden="true">
   <div class="modal-box" style="width:540px">
@@ -2374,6 +2500,31 @@ time: 2026-11-24T18:41:02Z</div>
 </div>
 
 <!-- 新建 / 编辑告警规则 -->
+<!-- 审计事件详情 -->
+<div class="modal" id="dlg-audit" role="dialog" aria-modal="true" aria-labelledby="audit-title" aria-hidden="true">
+  <div class="modal-box" style="width:620px">
+    <h3 id="audit-title">审计事件 · cloud.verify</h3>
+    <p class="mono" style="font-size:11.5px">event_id: 8f3a91c2 · 2026-11-24T18:22:13.902Z</p>
+    <div class="acc-code" style="max-height:240px">{
+  "op": "cloud.verify",
+  "result": "mismatch",
+  "actor": "cloud-downloader",
+  "subject": { "task": "cloud-9c31aa07-1", "path": "baidu:/MGT-102" },
+  "expected": "sha256:541b612d…",
+  "actual": "sha256:7a10f0c2…",
+  "stage": "transferring",
+  "duration_ms": 3,
+  "request_id": "8f3a91c2"
+}</div>
+    <div class="ds-row" style="margin-top:10px"><span class="pill pill-bad">mismatch</span><span class="muted" style="font-size:12px">关联任务 cloud-9c31aa07-1 · 期望校验失败</span></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-toast="已复制事件 JSON" data-toast-kind="ok">复制 JSON</button>
+      <button class="btn" type="button" data-toast="已打开关联任务" data-toast-kind="info">查看任务</button>
+      <button class="btn btn-primary" type="button" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 预览 -->
 <div class="preview" id="preview" role="dialog" aria-modal="true" aria-label="预览" aria-hidden="true">
   <div class="pv-bar">
@@ -2610,7 +2761,8 @@ time: 2026-11-24T18:41:02Z</div>
     secret: 'Secret · 副本与封印', sync: '同步冲突 · 2 待处理',
     mesh: 'Mesh · 4 个活跃节点', hub: 'Hub · 7 个注册节点',
     notify: '通知 · 3 个渠道（1 渠道异常）',
-    verify: '巡检 · 12,480 对象（3 项不一致）'
+    verify: '巡检 · 12,480 对象（3 项不一致）',
+    access: '接入 · WebDAV / S3 / CLI'
   };
   function openConsole(sec) {
     if (isModalConsole()) {
@@ -3036,6 +3188,35 @@ time: 2026-11-24T18:41:02Z</div>
     });
     updateVisibility('');
   })();
+
+  // ── 凭据轮换向导 ──
+  (function () {
+    var step = 1, next = id('rot-next'), back = id('rot-back');
+    function render() {
+      $$('.wiz-pane[data-rp]').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-rp') === String(step)); });
+      $$('.wiz-steps .ws[data-rs]').forEach(function (w) {
+        var n = Number(w.getAttribute('data-rs'));
+        w.classList.toggle('cur', n === step); w.classList.toggle('done', n < step);
+      });
+      next.textContent = step === 3 ? '完成轮换' : '下一步';
+      back.style.visibility = step === 1 ? 'hidden' : 'visible';
+    }
+    next.addEventListener('click', function () {
+      if (step === 3) { closeDialog(id('dlg-rotate')); toast('ok', '已轮换凭据，宽限期 24h'); return; }
+      step += 1; render();
+    });
+    back.addEventListener('click', function () { if (step > 1) { step -= 1; render(); } });
+    $$('[data-dialog="dlg-rotate"]').forEach(function (b) { b.addEventListener('click', function () { step = 1; render(); }); });
+    render();
+  })();
+
+  // ── 换源选择 ──
+  $$('.src').forEach(function (c) {
+    c.addEventListener('click', function () {
+      $$('.src').forEach(function (x) { x.classList.remove('sel'); });
+      c.classList.add('sel');
+    });
+  });
 
   // ── 预览 ──
   var pv = id('preview');
