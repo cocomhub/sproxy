@@ -297,6 +297,100 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("接入分区既无凭据也无提示: %v", err)
 	}
+	// 命令面板：⌘K/Ctrl+K → 搜索「配置」→ Enter 直达控制台配置分区。
+	if err := page.Keyboard().Press("Control+k"); err != nil {
+		t.Fatalf("打开命令面板: %v", err)
+	}
+	if err := waitLoc(page, "#v2-cmdk", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("命令面板未显示: %v", err)
+	}
+	if err := page.Locator("#v2-cmdk-input").Fill("配置"); err != nil {
+		t.Fatalf("命令面板输入: %v", err)
+	}
+	if err := page.Keyboard().Press("Enter"); err != nil {
+		t.Fatalf("执行命令: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=config]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("命令面板未跳到配置分区: %v", err)
+	}
+
+	// 快捷键帮助：? 打开、Esc 关闭。
+	if err := page.Keyboard().Press("?"); err != nil {
+		t.Fatalf("打开快捷键帮助: %v", err)
+	}
+	if err := waitLoc(page, "#v2-help", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("快捷键帮助未显示: %v", err)
+	}
+	if err := page.Keyboard().Press("Escape"); err != nil {
+		t.Fatalf("关闭快捷键帮助: %v", err)
+	}
+	if err := waitLoc(page, "#v2-help", playwright.WaitForSelectorStateHidden, 5000); err != nil {
+		t.Fatalf("快捷键帮助未关闭: %v", err)
+	}
+
+	// g f 跳文件页；j/k 移动行、x 选中、Enter 打开预览（真实文件 e2e.txt）。
+	if err := page.Keyboard().Press("g"); err != nil {
+		t.Fatalf("g 前缀: %v", err)
+	}
+	if err := page.Keyboard().Press("f"); err != nil {
+		t.Fatalf("g f 跳转: %v", err)
+	}
+	if err := waitLoc(page, "[data-panel=files]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("未跳到文件页: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("跳到 v2demo 目录: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !!document.querySelector('#v2-file-body tr[data-name=\"e2e.txt\"]')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("v2demo 目录未列到 e2e.txt: %v", err)
+	}
+	if err := page.Keyboard().Press("j"); err != nil {
+		t.Fatalf("j 移动: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !!document.querySelector('#v2-file-body tr.row-focus')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("键盘焦点行未出现: %v", err)
+	}
+	if err := page.Keyboard().Press("x"); err != nil {
+		t.Fatalf("x 选中: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => (document.querySelector('#v2-count') || {}).textContent?.includes('已选 1')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("x 未选中当前行: %v", err)
+	}
+	if err := page.Keyboard().Press("Enter"); err != nil {
+		t.Fatalf("Enter 打开: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const p = document.querySelector('#v2-preview'); return p && !p.hidden && document.querySelector('#v2-preview .pv-stage').textContent.includes('hello e2e'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("Enter 未打开文本预览: %v", err)
+	}
+	if err := page.Keyboard().Press("Escape"); err != nil {
+		t.Fatalf("关闭预览: %v", err)
+	}
+
+	// 密度切换：写入 localStorage，刷新后保持紧凑。
+	if err := page.Locator("#v2-density-toggle").Click(); err != nil {
+		t.Fatalf("切换密度: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.documentElement.getAttribute('data-density') === 'compact'",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("密度未切换为 compact: %v", err)
+	}
+	if _, err := page.Reload(); err != nil {
+		t.Fatalf("刷新: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.documentElement.getAttribute('data-density') === 'compact'",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("刷新后密度未保持: %v", err)
+	}
 
 	// 主题切换。
 	before, _ := page.Evaluate("() => document.documentElement.getAttribute('data-theme')", nil)
