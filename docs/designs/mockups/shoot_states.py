@@ -45,6 +45,22 @@ for skin in "abc":
             'document.querySelector(\'.nav[data-goto="console"]\').click()',
             'document.querySelector(\'.cnav[data-sec="cloud"]\').click()',
             f"for(var i=0;i<{clicks};i++){{document.getElementById('dev-states').click();}}"]))
+    specs += [
+        spec(f"{skin}-queue", skin, actions=[
+            "document.querySelector('[data-goto=transfer]').click()",
+            "document.getElementById('open-queue').click()"]),
+        spec(f"{skin}-groups", skin, actions=[
+            "document.querySelector('[data-goto=transfer]').click()"]),
+        spec(f"{skin}-group-detail", skin, actions=[
+            "document.querySelector('[data-goto=transfer]').click()",
+            "document.querySelector('[data-dialog=dlg-group]').click()"]),
+        spec(f"{skin}-onboarding", skin, actions=[
+            "document.getElementById('dev-onboard').click()"]),
+        spec(f"{skin}-readonly", skin, actions=[
+            "document.getElementById('dev-ro').click()"]),
+        spec(f"{skin}-share", skin, actions=[
+            "document.getElementById('dev-share').click()"]),
+    ]
     specs.append(spec(f"{skin}-session-expired", skin, actions=[
         "document.body.dataset.session='expired';",
         'document.querySelector(\'.nav[data-goto="files"]\').click()']))

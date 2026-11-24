@@ -532,6 +532,60 @@ body[data-session="expired"] .session-banner{display:flex}
 .br-table code{font-family:var(--font-mono)}
 .br-table .warn{color:var(--warn)}
 
+
+/* ───── 上传队列 ───── */
+.drawer.wide{width:480px}
+.uq-summary{display:flex;flex-direction:column;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.uq-summary .top{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-3)}
+.uq-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 12px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.uq-row:last-child{border-bottom:0}
+.uq-name{font-size:13px;font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.uq-meta{font-size:11.5px;color:var(--text-3);display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:2px}
+.uq-acts{display:flex;gap:4px;align-items:center}
+.uq-foot{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+
+/* ───── 任务组 ───── */
+.groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.gcard{background:var(--surface);border:var(--card-border);border-radius:var(--radius-lg);box-shadow:var(--card-shadow);padding:14px;display:flex;flex-direction:column;gap:10px}
+.gcard .gh{display:flex;align-items:center;gap:8px}
+.gcard .gh b{font-size:13px}
+.gcard .gm{display:flex;gap:10px;align-items:center;font-size:11.5px;color:var(--text-3)}
+.gmember{display:grid;grid-template-columns:minmax(0,1fr) 90px 96px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:12.5px}
+.gmember:last-child{border-bottom:0}
+
+/* ───── 首次引导 ───── */
+.onboard{display:none;flex-direction:column;gap:14px}
+body[data-onboard="1"] .onboard{display:flex}
+body[data-onboard="1"] #files-table,body[data-onboard="1"] .files-grid,body[data-onboard="1"] .topbatch,body[data-onboard="1"] #dropzone{display:none}
+.steps{display:flex;flex-direction:column;gap:0}
+.step{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:12px;align-items:center;padding:14px 16px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface);margin-bottom:8px}
+.step .n{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:var(--surface-3);color:var(--text-3)}
+.step.done .n{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.step.cur{border-color:color-mix(in srgb,var(--accent) 34%,transparent);background:var(--accent-soft)}
+.step.cur .n{background:var(--accent);color:var(--accent-fg)}
+.step .t{font-size:13px;font-weight:600}
+.step .d{font-size:11.5px;color:var(--text-3);margin-top:2px}
+
+/* ───── 公开分享页 ───── */
+.share-page{max-width:560px;margin:6vh auto;display:flex;flex-direction:column;gap:14px}
+.share-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-xl);box-shadow:var(--shadow-2);padding:24px}
+.share-file{display:flex;gap:14px;align-items:center;padding:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-lg);margin-bottom:16px}
+.share-meta{display:grid;grid-template-columns:80px minmax(0,1fr);gap:8px 12px;font-size:12.5px;margin:14px 0}
+
+/* ───── 登录锁定 ───── */
+.lockout{display:none;flex-direction:column;gap:6px;padding:10px 12px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--warn) 10%,transparent);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);font-size:12.5px;color:var(--warn)}
+.lockout.show{display:flex}
+
+/* ───── 只读卷 ───── */
+.ro-banner{display:none}
+body[data-readonly="1"] .ro-banner{display:flex}
+.replay-banner{display:none}
+body[data-replay="1"] .replay-banner{display:flex}
+#share-invalid{display:none}
+body[data-share="invalid"] #share-valid{display:none}
+body[data-share="invalid"] #share-invalid{display:block}
+body[data-readonly="1"] [data-write]{opacity:.45;cursor:not-allowed}
+
 /* ───── 控制台状态演示（设计稿） ───── */
 #cs-demo{display:none;flex-direction:column;gap:var(--gap-block)}
 body[data-cs-state="empty"] .csection.active,body[data-cs-state="error"] .csection.active,body[data-cs-state="loading"] .csection.active{display:none}
@@ -615,6 +669,10 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   <button id="dev-states" type="button">状态演示</button>
   <button id="dev-auth" type="button">登录页</button>
   <button id="dev-session" type="button" aria-pressed="false">会话过期</button>
+  <button id="dev-queue" type="button">上传队列</button>
+  <button id="dev-share" type="button">分享页</button>
+  <button id="dev-onboard" type="button" aria-pressed="false">首次引导</button>
+  <button id="dev-ro" type="button" aria-pressed="false">只读卷</button>
   <button id="dev-ds" type="button">组件库</button>
   <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
@@ -669,7 +727,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       <button class="icon-btn" id="theme-quick" type="button" title="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
-      <button class="btn btn-primary" type="button" data-toast="已选择 2 个文件，准备上传" data-toast-kind="info">
+      <button class="btn btn-primary" type="button" data-write data-toast="已选择 2 个文件，准备上传" data-toast-kind="info">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         上传
       </button>
@@ -700,6 +758,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
 
             <form class="auth-pane active" data-auth-pane="login" novalidate>
               <div class="auth-err" id="auth-err"><span>!</span><div><b>认证失败</b><div style="font-size:11.5px">AccessKey 或 Secret 不正确（auth_failed）。若刚轮换过凭据，请使用新 Secret。</div></div></div>
+              <div class="lockout" id="auth-lockout"><b>尝试次数过多</b><div>连续失败 3 次；请在 <span class="num">04:57</span> 后重试，或联系管理员重置。</div></div>
               <label>Owner<input class="input" id="auth-owner" placeholder="例如 leonli" value="leonli"></label>
               <label>AccessKey<input class="input" id="auth-ak" placeholder="skey-xxxxxxxx" value="skey-d6ff3f0f"></label>
               <label>Secret
@@ -747,6 +806,26 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <div><b>登录已过期（auth_failed）</b><div class="muted" style="font-size:12px">写操作已暂停；重新登录后会自动重试未完成的操作。</div></div>
           <div class="acts"><button class="btn btn-sm btn-primary" type="button" data-goto="auth">重新登录</button><button class="btn btn-sm" type="button" data-toast="已复制诊断信息" data-toast-kind="info">诊断</button></div>
         </div>
+        <div class="banner replay-banner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--ok);flex:0 0 auto"><path d="M20 6 9 17l-5-5"/></svg>
+          <div><b>已恢复 2 个未完成操作</b><div class="muted" style="font-size:12px">上传 NHDTB-864.mp4（从 62% 续传）· 重试 MGT-102（换源）</div></div>
+          <div class="acts"><button class="btn btn-sm" type="button" data-goto="transfer">查看</button><button class="btn btn-sm btn-ghost" type="button" data-dismiss-replay>不再提示</button></div>
+        </div>
+        <div class="banner ro-banner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--text-2);flex:0 0 auto"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <div><b>当前卷为只读（wrapper · RO）</b><div class="muted" style="font-size:12px">上传、新建目录、重命名、删除已禁用；下载与预览可用。</div></div>
+        </div>
+        <div class="onboard">
+          <div class="card"><div class="card-b">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><b style="font-size:15px">开始使用 sproxy</b><span class="muted" style="font-size:12px">3 步完成配置</span></div>
+            <div class="steps">
+              <div class="step done"><span class="n">✓</span><div><div class="t">连接服务器并登录</div><div class="d">已完成：leonli · skey-d6ff3f0f</div></div><button class="btn btn-sm" type="button">查看</button></div>
+              <div class="step done"><span class="n">✓</span><div><div class="t">选择工作卷</div><div class="d">已完成：baidu（外部 · 1.6 TiB）</div></div><button class="btn btn-sm" type="button">切换</button></div>
+              <div class="step cur"><span class="n">3</span><div><div class="t">上传第一个文件或新建目录</div><div class="d">拖拽到窗口即可上传，或先建目录整理</div></div><div style="display:flex;gap:6px"><button class="btn btn-sm btn-primary" type="button">上传文件</button><button class="btn btn-sm" type="button" data-write data-dialog="dlg-mkdir">新建目录</button></div></div>
+            </div>
+            <div class="muted" style="font-size:12px;margin-top:6px">完成后此面板自动消失；可在「设置」中重新打开。</div>
+          </div></div>
+        </div>
         <div class="toolbar">
           <div class="crumbs">
             <a>全部卷</a><span class="sep">/</span><a>anonymous</a><span class="sep">/</span>
@@ -773,7 +852,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <button class="btn btn-sm" type="button">移动</button>
           <button class="btn btn-sm" type="button">校验</button>
           <button class="btn btn-sm" type="button" data-dialog="dlg-batch">批量重命名</button>
-          <button class="btn btn-sm" type="button" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
+          <button class="btn btn-sm" type="button" data-write data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
           <button class="btn btn-sm" type="button" id="topbatch-clear">取消选择</button>
         </div>
 
@@ -871,7 +950,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             <div class="dropzone" id="dropzone">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 16V4m0 0 4 4m-4-4-4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
               <div style="flex:1;min-width:0"><b>拖拽文件到此处即可上传</b><div class="muted" style="font-size:12px">支持多选与目录保留；目标卷：baidu · 单文件上限 1 GiB（普通上传）</div></div>
-              <button class="btn btn-sm" type="button" data-toast="请选择文件（原型不打开文件选择器）" data-toast-kind="info">选择文件</button>
+              <button class="btn btn-sm" type="button" data-write data-toast="请选择文件（原型不打开文件选择器）" data-toast-kind="info">选择文件</button>
             </div>
             <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
               <button class="btn btn-sm" type="button" data-dialog="dlg-mkdir">新建目录</button>
@@ -912,6 +991,39 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13h10l1-13"/></svg>
           <div><b>回收站为空时</b> 显示此空态与「返回文件」按钮</div>
           <div class="acts"><button class="btn btn-sm" type="button">返回文件</button></div>
+        </div>
+      </section>
+
+      <!-- ══════════ 公开分享页（/s/<token>） ══════════ -->
+      <section class="view" id="view-share">
+        <div class="share-page">
+          <div class="share-card" id="share-valid">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><b style="font-size:16px">分享的文件</b><span class="pill pill-ok" style="margin-left:auto">链接有效</span></div>
+            <div class="muted" style="font-size:12px">由 leonli 分享 · 匿名访问</div>
+            <div class="share-file">
+              <div class="thumb video" style="width:72px;height:52px;border-radius:8px;background:var(--surface-3);display:grid;place-items:center;position:relative;flex:0 0 auto"><span class="play" style="width:24px;height:24px">▶</span></div>
+              <div style="min-width:0"><div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">NHDTB-864.mp4</div><div class="muted" style="font-size:12px">4.72 GB · 视频</div></div>
+            </div>
+            <dl class="share-meta">
+              <dt class="muted">有效期</dt><dd class="num">剩余 6 天（至 2026-11-30）</dd>
+              <dt class="muted">下载次数</dt><dd class="num">3 次（不限）</dd>
+              <dt class="muted">校验</dt><dd class="mono">sha256:9f2c…41ab</dd>
+            </dl>
+            <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">访问密码（可选）
+              <input class="input" type="password" value="1234">
+            </label>
+            <button class="btn btn-primary" style="width:100%;height:40px;margin-top:14px" type="button" data-toast="开始下载 NHDTB-864.mp4" data-toast-kind="ok">下载</button>
+            <div class="muted" style="font-size:11.5px;margin-top:8px">下载即代表同意站点的使用条款；链接失效后可向分享者索取新链接。</div>
+          </div>
+
+          <div class="share-card" id="share-invalid">
+            <div style="display:flex;align-items:center;gap:8px"><b style="font-size:16px">链接已失效</b><span class="pill pill-bad" style="margin-left:auto">已过期</span></div>
+            <div class="empty" style="padding:28px 10px">
+              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
+              <b>此分享链接已过期或被撤销</b>
+              <div>请联系分享者重新生成，或检查链接是否完整。</div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -973,7 +1085,29 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
             </div>
 
             <div class="card">
-              <div class="card-h"><h3>本地上传</h3><span class="hint">分块会话 · 断点续传</span></div>
+              <div class="card-h"><h3>任务组</h3><span class="hint">组内成员共享来源与目标卷</span>
+                <div style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" type="button" data-dialog="dlg-group">组详情</button><button class="btn btn-sm" type="button" data-toast="已创建任务组（3 项）" data-toast-kind="ok">创建组</button></div></div>
+              <div class="card-b">
+                <div class="groups">
+                  <div class="gcard">
+                    <div class="gh"><b>mgt-102 系列</b><span class="pill pill-info" style="margin-left:auto">进行中</span></div>
+                    <div class="gm"><span class="num">2/4 完成</span><span>·</span><span>失败 1</span></div>
+                    <div class="bar"><i style="width:52%"></i></div>
+                    <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button" data-dialog="dlg-group">详情</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已重试组内失败项" data-toast-kind="ok">重试失败</button></div>
+                  </div>
+                  <div class="gcard">
+                    <div class="gh"><b>NHDTB 十一月</b><span class="pill pill-ok" style="margin-left:auto">已完成</span></div>
+                    <div class="gm"><span class="num">3/3 完成</span><span>·</span><span>失败 0</span></div>
+                    <div class="bar ok"><i style="width:100%"></i></div>
+                    <div style="display:flex;gap:6px"><button class="btn btn-sm" type="button">详情</button></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h"><h3>本地上传</h3><span class="hint">分块会话 · 断点续传</span>
+                <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" type="button" id="open-queue">查看队列</button></div></div>
               <div class="tasks">
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 21V9m0 0 4 4m-4-4-4 4"/><path d="M4 7V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2"/></svg>
@@ -1802,6 +1936,75 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   </div>
 </div>
 
+<!-- 任务组详情 -->
+<div class="modal" id="dlg-group" role="dialog" aria-modal="true" aria-labelledby="group-title" aria-hidden="true">
+  <div class="modal-box" style="width:680px">
+    <h3 id="group-title">mgt-102 系列</h3>
+    <p>来源 keepshare · 目标卷 baidu · 创建于 11-24 18:02</p>
+    <div style="display:flex;gap:14px;align-items:center;margin:12px 0">
+      <div style="flex:1"><div class="bar"><i style="width:52%"></i></div></div>
+      <span class="num" style="font-size:12.5px;color:var(--text-3)">2/4 完成 · 1 失败</span>
+    </div>
+    <div class="gmember" style="font-size:11px;color:var(--text-3);text-transform:uppercase;letter-spacing:.04em"><span>成员</span><span>状态</span><span>操作</span></div>
+    <div class="gmember"><span class="mono">MGT-102 · 4.52 GB</span><span class="pill pill-bad">failed</span><span><button class="btn btn-sm" type="button" data-toast="已重试 MGT-102" data-toast-kind="ok">重试</button></span></div>
+    <div class="gmember"><span class="mono">MGT-102-C · 3.61 GB</span><span class="pill pill-info">running</span><span><button class="btn btn-sm btn-ghost" type="button">取消</button></span></div>
+    <div class="gmember"><span class="mono">MGT-102 特典 · 0.9 GB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
+    <div class="gmember"><span class="mono">MGT-102 字幕 · 12 MB</span><span class="pill pill-ok">completed</span><span><button class="btn btn-sm btn-ghost" type="button">详情</button></span></div>
+    <div class="modal-actions">
+      <button class="btn" type="button" data-close>关闭</button>
+      <button class="btn" type="button" data-toast="已取消组内 1 个运行任务" data-toast-kind="warn">取消运行中</button>
+      <button class="btn btn-primary" type="button" data-toast="已重试组内失败项（换源）" data-toast-kind="ok">重试失败项</button>
+    </div>
+  </div>
+</div>
+
+<!-- 上传队列 -->
+<div class="drawer wide" id="upload-drawer" role="dialog" aria-labelledby="uq-title" aria-hidden="true">
+  <header><h3 id="uq-title">上传队列</h3><span class="pill pill-info" id="uq-count">3 项</span>
+    <div style="margin-left:auto"><button class="icon-btn" id="uq-close" type="button" title="关闭">✕</button></div></header>
+  <div class="uq-summary">
+    <div class="top"><span>总进度</span><span class="num" style="margin-left:auto" id="uq-total">1.9 / 4.7 GB</span></div>
+    <div class="bar"><i id="uq-total-bar" style="width:41%"></i></div>
+    <div class="top"><span id="uq-speed">11.4 MB/s</span><span id="uq-eta">剩余 4m 12s</span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button class="btn btn-sm" type="button" id="uq-pause-all">全部暂停</button>
+      </span>
+    </div>
+  </div>
+  <div class="body" style="padding:0">
+    <div class="uq-row" data-uq="1">
+      <div><div class="uq-name">NHDTB-864.mp4</div>
+        <div class="uq-meta"><span class="pill pill-info">上传中</span><span class="num">62%</span><span>11.4 MB/s</span><span>剩余 2m 08s</span><span class="pill pill-mute">续传</span></div></div>
+      <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-toggle type="button">暂停</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
+      <div style="grid-column:1/-1"><div class="bar"><i style="width:62%"></i></div></div>
+    </div>
+    <div class="uq-row" data-uq="2">
+      <div><div class="uq-name">NHDTB-863.mp4</div>
+        <div class="uq-meta"><span class="pill pill-warn">已暂停</span><span class="num">18%</span><span>可续传</span></div></div>
+      <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-toggle type="button">继续</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
+      <div style="grid-column:1/-1"><div class="bar"><i style="width:18%"></i></div></div>
+    </div>
+    <div class="uq-row" data-uq="3">
+      <div><div class="uq-name">NHDTB-861.mp4</div>
+        <div class="uq-meta"><span class="pill pill-bad">失败</span><span class="num">41%</span><span>network reset</span></div></div>
+      <div class="uq-acts"><button class="btn btn-sm btn-primary" data-uq-retry type="button">重试</button><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
+      <div style="grid-column:1/-1"><div class="bar bad"><i style="width:41%"></i></div></div>
+    </div>
+    <div class="uq-row" data-uq="4" data-done="1">
+      <div><div class="uq-name">NHDTB-860.mp4</div>
+        <div class="uq-meta"><span class="pill pill-ok">已完成</span><span class="num">3.10 GB</span><span>11-24 18:05</span></div></div>
+      <div class="uq-acts"><button class="btn btn-sm btn-ghost" data-uq-remove type="button">移除</button></div>
+      <div style="grid-column:1/-1"><div class="bar ok"><i style="width:100%"></i></div></div>
+    </div>
+  </div>
+  <div class="uq-foot">
+    <span class="muted">并发</span>
+    <select class="select" id="uq-concurrency"><option>1</option><option selected>2</option><option>3</option></select>
+    <span class="muted">目标卷</span><span class="pill pill-info">baidu</span>
+    <button class="btn btn-sm btn-ghost" style="margin-left:auto" id="uq-clear" type="button">清理已完成</button>
+  </div>
+</div>
+
 <div class="popover" id="account-menu" role="menu" aria-hidden="true">
   <div class="pop-head">
     <div class="avatar">LL</div>
@@ -1934,7 +2137,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   var titles = {
     files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'],
     trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿'],
-    auth: ['登录', '/ 凭据 Ring']
+    auth: ['登录', '/ 凭据 Ring'], share: ['分享', '/ 公开链接']
   };
   function show(go) {
     if (go === 'console') { openConsole(currentSec); return; }
@@ -2209,7 +2412,8 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       var top = layerStack[layerStack.length - 1];
-      if (top === 'account') { closeAccount(); }
+      if (top === 'queue') { closeQueue(); }
+      else if (top === 'account') { closeAccount(); }
       else if (top === 'dlg') { var d = topDialog(); if (d) { closeDialog(d); } }
       else if (top === 'confirm') { closeConfirm(); }
       else if (top === 'cmdk') { closeCmdk(); }
@@ -2258,6 +2462,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
     inp.type = show ? 'text' : 'password';
     pwToggle.textContent = show ? '隐藏' : '显示';
   });
+  var authFails = 0;
   id('auth-submit').addEventListener('click', function (e) {
     e.preventDefault();
     var btn = e.currentTarget;
@@ -2266,12 +2471,21 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
       btn.classList.remove('loading'); btn.disabled = false;
       var ak = id('auth-ak').value.trim(), sk = id('auth-sk').value.trim();
       if (!ak || sk.length < 8) {
+        authFails += 1;
         id('auth-err').classList.add('show');
         toast('bad', '登录失败：AccessKey 或 Secret 不正确');
+        if (authFails >= 3) {
+          id('auth-lockout').classList.add('show');
+          id('auth-submit').disabled = true;
+          toast('warn', '连续失败 3 次，已临时锁定 5 分钟');
+        }
         return;
       }
       id('auth-err').classList.remove('show');
+      id('auth-lockout').classList.remove('show');
+      authFails = 0;
       document.body.dataset.session = 'ok';
+      document.body.dataset.replay = '1';
       id('dev-session').setAttribute('aria-pressed', 'false');
       toast('ok', '已登录：leonli（凭据 10 天后过期）');
       show('files');
@@ -2435,6 +2649,98 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   });
   id('dev-ds').addEventListener('click', function () { show('ds'); });
   id('dev-auth').addEventListener('click', function () { show('auth'); toast('info', '预览登录 / 注册页'); });
+  id('dev-share').addEventListener('click', function (e) {
+    var invalid = document.body.dataset.share === 'invalid';
+    if (invalid) { delete document.body.dataset.share; } else { document.body.dataset.share = 'invalid'; }
+    show('share');
+    e.currentTarget.setAttribute('aria-pressed', String(!invalid));
+    toast('info', invalid ? '分享页：有效链接' : '分享页：失效链接');
+  });
+  id('dev-onboard').addEventListener('click', function (e) {
+    var on = document.body.dataset.onboard === '1';
+    if (on) { delete document.body.dataset.onboard; } else { document.body.dataset.onboard = '1'; }
+    show('files');
+    e.currentTarget.setAttribute('aria-pressed', String(!on));
+    toast('info', on ? '已隐藏首次引导' : '已显示首次引导（3 步）');
+  });
+  id('dev-ro').addEventListener('click', function (e) {
+    var on = document.body.dataset.readonly === '1';
+    if (on) { delete document.body.dataset.readonly; } else { document.body.dataset.readonly = '1'; }
+    $$('[data-write]').forEach(function (b) { b.disabled = !on ? true : false; if (!on) { b.setAttribute('aria-disabled', 'true'); } else { b.removeAttribute('aria-disabled'); } });
+    show('files');
+    e.currentTarget.setAttribute('aria-pressed', String(!on));
+    toast(on ? 'ok' : 'warn', on ? '已恢复读写' : '当前卷只读：写操作已禁用');
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('[data-dismiss-replay]')) { delete document.body.dataset.replay; }
+  });
+
+  // ── 上传队列 ──
+  var uqDrawer = id('upload-drawer');
+  function openQueue() {
+    lastFocus = document.activeElement;
+    uqDrawer.classList.add('show'); uqDrawer.setAttribute('aria-hidden', 'false');
+    layerStack.push('queue');
+    refreshQueue();
+  }
+  function closeQueue() {
+    uqDrawer.classList.remove('show'); uqDrawer.setAttribute('aria-hidden', 'true');
+    layerStack = layerStack.filter(function (x) { return x !== 'queue'; });
+  }
+  function refreshQueue() {
+    var rows = $$('#upload-drawer [data-uq]');
+    id('uq-count').textContent = rows.length + ' 项';
+    var done = rows.filter(function (r) { return r.hasAttribute('data-done'); }).length;
+    return done;
+  }
+  id('open-queue').addEventListener('click', openQueue);
+  id('uq-close').addEventListener('click', closeQueue);
+  $$('#upload-drawer [data-uq-toggle]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var row = b.closest('[data-uq]');
+      var paused = row.querySelector('.pill').textContent.indexOf('暂停') !== -1;
+      var pill = row.querySelector('.pill');
+      if (paused) { pill.className = 'pill pill-info'; pill.textContent = '上传中'; b.textContent = '暂停'; }
+      else { pill.className = 'pill pill-warn'; pill.textContent = '已暂停'; b.textContent = '继续'; }
+      toast('info', paused ? '已继续上传' : '已暂停上传');
+    });
+  });
+  $$('#upload-drawer [data-uq-retry]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var row = b.closest('[data-uq]');
+      var pill = row.querySelector('.pill');
+      pill.className = 'pill pill-info'; pill.textContent = '重试中';
+      b.disabled = true; b.classList.add('loading');
+      setTimeout(function () {
+        pill.className = 'pill pill-info'; pill.textContent = '上传中';
+        b.disabled = false; b.classList.remove('loading'); b.textContent = '暂停';
+        b.setAttribute('data-uq-toggle', '');
+        toast('ok', '已重试并续传（从 41% 继续）');
+      }, 800);
+    });
+  });
+  $$('#upload-drawer [data-uq-remove]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      b.closest('[data-uq]').remove(); refreshQueue(); toast('info', '已从队列移除');
+    });
+  });
+  id('uq-clear').addEventListener('click', function () {
+    $$('#upload-drawer [data-done]').forEach(function (r) { r.remove(); });
+    refreshQueue(); toast('ok', '已清理完成项');
+  });
+  id('uq-pause-all').addEventListener('click', function (e) {
+    var paused = e.currentTarget.textContent === '继续全部';
+    $$('#upload-drawer [data-uq]').forEach(function (row) {
+      if (row.hasAttribute('data-done')) { return; }
+      var pill = row.querySelector('.pill');
+      if (pill.textContent.indexOf('失败') !== -1) { return; }
+      pill.className = paused ? 'pill pill-info' : 'pill pill-warn';
+      pill.textContent = paused ? '上传中' : '已暂停';
+      var t = row.querySelector('[data-uq-toggle]'); if (t) { t.textContent = paused ? '暂停' : '继续'; }
+    });
+    e.currentTarget.textContent = paused ? '全部暂停' : '继续全部';
+    toast('info', paused ? '已恢复全部上传' : '已暂停全部上传');
+  });
   id('dev-session').addEventListener('click', function (e) {
     var on = document.body.dataset.session === 'expired';
     if (on) { delete document.body.dataset.session; show('files'); } else { document.body.dataset.session = 'expired'; show('files'); }
@@ -2452,7 +2758,7 @@ body[data-cs-state="empty"] #cs-demo .demo-empty,body[data-cs-state="error"] #cs
   document.addEventListener('keydown', function (e) {
     if (e.key !== 'Tab') { return; }
     var top = layerStack[layerStack.length - 1];
-    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu') };
+    var map = { confirm: id('confirm'), cmdk: id('cmdk'), help: id('help'), drawer: id('drawer'), 'task-drawer': id('task-drawer'), account: id('account-menu'), queue: id('upload-drawer') };
     var t = map[top] || (top === 'dlg' ? topDialog() : null) || (top === 'console' && isModalConsole() ? id('view-console') : null);
     if (!t) { return; }
     var f = $$('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])', t).filter(function (el) {

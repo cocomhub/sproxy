@@ -90,3 +90,16 @@
 同时确认：对话框/账户菜单打开时，顶栏被遮罩覆盖属**预期**（审计在存在 `.modal.show` / `.popover.show` 时跳过遮挡检查，仅检查对话框内部）。
 
 截图扩到 **53 张**（新增 `*-auth-login`、`*-auth-register`、`*-account-menu`、`*-dialog-mkdir/rename/batch`、`*-session-expired`、`m-a-auth`）。
+
+## 8. 第三轮审计（队列 / 任务组 / 引导 / 分享 / 受限态）
+
+状态矩阵扩到 **102 个**（新增 21 个：3 皮肤 × {传输-任务组, 组详情, 上传队列, 首次引导, 只读卷, 分享失效, 分享有效}）。
+
+| 视口 | 状态数 | 问题数 |
+| --- | --- | --- |
+| 1500×950 | 102 | **0** |
+| 390×844 | 102 | **0** |
+
+本轮修复：分享失效卡片原本用内联 `display:none`，会压制 `body[data-share=invalid]` 的切换 → 改为 CSS 控制，实测失效态 `#share-invalid: block` / 有效态 `none`。
+
+截图扩到 **71 张**（新增 `*-queue`、`*-groups`、`*-group-detail`、`*-onboarding`、`*-readonly`、`*-share`）。
