@@ -61,6 +61,36 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("面包屑未更新为 v2demo: %v", err)
 	}
 
+	// P1b：UI 新建目录 → 选择 → 批量删除（走真实 /mkdir 与 /rmdir）。
+	if err := page.Locator("#v2-mkdir").Click(); err != nil {
+		t.Fatalf("打开新建目录: %v", err)
+	}
+	if err := page.Locator("#v2-dlg-input").Fill("uifolder"); err != nil {
+		t.Fatalf("填写目录名: %v", err)
+	}
+	if err := page.Locator("[data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("提交新建目录: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('uifolder') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("新建目录未出现在列表: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=uifolder] .cb").Check(); err != nil {
+		t.Fatalf("勾选新目录: %v", err)
+	}
+	if err := page.Locator("#v2-batch-delete").Click(); err != nil {
+		t.Fatalf("点批量删除: %v", err)
+	}
+	if err := page.Locator("[data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("确认删除: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('uifolder') === -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("目录删除后仍在列表: %v", err)
+	}
+
 	// 切换路由：hash + 面板可见性。
 	if err := page.Locator(".nav[data-route='transfer']").Click(); err != nil {
 		t.Fatalf("点击传输: %v", err)

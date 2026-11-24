@@ -275,6 +275,9 @@ web-test:
 	@node --check web/static/v2/files.js
 	@node --check web/static/v2/files.test.js
 	@node --check web/static/v2/files-view.js
+	@node --check web/static/v2/files-ops.js
+	@node --check web/static/v2/files-ops.test.js
+	@node --check web/static/v2/files-actions.js
 	@node --check web/static/overview-cards.js
 	@node --check web/static/overview-cards.test.js
 	@node --check web/static/console-nav.test.js
@@ -304,6 +307,7 @@ web-test:
 	node --test web/static/shared/creds.test.js
 	node --test web/static/v2/auth.test.js
 	node --test web/static/v2/files.test.js
+	node --test web/static/v2/files-ops.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js

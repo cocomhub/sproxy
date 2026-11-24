@@ -69,13 +69,19 @@
           <div class="card-h">
             <div class="crumbs" id="v2-crumbs"></div>
             <span class="hint" id="v2-count"></span>
-            <button class="btn" id="v2-refresh" type="button" style="margin-left:auto">刷新</button>
+            <span class="spacer" style="flex:1"></span>
+            <label class="btn btn-primary" for="v2-upload-input">上传</label>
+            <input id="v2-upload-input" type="file" multiple hidden>
+            <button class="btn" id="v2-mkdir" type="button">新建目录</button>
+            <button class="btn" id="v2-batch-delete" type="button" disabled>删除所选</button>
+            <button class="btn" id="v2-refresh" type="button">刷新</button>
           </div>
           <div id="v2-files-state" class="banner" hidden role="status"></div>
           <table class="table">
             <thead>
-              <tr><th>名称</th><th style="width:110px">卷</th><th style="width:96px" class="r">大小</th>
-                <th style="width:150px">修改时间</th><th style="width:90px">校验</th></tr>
+              <tr><th style="width:34px"><input class="cb" id="v2-select-all" type="checkbox" aria-label="全选"></th>
+                <th>名称</th><th style="width:110px">卷</th><th style="width:96px" class="r">大小</th>
+                <th style="width:150px">修改时间</th><th style="width:70px">校验</th><th style="width:150px"></th></tr>
             </thead>
             <tbody id="v2-file-body"></tbody>
           </table>
@@ -108,13 +114,17 @@
     </div>
   </div>
 </div>
+<div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
 <script src="../sclient/crypto.js"></script>
 <script src="../sclient/sig.js"></script>
 <script src="../shared/format.js"></script>
 <script src="../shared/creds.js"></script>
 <script src="auth.js"></script>
 <script src="files.js"></script>
+<script src="../sclient/util.js"></script>
+<script src="files-ops.js"></script>
 <script src="files-view.js"></script>
+<script src="files-actions.js"></script>
 <script src="shell.js"></script>
 </body>
 </html>
