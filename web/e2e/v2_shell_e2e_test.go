@@ -108,6 +108,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("目录删除后仍在列表: %v", err)
 	}
 
+	// P1d：上传（简单路径）→ 行出现。
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "e2e.txt", MimeType: "text/plain", Buffer: []byte("hello e2e"),
+	}}); err != nil {
+		t.Fatalf("选择上传文件: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('e2e.txt') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("上传后列表未出现 e2e.txt: %v", err)
+	}
+
 	// 切换路由：hash + 面板可见性。
 	if err := page.Locator(".nav[data-route='transfer']").Click(); err != nil {
 		t.Fatalf("点击传输: %v", err)

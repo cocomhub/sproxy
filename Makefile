@@ -278,6 +278,8 @@ web-test:
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
 	@node --check web/static/v2/files-actions.js
+	@node --check web/static/v2/upload-chunked.js
+	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js
 	@node --check web/static/v2/files-inspector.js
 	@node --check web/static/overview-cards.js
@@ -310,6 +312,7 @@ web-test:
 	node --test web/static/v2/auth.test.js
 	node --test web/static/v2/files.test.js
 	node --test web/static/v2/files-ops.test.js
+	node --test web/static/v2/upload-chunked.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js
