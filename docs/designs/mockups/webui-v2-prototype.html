@@ -1,18 +1,20 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!--
-  sproxy Web UI 现代化 · 方案对比原型 v2（设计稿，非产品代码）
-  三套方案是**结构变体**，不只是配色：
-    A 工程控制台：侧栏 + 控制台页面 + compact 密度 + 6px 圆角 + 无阴影 + 浮动批量条 + ⌘K
-    B 运维仪表盘：侧栏 + 控制台弹窗（卡片/KPI/阈值表）+ medium 密度 + 12px 圆角 + 阴影 + 顶部批量条
-    C 精修既有  ：顶部 tab（无侧栏）+ 控制台弹窗（紧凑表格）+ comfortable 密度 + 现状顶栏批量条
+  sproxy Web UI 现代化 · 方案对比原型 v3（设计稿，非产品代码）
+  三套结构变体：
+    A 工程控制台：侧栏 + 控制台页面 + 35px 紧凑行 + 无阴影 + 底部浮动条 + ⌘K
+    B 运维仪表盘：侧栏 + 控制台弹窗(1180×760) + KPI/仪表 + 45px 行 + 12px 圆角
+    C 精修既有  ：顶部 tab + 1000px 容器 + 控制台弹窗(1229×736) + 57px 行 + 现状黄条
+  交互：⌘K 实搜索、j/k/x/Enter 列表键盘模型、g 前缀跳转、? 帮助、Esc 层级关闭、Toast+撤销、
+        骨架屏、空态、错误 banner、焦点环、aria-live。
   约束：单文件、零外部依赖、无内联事件（贴近产品 CSP: default-src 'self'）。
 -->
 <html lang="zh-CN" data-theme="light" data-skin="a">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>sproxy · Web UI 现代化设计稿 v2</title>
+<title>sproxy · Web UI 现代化设计稿 v3</title>
 <style>
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%}
@@ -21,7 +23,6 @@ body{
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;
   font-size:var(--font-base);line-height:1.45;-webkit-font-smoothing:antialiased;
 }
-/* ───────── 结构轴默认值（被各方案覆盖） ───────── */
 :root{
   --font-base:13px;
   --radius-xs:4px; --radius-sm:6px; --radius-md:6px; --radius-lg:8px; --radius-xl:10px;
@@ -33,7 +34,7 @@ body{
   --dur:120ms; --ease:cubic-bezier(.2,0,.2,1);
   --font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
 }
-/* ═════════ 方案 A：工程控制台（结构：侧栏 + 页面控制台；紧凑；无阴影） ═════════ */
+/* ───── A：工程控制台 ───── */
 [data-skin="a"]{
   --font-base:13px; --row-h:34px; --pad-row:6px 12px; --gap-block:12px;
   --radius-xs:3px; --radius-sm:5px; --radius-md:6px; --radius-lg:8px; --radius-xl:10px;
@@ -59,7 +60,7 @@ body{
   --shadow-1:none; --shadow-2:0 18px 44px rgba(16,24,40,.16); --ring:0 0 0 3px rgba(91,99,232,.22);
   --overlay:rgba(16,24,40,.42); --batch-bg:#0e1116; --batch-fg:#ffffff;
 }
-/* ═════════ 方案 B：运维仪表盘（结构：侧栏 + 弹窗控制台卡片化；medium；阴影） ═════════ */
+/* ───── B：运维仪表盘 ───── */
 [data-skin="b"]{
   --font-base:13.5px; --row-h:42px; --pad-row:8px 14px; --gap-block:16px;
   --radius-xs:4px; --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-xl:16px;
@@ -87,7 +88,7 @@ body{
   --shadow-1:0 1px 0 rgba(255,255,255,.03); --shadow-2:0 16px 40px rgba(0,0,0,.5);
   --ring:0 0 0 3px rgba(77,141,255,.30); --overlay:rgba(2,6,12,.6); --batch-bg:#1b2430; --batch-fg:#e6edf3;
 }
-/* ═════════ 方案 C：精修既有（结构：顶部 tab + 弹窗控制台；comfortable；现状观感） ═════════ */
+/* ───── C：精修既有 ───── */
 [data-skin="c"]{
   --font-base:14px; --row-h:46px; --pad-row:11px 16px; --gap-block:18px;
   --radius-xs:4px; --radius-sm:6px; --radius-md:6px; --radius-lg:8px; --radius-xl:10px;
@@ -117,7 +118,7 @@ body{
   --batch-bg:#2a2a1e; --batch-fg:#e6dfc0;
 }
 
-/* ───────── 布局：A/B 侧栏；C 顶部 tab + 居中容器 ───────── */
+/* ───── 布局 ───── */
 .shell{height:100vh;overflow:hidden}
 [data-skin="a"] .shell,[data-skin="b"] .shell{display:grid;grid-template-columns:var(--rail-w) minmax(0,1fr)}
 [data-skin="c"] .shell{display:block;overflow:auto;padding:20px}
@@ -125,7 +126,7 @@ body{
 [data-skin="c"] .main{max-width:1000px;margin:0 auto;background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow-1);min-height:calc(100vh - 40px);overflow:hidden}
 .rail{border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;padding:14px 10px;gap:2px;min-height:0}
 .brand{display:flex;align-items:center;gap:9px;padding:4px 8px 14px}
-.brand-mark{width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,var(--accent),color-mix(in oklab,var(--accent) 55%,#00d4ff));display:grid;place-items:center;color:var(--accent-fg);font-weight:800;font-size:12px;letter-spacing:-.02em}
+.brand-mark{width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,var(--accent),color-mix(in oklab,var(--accent) 55%,#00d4ff));display:grid;place-items:center;color:var(--accent-fg);font-weight:800;font-size:12px}
 .brand-name{font-weight:650;letter-spacing:-.01em}
 .brand-tag{font-size:11px;color:var(--text-3);margin-left:auto;font-variant-numeric:tabular-nums}
 .rail-group{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);padding:12px 8px 6px;font-weight:600}
@@ -140,23 +141,23 @@ body{
 .avatar{width:24px;height:24px;border-radius:50%;background:var(--surface-3);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--text-2);border:1px solid var(--border)}
 .who small{display:block;font-size:11px;color:var(--text-3);line-height:1.2}
 
-/* C 的顶部 tab（当前产品的信息架构） */
 .top-tabs{display:none}
-[data-skin="c"] .top-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);padding:0 24px}
+[data-skin="c"] .top-tabs{display:flex;border-bottom:2px solid var(--border);padding:0 24px}
 [data-skin="c"] .top-tabs button{border:0;background:none;border-bottom:2px solid transparent;margin-bottom:-2px;padding:14px 20px;font-size:14px;color:var(--text-2);cursor:pointer}
 [data-skin="c"] .top-tabs button[aria-current="page"]{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
 
 .main{display:flex;flex-direction:column;min-width:0;min-height:0}
-.topbar{display:flex;align-items:center;gap:12px;padding:0 20px;height:var(--topbar-h,56px);border-bottom:1px solid var(--border);background:var(--surface);flex:0 0 auto}
-[data-skin="c"] .topbar{height:auto;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--bg-auth,#f8fafc);flex-wrap:wrap}
-[data-skin="c"] .topbar .page-title{font-size:18px;font-weight:600}
+.topbar{display:flex;align-items:center;gap:12px;padding:0 20px;height:56px;border-bottom:1px solid var(--border);background:var(--surface);flex:0 0 auto}
+[data-skin="c"] .topbar{height:auto;padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface-2);flex-wrap:wrap}
 .page-title{font-size:15px;font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+[data-skin="c"] .page-title{font-size:18px;font-weight:600}
 .page-sub{font-size:12px;color:var(--text-3);font-weight:400}
 .search-trigger{display:flex;align-items:center;gap:8px;margin-left:auto;min-width:240px;height:var(--input-h);padding:0 10px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text-3);cursor:text;font-size:13px}
 .search-trigger:hover{border-color:var(--border-strong)}
 [data-skin="c"] .search-trigger{margin-left:0;min-width:220px}
 [data-skin="b"] .search-trigger{background:var(--surface-2)}
 kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-strong);border-bottom-width:2px;border-radius:4px;padding:1px 5px;color:var(--text-2);background:var(--surface-2)}
+[data-skin="c"] .search-trigger kbd{display:none}
 .icon-btn{width:var(--input-h);height:var(--input-h);display:grid;place-items:center;border-radius:var(--radius-md);border:1px solid transparent;background:transparent;color:var(--text-2);cursor:pointer}
 .icon-btn:hover{background:var(--surface-hover);color:var(--text);border-color:var(--border)}
 .content{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 20px 40px}
@@ -166,24 +167,28 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 .view{display:none;flex-direction:column;gap:var(--gap-block);max-width:1400px}
 .view.active{display:flex}
 
-/* ───────── 通用组件（形状由方案的结构变量决定） ───────── */
+/* ───── 基础组件 ───── */
 .card{background:var(--surface);border:var(--card-border);border-radius:var(--radius-lg);box-shadow:var(--card-shadow)}
-[data-skin="a"] .card{border-color:var(--border)}
-[data-skin="b"] .card{padding:0}
-.card-h{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)}
-.card-h h3{margin:0;font-size:13px;font-weight:650;letter-spacing:-.005em}
+.card-h{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.card-h h3{margin:0;font-size:13px;font-weight:650}
 .card-h .hint{font-size:11.5px;color:var(--text-3)}
 .card-b{padding:14px}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:var(--btn-h);padding:0 12px;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font-weight:550;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:var(--btn-h);padding:0 12px;border-radius:var(--radius-md);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font-size:1em;font-weight:550;cursor:pointer;white-space:nowrap;transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),opacity var(--dur)}
 .btn:hover{background:var(--surface-hover)}
+.btn[disabled],.btn:disabled{opacity:.45;cursor:not-allowed}
 .btn-primary{background:var(--accent);border-color:transparent;color:var(--accent-fg)}
 .btn-primary:hover{background:var(--accent-hover)}
+.btn-danger{background:var(--bad);border-color:transparent;color:#fff}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--text-2)}
 .btn-ghost:hover{background:var(--surface-hover);color:var(--text)}
-[data-skin="c"] .btn{border-color:var(--border-input,#ccc);background:var(--surface-2)}
+[data-skin="c"] .btn{border-color:var(--border-strong);background:var(--surface-2)}
 [data-skin="c"] .btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn:focus-visible,.nav:focus-visible,.icon-btn:focus-visible,.search-trigger:focus-visible,.chip:focus-visible,.top-tabs button:focus-visible{outline:none;box-shadow:var(--ring)}
+.btn:focus-visible,.nav:focus-visible,.icon-btn:focus-visible,.search-trigger:focus-visible,.chip:focus-visible,.cnav:focus-visible,.top-tabs button:focus-visible,select:focus-visible,input:focus-visible{outline:none;box-shadow:var(--ring)}
 .btn-sm{height:calc(var(--btn-h) - 4px);padding:0 9px;font-size:12px;border-radius:var(--radius-sm)}
+.btn.loading{position:relative;color:transparent}
+.btn.loading::after{content:"";position:absolute;width:13px;height:13px;border:2px solid var(--text-2);border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+.btn-primary.loading::after{border-color:var(--accent-fg);border-right-color:transparent}
+@keyframes spin{to{transform:rotate(360deg)}}
 .chip{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-2);font-size:12px;cursor:pointer;white-space:nowrap}
 .chip:hover{border-color:var(--border-strong);color:var(--text)}
 .chip.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 34%,transparent);color:var(--text);font-weight:600}
@@ -202,28 +207,27 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 .muted{color:var(--text-3)}
 .sub{color:var(--text-2)}
 .divider{height:1px;background:var(--border)}
-
-/* 工具条 */
 .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .toolbar .spacer{flex:1}
-[data-skin="c"] .toolbar{gap:8px}
 .seg{display:inline-flex;border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden;background:var(--surface)}
 .seg button{height:calc(var(--btn-h) - 2px);padding:0 10px;border:0;background:transparent;color:var(--text-2);font-size:12.5px;cursor:pointer}
 .seg button[aria-pressed="true"]{background:var(--surface-3);color:var(--text);font-weight:600}
 .field{display:flex;align-items:center;gap:8px;height:var(--input-h);padding:0 10px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text-3);font-size:13px;min-width:200px}
 .field input{border:0;outline:none;background:transparent;color:var(--text);font:inherit;flex:1;min-width:0}
-
-/* 面包屑 */
-.crumbs{display:flex;align-items:center;gap:6px;color:var(--text-2)}
+.select{height:var(--input-h);padding:0 8px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font-size:13px}
+.input{height:var(--input-h);padding:0 10px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface);color:var(--text);font-size:13px;width:100%}
+.input.invalid{border-color:var(--bad)}
+.hint-err{color:var(--bad);font-size:11.5px;margin-top:4px}
+.crumbs{display:flex;align-items:center;gap:6px;color:var(--text-2);flex-wrap:wrap}
 .crumbs .sep{color:var(--text-3)}
 .crumbs a{color:var(--text-2);text-decoration:none;padding:2px 6px;border-radius:var(--radius-xs);cursor:pointer}
 .crumbs a:hover{background:var(--surface-hover);color:var(--text)}
 .crumbs .cur{color:var(--text);font-weight:600}
 
-/* 表格：A 无外框紧贴、B 卡片内、C 现状风格 */
-.table{width:100%;border-collapse:separate;border-spacing:0}
-.table th{text-align:left;font-size:11.5px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--text-3);padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2);position:sticky;top:0;z-index:1}
-[data-skin="c"] .table th{text-transform:none;letter-spacing:0;font-size:13px;background:var(--bg-dir,#f8f9fa);padding:8px 12px}
+/* ───── 表格 ───── */
+.table{width:100%;border-collapse:separate;border-spacing:0;font-size:1em}
+.table th{text-align:left;font-size:11.5px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--text-3);padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+[data-skin="c"] .table th{text-transform:none;letter-spacing:0;font-size:13px}
 .table td{padding:var(--pad-row);border-bottom:1px solid var(--border);vertical-align:middle}
 .table tr{height:var(--row-h)}
 .table tbody tr:hover{background:var(--surface-hover)}
@@ -233,82 +237,89 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 .table .name .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:520}
 [data-skin="c"] .table .name .t{font-weight:400}
 .table .name .t:hover{text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+tr.kbd-focus{box-shadow:inset 2px 0 0 var(--accent);background:var(--accent-soft)!important}
 .ficon{width:18px;height:18px;flex:0 0 auto;color:var(--text-3)}
 .ficon.dir{color:var(--accent)}
 .cb{appearance:none;width:15px;height:15px;border:1px solid var(--border-strong);border-radius:3px;background:var(--surface);cursor:pointer;display:inline-grid;place-items:center;margin:0;vertical-align:middle}
 .cb:checked{background:var(--accent);border-color:var(--accent)}
 .cb:checked::after{content:"";width:7px;height:4px;border-left:2px solid var(--accent-fg);border-bottom:2px solid var(--accent-fg);transform:rotate(-45deg) translateY(-1px)}
-/* 行内操作：A 悬停出现；B 常驻图标；C 文本按钮 */
 .row-actions{display:flex;gap:2px;justify-content:flex-end}
 [data-skin="a"] .row-actions{opacity:0;transition:opacity var(--dur) var(--ease)}
-[data-skin="a"] .row-actions .icon-btn{width:24px;height:22px;border-radius:var(--radius-xs)}
 [data-skin="a"] tr:hover .row-actions,[data-skin="a"] .row-actions:focus-within{opacity:1}
-[data-skin="c"] .row-actions{gap:8px}
+[data-skin="a"] .row-actions .icon-btn{width:24px;height:22px;border-radius:var(--radius-xs)}
 [data-skin="b"] .row-actions .icon-btn{width:28px;height:28px;border-radius:var(--radius-sm)}
-[data-skin="c"] .row-actions .icon-btn{width:auto;padding:0 4px;font-size:13px;color:var(--link,#2b6cb5)}
+[data-skin="c"] .row-actions{gap:8px}
+[data-skin="c"] .row-actions .icon-btn{width:auto;height:auto;padding:0 4px;font-size:13px;color:var(--info)}
 [data-skin="c"] .row-actions .icon-btn svg{display:none}
 
-/* 空态 */
-.empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:56px 20px;color:var(--text-3);text-align:center}
-.empty svg{opacity:.5}
+/* ───── 空态 / 骨架 / banner ───── */
+.empty{display:flex;flex-direction:column;align-items:center;gap:10px;padding:52px 20px;color:var(--text-3);text-align:center}
+.empty svg{opacity:.45}
 .empty b{color:var(--text);font-size:14px}
+.empty .acts{display:flex;gap:8px;margin-top:6px}
+.skeleton{display:none;flex-direction:column}
+[data-loading="1"] .skeleton{display:flex}
+[data-loading="1"] .real-rows{display:none}
+.sk-row{display:grid;grid-template-columns:18px 32px minmax(0,1fr) 90px 120px 80px;gap:12px;align-items:center;padding:var(--pad-row);border-bottom:1px solid var(--border)}
+.sk{height:9px;border-radius:4px;background:linear-gradient(90deg,var(--surface-3) 25%,var(--surface-hover) 37%,var(--surface-3) 63%);background-size:400% 100%;animation:sk 1.4s ease infinite}
+.sk.w40{width:40%}.sk.w60{width:60%}.sk.w80{width:80%}
+@keyframes sk{0%{background-position:100% 50%}100%{background-position:0 50%}}
+@media (prefers-reduced-motion:reduce){.sk{animation:none}}
+.banner{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--surface-2);font-size:13px}
+.banner-bad{border-color:color-mix(in srgb,var(--bad) 34%,transparent);background:color-mix(in srgb,var(--bad) 8%,transparent)}
+.banner-warn{border-color:color-mix(in srgb,var(--warn) 34%,transparent);background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.banner .acts{margin-left:auto;display:flex;gap:6px}
 
-/* KPI：A 紧凑平铺；B 大卡片；C 用汇总条 */
+/* ───── KPI / 图表 ───── */
 .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
 [data-skin="a"] .kpis{gap:8px}
 .kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;display:flex;flex-direction:column;gap:5px;box-shadow:var(--card-shadow)}
 [data-skin="b"] .kpi{padding:16px 18px;gap:8px}
 [data-skin="c"] .kpi{background:var(--surface-2);padding:10px 12px}
 .kpi .k{font-size:12px;color:var(--text-2);display:flex;align-items:center;gap:6px}
-.kpi .v{font-size:var(--kpi-v,24px);font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
+.kpi .v{font-size:24px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
 [data-skin="b"] .kpi .v{font-size:32px}
 [data-skin="c"] .kpi .v{font-size:22px;font-weight:600}
-.kpi .d{font-size:11.5px;color:var(--text-3);display:flex;gap:6px;align-items:center;min-height:17px}
+.kpi .d{font-size:11.5px;color:var(--text-3);display:flex;gap:6px;align-items:center;min-height:17px;flex-wrap:wrap}
 .trend-up{color:var(--ok)} .trend-down{color:var(--bad)}
-/* A 的迷你柱；B 的阈值仪表；C 的纯数字 */
 .spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-top:2px}
 .spark i{flex:1;background:color-mix(in srgb,var(--accent) 34%,transparent);border-radius:2px 2px 0 0;min-height:3px}
 .spark i.hi{background:var(--accent)}
 [data-skin="b"] .spark{height:46px;gap:3px}
-[data-skin="b"] .spark i{border-radius:3px 3px 0 0;background:color-mix(in srgb,var(--accent) 26%,transparent)}
 [data-skin="c"] .spark{display:none}
-.gauge{position:relative;height:10px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin-top:4px}
+.gauge{position:relative;height:8px;border-radius:999px;background:var(--surface-3);overflow:hidden;margin-top:4px}
 .gauge i{display:block;height:100%;background:var(--accent)}
 .gauge.warn i{background:var(--warn)} .gauge.bad i{background:var(--bad)}
 [data-skin="a"] .gauge,[data-skin="c"] .gauge{display:none}
-
-/* 进度条 */
 .bar{height:6px;border-radius:999px;background:var(--surface-3);overflow:hidden}
 .bar > i{display:block;height:100%;background:var(--accent);border-radius:inherit}
 .bar.ok > i{background:var(--ok)} .bar.bad > i{background:var(--bad)} .bar.warn > i{background:var(--warn)}
 
-/* 任务行：A 单行高密度；B 卡片内行；C 表格化 */
+/* ───── 任务 / 卷 ───── */
 .tasks{display:flex;flex-direction:column}
-.task{display:grid;grid-template-columns:24px minmax(0,1.6fr) minmax(180px,1fr) 96px 132px;gap:12px;align-items:center;padding:var(--pad-row);border-bottom:1px solid var(--border)}
+.task{display:grid;grid-template-columns:24px minmax(0,1.6fr) minmax(180px,1fr) 96px 140px;gap:12px;align-items:center;padding:var(--pad-row);border-bottom:1px solid var(--border)}
 .task:last-child{border-bottom:0}
 .task:hover{background:var(--surface-hover)}
 [data-skin="b"] .task{padding:14px 16px;gap:14px}
 [data-skin="c"] .task{padding:12px 14px}
-.task .title{font-weight:560;font-size:1em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task .title{font-weight:560;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task .meta{font-size:11.5px;color:var(--text-3);display:flex;gap:8px;align-items:center;margin-top:2px;flex-wrap:wrap}
 .task .prog{display:flex;flex-direction:column;gap:5px}
 .task .prog .l{display:flex;justify-content:space-between;font-size:11.5px;color:var(--text-3)}
 .task .prog .l b{color:var(--text-2);font-weight:600;font-variant-numeric:tabular-nums}
-
-/* 卷水位 */
 .volrow{display:grid;grid-template-columns:minmax(0,1fr) 120px 64px;gap:12px;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)}
 .volrow:last-child{border-bottom:0}
-.volrow .vn{font-weight:560;display:flex;align-items:center;gap:8px}
+.volrow .vn{font-weight:560;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .volrow .vs{font-size:11.5px;color:var(--text-3);font-variant-numeric:tabular-nums;text-align:right}
-
-/* 两列布局 */
 .split{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(300px,1fr);gap:14px;align-items:start}
 [data-skin="a"] .split{gap:12px}
-[data-skin="b"] .split{gap:16px}
-[data-skin="c"] .split{gap:16px}
+[data-skin="b"] .split,[data-skin="c"] .split{gap:16px}
 .stack{display:flex;flex-direction:column;gap:var(--gap-block);min-width:0}
+.pager{display:flex;align-items:center;gap:6px;justify-content:flex-end;font-size:12.5px;color:var(--text-3)}
+.pg{min-width:26px;height:26px;padding:0 6px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text-2);cursor:pointer}
+.pg[aria-current="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:600}
 
-/* ───────── 批量条：A 底部浮动 / B 卡片顶栏 / C 现状黄色条 ───────── */
+/* ───── 批量条 ───── */
 .floatbar{position:fixed;left:50%;bottom:22px;transform:translate(-50%,140%);background:var(--batch-bg);color:var(--batch-fg);border-radius:var(--radius-lg);display:flex;align-items:center;gap:6px;padding:7px;z-index:60;transition:transform 180ms var(--ease);box-shadow:var(--shadow-2);border:1px solid color-mix(in srgb,var(--batch-fg) 16%,transparent)}
 .floatbar.show{transform:translate(-50%,0)}
 .floatbar .cnt{padding:0 8px;font-weight:650;white-space:nowrap}
@@ -316,7 +327,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 .floatbar .btn-ghost{color:var(--batch-fg)}
 .floatbar .btn-ghost:hover{background:color-mix(in srgb,var(--batch-fg) 14%,transparent);color:var(--batch-fg)}
 [data-skin="b"] .floatbar,[data-skin="c"] .floatbar{display:none}
-.topbatch{display:none;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--radius-md);background:var(--batch-bg);color:var(--batch-fg);border:1px solid var(--border)}
+.topbatch{display:none;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--radius-md);background:var(--batch-bg);color:var(--batch-fg);border:1px solid var(--border);flex-wrap:wrap}
 [data-skin="b"] .topbatch.show,[data-skin="c"] .topbatch.show{display:flex}
 [data-skin="c"] .topbatch{background:#fff8e1;color:#7a5c00;border-color:#f0e0b0;border-radius:var(--radius-xs);padding:6px 12px}
 [data-skin="c"][data-theme="dark"] .topbatch{background:#2a2a1e;color:#e6dfc0;border-color:#4a4a2a}
@@ -326,17 +337,16 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 [data-skin="c"] .topbatch .btn{height:26px;font-size:12px;background:#fff;color:#333}
 [data-skin="c"][data-theme="dark"] .topbatch .btn{background:var(--surface);color:var(--text)}
 
-/* ───────── 控制台：A 页面 / B、C 弹窗（尺寸与内部布局不同） ───────── */
+/* ───── 控制台 ───── */
 .console-frame{display:flex;flex-direction:column;height:100%;min-height:0}
 [data-skin="b"] #view-console,[data-skin="c"] #view-console{position:fixed;inset:0;z-index:80;background:var(--overlay);padding:16px;display:none;align-items:center;justify-content:center;max-width:none}
 [data-skin="b"] #view-console.active,[data-skin="c"] #view-console.active{display:flex}
 [data-skin="b"] .console-frame,[data-skin="c"] .console-frame{background:var(--surface);border-radius:var(--radius-lg);box-shadow:var(--shadow-2);width:var(--console-w);height:var(--console-h);max-width:96vw;max-height:92vh;overflow:hidden;border:1px solid var(--border)}
 [data-skin="a"] .console-frame{background:transparent}
 .console-head{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--border);flex:0 0 auto}
-[data-skin="a"] .console-head{padding:0 0 12px;border-bottom:1px solid var(--border)}
+[data-skin="a"] .console-head{padding:0 0 12px}
 .console-head h3{margin:0;font-size:15px;font-weight:650}
 [data-skin="b"] .console-head{padding:16px 20px}
-[data-skin="c"] .console-head{padding:12px 18px}
 .console-close{display:none;margin-left:auto}
 [data-skin="b"] .console-close,[data-skin="c"] .console-close{display:inline-grid}
 .console-body{display:flex;flex:1 1 auto;min-height:0}
@@ -344,33 +354,38 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 [data-skin="a"] .console-nav{border:1px solid var(--border);border-radius:var(--radius-lg);margin-right:14px;background:var(--surface);padding:10px 8px}
 [data-skin="b"] .console-nav{background:var(--surface-2);padding:16px 12px;gap:4px}
 [data-skin="c"] .console-nav{width:176px;padding:12px 10px}
-.cnav{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius-md);color:var(--text-2);cursor:pointer;font-size:13px}
+.cnav{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius-md);color:var(--text-2);cursor:pointer;font-size:13px;border:1px solid transparent}
 .cnav:hover{background:var(--surface-hover);color:var(--text)}
 .cnav[aria-current="page"]{background:var(--accent-soft);color:var(--text);font-weight:600}
-[data-skin="c"] .cnav{border-radius:var(--radius-sm);font-size:13px}
 .cnav .count{margin-left:auto;font-size:11px;color:var(--text-3);font-variant-numeric:tabular-nums}
-.console-content{flex:1 1 auto;min-width:0;overflow:auto;padding:18px 20px 24px;display:flex;flex-direction:column;gap:var(--gap-block)}
+.cnav.pending{opacity:.55}
+.cnav.pending .tag{font-size:10px;border:1px dashed var(--border-strong);border-radius:3px;padding:0 3px;color:var(--text-3)}
+.console-content{flex:1 1 auto;min-width:0;overflow:auto;padding:18px 20px 24px}
 [data-skin="a"] .console-content{padding:0}
 [data-skin="b"] .console-content{padding:20px 22px 26px}
 [data-skin="c"] .console-content{padding:16px 18px}
-
-/* C 的“现状式”汇总条（无 KPI 卡片） */
+.csection{display:none;flex-direction:column;gap:var(--gap-block)}
+.csection.active{display:flex}
 .legacy-summary{display:none;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 14px;gap:22px;flex-wrap:wrap;font-size:13px}
 [data-skin="c"] .legacy-summary{display:flex}
 [data-skin="c"] .kpis{display:none}
 .legacy-summary .it{display:flex;gap:6px;align-items:baseline}
 .legacy-summary .it b{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
-/* ───────── 详情抽屉 ───────── */
-.drawer{position:fixed;top:0;right:0;height:100vh;width:400px;max-width:92vw;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);transform:translateX(105%);transition:transform 200ms var(--ease);z-index:70;display:flex;flex-direction:column}
+/* ───── 抽屉 / 浮层 ───── */
+.drawer{position:fixed;top:0;right:0;height:100vh;width:420px;max-width:94vw;background:var(--surface);border-left:1px solid var(--border);box-shadow:var(--shadow-2);transform:translateX(105%);transition:transform 200ms var(--ease);z-index:70;display:flex;flex-direction:column}
 .drawer.show{transform:none}
 .drawer header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border)}
-.drawer header h3{margin:0;font-size:14px;font-weight:650}
+.drawer header h3{margin:0;font-size:14px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .drawer .body{padding:16px;overflow:auto;display:flex;flex-direction:column;gap:14px}
+.dtabs{display:flex;gap:4px;border-bottom:1px solid var(--border);padding:0 16px}
+.dtab{border:0;background:none;padding:10px 10px;color:var(--text-2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;font-size:13px}
+.dtab[aria-current="page"]{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
+.dpane{display:none;flex-direction:column;gap:14px}
+.dpane.active{display:flex}
 .kv{display:grid;grid-template-columns:88px minmax(0,1fr);gap:8px 12px;font-size:12.5px}
 .kv dt{color:var(--text-3)} .kv dd{margin:0;color:var(--text);overflow-wrap:anywhere}
-
-/* ───────── 命令面板（A 专属交互入口） ───────── */
 .cmdk{position:fixed;inset:0;background:var(--overlay);display:none;align-items:flex-start;justify-content:center;padding-top:12vh;z-index:90}
 .cmdk.show{display:flex}
 .cmdk-box{width:600px;max-width:92vw;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-2);overflow:hidden}
@@ -379,13 +394,43 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
 .cmdk-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-md);font-size:13px;color:var(--text-2);cursor:pointer}
 .cmdk-item .g{margin-left:auto;font-size:11px;color:var(--text-3)}
 .cmdk-item[aria-selected="true"]{background:var(--accent-soft);color:var(--text)}
+.cmdk-item.hide{display:none}
 .cmdk-group{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);padding:8px 10px 4px}
-[data-skin="c"] .search-trigger kbd{display:none}
+.cmdk-empty{padding:16px;color:var(--text-3);font-size:13px;text-align:center}
+.help{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:95;padding:16px}
+.help.show{display:flex}
+.help-box{width:560px;max-width:94vw;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-xl);box-shadow:var(--shadow-2);padding:20px}
+.help-box h3{margin:0 0 4px;font-size:15px}
+.help-grid{display:grid;grid-template-columns:auto 1fr;gap:10px 16px;margin-top:14px;font-size:13px}
+.help-grid kbd{justify-self:start}
+.toasts{position:fixed;right:16px;bottom:16px;display:flex;flex-direction:column;gap:8px;z-index:150;max-width:400px}
+.toast{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:var(--radius-md);background:var(--surface);border:1px solid var(--border-strong);box-shadow:var(--shadow-2);font-size:13px;animation:toast-in 160ms var(--ease)}
+@keyframes toast-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.toast .bar{width:3px;align-self:stretch;border-radius:2px;background:var(--info);flex:0 0 auto}
+.toast.ok .bar{background:var(--ok)} .toast.bad .bar{background:var(--bad)} .toast.warn .bar{background:var(--warn)}
+.toast .msg{flex:1;min-width:0}
+.toast .undo{border:0;background:none;color:var(--info);cursor:pointer;font-size:12.5px;font-weight:600;padding:0}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 
-/* ───────── 设计稿控制条 ───────── */
-.devtools{position:fixed;right:14px;bottom:14px;z-index:120;display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border-strong);border-radius:999px;padding:6px 8px 6px 12px;box-shadow:var(--shadow-2);font-size:12px}
+/* ───── 设计系统页 ───── */
+.ds{display:flex;flex-direction:column;gap:var(--gap-block)}
+.ds-sec{border:var(--card-border);border-radius:var(--radius-lg);background:var(--surface);box-shadow:var(--card-shadow);overflow:hidden}
+.ds-sec > h4{margin:0;padding:12px 14px;border-bottom:1px solid var(--border);font-size:13px}
+.ds-body{padding:14px;display:flex;flex-direction:column;gap:14px}
+.swatches{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.sw{border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
+.sw .c{height:44px}
+.sw .m{padding:6px 8px;font-size:11px;color:var(--text-3);display:flex;justify-content:space-between;gap:6px}
+.ds-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.type-row{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.type-row span:last-child{color:var(--text-3);font-size:11px}
+.space-bar{height:10px;background:var(--accent-soft);border-radius:2px}
+
+/* ───── 设计稿控制条 ───── */
+.devtools{position:fixed;right:14px;bottom:14px;z-index:200;display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border-strong);border-radius:999px;padding:6px 8px 6px 12px;box-shadow:var(--shadow-2);font-size:12px}
 .devtools .lbl{color:var(--text-3);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
 .devtools select,.devtools button{height:26px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);border-radius:var(--radius-sm);font-size:12px;padding:0 7px;cursor:pointer}
+.devtools button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg);border-color:transparent}
 
 @media (max-width:1100px){
   [data-skin="a"] .shell,[data-skin="b"] .shell{grid-template-columns:64px minmax(0,1fr)}
@@ -396,11 +441,13 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
   .task{grid-template-columns:24px minmax(0,1fr) 120px}
   .task .prog{grid-column:2/4}
   .task .when,.task .act{display:none}
+  .drawer{width:100vw}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
 <body>
+<div class="sr-only" aria-live="polite" id="live"></div>
 
 <div class="devtools" role="group" aria-label="设计稿预览控制">
   <span class="lbl">设计稿</span>
@@ -410,6 +457,9 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
     <option value="c">C · 精修既有</option>
   </select>
   <button id="dev-theme" type="button">暗/亮</button>
+  <button id="dev-loading" type="button" aria-pressed="false">加载态</button>
+  <button id="dev-ds" type="button">组件库</button>
+  <button id="dev-help" type="button" title="快捷键">?</button>
 </div>
 
 <div class="shell">
@@ -424,22 +474,34 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h13l-3-3M20 16H7l3 3"/></svg>
       <span class="label">传输</span><span class="count">3</span>
     </div>
+    <div class="nav" data-goto="trash" tabindex="0">
+      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13h10l1-13"/></svg>
+      <span class="label">回收站</span><span class="count">4</span>
+    </div>
     <div class="rail-group">控制台</div>
     <div class="nav" data-goto="console" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 19V5m0 14h16M7 15l3.5-4 3 2.5L20 7"/></svg>
       <span class="label">概览</span>
     </div>
-    <div class="nav" data-goto="console" tabindex="0">
+    <div class="nav" data-goto="console" data-sec="cloud" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 4h14v6H5zM5 14h14v6H5z"/><path d="M9 7h.01M9 17h.01"/></svg>
       <span class="label">云端任务</span><span class="count">12</span>
     </div>
-    <div class="nav" data-goto="console" tabindex="0">
+    <div class="nav" data-goto="console" data-sec="issues" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l7 4v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V7z"/><path d="M9.5 12l1.8 1.8 3.4-3.6"/></svg>
+      <span class="label">待处理事项</span><span class="count">5</span>
+    </div>
+    <div class="nav" data-goto="console" data-sec="audit" tabindex="0">
+      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/></svg>
       <span class="label">审计</span>
     </div>
-    <div class="nav" data-goto="console" tabindex="0">
+    <div class="nav" data-goto="console" data-sec="volumes" tabindex="0">
       <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>
       <span class="label">卷</span><span class="count">6</span>
+    </div>
+    <div class="nav" data-goto="console" data-sec="config" tabindex="0">
+      <svg class="ic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a1.7 1.7 0 0 0-1.6-1H1a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 3 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 9 3a1.7 1.7 0 0 0 1-1.6V1a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 15 3c.7.3 1.5.2 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 9c.3.7.9 1.1 1.6 1.1H23a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      <span class="label">配置</span>
     </div>
     <div class="rail-foot">
       <div class="who" tabindex="0">
@@ -450,10 +512,10 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
   </aside>
 
   <div class="main">
-    <!-- C 专属：顶部 tab（当前产品 IA） -->
     <div class="top-tabs" id="top-tabs">
       <button type="button" data-goto="files" aria-current="page">文件</button>
       <button type="button" data-goto="transfer">传输</button>
+      <button type="button" data-goto="trash">回收站</button>
       <button type="button" data-goto="console">服务器监控</button>
     </div>
 
@@ -467,7 +529,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
       <button class="icon-btn" id="theme-quick" type="button" title="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
-      <button class="btn btn-primary" type="button">
+      <button class="btn btn-primary" type="button" data-toast="已选择 2 个文件，准备上传" data-toast-kind="info">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
         上传
       </button>
@@ -482,27 +544,31 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
             <a>jav</a><span class="sep">/</span><span class="cur">NHDTB</span>
           </div>
           <div class="spacer"></div>
+          <div class="filters">
+            <span class="chip active">全部</span>
+            <span class="chip">仅异常 <span class="n">1</span></span>
+            <span class="chip">大文件 <span class="n">3</span></span>
+          </div>
           <div class="seg" role="group" aria-label="视图">
             <button aria-pressed="true" type="button">列表</button>
             <button aria-pressed="false" type="button">网格</button>
           </div>
           <button class="btn btn-ghost btn-sm" type="button">排序</button>
-          <button class="btn btn-ghost btn-sm" type="button">刷新</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-toast="已强制刷新卷状态缓存" data-toast-kind="ok">刷新</button>
         </div>
 
-        <!-- B/C：顶部批量条（C 为现状黄色条） -->
         <div class="topbatch" id="topbatch">
           <span class="cnt">已选 <b class="num">0</b> 项</span>
           <span class="spacer"></span>
           <button class="btn btn-sm" type="button">下载</button>
           <button class="btn btn-sm" type="button">移动</button>
           <button class="btn btn-sm" type="button">校验</button>
-          <button class="btn btn-sm" type="button">删除</button>
+          <button class="btn btn-sm" type="button" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
           <button class="btn btn-sm" type="button" id="topbatch-clear">取消选择</button>
         </div>
 
         <div class="card" style="overflow:hidden">
-          <table class="table">
+          <table class="table" id="files-table">
             <thead>
               <tr>
                 <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
@@ -510,8 +576,8 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <th style="width:150px">修改时间</th><th style="width:130px">校验</th><th style="width:90px"></th>
               </tr>
             </thead>
-            <tbody>
-              <tr>
+            <tbody class="real-rows">
+              <tr tabindex="0">
                 <td><input class="cb" type="checkbox" checked aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon dir" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -520,7 +586,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <td class="num muted">11-24 18:32</td><td><span class="pill pill-ok"><span class="dot"></span>12/12</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
               </tr>
-              <tr>
+              <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
@@ -529,7 +595,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <td class="num muted">11-24 17:10</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td>
                 <td><div class="row-actions"><button class="icon-btn" data-drawer="1" title="详情">详情</button><button class="icon-btn" title="更多">⋯</button></div></td>
               </tr>
-              <tr>
+              <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
@@ -538,7 +604,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <td class="num muted">11-24 15:48</td><td><span class="pill pill-warn"><span class="dot"></span>待校验</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
               </tr>
-              <tr>
+              <tr tabindex="0">
                 <td><input class="cb" type="checkbox" checked aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg>
@@ -548,7 +614,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <td><span class="pill pill-bad"><span class="dot"></span>1 块缺失</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
               </tr>
-              <tr>
+              <tr tabindex="0">
                 <td><input class="cb" type="checkbox" aria-label="选择"></td>
                 <td><div class="name">
                   <svg class="ficon dir" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -557,6 +623,14 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                 <td class="num muted">11-20 09:15</td><td><span class="pill pill-ok"><span class="dot"></span>一致</span></td>
                 <td><div class="row-actions"><button class="icon-btn" title="更多">⋯</button></div></td>
               </tr>
+            </tbody>
+            <tbody class="skeleton" aria-hidden="true">
+              <tr><td colspan="7" style="padding:0;border:0">
+                <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk" style="width:18px;height:18px"></span><span class="sk w60"></span><span class="sk w80"></span><span class="sk w80"></span><span class="sk w40"></span></div>
+                <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk" style="width:18px;height:18px"></span><span class="sk w40"></span><span class="sk w60"></span><span class="sk w80"></span><span class="sk w40"></span></div>
+                <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk" style="width:18px;height:18px"></span><span class="sk w80"></span><span class="sk w60"></span><span class="sk w60"></span><span class="sk w40"></span></div>
+                <div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk" style="width:18px;height:18px"></span><span class="sk w60"></span><span class="sk w80"></span><span class="sk w60"></span><span class="sk w40"></span></div>
+              </td></tr>
             </tbody>
           </table>
         </div>
@@ -574,6 +648,39 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
         </div>
       </section>
 
+      <!-- ══════════ 回收站 ══════════ -->
+      <section class="view" id="view-trash">
+        <div class="banner banner-warn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--warn);flex:0 0 auto"><path d="M12 8v5m0 3.5h.01"/><circle cx="12" cy="12" r="9"/></svg>
+          <div><b>回收站保留 30 天</b><div class="muted" style="font-size:12px">超期自动清理；恢复会回到原路径，若原路径已存在则自动改名。</div></div>
+          <div class="acts"><button class="btn btn-sm" type="button" data-toast="已清空回收站（4 项）" data-toast-kind="warn" data-undo="1">清空回收站</button></div>
+        </div>
+        <div class="card" style="overflow:hidden">
+          <table class="table">
+            <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th>原路径</th><th style="width:100px" class="r">大小</th><th style="width:150px">删除时间</th><th style="width:170px"></th></tr></thead>
+            <tbody>
+              <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/NHDTB/_repair_probe/p3.html</span></div></td>
+                <td class="r num">12 KB</td><td class="num muted">11-24 12:04</td>
+                <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已恢复 p3.html" data-toast-kind="ok">恢复</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已彻底删除 p3.html" data-toast-kind="bad" data-undo="1">彻底删除</button></div></td></tr>
+              <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">jav/NHDTB/_repair_probe/ok.html</span></div></td>
+                <td class="r num">8 KB</td><td class="num muted">11-24 12:04</td>
+                <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已恢复 ok.html" data-toast-kind="ok">恢复</button><button class="btn btn-sm btn-ghost" type="button">彻底删除</button></div></td></tr>
+              <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                <td><div class="name"><svg class="ficon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/></svg><span class="t">archive/tmp-20261120.tar</span></div></td>
+                <td class="r num">2.1 GB</td><td class="num muted">11-20 09:20</td>
+                <td><div class="row-actions"><button class="btn btn-sm" type="button">恢复</button><button class="btn btn-sm btn-ghost" type="button">彻底删除</button></div></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="empty" style="padding:12px">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13h10l1-13"/></svg>
+          <div><b>回收站为空时</b> 显示此空态与「返回文件」按钮</div>
+          <div class="acts"><button class="btn btn-sm" type="button">返回文件</button></div>
+        </div>
+      </section>
+
       <!-- ══════════ 传输 ══════════ -->
       <section class="view" id="view-transfer">
         <div class="toolbar">
@@ -582,7 +689,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
           <div class="chip">已完成 <span class="n num">7</span></div>
           <div class="chip">失败 <span class="n num">2</span></div>
           <div class="spacer"></div>
-          <button class="btn btn-sm" type="button">重试失败项</button>
+          <button class="btn btn-sm" type="button" data-toast="已重试 2 个失败任务（自动换源）" data-toast-kind="ok">重试失败项</button>
           <button class="btn btn-sm" type="button">导出</button>
           <span class="pill pill-ok"><span class="dot"></span>自动刷新 5s</span>
         </div>
@@ -599,7 +706,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                   <div class="prog"><div class="bar"><i style="width:14%"></i></div>
                     <div class="l"><span>1.2 MB/s</span><span>剩余 <b>1h 12m</b></span></div></div>
                   <div class="when muted num">18:40</div>
-                  <div class="act"><button class="btn btn-sm btn-ghost">暂停</button><button class="btn btn-sm btn-ghost">取消</button></div>
+                  <div class="act"><button class="btn btn-sm btn-ghost" type="button" data-toast="已暂停 AVOP-173" data-toast-kind="info">暂停</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已取消 AVOP-173" data-toast-kind="warn" data-undo="1">取消</button></div>
                 </div>
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
@@ -617,7 +724,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                   <div class="prog"><div class="bar bad"><i style="width:100%"></i></div>
                     <div class="l"><span>已停止</span><span>期望 <b>541b612d…</b></span></div></div>
                   <div class="when muted num">18:22</div>
-                  <div class="act"><button class="btn btn-sm btn-primary">重试</button><button class="btn btn-sm btn-ghost">详情</button></div>
+                  <div class="act"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试 MGT-102（换源 keepshare → pikpak）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div>
                 </div>
                 <div class="task">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="1.7"><path d="M20 6 9 17l-5-5"/></svg>
@@ -626,7 +733,7 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
                   <div class="prog"><div class="bar ok"><i style="width:100%"></i></div>
                     <div class="l"><span>完成</span><span><b>6.05 GB</b> · 18:05</span></div></div>
                   <div class="when muted num">18:05</div>
-                  <div class="act"><button class="btn btn-sm btn-ghost">详情</button></div>
+                  <div class="act"><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div>
                 </div>
               </div>
             </div>
@@ -678,107 +785,438 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
         </div>
       </section>
 
-      <!-- ══════════ 控制台：A=页面；B/C=弹窗（同结构，密度/尺寸/内容组织不同） ══════════ -->
+      <!-- ══════════ 控制台 ══════════ -->
       <section class="view" id="view-console">
         <div class="console-frame">
           <div class="console-head">
             <h3>服务器控制台</h3>
             <span class="page-sub" id="console-subtitle">概览 · 最近 1 小时</span>
             <span style="flex:1"></span>
-            <button class="btn btn-sm btn-ghost" type="button">刷新</button>
+            <button class="btn btn-sm btn-ghost" type="button" data-toast="控制台数据已刷新" data-toast-kind="ok">刷新</button>
             <button class="icon-btn console-close" id="console-close" type="button" title="关闭">✕</button>
           </div>
           <div class="console-body">
-            <nav class="console-nav">
-              <div class="cnav" aria-current="page">概览</div>
-              <div class="cnav">云端任务 <span class="count">12</span></div>
-              <div class="cnav">待处理事项 <span class="count">5</span></div>
-              <div class="cnav">审计</div>
-              <div class="cnav">卷 <span class="count">6</span></div>
-              <div class="cnav">卷管理</div>
-              <div class="cnav">凭据</div>
-              <div class="cnav">Secret</div>
-              <div class="cnav">同步冲突</div>
-              <div class="cnav">Mesh</div>
-              <div class="cnav">Hub</div>
-              <div class="cnav">配置</div>
+            <nav class="console-nav" aria-label="控制台分区">
+              <div class="cnav" data-sec="overview" role="button" tabindex="0" aria-current="page">概览</div>
+              <div class="cnav" data-sec="cloud" role="button" tabindex="0">云端任务 <span class="count">12</span></div>
+              <div class="cnav" data-sec="issues" role="button" tabindex="0">待处理事项 <span class="count">5</span></div>
+              <div class="cnav" data-sec="audit" role="button" tabindex="0">审计</div>
+              <div class="cnav" data-sec="volumes" role="button" tabindex="0">卷 <span class="count">6</span></div>
+              <div class="cnav" data-sec="config" role="button" tabindex="0">配置</div>
+              <div class="cnav pending" title="设计待定（对照表中尚未展开）">卷管理 <span class="tag">待定</span></div>
+              <div class="cnav pending" title="设计待定">凭据 <span class="tag">待定</span></div>
+              <div class="cnav pending" title="设计待定">Secret <span class="tag">待定</span></div>
+              <div class="cnav pending" title="设计待定">同步冲突 <span class="tag">待定</span></div>
+              <div class="cnav pending" title="设计待定">Mesh <span class="tag">待定</span></div>
+              <div class="cnav pending" title="设计待定">Hub <span class="tag">待定</span></div>
             </nav>
             <div class="console-content">
-              <!-- C：现状式汇总条（无 KPI 卡片） -->
-              <div class="legacy-summary">
-                <div class="it">任务 <b>12</b></div>
-                <div class="it">失败 <b style="color:var(--bad)">2</b></div>
-                <div class="it">存储水位 <b>68.4%</b></div>
-                <div class="it">待处理 <b>5</b></div>
-                <div class="it">卷 <b>6</b></div>
-              </div>
-
-              <!-- A/B：KPI 卡（A 紧凑无阴影，B 大卡带仪表） -->
-              <div class="kpis">
-                <div class="kpi"><div class="k">云端任务</div><div class="v num">12</div>
-                  <div class="d"><span class="trend-up">+3</span><span>较上小时</span></div>
-                  <div class="gauge"><i style="width:40%"></i></div></div>
-                <div class="kpi"><div class="k">失败任务</div><div class="v num" style="color:var(--bad)">2</div>
-                  <div class="d"><span>content_mismatch · target_unavailable</span></div>
-                  <div class="gauge bad"><i style="width:18%"></i></div></div>
-                <div class="kpi"><div class="k">存储水位</div>
-                  <div class="v num">68.4<span style="font-size:14px;color:var(--text-3);font-weight:500">%</span></div>
-                  <div class="d"><span class="num">1.37 / 2.0 TiB</span></div>
-                  <div class="gauge warn"><i style="width:68%"></i></div></div>
-                <div class="kpi"><div class="k">待处理事项</div><div class="v num">5</div>
-                  <div class="d"><span class="pill pill-warn">2 可重试</span><span class="muted">3 待人工</span></div>
-                  <div class="gauge"><i style="width:30%"></i></div></div>
-              </div>
-
-              <div class="split">
-                <div class="stack">
-                  <div class="card">
-                    <div class="card-h"><h3>卷水位</h3><span class="hint">物理足迹（含副本周转）</span>
-                      <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" type="button">全部卷</button></div></div>
-                    <div class="card-b" style="padding-top:6px;padding-bottom:8px">
-                      <div class="volrow"><div><div class="vn">baidu <span class="pill pill-info">外部</span></div><div class="muted" style="font-size:11.5px">mydisk/s · 1.02 TiB</div></div><div class="bar"><i style="width:64%"></i></div><div class="vs">64%</div></div>
-                      <div class="volrow"><div><div class="vn">secretdata <span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></div><div class="muted" style="font-size:11.5px">4 副本 · 312 GiB</div></div><div class="bar ok"><i style="width:31%"></i></div><div class="vs">31%</div></div>
-                      <div class="volrow"><div><div class="vn">local <span class="pill pill-mute">本地</span></div><div class="muted" style="font-size:11.5px">/srv/sproxy · 58 GiB</div></div><div class="bar"><i style="width:12%"></i></div><div class="vs">12%</div></div>
-                      <div class="volrow"><div><div class="vn">archive <span class="pill pill-mute">封装</span></div><div class="muted" style="font-size:11.5px">baidu/archive · 210 GiB</div></div><div class="bar warn"><i style="width:88%"></i></div><div class="vs">88%</div></div>
-                    </div>
-                  </div>
-
-                  <div class="card">
-                    <div class="card-h"><h3>最近审计</h3>
-                      <div style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" type="button">筛选</button><button class="btn btn-ghost btn-sm" type="button">导出 CSV</button></div></div>
-                    <table class="table">
-                      <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>结果</th></tr></thead>
-                      <tbody>
-                        <tr><td class="num muted">18:41:02</td><td>cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td></tr>
-                        <tr><td class="num muted">18:38:51</td><td>upload.chunk</td><td class="mono">NHDTB-864.mp4</td><td><span class="pill pill-ok">ok</span></td></tr>
-                        <tr><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td></tr>
-                        <tr><td class="num muted">18:12:40</td><td>volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td></tr>
-                      </tbody>
-                    </table>
-                  </div>
+              <!-- 概览 -->
+              <section class="csection active" data-sec="overview">
+                <div class="legacy-summary">
+                  <div class="it">任务 <b>12</b></div>
+                  <div class="it">失败 <b style="color:var(--bad)">2</b></div>
+                  <div class="it">存储水位 <b>68.4%</b></div>
+                  <div class="it">待处理 <b>5</b></div>
+                  <div class="it">卷 <b>6</b></div>
                 </div>
-
-                <div class="stack">
-                  <div class="card">
-                    <div class="card-h"><h3>系统</h3></div>
-                    <div class="card-b" style="font-size:12.5px;display:flex;flex-direction:column;gap:9px">
-                      <div style="display:flex;justify-content:space-between"><span class="muted">版本</span><span class="mono">v0.18.0 · e09eccd</span></div>
-                      <div style="display:flex;justify-content:space-between"><span class="muted">运行时长</span><span class="num">6d 04h</span></div>
-                      <div style="display:flex;justify-content:space-between"><span class="muted">凭据</span><span>3 AK · 1 即将到期</span></div>
-                      <div style="display:flex;justify-content:space-between"><span class="muted">备份</span><span>上次 2h 前</span></div>
+                <div class="kpis">
+                  <div class="kpi"><div class="k">云端任务</div><div class="v num">12</div>
+                    <div class="d"><span class="trend-up">+3</span><span>较上小时</span></div><div class="gauge"><i style="width:40%"></i></div></div>
+                  <div class="kpi"><div class="k">失败任务</div><div class="v num" style="color:var(--bad)">2</div>
+                    <div class="d"><span>content_mismatch · target_unavailable</span></div><div class="gauge bad"><i style="width:18%"></i></div></div>
+                  <div class="kpi"><div class="k">存储水位</div>
+                    <div class="v num">68.4<span style="font-size:14px;color:var(--text-3);font-weight:500">%</span></div>
+                    <div class="d"><span class="num">1.37 / 2.0 TiB</span></div><div class="gauge warn"><i style="width:68%"></i></div></div>
+                  <div class="kpi"><div class="k">待处理事项</div><div class="v num">5</div>
+                    <div class="d"><span class="pill pill-warn">2 可重试</span><span class="muted">3 待人工</span></div><div class="gauge"><i style="width:30%"></i></div></div>
+                </div>
+                <div class="split">
+                  <div class="stack">
+                    <div class="card">
+                      <div class="card-h"><h3>卷水位</h3><span class="hint">物理足迹（含副本周转）</span>
+                        <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" type="button" data-sec-jump="volumes">全部卷</button></div></div>
+                      <div class="card-b" style="padding-top:6px;padding-bottom:8px">
+                        <div class="volrow"><div><div class="vn">baidu <span class="pill pill-info">外部</span></div><div class="muted" style="font-size:11.5px">mydisk/s · 1.02 TiB</div></div><div class="bar"><i style="width:64%"></i></div><div class="vs">64%</div></div>
+                        <div class="volrow"><div><div class="vn">secretdata <span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></div><div class="muted" style="font-size:11.5px">4 副本 · 312 GiB</div></div><div class="bar ok"><i style="width:31%"></i></div><div class="vs">31%</div></div>
+                        <div class="volrow"><div><div class="vn">local <span class="pill pill-mute">本地</span></div><div class="muted" style="font-size:11.5px">/srv/sproxy · 58 GiB</div></div><div class="bar"><i style="width:12%"></i></div><div class="vs">12%</div></div>
+                        <div class="volrow"><div><div class="vn">archive <span class="pill pill-mute">封装</span></div><div class="muted" style="font-size:11.5px">baidu/archive · 210 GiB</div></div><div class="bar warn"><i style="width:88%"></i></div><div class="vs">88%</div></div>
+                      </div>
+                    </div>
+                    <div class="card">
+                      <div class="card-h"><h3>最近审计</h3>
+                        <div style="margin-left:auto;display:flex;gap:6px"><button class="btn btn-ghost btn-sm" type="button" data-sec-jump="audit">筛选</button><button class="btn btn-ghost btn-sm" type="button" data-toast="已导出 audit.csv" data-toast-kind="ok">导出 CSV</button></div></div>
+                      <table class="table">
+                        <thead><tr><th>时间</th><th>操作</th><th>对象</th><th>结果</th></tr></thead>
+                        <tbody>
+                          <tr><td class="num muted">18:41:02</td><td>cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td></tr>
+                          <tr><td class="num muted">18:38:51</td><td>upload.chunk</td><td class="mono">NHDTB-864.mp4</td><td><span class="pill pill-ok">ok</span></td></tr>
+                          <tr><td class="num muted">18:22:13</td><td>cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td></tr>
+                          <tr><td class="num muted">18:12:40</td><td>volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td></tr>
+                        </tbody>
+                      </table>
                     </div>
                   </div>
-                  <div class="card">
-                    <div class="card-h"><h3>待处理事项</h3><span class="hint">5</span></div>
-                    <div class="card-b" style="display:flex;flex-direction:column;gap:9px;font-size:12.5px">
-                      <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-bad">块缺失</span><div><div>secretdata · NHDTB-861.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读 · 副本可修复</div></div></div>
-                      <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-warn">空目录</span><div><div>baidu · jav/_repair_probe</div><div class="muted" style="font-size:11px">列举为空，删除失败</div></div></div>
-                      <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-info">凭据</span><div><div>skey-d6ff3f0f 将于 10 天过期</div><div class="muted" style="font-size:11px">建议轮换</div></div></div>
-                      <button class="btn btn-sm" type="button" style="align-self:flex-start">查看全部</button>
+                  <div class="stack">
+                    <div class="card">
+                      <div class="card-h"><h3>系统</h3></div>
+                      <div class="card-b" style="font-size:12.5px;display:flex;flex-direction:column;gap:9px">
+                        <div style="display:flex;justify-content:space-between"><span class="muted">版本</span><span class="mono">v0.18.0 · e09eccd</span></div>
+                        <div style="display:flex;justify-content:space-between"><span class="muted">运行时长</span><span class="num">6d 04h</span></div>
+                        <div style="display:flex;justify-content:space-between"><span class="muted">凭据</span><span>3 AK · 1 即将到期</span></div>
+                        <div style="display:flex;justify-content:space-between"><span class="muted">备份</span><span>上次 2h 前</span></div>
+                      </div>
+                    </div>
+                    <div class="card">
+                      <div class="card-h"><h3>待处理事项</h3><span class="hint">5</span>
+                        <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" type="button" data-sec-jump="issues">全部</button></div></div>
+                      <div class="card-b" style="display:flex;flex-direction:column;gap:9px;font-size:12.5px">
+                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-bad">块缺失</span><div><div>secretdata · NHDTB-861.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读 · 副本可修复</div></div></div>
+                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-warn">空目录</span><div><div>baidu · jav/_repair_probe</div><div class="muted" style="font-size:11px">列举为空，删除失败</div></div></div>
+                        <div style="display:flex;gap:8px;align-items:flex-start"><span class="pill pill-info">凭据</span><div><div>skey-d6ff3f0f 将于 10 天过期</div><div class="muted" style="font-size:11px">建议轮换</div></div></div>
+                      </div>
                     </div>
                   </div>
                 </div>
+              </section>
+
+              <!-- 云端任务 -->
+              <section class="csection" data-sec="cloud">
+                <div class="filters">
+                  <select class="select" aria-label="目标卷"><option>全部卷</option><option>baidu</option><option>secretdata</option><option>local</option></select>
+                  <select class="select" aria-label="状态"><option>全部状态</option><option>进行中</option><option>失败</option><option>已完成</option></select>
+                  <div class="field" style="min-width:200px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                    <input placeholder="任务 id / 番号 / 文件名" aria-label="关键字">
+                  </div>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 cloud-tasks.tsv" data-toast-kind="ok">导出 TSV</button>
+                  <button class="btn btn-sm" type="button">导入重试</button>
+                </div>
+
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">12</span></span>
+                  <span class="chip">运行中 <span class="n">3</span></span>
+                  <span class="chip">失败 <span class="n">2</span></span>
+                  <span class="chip">已完成 <span class="n">7</span></span>
+                  <span class="divider" style="width:1px;height:18px"></span>
+                  <span class="chip">content_mismatch <span class="n">1</span></span>
+                  <span class="chip">target_unavailable <span class="n">1</span></span>
+                </div>
+
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr>
+                      <th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th>
+                      <th>任务</th><th style="width:110px">来源</th><th style="width:110px">目标卷</th>
+                      <th style="width:180px">进度</th><th style="width:150px">状态</th><th style="width:120px">更新</th><th style="width:150px"></th>
+                    </tr></thead>
+                    <tbody>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="name"><span class="t">AVOP-173 · 1.24 GiB</span></div><div class="muted mono" style="font-size:11px">cloud-44fdbad8-2</div></td>
+                        <td><span class="pill pill-info">keepshare</span></td><td>baidu</td>
+                        <td><div class="bar"><i style="width:14%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">14% · 1.2 MB/s</div></td>
+                        <td><span class="pill pill-info"><span class="dot"></span>running</span></td>
+                        <td class="num muted">18:40</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost">暂停</button><button class="btn btn-sm btn-ghost">取消</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="name"><span class="t">MGT-102 · 4.52 GB</span></div><div class="muted mono" style="font-size:11px">cloud-9c31aa07-1</div></td>
+                        <td><span class="pill pill-info">keepshare</span></td><td>baidu</td>
+                        <td><div class="bar bad"><i style="width:100%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">已停止</div></td>
+                        <td><span class="pill pill-bad"><span class="dot"></span>failed · content_mismatch</span></td>
+                        <td class="num muted">18:22</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试（换源）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="name"><span class="t">NHDTB-864.mp4 · 4.72 GB</span></div><div class="muted mono" style="font-size:11px">cloud-1f7d02ae-4</div></td>
+                        <td><span class="pill pill-info">pikpak</span></td><td>baidu</td>
+                        <td><div class="bar warn"><i style="width:67%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">67% · 11.4 MB/s</div></td>
+                        <td><span class="pill pill-info"><span class="dot"></span>running</span></td>
+                        <td class="num muted">18:41</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost">暂停</button><button class="btn btn-sm btn-ghost">取消</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="name"><span class="t">NHDTB-863 · 6.05 GB</span></div><div class="muted mono" style="font-size:11px">cloud-77aa1b90-3</div></td>
+                        <td><span class="pill pill-info">pikpak</span></td><td>baidu</td>
+                        <td><div class="bar ok"><i style="width:100%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">完成 · md5 一致</div></td>
+                        <td><span class="pill pill-ok"><span class="dot"></span>completed</span></td>
+                        <td class="num muted">18:05</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><div class="name"><span class="t">HHD-812 · 1.02 GB</span></div><div class="muted mono" style="font-size:11px">cloud-2b8801cc-5</div></td>
+                        <td><span class="pill pill-info">keepshare</span></td><td>secretdata</td>
+                        <td><div class="bar bad"><i style="width:0%"></i></div><div class="muted num" style="font-size:11px;margin-top:4px">未开始</div></td>
+                        <td><span class="pill pill-warn"><span class="dot"></span>failed · target_unavailable</span></td>
+                        <td class="num muted">17:58</td>
+                        <td><div class="row-actions"><button class="btn btn-sm btn-primary" type="button" data-toast="已重试（目标卷已装配）" data-toast-kind="ok">重试</button><button class="btn btn-sm btn-ghost" type="button" data-task="1">详情</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="pager">
+                  <span>共 12 条 · 每页 5</span>
+                  <button class="pg" type="button" aria-current="true">1</button>
+                  <button class="pg" type="button">2</button>
+                  <button class="pg" type="button">3</button>
+                </div>
+              </section>
+
+              <!-- 待处理事项 -->
+              <section class="csection" data-sec="issues">
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">5</span></span>
+                  <span class="chip">可重试 <span class="n">2</span></span>
+                  <span class="chip">需人工 <span class="n">3</span></span>
+                  <span class="chip">已解决 <span class="n">18</span></span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已批量重试 2 项" data-toast-kind="ok">批量重试</button>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 issues.csv" data-toast-kind="ok">导出 CSV</button>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th style="width:36px"><input class="cb" type="checkbox" aria-label="全选"></th><th style="width:150px">类型</th><th>路径 / 对象</th><th>原因</th><th style="width:110px">状态</th><th style="width:170px"></th></tr></thead>
+                    <tbody>
+                      <tr><td><input class="cb" type="checkbox" checked aria-label="选择"></td>
+                        <td><span class="pill pill-bad">chunk_missing</span></td>
+                        <td><div class="mono">secretdata:/NHDTB/NHDTB-861.mp4</div><div class="muted" style="font-size:11px">3 个分块不可读；副本可修复</div></td>
+                        <td class="muted">副本重建需要 1 个可用源</td>
+                        <td><span class="pill pill-warn">open</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已开始修复分块" data-toast-kind="ok">修复</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" checked aria-label="选择"></td>
+                        <td><span class="pill pill-warn">dir_listing_empty</span></td>
+                        <td><div class="mono">baidu:/jav/_repair_probe</div><div class="muted" style="font-size:11px">列举为空，删除失败</div></td>
+                        <td class="muted">外部卷列举与删除语义不一致</td>
+                        <td><span class="pill pill-warn">open</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已重试删除" data-toast-kind="ok">重试删除</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
+                      <tr><td><input class="cb" type="checkbox" aria-label="选择"></td>
+                        <td><span class="pill pill-info">credential_expiring</span></td>
+                        <td><div class="mono">skey-d6ff3f0f</div><div class="muted" style="font-size:11px">10 天后过期</div></td>
+                        <td class="muted">建议在到期前轮换</td>
+                        <td><span class="pill pill-info">open</span></td>
+                        <td><div class="row-actions"><button class="btn btn-sm" type="button" data-toast="已打开轮换流程" data-toast-kind="info">轮换</button><button class="btn btn-sm btn-ghost">详情</button><button class="btn btn-sm btn-ghost">忽略</button></div></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <!-- 审计 -->
+              <section class="csection" data-sec="audit">
+                <div class="filters">
+                  <select class="select" aria-label="时间范围"><option>最近 1 小时</option><option>最近 24 小时</option><option>最近 7 天</option></select>
+                  <select class="select" aria-label="操作类型"><option>全部操作</option><option>cloud.*</option><option>upload.*</option><option>volume.*</option></select>
+                  <select class="select" aria-label="结果"><option>全部结果</option><option>ok</option><option>失败</option></select>
+                  <div class="field" style="min-width:180px"><input placeholder="对象 / 任务 id" aria-label="对象"></div>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已导出 audit.csv（当前筛选）" data-toast-kind="ok">导出 CSV</button>
+                </div>
+                <div class="card" style="overflow:hidden">
+                  <table class="table">
+                    <thead><tr><th style="width:150px">时间</th><th style="width:170px">操作</th><th>对象</th><th style="width:110px">结果</th><th style="width:110px">耗时</th></tr></thead>
+                    <tbody>
+                      <tr><td class="num muted">18:41:02.311</td><td class="mono">cloud.retry</td><td class="mono">MGT-102</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">12 ms</td></tr>
+                      <tr><td class="num muted">18:38:51.077</td><td class="mono">upload.chunk</td><td class="mono">NHDTB-864.mp4 #11</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">842 ms</td></tr>
+                      <tr><td class="num muted">18:22:13.902</td><td class="mono">cloud.verify</td><td class="mono">AVOP-173</td><td><span class="pill pill-bad">mismatch</span></td><td class="num muted">3 ms</td></tr>
+                      <tr><td class="num muted">18:12:40.004</td><td class="mono">volume.attach</td><td class="mono">archive → baidu</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">1.2 s</td></tr>
+                      <tr><td class="num muted">18:05:22.618</td><td class="mono">cloud.complete</td><td class="mono">NHDTB-863</td><td><span class="pill pill-ok">ok</span></td><td class="num muted">48 ms</td></tr>
+                      <tr><td class="num muted">17:58:10.233</td><td class="mono">cloud.submit</td><td class="mono">HHD-812</td><td><span class="pill pill-warn">rejected</span></td><td class="num muted">5 ms</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <!-- 卷 -->
+              <section class="csection" data-sec="volumes">
+                <div class="filters">
+                  <span class="chip active">全部 <span class="n">6</span></span>
+                  <span class="chip">本地</span><span class="chip">外部</span><span class="chip">加密</span><span class="chip">封装</span>
+                  <span class="spacer" style="flex:1"></span>
+                  <button class="btn btn-sm" type="button" data-toast="已刷新全部卷状态" data-toast-kind="ok">刷新状态</button>
+                  <button class="btn btn-sm btn-primary" type="button">新建卷</button>
+                </div>
+                <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(260px,1fr))">
+                  <div class="kpi">
+                    <div class="k" style="justify-content:space-between"><span>baidu</span><span class="pill pill-info">外部</span></div>
+                    <div class="d" style="min-height:0"><span class="muted">mydisk/s</span></div>
+                    <div class="bar" style="margin-top:6px"><i style="width:64%"></i></div>
+                    <div class="d"><span class="num">1.02 TiB</span><span class="muted">/ 1.6 TiB</span><span class="pill pill-ok" style="margin-left:auto">健康</span></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已开始一致性巡检" data-toast-kind="info">巡检</button></div>
+                  </div>
+                  <div class="kpi">
+                    <div class="k" style="justify-content:space-between"><span>secretdata</span><span class="pill" style="color:var(--accent);background:var(--accent-soft)">加密</span></div>
+                    <div class="d" style="min-height:0"><span class="muted">4 副本 · erasure</span></div>
+                    <div class="bar ok" style="margin-top:6px"><i style="width:31%"></i></div>
+                    <div class="d"><span class="num">312 GiB</span><span class="muted">/ 2 TiB</span><span class="pill pill-warn" style="margin-left:auto">1 项异常</span></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                  </div>
+                  <div class="kpi">
+                    <div class="k" style="justify-content:space-between"><span>local</span><span class="pill pill-mute">本地</span></div>
+                    <div class="d" style="min-height:0"><span class="muted">/srv/sproxy</span></div>
+                    <div class="bar" style="margin-top:6px"><i style="width:12%"></i></div>
+                    <div class="d"><span class="num">58 GiB</span><span class="muted">/ 480 GiB</span><span class="pill pill-ok" style="margin-left:auto">健康</span></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                  </div>
+                  <div class="kpi">
+                    <div class="k" style="justify-content:space-between"><span>archive</span><span class="pill pill-mute">封装</span></div>
+                    <div class="d" style="min-height:0"><span class="muted">baidu/archive</span></div>
+                    <div class="bar warn" style="margin-top:6px"><i style="width:88%"></i></div>
+                    <div class="d"><span class="num">210 GiB</span><span class="muted">/ 240 GiB</span><span class="pill pill-warn" style="margin-left:auto">水位 88%</span></div>
+                    <div class="d"><button class="btn btn-sm btn-ghost" type="button">列举</button><button class="btn btn-sm btn-ghost" type="button">属性</button></div>
+                  </div>
+                </div>
+                <div class="empty" style="padding:16px">
+                  <div class="muted" style="font-size:12px">卷管理（创建/删除/属性）、凭据、Secret、同步冲突、Mesh、Hub 分区设计待定，已登记在 parity 表 G 组。</div>
+                </div>
+              </section>
+
+              <!-- 配置 -->
+              <section class="csection" data-sec="config">
+                <div class="banner banner-bad">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" style="color:var(--bad);flex:0 0 auto"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3.5h.01"/></svg>
+                  <div><b>1 项校验未通过</b><div class="muted" style="font-size:12px">max_upload_bytes 必须大于 chunk_size（4 MiB）。</div></div>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>日志</h3><span class="hint">SIGHUP 可热加载</span></div>
+                  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">级别
+                      <select class="select"><option>info</option><option>debug</option><option>warn</option><option>error</option></select></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">格式
+                      <select class="select"><option>text</option><option>json</option></select></label>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>存储与上传</h3><span class="hint">需要重启</span></div>
+                  <div class="card-b" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">最大上传
+                      <input class="input invalid" value="2 MiB" aria-invalid="true">
+                      <span class="hint-err">必须 ≥ chunk_size（4 MiB）</span></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">分块大小
+                      <input class="input" value="4 MiB"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">存储上限
+                      <input class="input" value="2 TiB"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">上传会话 TTL
+                      <input class="input" value="24h"></label>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-h"><h3>限流</h3></div>
+                  <div class="card-b" style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+                    <label style="display:flex;gap:8px;align-items:center;font-size:13px"><input class="cb" type="checkbox" checked> 启用</label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">请求数
+                      <input class="input" style="width:120px" value="120"></label>
+                    <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">窗口
+                      <input class="input" style="width:120px" value="1m"></label>
+                  </div>
+                </div>
+                <div class="toolbar" style="justify-content:flex-end">
+                  <span class="muted" style="font-size:12px;margin-right:auto">有未保存改动 · 保存后立即生效（部分项需重启）</span>
+                  <button class="btn btn-sm" type="button" data-toast="已放弃改动" data-toast-kind="info">重置</button>
+                  <button class="btn btn-sm btn-primary" type="button" data-toast="配置校验失败：max_upload_bytes 过小" data-toast-kind="bad">保存</button>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════ 设计系统（仅设计稿） ══════════ -->
+      <section class="view" id="view-ds">
+        <div class="toolbar">
+          <div class="crumbs"><span class="cur">设计系统</span><span class="muted" style="font-size:12px">仅设计稿 · 不代表产品导航</span></div>
+          <div class="spacer"></div>
+          <button class="btn btn-sm" type="button" data-goto="files">返回文件</button>
+        </div>
+        <div class="ds">
+          <div class="ds-sec"><h4>色彩（当前方案语义角色）</h4>
+            <div class="ds-body">
+              <div class="swatches">
+                <div class="sw"><div class="c" style="background:var(--bg)"></div><div class="m"><span>bg</span><span class="mono">页面底</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--surface)"></div><div class="m"><span>surface</span><span class="mono">卡片</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--surface-2)"></div><div class="m"><span>surface-2</span><span class="mono">表头</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--surface-3)"></div><div class="m"><span>surface-3</span><span class="mono">槽</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--accent)"></div><div class="m"><span>accent</span><span class="mono">主操作</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--ok)"></div><div class="m"><span>ok</span><span class="mono">成功</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--warn)"></div><div class="m"><span>warn</span><span class="mono">警告</span></div></div>
+                <div class="sw"><div class="c" style="background:var(--bad)"></div><div class="m"><span>bad</span><span class="mono">失败</span></div></div>
               </div>
+              <div class="muted" style="font-size:12px">切换 A/B/C 与亮/暗时，所有色块随语义角色变化；业务代码只允许引用变量。</div>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>排版与数字</h4>
+            <div class="ds-body">
+              <div class="type-row"><span style="font-size:26px;font-weight:680;letter-spacing:-.02em">26 / 标题</span><span>Aa 任务与存储</span></div>
+              <div class="type-row"><span style="font-size:20px;font-weight:650">20 / 小标题</span><span>Aa 卷与凭据</span></div>
+              <div class="type-row"><span style="font-size:14px;font-weight:600">14 / 正文强调</span><span>Aa 文件名与操作</span></div>
+              <div class="type-row"><span style="font-size:13px">13 / 正文</span><span>Aa 描述与提示</span></div>
+              <div class="type-row"><span style="font-size:11px;color:var(--text-3)">11 / 辅助</span><span>时间戳与计数</span></div>
+              <div class="type-row"><span class="num" style="font-size:14px">4.72 GB · 18:41:02 · 68.4%</span><span>tabular-nums 对齐</span></div>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>间距 / 圆角 / 层级</h4>
+            <div class="ds-body">
+              <div class="ds-row"><span class="muted" style="width:70px;font-size:12px">间距</span>
+                <span class="space-bar" style="width:4px"></span><span class="space-bar" style="width:8px"></span><span class="space-bar" style="width:12px"></span><span class="space-bar" style="width:16px"></span><span class="space-bar" style="width:24px"></span><span class="space-bar" style="width:32px"></span>
+                <span class="muted" style="font-size:11px">4 / 8 / 12 / 16 / 24 / 32</span></div>
+              <div class="ds-row"><span class="muted" style="width:70px;font-size:12px">圆角</span>
+                <span style="width:40px;height:28px;background:var(--surface-3);border-radius:var(--radius-xs)"></span>
+                <span style="width:40px;height:28px;background:var(--surface-3);border-radius:var(--radius-sm)"></span>
+                <span style="width:40px;height:28px;background:var(--surface-3);border-radius:var(--radius-md)"></span>
+                <span style="width:40px;height:28px;background:var(--surface-3);border-radius:var(--radius-lg)"></span>
+                <span class="muted" style="font-size:11px">4 / 6 / 8 / 12</span></div>
+              <div class="ds-row"><span class="muted" style="width:70px;font-size:12px">层级</span>
+                <span style="padding:8px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);box-shadow:var(--shadow-2);font-size:12px">弹层 shadow-2</span></div>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>按钮</h4>
+            <div class="ds-body">
+              <div class="ds-row">
+                <button class="btn btn-primary" type="button">主操作</button>
+                <button class="btn" type="button">次操作</button>
+                <button class="btn btn-ghost" type="button">幽灵</button>
+                <button class="btn btn-danger" type="button">危险</button>
+                <button class="btn" type="button" disabled>禁用</button>
+                <button class="btn btn-primary loading" type="button">加载中</button>
+              </div>
+              <div class="ds-row"><span class="muted" style="font-size:12px">焦点环：Tab 到任意按钮可见；hover 只改背景不改尺寸；loading 保留宽度防跳动。</span></div>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>输入与校验</h4>
+            <div class="ds-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px">
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">默认<input class="input" placeholder="placeholder"></label>
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">已填<input class="input" value="4 MiB"></label>
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">错误<input class="input invalid" value="2 MiB" aria-invalid="true"><span class="hint-err">必须 ≥ chunk_size</span></label>
+              <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">禁用<input class="input" value="只读" disabled></label>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>状态徽标与进度</h4>
+            <div class="ds-body">
+              <div class="ds-row">
+                <span class="pill pill-ok"><span class="dot"></span>一致</span>
+                <span class="pill pill-warn"><span class="dot"></span>待校验</span>
+                <span class="pill pill-bad"><span class="dot"></span>1 块缺失</span>
+                <span class="pill pill-info"><span class="dot"></span>running</span>
+                <span class="pill pill-mute">目录</span>
+              </div>
+              <div class="ds-row" style="gap:14px">
+                <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:4px">14%</div><div class="bar"><i style="width:14%"></i></div></div>
+                <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:4px">67%（接近水位）</div><div class="bar warn"><i style="width:67%"></i></div></div>
+                <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:4px">失败</div><div class="bar bad"><i style="width:100%"></i></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ds-sec"><h4>反馈：Toast / Banner / 空态 / 骨架</h4>
+            <div class="ds-body">
+              <div class="ds-row">
+                <button class="btn btn-sm" type="button" data-toast="已重试 2 个失败任务" data-toast-kind="ok">成功 toast</button>
+                <button class="btn btn-sm" type="button" data-toast="校验失败：期望与实际不一致" data-toast-kind="bad" data-undo="1">失败 toast（可撤销）</button>
+                <button class="btn btn-sm" type="button" data-toast="目标卷未装配，已排队" data-toast-kind="warn">警告 toast</button>
+              </div>
+              <div class="banner"><div><b>普通提示 banner</b><div class="muted" style="font-size:12px">用于页面级说明，不阻断操作。</div></div></div>
+              <div class="banner banner-bad"><div><b>错误 banner</b><div class="muted" style="font-size:12px">带重试动作，保留上下文。</div></div><div class="acts"><button class="btn btn-sm" type="button">重试</button></div></div>
+              <div class="empty" style="padding:20px"><b>空态标题</b><div>一句解释 + 一个明确动作</div><div class="acts"><button class="btn btn-sm btn-primary" type="button">新建</button></div></div>
+              <div class="skeleton" style="display:flex"><div class="sk-row"><span class="sk" style="width:14px;height:14px"></span><span class="sk" style="width:18px;height:18px"></span><span class="sk w60"></span><span class="sk w40"></span><span class="sk w80"></span></div></div>
             </div>
           </div>
         </div>
@@ -787,164 +1225,414 @@ kbd{font-family:var(--font-mono);font-size:10.5px;border:1px solid var(--border-
   </div>
 </div>
 
-<!-- A 专属：底部浮动批量条 -->
+<!-- A：浮动批量条 -->
 <div class="floatbar" id="floatbar">
   <span class="cnt">已选 <b class="num">2</b> 项</span>
   <span class="sep"></span>
   <button class="btn btn-sm btn-ghost" type="button">下载</button>
   <button class="btn btn-sm btn-ghost" type="button">移动</button>
-  <button class="btn btn-sm btn-ghost" type="button">校验</button>
-  <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93">删除</button>
+  <button class="btn btn-sm btn-ghost" type="button" data-toast="已提交校验任务" data-toast-kind="info">校验</button>
+  <button class="btn btn-sm btn-ghost" type="button" style="color:#ff8b93" data-toast="已删除 2 项，可在回收站恢复" data-toast-kind="ok" data-undo="1">删除</button>
   <span class="sep"></span>
   <button class="btn btn-sm btn-ghost" type="button" id="float-clear">取消</button>
 </div>
 
-<div class="drawer" id="drawer" aria-hidden="true">
+<!-- 文件检查器：详情 / 版本 / 分享 -->
+<div class="drawer" id="drawer" aria-hidden="true" role="dialog" aria-label="文件详情">
   <header><h3>NHDTB-864.mp4</h3><span class="pill pill-ok"><span class="dot"></span>一致</span>
     <div style="margin-left:auto"><button class="icon-btn" id="drawer-close" type="button" title="关闭">✕</button></div></header>
+  <div class="dtabs" role="tablist">
+    <button class="dtab" data-dtab="info" aria-current="page" type="button">详情</button>
+    <button class="dtab" data-dtab="ver" type="button">版本 <span class="muted">3</span></button>
+    <button class="dtab" data-dtab="share" type="button">分享</button>
+  </div>
   <div class="body">
-    <dl class="kv">
-      <dt>卷</dt><dd>baidu（外部 · mydisk/s）</dd>
-      <dt>大小</dt><dd class="num">4.72 GB（5,068,546,048 B）</dd>
-      <dt>校验</dt><dd class="mono" style="overflow-wrap:anywhere">sha256:9f2c…41ab</dd>
-      <dt>分块</dt><dd>12 / 12 · 64 MiB</dd>
-      <dt>修改</dt><dd class="num">2026-11-24 17:10:22</dd>
-      <dt>来源</dt><dd>cloud-download · pikpak</dd>
-    </dl>
-    <div class="divider"></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-sm" type="button">下载</button>
-      <button class="btn btn-sm" type="button">重命名</button>
-      <button class="btn btn-sm" type="button">校验</button>
-      <button class="btn btn-sm" type="button" style="color:var(--bad)">删除</button>
-    </div>
-    <div class="divider"></div>
-    <div>
-      <div style="font-size:12px;font-weight:650;margin-bottom:8px">版本（3）</div>
-      <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px">
-        <div style="display:flex;justify-content:space-between"><span>v3 · 当前</span><span class="muted num">11-24 17:10</span></div>
-        <div style="display:flex;justify-content:space-between"><span>v2</span><span class="muted num">11-22 09:31</span></div>
-        <div style="display:flex;justify-content:space-between"><span>v1</span><span class="muted num">11-20 21:02</span></div>
+    <div class="dpane active" data-dpane="info">
+      <dl class="kv">
+        <dt>卷</dt><dd>baidu（外部 · mydisk/s）</dd>
+        <dt>大小</dt><dd class="num">4.72 GB（5,068,546,048 B）</dd>
+        <dt>校验</dt><dd class="mono" style="overflow-wrap:anywhere">sha256:9f2c…41ab</dd>
+        <dt>分块</dt><dd>12 / 12 · 64 MiB</dd>
+        <dt>修改</dt><dd class="num">2026-11-24 17:10:22</dd>
+        <dt>来源</dt><dd>cloud-download · pikpak</dd>
+      </dl>
+      <div class="divider"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" type="button">下载</button>
+        <button class="btn btn-sm" type="button">重命名</button>
+        <button class="btn btn-sm" type="button" data-toast="已提交校验" data-toast-kind="info">校验</button>
+        <button class="btn btn-sm" type="button" style="color:var(--bad)" data-toast="已移入回收站" data-toast-kind="ok" data-undo="1">删除</button>
       </div>
+    </div>
+    <div class="dpane" data-dpane="ver">
+      <div class="muted" style="font-size:12px">版本由服务端 versioning 管理；恢复会生成新版本，不覆盖历史。</div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="card" style="padding:10px 12px;display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-weight:600">v3 · 当前</div><div class="muted" style="font-size:11px">11-24 17:10 · 4.72 GB</div></div><button class="btn btn-sm" type="button" disabled>当前</button></div>
+        <div class="card" style="padding:10px 12px;display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-weight:600">v2</div><div class="muted" style="font-size:11px">11-22 09:31 · 4.70 GB</div></div><button class="btn btn-sm" type="button" data-toast="已恢复到 v2（生成 v4）" data-toast-kind="ok">恢复</button><button class="btn btn-sm btn-ghost" type="button">删除</button></div>
+        <div class="card" style="padding:10px 12px;display:flex;align-items:center;gap:10px"><div style="flex:1"><div style="font-weight:600">v1</div><div class="muted" style="font-size:11px">11-20 21:02 · 4.68 GB</div></div><button class="btn btn-sm" type="button">恢复</button><button class="btn btn-sm btn-ghost" type="button">删除</button></div>
+      </div>
+    </div>
+    <div class="dpane" data-dpane="share">
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">有效期
+        <select class="select"><option>1 天</option><option>7 天</option><option>30 天</option></select></label>
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">下载次数上限
+        <input class="input" value="0（不限）"></label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px"><input class="cb" type="checkbox"> 一次性链接（下载后失效）</label>
+      <button class="btn btn-primary btn-sm" style="align-self:flex-start" type="button" data-toast="已创建分享链接" data-toast-kind="ok">创建分享</button>
+      <div class="divider"></div>
+      <div style="font-size:12px;font-weight:650">已有链接（2）</div>
+      <div class="card" style="padding:10px 12px"><div class="mono" style="font-size:11.5px;overflow-wrap:anywhere">/s/EXAMPLETOKEN01</div><div class="muted" style="font-size:11px;margin-top:4px">7 天 · 已下载 3 次 · 有效</div><div style="margin-top:8px;display:flex;gap:6px"><button class="btn btn-sm" type="button" data-toast="已复制链接" data-toast-kind="info">复制</button><button class="btn btn-sm btn-ghost" type="button" data-toast="已撤销分享" data-toast-kind="warn" data-undo="1">撤销</button></div></div>
+      <div class="card" style="padding:10px 12px"><div class="mono" style="font-size:11.5px;overflow-wrap:anywhere">/s/EXAMPLETOKEN02</div><div class="muted" style="font-size:11px;margin-top:4px">1 天 · 已过期</div></div>
     </div>
   </div>
 </div>
 
-<div class="cmdk" id="cmdk">
-  <div class="cmdk-box" role="dialog" aria-label="命令面板">
-    <input id="cmdk-input" placeholder="输入命令或搜索…" aria-label="命令或搜索">
-    <div class="cmdk-list">
-      <div class="cmdk-group">跳转</div>
-      <div class="cmdk-item" aria-selected="true"><span>文件</span><span class="g">G then F</span></div>
-      <div class="cmdk-item"><span>传输</span><span class="g">G then T</span></div>
-      <div class="cmdk-item"><span>控制台 · 概览</span><span class="g">G then O</span></div>
-      <div class="cmdk-group">操作</div>
-      <div class="cmdk-item"><span>上传文件…</span><span class="g">U</span></div>
-      <div class="cmdk-item"><span>重试全部失败任务</span><span class="g">R</span></div>
-      <div class="cmdk-item"><span>切换暗色模式</span><span class="g">⌘⇧L</span></div>
+<!-- 任务诊断抽屉 -->
+<div class="drawer" id="task-drawer" aria-hidden="true" role="dialog" aria-label="任务详情">
+  <header><h3>MGT-102 · 4.52 GB</h3><span class="pill pill-bad">failed</span>
+    <div style="margin-left:auto"><button class="icon-btn" id="task-close" type="button" title="关闭">✕</button></div></header>
+  <div class="body">
+    <div class="banner banner-bad"><div><b>content_mismatch</b><div class="muted" style="font-size:12px">转存完成但校验不一致；已保留部分产物，可换源重试。</div></div></div>
+    <dl class="kv">
+      <dt>任务 id</dt><dd class="mono">cloud-9c31aa07-1</dd>
+      <dt>来源</dt><dd>keepshare · [10] HD-mgt-102.mp4</dd>
+      <dt>目标卷</dt><dd>baidu（外部）</dd>
+      <dt>阶段</dt><dd>transferring</dd>
+      <dt>尝试</dt><dd class="num">1 / 3</dd>
+      <dt>期望</dt><dd class="mono">541b612d…</dd>
+      <dt>实际</dt><dd class="mono">7a10f0c2…</dd>
+    </dl>
+    <div class="divider"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" type="button" data-toast="已重试（换源 pikpak）" data-toast-kind="ok">换源重试</button>
+      <button class="btn btn-sm" type="button" data-toast="已复制诊断信息" data-toast-kind="info">复制诊断</button>
+      <button class="btn btn-sm btn-ghost" type="button" data-toast="已忽略该任务" data-toast-kind="warn">忽略</button>
+    </div>
+    <div class="divider"></div>
+    <div style="font-size:12px;font-weight:650">最近事件</div>
+    <div style="display:flex;flex-direction:column;gap:8px;font-size:12.5px">
+      <div><span class="muted num">18:22:13</span> · 校验失败（content_mismatch）</div>
+      <div><span class="muted num">18:21:58</span> · 转存完成，开始校验</div>
+      <div><span class="muted num">18:18:02</span> · 从 keepshare 拉取 4.52 GB</div>
+      <div><span class="muted num">18:17:55</span> · 任务创建</div>
     </div>
   </div>
 </div>
+
+<!-- 命令面板 -->
+<div class="cmdk" id="cmdk">
+  <div class="cmdk-box" role="dialog" aria-label="命令面板">
+    <input id="cmdk-input" placeholder="输入命令或搜索…" aria-label="命令或搜索" autocomplete="off">
+    <div class="cmdk-list" id="cmdk-list">
+      <div class="cmdk-group">跳转</div>
+      <div class="cmdk-item" data-cmd="files" data-label="文件 files" aria-selected="true"><span>文件</span><span class="g">g f</span></div>
+      <div class="cmdk-item" data-cmd="transfer" data-label="传输 transfer"><span>传输</span><span class="g">g t</span></div>
+      <div class="cmdk-item" data-cmd="trash" data-label="回收站 trash"><span>回收站</span><span class="g">g r</span></div>
+      <div class="cmdk-item" data-cmd="console" data-label="控制台 console 概览"><span>控制台 · 概览</span><span class="g">g c</span></div>
+      <div class="cmdk-group">操作</div>
+      <div class="cmdk-item" data-cmd="retry" data-label="重试失败任务 retry"><span>重试全部失败任务</span><span class="g">r</span></div>
+      <div class="cmdk-item" data-cmd="theme" data-label="切换暗色主题 theme dark"><span>切换暗色模式</span><span class="g">⌘⇧L</span></div>
+      <div class="cmdk-item" data-cmd="help" data-label="快捷键 help"><span>键盘快捷键</span><span class="g">?</span></div>
+      <div class="cmdk-empty" id="cmdk-empty" style="display:none">没有匹配项</div>
+    </div>
+  </div>
+</div>
+
+<!-- 快捷键帮助 -->
+<div class="help" id="help">
+  <div class="help-box" role="dialog" aria-label="键盘快捷键">
+    <h3>键盘快捷键</h3>
+    <div class="muted" style="font-size:12px">在列表页与传输页生效；输入框内不触发单键快捷键。</div>
+    <div class="help-grid">
+      <kbd>⌘K</kbd><span>打开命令面板（全局搜索与动作）</span>
+      <kbd>/</kbd><span>聚焦搜索</span>
+      <kbd>j / k</kbd><span>下移 / 上移列表行</span>
+      <kbd>x</kbd><span>选中 / 取消当前行</span>
+      <kbd>Enter</kbd><span>打开当前行详情</span>
+      <kbd>g f</kbd><span>跳到文件</span>
+      <kbd>g t</kbd><span>跳到传输</span>
+      <kbd>g r</kbd><span>跳到回收站</span>
+      <kbd>g c</kbd><span>打开控制台</span>
+      <kbd>?</kbd><span>显示 / 隐藏本帮助</span>
+      <kbd>Esc</kbd><span>关闭最上层浮层</span>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
 <script>
 (function () {
   var root = document.documentElement;
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var id = function (x) { return document.getElementById(x); };
   var isModalConsole = function () { return root.dataset.skin === 'b' || root.dataset.skin === 'c'; };
+  var layerStack = [];
+  var lastFocus = null;
 
-  // 设计稿控制
-  id('dev-skin').addEventListener('change', function (e) { setSkin(e.target.value); });
-  var toggleTheme = function () { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; };
-  id('dev-theme').addEventListener('click', toggleTheme);
-  id('theme-quick').addEventListener('click', toggleTheme);
+  function announce(msg) { var el = id('live'); if (el) { el.textContent = ''; setTimeout(function () { el.textContent = msg; }, 30); } }
 
-  function setSkin(skin) {
-    root.dataset.skin = skin;
-    closeConsole();
-    show('files');
-  }
-
-  // 视图切换
-  var titles = { files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'], console: ['控制台', '/ 概览'] };
-  function show(go) {
-    if (go === 'console' && isModalConsole()) {
-      id('view-console').classList.add('active');
-      return;
+  // ── Toast（含撤销） ──
+  function toast(kind, msg, withUndo) {
+    var box = document.createElement('div');
+    box.className = 'toast ' + (kind || 'info');
+    box.innerHTML = '<span class="bar"></span><div class="msg"></div>';
+    box.querySelector('.msg').textContent = msg;
+    if (withUndo) {
+      var undo = document.createElement('button');
+      undo.className = 'undo'; undo.type = 'button'; undo.textContent = '撤销';
+      undo.addEventListener('click', function () { toast('info', '已撤销：' + msg); box.remove(); });
+      box.appendChild(undo);
     }
+    id('toasts').appendChild(box);
+    announce(msg);
+    setTimeout(function () { box.remove(); }, withUndo ? 7000 : 4200);
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-toast]');
+    if (!t) { return; }
+    toast(t.getAttribute('data-toast-kind') || 'info', t.getAttribute('data-toast'), t.hasAttribute('data-undo'));
+  });
+
+  // ── 视图切换 ──
+  var titles = {
+    files: ['文件', '/ 全部卷'], transfer: ['传输', '/ 3 个进行中'],
+    trash: ['回收站', '/ 保留 30 天'], console: ['控制台', '/ 概览'], ds: ['设计系统', '/ 仅设计稿']
+  };
+  function show(go) {
+    if (go === 'console' && isModalConsole()) { openConsole(); return; }
     if (go === 'console') { closeConsole(); }
-    Array.prototype.forEach.call(document.querySelectorAll('.view'), function (v) {
-      v.classList.toggle('active', v.id === 'view-' + go);
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('[data-goto]'), function (n) {
+    $$('.view').forEach(function (v) { v.classList.toggle('active', v.id === 'view-' + go); });
+    $$('[data-goto]').forEach(function (n) {
       if (n.getAttribute('data-goto') === go) { n.setAttribute('aria-current', 'page'); } else { n.removeAttribute('aria-current'); }
     });
-    var t = titles[go];
+    var t = titles[go] || titles.files;
     id('page-title').firstChild.nodeValue = t[0];
     id('page-sub').textContent = t[1];
+    if (go !== 'console') { closeConsole(); }
+    var list = $('#view-' + go + ' .table tbody tr');
+    if (list) { list.setAttribute('tabindex', '0'); }
+  }
+  $$('[data-goto]').forEach(function (nav) {
+    var go = nav.getAttribute('data-goto');
+    var act = function () {
+      var sec = nav.getAttribute('data-sec');
+      show(go);
+      if (sec) { openConsole(sec); }
+    };
+    nav.addEventListener('click', act);
+    nav.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } });
+  });
+
+  // ── 控制台 ──
+  var SECTIONS = {
+    overview: '概览 · 最近 1 小时', cloud: '云端任务 · 12 条（2 失败）',
+    issues: '待处理事项 · 5 项（2 可重试）', audit: '审计 · 最近 1 小时',
+    volumes: '卷 · 6 个（2 需关注）', config: '配置 · 有未保存改动'
+  };
+  function openConsole(sec) {
+    if (isModalConsole()) {
+      lastFocus = document.activeElement;
+      id('view-console').classList.add('active');
+      layerStack.push('console');
+    }
+    switchSection(sec || 'overview');
+    var first = $('#view-console .cnav');
+    if (first) { setTimeout(function () { first.focus(); }, 30); }
   }
   function closeConsole() {
     id('view-console').classList.remove('active');
+    layerStack = layerStack.filter(function (x) { return x !== 'console'; });
   }
-  Array.prototype.forEach.call(document.querySelectorAll('[data-goto]'), function (nav) {
-    nav.addEventListener('click', function () { show(nav.getAttribute('data-goto')); });
-    nav.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(nav.getAttribute('data-goto')); }
+  function switchSection(sec) {
+    $$('.csection').forEach(function (s) { s.classList.toggle('active', s.getAttribute('data-sec') === sec); });
+    $$('.cnav[data-sec]').forEach(function (n) {
+      if (n.getAttribute('data-sec') === sec) { n.setAttribute('aria-current', 'page'); } else { n.removeAttribute('aria-current'); }
     });
+    id('console-subtitle').textContent = SECTIONS[sec] || SECTIONS.overview;
+    $$('#view-console .console-content').forEach(function (c) { c.scrollTop = 0; });
+  }
+  $$('.cnav[data-sec]').forEach(function (n) {
+    var act = function () { switchSection(n.getAttribute('data-sec')); };
+    n.addEventListener('click', act);
+    n.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); } });
+  });
+  $$('[data-sec-jump]').forEach(function (b) {
+    b.addEventListener('click', function () { switchSection(b.getAttribute('data-sec-jump')); });
   });
   id('console-close').addEventListener('click', function () { closeConsole(); show('files'); });
-  id('view-console').addEventListener('click', function (e) { if (e.target === id('view-console')) { closeConsole(); show('files'); } });
+  id('view-console').addEventListener('click', function (e) {
+    if (e.target === id('view-console')) { closeConsole(); show('files'); }
+  });
 
-  // 批量选择：A 用浮动条，B/C 用顶部条
+  // ── 批量选择 ──
   var floatbar = id('floatbar'), topbatch = id('topbatch');
   function syncSelection() {
-    var boxes = document.querySelectorAll('.table tbody .cb');
-    var n = document.querySelectorAll('.table tbody .cb:checked').length;
+    var boxes = $$('#view-files .table tbody.real-rows .cb');
+    var n = $$('#view-files .table tbody.real-rows .cb:checked').length;
     floatbar.classList.toggle('show', n > 0);
     topbatch.classList.toggle('show', n > 0);
     floatbar.querySelector('.cnt b').textContent = String(n);
     topbatch.querySelector('.cnt b').textContent = String(n);
-    var head = document.querySelector('.table thead .cb');
+    var head = $('#view-files thead .cb');
     if (head) { head.checked = n > 0 && n === boxes.length; }
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.table .cb'), function (cb) {
-    cb.addEventListener('change', syncSelection);
-  });
-  var selectAll = document.querySelector('.table thead .cb');
-  if (selectAll) {
-    selectAll.addEventListener('change', function () {
-      Array.prototype.forEach.call(document.querySelectorAll('.table tbody .cb'), function (cb) { cb.checked = selectAll.checked; });
+  $$('#view-files .table .cb').forEach(function (cb) { cb.addEventListener('change', syncSelection); });
+  var headCb = $('#view-files thead .cb');
+  if (headCb) {
+    headCb.addEventListener('change', function () {
+      $$('#view-files tbody.real-rows .cb').forEach(function (cb) { cb.checked = headCb.checked; });
       syncSelection();
     });
   }
-  var clearAll = function () {
-    Array.prototype.forEach.call(document.querySelectorAll('.table tbody .cb'), function (cb) { cb.checked = false; });
-    if (selectAll) { selectAll.checked = false; }
+  function clearAll() {
+    $$('#view-files tbody.real-rows .cb').forEach(function (cb) { cb.checked = false; });
+    if (headCb) { headCb.checked = false; }
     syncSelection();
-  };
+  }
   id('float-clear').addEventListener('click', clearAll);
   id('topbatch-clear').addEventListener('click', clearAll);
-  syncSelection();
 
-  // 抽屉
-  var drawer = id('drawer');
-  Array.prototype.forEach.call(document.querySelectorAll('[data-drawer]'), function (b) {
-    b.addEventListener('click', function () { drawer.classList.add('show'); drawer.setAttribute('aria-hidden', 'false'); });
+  // ── 抽屉 ──
+  var drawer = id('drawer'), taskDrawer = id('task-drawer');
+  function openDrawer(el) {
+    lastFocus = document.activeElement;
+    el.classList.add('show'); el.setAttribute('aria-hidden', 'false');
+    layerStack.push(el.id);
+    var f = el.querySelector('.dtab, button'); if (f) { f.focus(); }
+  }
+  function closeDrawer(el) {
+    el.classList.remove('show'); el.setAttribute('aria-hidden', 'true');
+    layerStack = layerStack.filter(function (x) { return x !== el.id; });
+  }
+  $$('[data-drawer]').forEach(function (b) { b.addEventListener('click', function () { openDrawer(drawer); }); });
+  $$('[data-task]').forEach(function (b) { b.addEventListener('click', function () { openDrawer(taskDrawer); }); });
+  id('drawer-close').addEventListener('click', function () { closeDrawer(drawer); });
+  id('task-close').addEventListener('click', function () { closeDrawer(taskDrawer); });
+  $$('.dtab').forEach(function (t) {
+    t.addEventListener('click', function () {
+      $$('.dtab').forEach(function (x) { x.removeAttribute('aria-current'); });
+      t.setAttribute('aria-current', 'page');
+      $$('.dpane').forEach(function (p) { p.classList.toggle('active', p.getAttribute('data-dpane') === t.getAttribute('data-dtab')); });
+    });
   });
-  id('drawer-close').addEventListener('click', function () { drawer.classList.remove('show'); drawer.setAttribute('aria-hidden', 'true'); });
 
-  // 命令面板
-  var cmdk = id('cmdk');
-  var openCmdk = function () { cmdk.classList.add('show'); id('cmdk-input').focus(); };
-  var closeCmdk = function () { cmdk.classList.remove('show'); };
+  // ── 命令面板 ──
+  var cmdk = id('cmdk'), cmdkInput = id('cmdk-input');
+  var cmdkIndex = 0;
+  function visibleItems() { return $$('.cmdk-item').filter(function (i) { return !i.classList.contains('hide'); }); }
+  function openCmdk() {
+    layerStack.push('cmdk');
+    cmdk.classList.add('show'); cmdkInput.value = '';
+    $$('.cmdk-item').forEach(function (i) { i.classList.remove('hide'); i.removeAttribute('aria-selected'); });
+    $('.cmdk-item').setAttribute('aria-selected', 'true');
+    cmdkIndex = 0; id('cmdk-empty').style.display = 'none';
+    cmdkInput.focus();
+  }
+  function closeCmdk() { cmdk.classList.remove('show'); layerStack = layerStack.filter(function (x) { return x !== 'cmdk'; }); }
+  function moveCmd(delta) {
+    var items = visibleItems();
+    if (!items.length) { return; }
+    cmdkIndex = (cmdkIndex + delta + items.length) % items.length;
+    $$('.cmdk-item').forEach(function (i) { i.removeAttribute('aria-selected'); });
+    items[cmdkIndex].setAttribute('aria-selected', 'true');
+    items[cmdkIndex].scrollIntoView({ block: 'nearest' });
+  }
+  function runCmd(item) {
+    var cmd = item.getAttribute('data-cmd');
+    closeCmdk();
+    if (cmd === 'theme') { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; return; }
+    if (cmd === 'retry') { toast('ok', '已重试全部失败任务（2 项）'); return; }
+    if (cmd === 'help') { openHelp(); return; }
+    show(cmd);
+  }
   id('search-trigger').addEventListener('click', openCmdk);
-  id('search-trigger').addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCmdk(); }
-  });
+  id('search-trigger').addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCmdk(); } });
   cmdk.addEventListener('click', function (e) { if (e.target === cmdk) { closeCmdk(); } });
-  document.addEventListener('keydown', function (e) {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); }
-    if (e.key === 'Escape') { closeCmdk(); closeConsole(); drawer.classList.remove('show'); }
+  cmdkInput.addEventListener('input', function () {
+    var q = cmdkInput.value.trim().toLowerCase();
+    $$('.cmdk-item').forEach(function (i) {
+      i.classList.toggle('hide', q !== '' && (i.getAttribute('data-label') || '').toLowerCase().indexOf(q) === -1);
+    });
+    var items = visibleItems();
+    id('cmdk-empty').style.display = items.length ? 'none' : 'block';
+    cmdkIndex = 0;
+    $$('.cmdk-item').forEach(function (i) { i.removeAttribute('aria-selected'); });
+    if (items[0]) { items[0].setAttribute('aria-selected', 'true'); }
   });
+  cmdkInput.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveCmd(1); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); moveCmd(-1); }
+    if (e.key === 'Enter') { e.preventDefault(); var it = visibleItems()[cmdkIndex]; if (it) { runCmd(it); } }
+  });
+  $$('.cmdk-item').forEach(function (i) { i.addEventListener('click', function () { runCmd(i); }); });
+
+  // ── 帮助 ──
+  function openHelp() { layerStack.push('help'); id('help').classList.add('show'); }
+  function closeHelp() { id('help').classList.remove('show'); layerStack = layerStack.filter(function (x) { return x !== 'help'; }); }
+  id('dev-help').addEventListener('click', openHelp);
+  id('help').addEventListener('click', function (e) { if (e.target === id('help')) { closeHelp(); } });
+
+  // ── 键盘模型 ──
+  var gPressed = 0;
+  function inField(e) { var t = e.target; return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable); }
+  function activeRows() { var v = $('.view.active'); return v ? $$('.table tbody tr', v).filter(function (r) { return r.closest('.skeleton') === null; }) : []; }
+  function focusRow(delta) {
+    var rows = activeRows(); if (!rows.length) { return; }
+    var cur = rows.indexOf(document.activeElement.closest ? document.activeElement.closest('tr') : null);
+    var next = cur === -1 ? 0 : Math.max(0, Math.min(rows.length - 1, cur + delta));
+    rows.forEach(function (r) { r.classList.remove('kbd-focus'); });
+    rows[next].classList.add('kbd-focus'); rows[next].focus();
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') {
+      var top = layerStack[layerStack.length - 1];
+      if (top === 'cmdk') { closeCmdk(); }
+      else if (top === 'help') { closeHelp(); }
+      else if (top === 'drawer') { closeDrawer(drawer); }
+      else if (top === 'task-drawer') { closeDrawer(taskDrawer); }
+      else if (top === 'console') { closeConsole(); show('files'); }
+      if (lastFocus && lastFocus.focus) { lastFocus.focus(); }
+      e.preventDefault(); return;
+    }
+    if (inField(e)) { return; }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openCmdk(); return; }
+    if (e.key === '?') { e.preventDefault(); id('help').classList.contains('show') ? closeHelp() : openHelp(); return; }
+    if (e.key === '/') { e.preventDefault(); openCmdk(); return; }
+    if (e.key === 'g') { gPressed = Date.now(); return; }
+    if (Date.now() - gPressed < 900) {
+      var map = { f: 'files', t: 'transfer', r: 'trash', c: 'console' };
+      if (map[e.key]) { e.preventDefault(); gPressed = 0; show(map[e.key]); return; }
+    }
+    if (e.key === 'j') { e.preventDefault(); focusRow(1); return; }
+    if (e.key === 'k') { e.preventDefault(); focusRow(-1); return; }
+    if (e.key === 'x') {
+      var row = document.activeElement.closest ? document.activeElement.closest('tr') : null;
+      var cb = row && row.querySelector('.cb');
+      if (cb) { e.preventDefault(); cb.checked = !cb.checked; syncSelection(); }
+      return;
+    }
+    if (e.key === 'Enter') {
+      var r2 = document.activeElement.closest ? document.activeElement.closest('tr') : null;
+      if (r2 && r2.querySelector('[data-drawer]')) { e.preventDefault(); openDrawer(drawer); }
+    }
+  });
+
+  // ── 设计稿控制 ──
+  id('dev-skin').addEventListener('change', function (e) {
+    root.dataset.skin = e.target.value; closeConsole(); closeDrawer(drawer); closeDrawer(taskDrawer); show('files');
+  });
+  var toggleTheme = function () { root.dataset.theme = root.dataset.theme === 'dark' ? 'light' : 'dark'; };
+  id('dev-theme').addEventListener('click', toggleTheme);
+  id('theme-quick').addEventListener('click', toggleTheme);
+  id('dev-loading').addEventListener('click', function (e) {
+    var on = document.body.dataset.loading === '1';
+    document.body.dataset.loading = on ? '0' : '1';
+    e.currentTarget.setAttribute('aria-pressed', on ? 'false' : 'true');
+    toast('info', on ? '已恢复数据' : '已切换到骨架屏加载态');
+  });
+  id('dev-ds').addEventListener('click', function () { show('ds'); });
 
   id('dev-skin').value = root.dataset.skin;
   syncSelection();
