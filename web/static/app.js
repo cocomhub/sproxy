@@ -918,9 +918,22 @@ function statsRefresh() {
 // renderOverviewCards 渲染「概览」顶部卡片（云端失败/进行中、事项待处理/需人工）。
 //
 // 数据源：GET /api/cloud/tasks + GET /api/issues/stats（互不阻塞，任一失败则该项按 0 显示并提示）。
+// overviewCardsInFlight 防重入：两个入口（switchStatsTab / 控制台刷新）几乎同时调用时，
+// 两次都看不到 #overview-cards ⇒ 各插入一份 ⇒ 卡片数翻倍（e2e 实测 10 ≠ 5）。
+let overviewCardsInFlight = false;
 async function renderOverviewCards() {
   const panel = document.getElementById('stats-panel');
   if (!panel) return;
+  if (overviewCardsInFlight) return;
+  overviewCardsInFlight = true;
+  try {
+    await renderOverviewCardsOnce(panel);
+  } finally {
+    overviewCardsInFlight = false;
+  }
+}
+
+async function renderOverviewCardsOnce(panel) {
   let cloud = null;
   let issuesStats = null;
   try {
