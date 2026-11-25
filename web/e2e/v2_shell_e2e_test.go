@@ -796,7 +796,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("切换语言: %v", err)
 	}
 	if _, err := page.WaitForFunction(
-		"() => { const n = document.querySelector('.nav[data-route=files] span'); const c = document.querySelector('[data-cs=overview]'); return n && n.textContent === 'Files' && c && c.textContent === 'Overview'; }",
+		"() => { const n = document.querySelector('.nav[data-route=files] span'); const c = document.querySelector('[data-cs=overview]'); const th = Array.from(document.querySelectorAll('[data-cspane=tasks] th')).find(x => x.textContent === 'Task'); return n && n.textContent === 'Files' && c && c.textContent === 'Overview' && th && th.textContent === 'Task'; }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
 		t.Fatalf("英文词条未生效: %v", err)
 	}
