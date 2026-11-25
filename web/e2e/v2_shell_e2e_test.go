@@ -770,6 +770,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "#v2-file-body tr[data-name=\"v2demo/e2e.txt\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 		t.Fatalf("搜索未命中 v2demo/e2e.txt: %v", err)
 	}
+	// 搜索态作业必须用完整相对路径（不得再拼 subdir）：详情里路径应为 v2demo/e2e.txt。
+	if err := page.Locator("#v2-file-body tr[data-name=\"v2demo/e2e.txt\"] [data-action=detail]").Click(); err != nil {
+		t.Fatalf("搜索态打开详情: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const d = document.querySelector('#v2-dr-info'); return d && d.textContent.includes('v2demo/e2e.txt') && !d.textContent.includes('v2demo/v2demo'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("搜索态详情路径拼接错误: %v", err)
+	}
+	if err := page.Locator("#v2-dr-close").Click(); err != nil {
+		t.Fatalf("关闭详情: %v", err)
+	}
 	if err := page.Locator("#v2-search-clear").Click(); err != nil {
 		t.Fatalf("清除搜索: %v", err)
 	}

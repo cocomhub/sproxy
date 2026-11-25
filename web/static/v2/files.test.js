@@ -44,3 +44,15 @@ test('joinSubdir/parentSubdir：拒绝 ..、处理空段', () => {
   assert.strictEqual(m.parentSubdir('jav'), '');
   assert.strictEqual(m.parentSubdir(''), '');
 });
+
+test('resolveRel：搜索态行名已是完整相对路径，不得再拼 subdir', () => {
+  const f = require('./files.js');
+  // 目录浏览：subdir + 基名
+  assert.strictEqual(f.resolveRel('v2demo', 'e2e.txt', false), 'v2demo/e2e.txt');
+  // 搜索态：行名是 v2demo/e2e.txt（服务端返回完整相对路径）
+  assert.strictEqual(f.resolveRel('v2demo', 'v2demo/e2e.txt', true), 'v2demo/e2e.txt');
+  // 搜索态且停在根
+  assert.strictEqual(f.resolveRel('', 'v2demo/e2e.txt', true), 'v2demo/e2e.txt');
+  // 目录浏览、根目录
+  assert.strictEqual(f.resolveRel('', 'a.txt', false), 'a.txt');
+});

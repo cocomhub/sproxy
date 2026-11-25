@@ -36,6 +36,16 @@
     return out;
   }
 
+  /**
+   * 行名 → 服务端相对路径。
+   * 搜索结果的 name 已是**完整相对路径**（服务端按租户根返回），不得再拼 subdir
+   * （否则 v2demo + v2demo/e2e.txt 变成 v2demo/v2demo/e2e.txt ⇒ 删除/预览/详情全部 404）。
+   */
+  function resolveRel(subdir, name, isSearch) {
+    if (isSearch) { return joinSubdir('', name); }
+    return joinSubdir(subdir, name);
+  }
+
   /** 面包屑：全部卷 + 每级目录（path 为累计 subdir）。 */
   function crumbsFor(subdir) {
     var parts = String(subdir || '').split('/').filter(Boolean);
@@ -70,6 +80,7 @@
     normalizeFiles: normalizeFiles,
     crumbsFor: crumbsFor,
     joinSubdir: joinSubdir,
+    resolveRel: resolveRel,
     parentSubdir: parentSubdir
   };
 });

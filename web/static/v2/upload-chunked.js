@@ -126,7 +126,10 @@
                 missingBytes += Math.min(start + serverChunk, total) - start;
               });
               var loaded = st && st.success ? Math.max(0, total - missingBytes) : 0;
-              if (o.onProgress && loaded > 0) { o.onProgress(loaded, total); }
+              if (loaded > 0) {
+                if (window.v2pending) { window.v2pending.updateProgress(loaded, total); }
+                if (o.onProgress) { o.onProgress(loaded, total); }
+              }
               var seq = Promise.resolve();
               indices.forEach(function (idx) {
                 seq = seq.then(function () {
@@ -150,6 +153,7 @@
                         .then(function (r) {
                           if (!r.success && !r.should_retry) { throw new Error(r.message || ('分块 ' + idx + ' 上传失败')); }
                           loaded += end - start;
+                          if (window.v2pending) { window.v2pending.updateProgress(loaded, total); }
                           if (o.onProgress) { o.onProgress(loaded, total); }
                         });
                     });

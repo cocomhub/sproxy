@@ -16,7 +16,8 @@
   function view() { return window.v2filesView; }
   function relPath() {
     var sub = view() ? view().subdir() : '';
-    return f.joinSubdir(sub, state.name);
+    var search = !!(view() && view().search && view().search());
+    return f.resolveRel(sub, state.name, search);
   }
 
   function showTab(tab) {
@@ -245,6 +246,9 @@
     state.name = name;
     state.file = view() ? view().file(name) : null;
     state.loaded = {};
+    // 切换文件：清空 meta 编辑框，防止把上一个文件的 extra 写进新文件。
+    var ed = el('v2-meta-edit');
+    if (ed) { ed.value = ''; }
     var drawer = el('v2-drawer');
     if (!drawer) { return; }
     el('v2-dr-title').textContent = name;
