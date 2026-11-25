@@ -1173,16 +1173,14 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	// （同卷；跨卷移动走 T6 move API）。带显式 ?volume= 只在指定卷定位源（不在 → 404）。
 	// 全视图未命中仅当默认卷对 owner 授权才回落默认租户；默认卷被 ACL 排除时不得回落
 	// （ACL bypass，AD-6）。语义见 resolveRenameHome。
-	homeVol, root, locErr := s.resolveRenameHome(ctx, owner, fromRel, input.ExplicitVol, tnt)
-	if locErr != nil {
-		// **外部卷（加密卷/远端）内重命名**：本地定位不覆盖外部卷（它们没有 *storage.Root）
-		// ⇒ 此前 `mv` 在加密卷上恒 404「源文件不存在」。本地优先、未命中转外部（与删除路径
-		// 同款，避免为每次本地重命名触达远端）。
-		if handled, res, extErr := s.renameExternalVolume(ctx, owner, from, to, input); handled || extErr != nil {
-			return res, extErr
-		}
-		return RenameFileResult{}, locErr
+	home, rerr := s.resolveRenameTarget(ctx, owner, from, to, fromRel, toRel, input, tnt)
+	if rerr != nil {
+		return RenameFileResult{}, rerr
 	}
+	if home.done {
+		return home.res, nil // 目录改名或外部卷改名已裁决
+	}
+	homeVol, root := home.volName, home.root
 
 	// **目录重命名**：目录没有单一 checksum，且允许同名目录跨卷并存（与 rmdir 同口径）
 	// ⇒ 不走 checksum 门禁与 AD-4 唯一性，改走 renameDirInHome（整棵子树 + meta 子树 +
@@ -1453,6 +1451,51 @@ func (s *Service) releaseChargeFor(volName, owner, remotePath string, fallback i
 		return n
 	}
 	return fallback
+}
+
+// renameTarget 是 resolveRenameTarget 的结果：done=true 表示已由目录/外部卷分支裁决完成。
+type renameTarget struct {
+	volName string
+	root    *storage.Root
+	done    bool
+	res     RenameFileResult
+}
+
+// resolveRenameTarget 定位重命名的源（home 卷 root），并在定位失败时按序尝试：
+// ① 目录（无 checksum，先在显式卷/默认卷找）→ 直接完成目录改名；② 缺 checksum → 400（参数
+// 校验先于存在性）；③ 外部卷接缝；④ 原定位错误。
+func (s *Service) resolveRenameTarget(ctx context.Context, owner, from, to, fromRel, toRel string,
+	input RenameFileInput, tnt *storage.Tenant) (renameTarget, error) {
+	homeVol, root, locErr := s.resolveRenameHome(ctx, owner, fromRel, input.ExplicitVol, tnt)
+	if locErr == nil {
+		return renameTarget{volName: homeVol, root: root}, nil
+	}
+	if dr, dv, isDir := s.resolveDirRoot(owner, fromRel, input.ExplicitVol, tnt); isDir {
+		res, err := s.renameDirectory(ctx, owner, dv, dr, from, to, fromRel, toRel, input.Origin)
+		return renameTarget{done: true, res: res}, err
+	}
+	if input.ExpectedChecksum == "" {
+		return renameTarget{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgMissingChecksum, Reason: reasonChecksumMissing}
+	}
+	if handled, res, extErr := s.renameExternalVolume(ctx, owner, from, to, input); handled || extErr != nil {
+		return renameTarget{done: true, res: res}, extErr
+	}
+	return renameTarget{}, locErr
+}
+
+// resolveDirRoot 在「跨卷定位未命中」时寻找**目录**所在的 root（目录改名不要求文件存在性）。
+// 显式卷优先；否则用调用方已解析的默认租户。命中返回 (root, 卷名, true)。
+func (s *Service) resolveDirRoot(owner, fromRel, explicitVol string, tnt *storage.Tenant) (*storage.Root, string, bool) {
+	if explicitVol != "" {
+		if t := s.rt.volumeTenant(explicitVol, owner); t != nil && t.Root() != nil && s.isDirAt(t.Root(), fromRel) {
+			return t.Root(), explicitVol, true
+		}
+		return nil, "", false
+	}
+	if tnt != nil && s.isDirAt(tnt.Root(), fromRel) {
+		return tnt.Root(), volumeNameForTenant(s.rt.volSet(), tnt), true
+	}
+	return nil, "", false
 }
 
 // renameDirectory 执行一次目录重命名并产出领域结果（RenameFile 的目录分支，独立成函数
