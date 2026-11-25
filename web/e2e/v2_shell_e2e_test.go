@@ -771,6 +771,21 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("清除搜索后未回到目录列表: %v", err)
 	}
 
+	// 上传落指定卷：选择卷后上传，任务/文件列表带该卷（真实 ?volume= 与 init body）。
+	if _, err := page.Locator("#v2-volume").SelectOption(playwright.SelectOptionValues{Values: &[]string{"default"}}); err != nil {
+		t.Fatalf("选择卷 default: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "volupload.txt", MimeType: "text/plain", Buffer: []byte("volume me"),
+	}}); err != nil {
+		t.Fatalf("上传到指定卷: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const tr = document.querySelector('#v2-file-body tr[data-name=\"v2demo/volupload.txt\"]') || document.querySelector('#v2-file-body tr[data-name=\"volupload.txt\"]'); return !!tr; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("指定卷上传后列表未出现文件: %v", err)
+	}
+
 	// 卷过滤 + 强刷（真实 /api/volumes 与 /api/volumes/refresh）。
 	if n, _ := page.Locator("#v2-volume option").Count(); n < 2 {
 		t.Fatalf("卷选择器未加载卷列表（options=%d）", n)
@@ -834,6 +849,13 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	// 再删除一次 → 清空回收站（原生确认框）。先把卷过滤复位为「全部卷」。
 	if _, err := page.Evaluate(`() => { const s = document.querySelector('#v2-volume'); if (s) { s.selectedIndex = 0; s.dispatchEvent(new Event('change')); } }`, nil); err != nil {
 		t.Fatalf("复位卷过滤: %v", err)
+	}
+	// 切卷会按「该卷上次目录」恢复路径（可能回到根），显式回 v2demo 再删。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("删除按钮未出现: %v", err)
 	}
 	respondDialogs(page, func(d playwright.Dialog) { _ = d.Accept() })
 	if err := page.Locator("#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]").Click(); err != nil {

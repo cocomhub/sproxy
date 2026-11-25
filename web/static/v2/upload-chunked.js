@@ -93,6 +93,7 @@
           body: new TextEncoder().encode(JSON.stringify({
             upload_id: uploadId,
             filename: rel,
+            volume: o.volume || undefined,
             total_size: total,
             chunk_size: chunkHint,
             total_chunks: Math.ceil(total / chunkHint),

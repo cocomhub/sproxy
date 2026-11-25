@@ -12,6 +12,7 @@
   if (!auth || !f) { return; }
 
   var VOL_KEY = 'sproxy_v2_volume';
+  var SUBDIR_KEY = 'sproxy_v2_subdir_by_vol';
   var state = { subdir: '', volume: '', query: '', files: [], selected: Object.create(null) };
 
   function el(id) { return document.getElementById(id); }
@@ -159,8 +160,28 @@
     return path;
   }
 
+  /** 按卷记忆子目录（切换卷时回到该卷上次目录；无记录则根）。 */
+  function subdirMap() {
+    try { return JSON.parse(localStorage.getItem(SUBDIR_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+
+  function rememberSubdir(vol, subdir) {
+    var m = subdirMap();
+    if (subdir) { m[vol || ''] = subdir; } else { delete m[vol || '']; }
+    try { localStorage.setItem(SUBDIR_KEY, JSON.stringify(m)); } catch (e) { /* 忽略 */ }
+  }
+
+  function subdirForVolume(vol) {
+    return subdirMap()[vol || ''] || '';
+  }
+
   function load() {
     var subdir = subdirFromHash();
+    if (state.volume && subdir === '' && !window.__v2volSwitch) {
+      subdir = subdirForVolume(state.volume);
+    }
+    window.__v2volSwitch = false;
+    if (state.volume && subdir) { rememberSubdir(state.volume, subdir); }
     state.subdir = subdir;
     renderCrumbs(subdir);
     setState('', '');
@@ -232,6 +253,10 @@
       vol.addEventListener('change', function () {
         state.volume = vol.value;
         try { localStorage.setItem(VOL_KEY, state.volume); } catch (e) { /* 忽略 */ }
+        // 切卷：跳回该卷上次目录（root 时清 hash 子路径）。
+        window.__v2volSwitch = true;
+        var target = subdirForVolume(state.volume);
+        try { history.replaceState(null, '', target ? '#/files/' + encodeURIComponent(target) : '#/files'); } catch (e) { /* 忽略 */ }
         load();
       });
     }
