@@ -377,6 +377,15 @@
               <div class="toolbar" style="margin-bottom:10px">
                 <b>云端任务</b>
                 <input id="v2-cs-tasks-q" placeholder="关键字（文件名/ID/URL）" style="width:200px">
+                <select id="v2-cs-tasks-sort" aria-label="排序">
+                  <option value="updated">按更新时间</option>
+                  <option value="size">按大小</option>
+                  <option value="name">按文件名</option>
+                </select>
+                <select id="v2-cs-tasks-order" aria-label="排序方向">
+                  <option value="desc">降序</option>
+                  <option value="asc">升序</option>
+                </select>
                 <select id="v2-cs-tasks-status" aria-label="按状态筛选">
                   <option value="">全部状态</option>
                   <option value="pending">等待中</option>
@@ -393,6 +402,7 @@
                 <input id="v2-cs-tasks-import" type="file" accept=".tsv,text/tab-separated-values" hidden>
                 <button class="btn" id="v2-cs-tasks-refresh" type="button">刷新</button>
               </div>
+              <div class="toolbar" id="v2-cs-tasks-groups" style="margin-bottom:8px"></div>
               <div class="muted" id="v2-cs-tasks-recent" style="font-size:11.5px;margin-bottom:8px" hidden></div>
               <div id="v2-cs-tasks-detail" class="card" hidden style="margin-bottom:10px">
                 <div class="card-title">任务详情</div>
@@ -406,6 +416,11 @@
                 </table>
                 <div class="empty" id="v2-cs-tasks-empty" hidden><b>暂无云端任务</b>
                   <div class="muted">提交下载链接后在此查看。</div></div>
+                <div class="toolbar" style="justify-content:flex-end;padding:8px 0">
+                  <span class="muted" id="v2-cs-tasks-page" style="font-size:12px"></span>
+                  <button class="btn btn-ghost btn-sm" id="v2-cs-tasks-prev" type="button">上一页</button>
+                  <button class="btn btn-ghost btn-sm" id="v2-cs-tasks-next" type="button">下一页</button>
+                </div>
               </div>
             </div>
 
