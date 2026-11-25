@@ -70,6 +70,38 @@
     if (box) { box.hidden = true; box.textContent = ''; }
   }
 
+  /** 保存 extra：mode merge/replace/delete；删除模式只取键名。 */
+  function saveMeta() {
+    var editor = el('v2-meta-edit');
+    var modeSel = el('v2-meta-mode');
+    var mode = modeSel ? modeSel.value : 'merge';
+    var text = (editor && editor.value || '').trim();
+    if (!text) { setPane('v2-meta-state', 'error', 'extra 不能为空'); return; }
+    var parsed;
+    try { parsed = JSON.parse(text); } catch (e) { setPane('v2-meta-state', 'error', 'JSON 非法：' + e.message); return; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      setPane('v2-meta-state', 'error', 'extra 必须是 JSON 对象');
+      return;
+    }
+    var payload = { extra: parsed };
+    if (mode === 'delete') {
+      var keys = {};
+      Object.keys(parsed).forEach(function (k) { keys[k] = null; });
+      payload.extra = keys;
+    }
+    if (mode !== 'merge') { payload.mode = mode; }
+    clearPane('v2-meta-state');
+    api.json('PUT', '/api/files/meta?filename=' + enc(relPath()), {
+      body: new TextEncoder().encode(JSON.stringify(payload)),
+      contentType: 'application/json'
+    }).then(function () {
+      if (window.v2toast) { window.v2toast('ok', 'meta 已保存（' + mode + '）'); }
+      state.loaded.meta = false;
+      var ed = el('v2-meta-edit'); if (ed) { ed.value = ''; }
+      loadMeta();
+    }).catch(function (e) { setPane('v2-meta-state', 'error', '保存失败：' + (e.message || e)); });
+  }
+
   function loadMeta() {
     state.loaded.meta = true;
     var pre = el('v2-meta-json');
@@ -77,7 +109,12 @@
     clearPane('v2-meta-state');
     api.json('GET', '/api/files/meta?filename=' + enc(relPath()))
       .then(function (body) {
-        pre.textContent = JSON.stringify(body && body.extra ? body.extra : body, null, 2);
+        var extra = body && body.extra ? body.extra : body;
+        pre.textContent = JSON.stringify(extra, null, 2);
+        var editor = el('v2-meta-edit');
+        if (editor && !editor.value) {
+          try { editor.value = JSON.stringify(extra || {}, null, 2); } catch (e) { editor.value = '{}'; }
+        }
       })
       .catch(function (err) {
         pre.textContent = '—';
@@ -236,6 +273,8 @@
     el('v2-dr-close').addEventListener('click', close);
     el('v2-dr-backdrop').addEventListener('click', close);
     el('v2-meta-reload').addEventListener('click', function () { state.loaded.meta = false; loadMeta(); });
+    var save = el('v2-meta-save');
+    if (save) { save.addEventListener('click', saveMeta); }
     el('v2-share-create').addEventListener('click', createShare);
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
   }

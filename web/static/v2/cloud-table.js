@@ -18,6 +18,18 @@
     return 'pill-info';
   }
 
+  /** 完整性徽标：verified（通过）/ damaged（损坏）/ 空（未校验）。 */
+  function integrityBadge(t) {
+    var st = t && t.integrity_status;
+    if (!st) { return null; }
+    var span = document.createElement('span');
+    span.className = 'pill ' + (st === 'verified' ? 'pill-ok' : (st === 'damaged' ? 'pill-bad' : 'pill-mute'));
+    span.style.marginLeft = '6px';
+    span.textContent = st === 'verified' ? '完整' : (st === 'damaged' ? '损坏' : st);
+    span.setAttribute('data-integrity', st);
+    return span;
+  }
+
   function actionBtn(text, handler) {
     var b = document.createElement('button');
     b.type = 'button'; b.className = 'btn btn-sm btn-ghost'; b.textContent = text;
@@ -59,6 +71,8 @@
       pill.className = 'pill ' + statusClass(t.status);
       pill.textContent = ctLabel(t.status);
       stTd.appendChild(pill);
+      var badge = integrityBadge(t);
+      if (badge) { stTd.appendChild(badge); }
       tr.appendChild(stTd);
 
       var pgTd = document.createElement('td');
@@ -129,5 +143,5 @@
       .catch(function (e) { if (done) { done(false, e); } });
   }
 
-  window.v2cloudTable = { render: render, statusClass: statusClass, perform: perform };
+  window.v2cloudTable = { render: render, statusClass: statusClass, perform: perform, integrityBadge: integrityBadge };
 })();

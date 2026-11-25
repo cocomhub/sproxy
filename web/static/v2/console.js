@@ -663,6 +663,21 @@
     var ist = el('v2-cs-issues-status');
     if (ist) { ist.addEventListener('change', function () { issues.status = ist.value; renderIssues(visibleIssues()); }); }
     var iex = el('v2-cs-issues-export'); if (iex) { iex.addEventListener('click', exportIssues); }
+    var iscan = el('v2-cs-issues-scan');
+    if (iscan) {
+      iscan.addEventListener('click', function () {
+        iscan.disabled = true;
+        api.json('POST', '/api/issues/scan', {})
+          .then(function (res) {
+            if (window.v2toast) {
+              window.v2toast('ok', '已触发存储审查' + (res && res.reported != null ? '（登记 ' + res.reported + ' 项）' : ''));
+            }
+            loadIssues();
+          })
+          .catch(function (e) { banner('warn', '扫描失败：' + (e.message || e)); })
+          .then(function () { iscan.disabled = false; });
+      });
+    }
     var h = parseConsoleHash();
     if (h) { setPane(h.section, h.params, true); }
     else if (isActive()) { load(); }

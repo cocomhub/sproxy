@@ -471,6 +471,7 @@
                 <input id="v2-cs-issues-q" placeholder="关键字（路径/说明）" style="width:180px">
                 <span style="flex:1"></span>
                 <button class="btn btn-ghost" id="v2-cs-issues-export" type="button">导出 CSV</button>
+                <button class="btn btn-ghost" id="v2-cs-issues-scan" type="button">立即扫描</button>
                 <button class="btn" id="v2-cs-issues-refresh" type="button">刷新</button>
               </div>
               <div class="card">
@@ -597,6 +598,18 @@
         <button class="btn btn-sm" id="v2-meta-reload" type="button">刷新</button></div>
       <div id="v2-meta-state" class="banner" hidden role="status"></div>
       <pre class="json" id="v2-meta-json">—</pre>
+      <div class="dr-sep"></div>
+      <div class="dr-row"><b>编辑 extra</b>
+        <select id="v2-meta-mode" aria-label="编辑模式">
+          <option value="merge">合并（保留未列出的键）</option>
+          <option value="replace">整表替换</option>
+          <option value="delete">删除所列键</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="v2-meta-save" type="button">保存</button>
+      </div>
+      <textarea id="v2-meta-edit" rows="6" placeholder='{"code":"EXAMPLE-001","label":"EXAMPLE"}'></textarea>
+      <div class="muted" style="font-size:11.5px">仅编辑 extra（自定义键/字段白名单由服务端校验）；值类型 JSON。
+        删除模式只需列出键名（值任意）。</div>
     </div>
     <div data-drpane="ver" hidden><div id="v2-ver-list">加载中…</div></div>
     <div data-drpane="share" hidden>
