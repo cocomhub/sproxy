@@ -360,6 +360,25 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "[data-cspane=issues]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("控制台待处理事项未渲染: %v", err)
 	}
+	// 待处理事项：筛选控件与 CSV 导出入口可用（无条目时导出给出提示）。
+	if err := waitLoc(page, "#v2-cs-issues-q", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("事项筛选输入框缺失: %v", err)
+	}
+	if err := page.Locator("#v2-cs-issues-q").Fill("e2e"); err != nil {
+		t.Fatalf("事项关键字筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-cs-issues'); return t && t.children.length >= 0; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("事项筛选未生效: %v", err)
+	}
+	if err := page.Locator("#v2-cs-issues-export").Click(); err != nil {
+		t.Fatalf("事项导出 CSV: %v", err)
+	}
+	if err := page.Locator("#v2-cs-issues-q").Fill(""); err != nil {
+		t.Fatalf("清空事项筛选: %v", err)
+	}
+
 	// 审计分区：过滤条与列表容器可用。
 	if err := page.Locator("[data-cs=audit]").Click(); err != nil {
 		t.Fatalf("切换审计分区: %v", err)
@@ -476,6 +495,34 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("未完成上传提示未显示: %v", err)
 	}
+	// Ctrl+A 全选 + Delete 触发批量删除（真实弹窗，取消不动数据）。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("列表未就绪: %v", err)
+	}
+	if err := page.Locator("#v2-file-body").Click(); err != nil {
+		t.Fatalf("聚焦列表: %v", err)
+	}
+	if err := page.Keyboard().Press("Control+a"); err != nil {
+		t.Fatalf("Ctrl+A 全选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-batch-delete'); return b && !b.disabled; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("Ctrl+A 未选中任何文件: %v", err)
+	}
+	if err := page.Keyboard().Press("Delete"); err != nil {
+		t.Fatalf("按 Delete: %v", err)
+	}
+	if err := waitLoc(page, ".modal-backdrop [data-dlg=cancel]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("Delete 未打开确认框: %v", err)
+	}
+	if err := page.Locator(".modal-backdrop [data-dlg=cancel]").Click(); err != nil {
+		t.Fatalf("取消批量删除: %v", err)
+	}
+
 	if err := page.Locator("#v2-pending-ignore").Click(); err != nil {
 		t.Fatalf("忽略未完成上传: %v", err)
 	}

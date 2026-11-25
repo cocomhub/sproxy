@@ -445,6 +445,18 @@
     return 'pill-warn';
   }
 
+  var issues = { all: [], q: '', status: '' };
+
+  function issueMatches(it) {
+    if (issues.status && it.status !== issues.status) { return false; }
+    if (!issues.q) { return true; }
+    var q = issues.q.toLowerCase();
+    return ((it.path || '') + ' ' + (it.detail || '') + ' ' + (it.kind || '') + ' ' + (it.volume || ''))
+      .toLowerCase().indexOf(q) !== -1;
+  }
+
+  function visibleIssues() { return issues.all.filter(issueMatches); }
+
   function renderIssues(items) {
     var tbody = el('v2-cs-issues');
     if (!tbody) { return; }
@@ -498,6 +510,24 @@
     if (empty) { empty.hidden = items.length > 0; }
   }
 
+  function exportIssues() {
+    var list = visibleIssues();
+    if (!list.length) { if (window.v2toast) { window.v2toast('warn', '没有可导出的条目'); } return; }
+    var head = ['id', 'kind', 'volume', 'path', 'status', 'attempts', 'last_seen', 'detail'];
+    var rows = [head.join(',')];
+    var esc = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+    list.forEach(function (it) {
+      rows.push([it.id, it.kind, it.volume, it.path, it.status, it.attempts, it.last_seen, it.detail].map(esc).join(','));
+    });
+    var blob = new Blob([rows.join(String.fromCharCode(10)) + String.fromCharCode(10)], { type: 'text/csv' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'issues-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  }
+
   function askResolve(it, cell) {
     cell.textContent = '';
     var input = document.createElement('input');
@@ -524,7 +554,10 @@
     var tbody = el('v2-cs-issues');
     if (!tbody) { return; }
     api.json('GET', '/api/issues?limit=100')
-      .then(function (body) { renderIssues((body && body.items) || []); })
+      .then(function (body) {
+        issues.all = (body && body.items) || [];
+        renderIssues(visibleIssues());
+      })
       .catch(function (e) { banner('warn', '待处理事项加载失败：' + (e.message || e)); });
   }
 
@@ -601,6 +634,11 @@
     if (imp) { imp.addEventListener('change', function () { importTasks(imp.files && imp.files[0]); imp.value = ''; }); }
     renderRecentOps();
     var ir = el('v2-cs-issues-refresh'); if (ir) { ir.addEventListener('click', loadIssues); }
+    var iq = el('v2-cs-issues-q');
+    if (iq) { iq.addEventListener('input', function () { issues.q = iq.value.trim(); renderIssues(visibleIssues()); }); }
+    var ist = el('v2-cs-issues-status');
+    if (ist) { ist.addEventListener('change', function () { issues.status = ist.value; renderIssues(visibleIssues()); }); }
+    var iex = el('v2-cs-issues-export'); if (iex) { iex.addEventListener('click', exportIssues); }
     var h = parseConsoleHash();
     if (h) { setPane(h.section, h.params, true); }
     else if (isActive()) { load(); }
