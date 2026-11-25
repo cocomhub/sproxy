@@ -1468,7 +1468,7 @@ func (s *Service) renameDirectory(ctx context.Context, owner, volName string, ro
 	if err := s.renameDirInHome(ctx, a); err != nil {
 		return RenameFileResult{}, err
 	}
-	s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to+"（目录）")
+	s.auditRename(ctx, from, to, origin, auditResultSuccess, "目录已重命名")
 	s.rt.publishFileEvent(EventRename, owner, to, 0)
 	return RenameFileResult{From: from, To: to, Message: fmt.Sprintf("目录已重命名: %s -> %s", from, to)}, nil
 }
@@ -1495,15 +1495,15 @@ func (s *Service) isDirAt(root *storage.Root, rel string) bool {
 func (s *Service) renameDirInHome(ctx context.Context, a renameHomeArgs) error {
 	a.logger.InfoContext(ctx, "开始目录重命名", "from", a.fromRel, "to", a.toRel)
 	if _, err := a.root.Lstat(a.fromRel); os.IsNotExist(err) {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, errMsgSrcNotExist)
+		s.auditRename(ctx, a.from, "", a.origin, auditResultError, errMsgSrcNotExist)
 		return &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 	}
 	if _, err := a.root.Lstat(a.toRel); err == nil {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail(errMsgDestExists, a.to, a.origin))
+		s.auditRename(ctx, a.from, a.to, a.origin, auditResultDenied, errMsgDestExists)
 		return &HTTPError{Status: http.StatusConflict, Message: errMsgDestExists}
 	}
 	if err := a.root.MkdirAll(filepath.Dir(a.toRel), 0o755); err != nil {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, renameAuditDetail("创建父目录失败", a.to, a.origin))
+		s.auditRename(ctx, a.from, a.to, a.origin, auditResultError, "创建父目录失败")
 		return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateParentDirFailed, Reason: reasonMkdirFailed}
 	}
 
@@ -1512,7 +1512,7 @@ func (s *Service) renameDirInHome(ctx context.Context, a renameHomeArgs) error {
 	sumRootDirFiles(a.root, a.fromRel, &files)
 
 	if err := atomicRenameRoot(a.root, a.fromRel, a.toRel); err != nil {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, renameAuditDetail("重命名失败", a.to, a.origin))
+		s.auditRename(ctx, a.from, a.to, a.origin, auditResultError, "重命名失败")
 		return &HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
 	}
 
@@ -1622,6 +1622,13 @@ func renameAuditDetail(base, to, origin string) string {
 	return detail
 }
 
+// auditRename 是重命名族审计的**唯一出口**（文件与目录共用）。
+// 为什么收口：R35-a 棘轮只减不增，重命名分支多且语义一致（都是「某路径改名被允许/拒绝/失败」），
+// 每加一个分支就多一处散点会持续顶高基线。统一走本方法后，新增分支不再增加审计调用点。
+func (s *Service) auditRename(ctx context.Context, from, to, origin, result, base string) {
+	s.rt.recordFileAudit(ctx, "rename", from, result, renameAuditDetail(base, to, origin))
+}
+
 // renameInHome 在给定 home 卷租户内完成一次重命名（含跨子目录配额对称转移）。
 //
 // 返回 nil 表示成功；失败返回 *HTTPError（状态码与文案即对外契约，由调用方写响应）。
@@ -1629,7 +1636,7 @@ func renameAuditDetail(base, to, origin string) string {
 func (s *Service) renameInHome(ctx context.Context, a renameHomeArgs) error {
 	a.logger.InfoContext(ctx, "开始重命名", "from", a.fromRel, "to", a.toRel)
 	if _, err := a.root.Stat(a.fromRel); os.IsNotExist(err) {
-		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, errMsgSrcNotExist)
+		s.auditRename(ctx, a.from, "", a.origin, auditResultError, errMsgSrcNotExist)
 		return &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
 	}
 	// 目标不存在检查（409 门禁）。**本 Stat 与下方 Rename 之间已不是 TOCTOU 窗口**：
