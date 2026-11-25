@@ -1167,6 +1167,15 @@ func (m *CloudDownloadManager) runDownloadAttempt(ctx context.Context, dlCtx con
 		attemptCtx, attemptCancel = context.WithTimeout(dlCtx, m.config.DownloadTimeout)
 	}
 
+	// 分块状态经 ctx 通道上报（按任务隔离）：写入 task.Chunks（同 index 覆盖，上限 chunkStateCap）。
+	attemptCtx = downloader.WithChunkProgress(attemptCtx, func(st downloader.ChunkState) {
+		m.mu.Lock()
+		recordChunkState(task, st)
+		id := task.ID
+		m.mu.Unlock()
+		m.markDirty(id)
+	})
+
 	progressFn := func(downloaded, total int64) {
 		m.mu.Lock()
 		task.Downloaded = downloaded

@@ -12,13 +12,19 @@
 //     不节流会写爆磁盘/JSON。
 package cloud
 
-import "time"
+import (
+	"time"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
+)
 
 const (
 	// progressSampleInterval 是两次采样之间的最小间隔（节流）。
 	progressSampleInterval = 10 * time.Second
 	// progressSampleCap 是每任务保留的采样点数（环形：超出丢最旧）。
 	progressSampleCap = 240
+	// chunkStateCap 是每任务保留的分块状态上限（≤20 行自适应几何下通常 ≤20 块）。
+	chunkStateCap = 128
 )
 
 // ProgressSample 是一次进度采样点。
@@ -78,4 +84,22 @@ func (t *CloudTask) ProgressSince(since time.Time) []ProgressSample {
 		}
 	}
 	return out
+}
+
+// recordChunkState 记录一次分块状态（调用方持有 m.mu）：同 Index 覆盖，超上限丢弃新块。
+// 覆盖而非追加：同一块会经历 pending→downloading→done 多次上报，保留最新状态。
+func recordChunkState(task *CloudTask, st downloader.ChunkState) {
+	if task == nil || st.Index < 0 {
+		return
+	}
+	for i := range task.Chunks {
+		if task.Chunks[i].Index == st.Index {
+			task.Chunks[i] = st
+			return
+		}
+	}
+	if len(task.Chunks) >= chunkStateCap {
+		return
+	}
+	task.Chunks = append(task.Chunks, st)
 }

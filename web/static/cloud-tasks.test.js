@@ -315,3 +315,34 @@ test('ctDetailHtml 含速率曲线槽（异步填充）', () => {
   assert.ok(html.includes('ct-spark-slot'));
   assert.ok(html.includes('data-id="cloud-x-1"'));
 });
+
+test('ctBlockMatrix 按 1MiB 拆小块并标记 done/active/todo/failed', () => {
+  const rows = m.ctBlockMatrix([
+    { index: 0, phase: 'done', done: 4 << 20, length: 4 << 20, source: 'share' },
+    { index: 1, phase: 'downloading', done: 1 << 20, length: 4 << 20, source: 'acct' },
+    { index: 2, phase: 'failed', done: 0, length: 2 << 20 },
+  ]);
+  assert.strictEqual(rows.length, 3);
+  assert.deepStrictEqual(rows[0].blocks, ['done', 'done', 'done', 'done']);
+  assert.deepStrictEqual(rows[1].blocks, ['done', 'active', 'todo', 'todo']);
+  assert.deepStrictEqual(rows[2].blocks, ['failed', 'failed']);
+  assert.strictEqual(rows[0].source, 'share');
+  // 排序：按 index 升序
+  const sorted = m.ctBlockMatrix([{ index: 2, length: 1 << 20 }, { index: 0, length: 1 << 20 }]);
+  assert.deepStrictEqual(sorted.map((r) => r.index), [0, 2]);
+});
+
+test('ctBlockMatrixHtml 渲染一行多小块；无状态给占位', () => {
+  const html = m.ctBlockMatrixHtml([{ index: 0, phase: 'done', done: 2 << 20, length: 2 << 20, source: 'share' }]);
+  assert.ok(html.includes('ct-block-row'));
+  assert.ok(html.includes('ct-block-done'));
+  assert.ok(html.includes('data-chunk="0"'));
+  assert.ok(html.includes('share'));
+  assert.ok(m.ctBlockMatrixHtml([]).includes('暂无分块状态'));
+  assert.ok(m.ctBlockMatrixHtml(null).includes('暂无分块状态'));
+});
+
+test('ctDetailHtml 含分块进度槽', () => {
+  const html = m.ctDetailHtml({ id: 'cloud-y-1', status: 'downloading', diagnostics: {} });
+  assert.ok(html.includes('ct-matrix-slot'));
+});
