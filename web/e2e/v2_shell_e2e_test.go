@@ -439,6 +439,43 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("单卷刷新未回显: %v", err)
 	}
+	// Secret 卷：可用则创建随机密钥 → 列表出现 → 删除；未装配时展示明确提示（二者必居其一）。
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-sec-state'); const e = document.querySelector('#v2-sec-empty'); const t = document.querySelector('#v2-sec-body'); return (b && !b.hidden) || (e && !e.hidden) || (t && t.children.length > 0); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("Secret 卡既无数据也无提示: %v", err)
+	}
+	unavailable, _ := page.Evaluate("() => { const b = document.querySelector('#v2-sec-state'); return !!(b && !b.hidden); }", nil)
+	t.Logf("secret 卷可用性：unavailable=%v（false = 已走真实创建/删除分支）", unavailable)
+	if unavailable != true {
+		respondDialogs(page, func(d playwright.Dialog) {
+			if strings.Contains(d.Message(), "Secret 名称") {
+				_ = d.Accept("e2esecret")
+				return
+			}
+			_ = d.Accept("")
+		})
+		if err := page.Locator("#v2-sec-create").Click(); err != nil {
+			t.Fatalf("创建 secret: %v", err)
+		}
+		if err := waitLoc(page, "#v2-sec-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+			t.Fatalf("secret 创建后未列出: %v", err)
+		}
+		if _, err := page.WaitForFunction(
+			"() => document.querySelector('#v2-sec-body').textContent.includes('e2esecret')",
+			nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+			t.Fatalf("secret 名称未出现: %v", err)
+		}
+		if err := page.Locator("#v2-sec-body tr button").First().Click(); err != nil {
+			t.Fatalf("删除 secret: %v", err)
+		}
+		if _, err := page.WaitForFunction(
+			"() => !document.querySelector('#v2-sec-body').textContent.includes('e2esecret')",
+			nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+			t.Fatalf("secret 删除后仍在列表: %v", err)
+		}
+	}
+
 	// Mesh 分区：真实 /api/mesh/status 渲染面状态。
 	if err := page.Locator("[data-cs=mesh]").Click(); err != nil {
 		t.Fatalf("切换 Mesh 分区: %v", err)

@@ -26,3 +26,8 @@ test('normalizeUserVolumes：剔除无名条目', () => {
   assert.deepStrictEqual(out, [{ name: 'u1', type: 'baidupcs', capacity: 0, usage: 5 }]);
   assert.deepStrictEqual(m.normalizeUserVolumes(null), []);
 });
+
+test('normalizeSecrets：仅保留非空字符串', () => {
+  assert.deepStrictEqual(m.normalizeSecrets({ secrets: ['a', '', 3, null, 'b'] }), ['a', 'b']);
+  assert.deepStrictEqual(m.normalizeSecrets(null), []);
+});

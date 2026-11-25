@@ -330,11 +330,30 @@
                 </div>
                 <table class="table">
                   <thead><tr><th>名称</th><th style="width:130px">类型</th>
-                    <th style="width:110px" class="r">容量</th><th style="width:110px" class="r">已用</th></tr></thead>
+                    <th style="width:110px" class="r">容量</th><th style="width:110px" class="r">已用</th>
+                    <th style="width:150px"></th></tr></thead>
                   <tbody id="v2-vl-user-body"></tbody>
                 </table>
                 <div class="empty" id="v2-vl-user-empty" hidden><b>没有用户卷</b>
                   <div class="muted">sclient volume create 可创建外部后端卷。</div></div>
+                <div class="toolbar" style="margin-top:8px">
+                  <button class="btn btn-ghost" id="v2-vl-create" type="button">创建用户卷…</button>
+                </div>
+              </div>
+              <div class="card" style="margin-top:14px">
+                <div class="toolbar" style="margin-bottom:8px">
+                  <b>Secret 卷</b><span class="muted" style="font-size:12px">密钥只显示一次，请立即备份</span>
+                  <span style="flex:1"></span>
+                  <button class="btn btn-ghost" id="v2-sec-refresh" type="button">刷新</button>
+                  <button class="btn" id="v2-sec-create" type="button">创建随机密钥</button>
+                </div>
+                <div id="v2-sec-state" class="banner" hidden role="status"></div>
+                <table class="table">
+                  <thead><tr><th>名称</th><th style="width:120px"></th></tr></thead>
+                  <tbody id="v2-sec-body"></tbody>
+                </table>
+                <div class="empty" id="v2-sec-empty" hidden><b>没有 secret</b>
+                  <div class="muted">未装配 secrets 卷时该能力不可用。</div></div>
               </div>
             </div>
 

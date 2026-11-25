@@ -113,6 +113,12 @@
       var usage = document.createElement('td'); usage.className = 'r num';
       usage.textContent = fmt.formatSize(v.usage);
       tr.appendChild(usage);
+      var act = document.createElement('td'); act.className = 'r actions';
+      var del = document.createElement('button');
+      del.type = 'button'; del.className = 'btn btn-ghost btn-sm'; del.textContent = '删除';
+      del.addEventListener('click', function () { deleteUserVolume(v.name); });
+      act.appendChild(del);
+      tr.appendChild(act);
       tbody.appendChild(tr);
     });
     var hint = el('v2-vl-user-empty');
@@ -142,18 +148,120 @@
     }).catch(function (e) { banner('刷新失败：' + (e.message || e), 'warn'); });
   }
 
+  function normalizeSecrets(body) {
+    var list = body && Array.isArray(body.secrets) ? body.secrets : [];
+    return list.filter(function (n) { return typeof n === 'string' && n; });
+  }
+
+  function renderSecrets(names) {
+    var tbody = el('v2-sec-body');
+    if (!tbody) { return; }
+    tbody.textContent = '';
+    names.forEach(function (name) {
+      var tr = document.createElement('tr');
+      var n = document.createElement('td'); n.className = 'mono'; n.textContent = name;
+      tr.appendChild(n);
+      var act = document.createElement('td'); act.className = 'r actions';
+      var del = document.createElement('button');
+      del.type = 'button'; del.className = 'btn btn-ghost btn-sm'; del.textContent = '删除';
+      del.addEventListener('click', function () { deleteSecret(name); });
+      act.appendChild(del);
+      tr.appendChild(act);
+      tbody.appendChild(tr);
+    });
+    var empty = el('v2-sec-empty');
+    if (empty) { empty.hidden = names.length > 0; }
+  }
+
+  function secBanner(text, kind) {
+    var box = el('v2-sec-state');
+    if (!box) { return; }
+    box.hidden = !text;
+    box.className = 'banner' + (kind === 'warn' ? ' banner-warn' : '');
+    box.textContent = text || '';
+  }
+
+  function loadSecrets() {
+    if (!api) { return Promise.resolve(); }
+    secBanner('');
+    return api.json('GET', '/api/secrets')
+      .then(function (body) { renderSecrets(normalizeSecrets(body)); })
+      .catch(function (e) {
+        renderSecrets([]);
+        secBanner('Secret 卷不可用：' + (e.message || e), 'warn');
+      });
+  }
+
+  function createSecret() {
+    var name = window.prompt('Secret 名称（字母/数字/-/_）');
+    if (!name) { return; }
+    api.json('POST', '/api/secrets', {
+      body: new TextEncoder().encode(JSON.stringify({ name: name.trim(), mode: 'random', origin: 'webui' })),
+      contentType: 'application/json'
+    }).then(function (res) {
+      if (res && res.value) {
+        window.prompt('密钥只显示一次，请立即备份（Ctrl+C 复制）', res.value);
+      }
+      if (window.v2toast) { window.v2toast('ok', '已创建 secret ' + (res.name || name)); }
+      loadSecrets();
+    }).catch(function (e) { secBanner('创建失败：' + (e.message || e), 'warn'); });
+  }
+
+  function deleteSecret(name) {
+    if (!window.confirm('删除 secret ' + name + '？删除后不可恢复。')) { return; }
+    api.json('DELETE', '/api/secrets/' + encodeURIComponent(name))
+      .then(function () {
+        if (window.v2toast) { window.v2toast('ok', '已删除 ' + name); }
+        loadSecrets();
+      })
+      .catch(function (e) { secBanner('删除失败：' + (e.message || e), 'warn'); });
+  }
+
+  function deleteUserVolume(name) {
+    if (!window.confirm('删除用户卷 ' + name + '？（卷内文件将一并移除）')) { return; }
+    api.json('DELETE', '/api/volumes/user?name=' + encodeURIComponent(name))
+      .then(function () {
+        if (window.v2toast) { window.v2toast('ok', '已删除卷 ' + name); }
+        load(); loadUser();
+      })
+      .catch(function (e) { banner('删除卷失败：' + (e.message || e), 'warn'); });
+  }
+
+  function createUserVolume() {
+    var name = window.prompt('卷名称（字母/数字/-/_）');
+    if (!name) { return; }
+    var type = window.prompt('类型（如 webdav / baidupcs）', 'webdav');
+    if (!type) { return; }
+    var cap = window.prompt('容量字节（0 = 不限）', '0');
+    if (cap === null) { return; }
+    var extra = window.prompt('extra JSON（可选，例如 {"url":"https://example.com/dav"}）', '{}');
+    if (extra === null) { return; }
+    var body = { name: name.trim(), type: type.trim(), capacity: Math.max(0, Number(cap) || 0) };
+    try { body.extra = extra.trim() ? JSON.parse(extra) : {}; } catch (e) { banner('extra 不是合法 JSON', 'warn'); return; }
+    api.json('POST', '/api/volumes/user', {
+      body: new TextEncoder().encode(JSON.stringify(body)),
+      contentType: 'application/json'
+    }).then(function () {
+      if (window.v2toast) { window.v2toast('ok', '已创建卷 ' + name); }
+      load(); loadUser();
+    }).catch(function (e) { banner('创建卷失败：' + (e.message || e), 'warn'); });
+  }
+
   var inited = false;
 
   function init() {
-    if (inited) { load(); loadUser(); return; }
+    if (inited) { load(); loadUser(); loadSecrets(); return; }
     inited = true;
     var r = el('v2-vl-refresh'); if (r) { r.addEventListener('click', function () { refresh(''); }); }
     var ur = el('v2-vl-user-refresh'); if (ur) { ur.addEventListener('click', loadUser); }
-    if (el('v2-vl-body')) { load(); loadUser(); }
+    var sr = el('v2-sec-refresh'); if (sr) { sr.addEventListener('click', loadSecrets); }
+    var sc = el('v2-sec-create'); if (sc) { sc.addEventListener('click', createSecret); }
+    var vc = el('v2-vl-create'); if (vc) { vc.addEventListener('click', createUserVolume); }
+    if (el('v2-vl-body')) { load(); loadUser(); loadSecrets(); }
   }
 
   if (typeof window !== 'undefined') { window.v2volumes = { init: init, load: load, loadUser: loadUser, normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes }; }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes };
+    module.exports = { normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes, normalizeSecrets: normalizeSecrets };
   }
 })();
