@@ -161,9 +161,12 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		ShareRatio:  cfg.Pikpak.Hybrid.ShareRatio,
 		Concurrency: cfg.Pikpak.Hybrid.Concurrency,
 		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
-		Logger:      slog.Default(),
-		Metrics:     &pikpak.HybridMetrics{},
-		GCIDStats:   pikpakGCIDStats,
+		// 云端下载（含受损文件修复）路径：GCID 失配时清续传状态从零重下一次
+		// （2026-11-25 事故：跨重启续传被污染 ⇒ 永远拼不出正确内容）。
+		ResetOnGCIDMismatch: true,
+		Logger:              slog.Default(),
+		Metrics:             &pikpak.HybridMetrics{},
+		GCIDStats:           pikpakGCIDStats,
 		// 多账号分片（round-12）：非 nil 时账号区 chunk 分摊到多账号并行（转存串行+下载并行）
 		AccountPool: pool,
 		// Fallback：匿名分享路径整体失败时降级到旧 PikpakDownloader 完整账号下载
