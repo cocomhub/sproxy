@@ -439,7 +439,40 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("单卷刷新未回显: %v", err)
 	}
+	// 未完成上传续传提示：写入 pending 记录 → 刷新 → 提示可见 → 忽略后清除。
+	if _, err := page.Evaluate(`() => { localStorage.setItem('sproxy_v2_pending_upload', JSON.stringify({
+		name: 'v2demo/big.bin', base: 'big.bin', size: 1048576, mtime: 1700000000000,
+		dir: 'v2demo', uploadID: 'pending-demo', total: 1048576, received: 524288, ts: Date.now()
+	})); }`, nil); err != nil {
+		t.Fatalf("写入 pending 记录: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files'; }", nil); err != nil {
+		t.Fatalf("切到文件页: %v", err)
+	}
+	if _, err := page.Reload(); err != nil {
+		t.Fatalf("刷新页面: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-pending'); return b && !b.hidden && b.textContent.includes('big.bin'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("未完成上传提示未显示: %v", err)
+	}
+	if err := page.Locator("#v2-pending-ignore").Click(); err != nil {
+		t.Fatalf("忽略未完成上传: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-pending'); return b && b.hidden; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("忽略后提示未隐藏: %v", err)
+	}
+
 	// Secret 卷：可用则创建随机密钥 → 列表出现 → 删除；未装配时展示明确提示（二者必居其一）。
+	if _, err := page.Evaluate("() => { location.hash = '#/console/volumes'; }", nil); err != nil {
+		t.Fatalf("回到卷分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=volumes]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("卷分区未显示: %v", err)
+	}
 	if _, err := page.WaitForFunction(
 		"() => { const b = document.querySelector('#v2-sec-state'); const e = document.querySelector('#v2-sec-empty'); const t = document.querySelector('#v2-sec-body'); return (b && !b.hidden) || (e && !e.hidden) || (t && t.children.length > 0); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
