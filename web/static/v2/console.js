@@ -209,6 +209,7 @@
     if (name === 'verify' && window.v2verify) { window.v2verify.init(); }
     if (name === 'access' && window.v2access) { window.v2access.init(); }
     if (name === 'volumes' && window.v2volumes) { window.v2volumes.init(); }
+    if (name === 'shares' && window.v2shares) { window.v2shares.init(); }
     if (name === 'mesh' && window.v2mesh) { window.v2mesh.initMesh(); }
     if (name === 'hub' && window.v2mesh) { window.v2mesh.initHub(); }
   }
@@ -230,7 +231,7 @@
     if (!r) { return true; }
     return size >= r[0] && size < r[1];
   }
-  var CS_ORDER = ['overview', 'tasks', 'issues', 'audit', 'config', 'notify', 'verify', 'access', 'volumes', 'mesh', 'hub'];
+  var CS_ORDER = ['overview', 'tasks', 'issues', 'audit', 'config', 'notify', 'verify', 'access', 'volumes', 'mesh', 'hub', 'shares'];
 
   function taskVolume(t) { return (t.transfer && t.transfer.volume) || ''; }
 

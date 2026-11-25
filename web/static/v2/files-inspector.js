@@ -192,7 +192,20 @@
           var meta = document.createElement('div');
           meta.className = 'muted';
           meta.style.fontSize = '11.5px';
-          meta.textContent = '有效期 ' + (s.expire_at || s.expires_at || '—') + ' · 下载 ' + (s.downloads || 0);
+          var dl = (s.downloads || 0) + (s.max_downloads > 0 ? '/' + s.max_downloads : '');
+          meta.textContent = '有效期 ' + (s.expire_at || s.expires_at || '—') + ' · 下载 ' + dl +
+            (s.one_time ? ' · 一次性' : '') + (s.expired ? ' · 已失效' : '');
+          var copy = document.createElement('button');
+          copy.className = 'btn btn-sm btn-ghost';
+          copy.type = 'button';
+          copy.textContent = '复制';
+          copy.addEventListener('click', function () {
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(link).then(function () {
+                if (window.v2toast) { window.v2toast('ok', '链接已复制'); }
+              }).catch(function () { if (window.v2toast) { window.v2toast('warn', link); } });
+            } else if (window.v2toast) { window.v2toast('warn', link); }
+          });
           var revoke = document.createElement('button');
           revoke.className = 'btn btn-sm btn-ghost';
           revoke.type = 'button';
@@ -202,8 +215,23 @@
               .then(function () { if (window.v2toast) { window.v2toast('ok', '已撤销分享'); } state.loaded.share = false; loadShares(); })
               .catch(function (e) { if (window.v2toast) { window.v2toast('bad', '撤销失败：' + e.message); } });
           });
+          if (s.readonly) {
+            var ro = document.createElement('span');
+            ro.className = 'pill pill-mute';
+            ro.textContent = '只读';
+            meta.appendChild(document.createTextNode(' '));
+            meta.appendChild(ro);
+          }
+          if (s.watermark) {
+            var wm = document.createElement('span');
+            wm.className = 'pill pill-info';
+            wm.textContent = '水印';
+            meta.appendChild(document.createTextNode(' '));
+            meta.appendChild(wm);
+          }
           row.appendChild(a);
           row.appendChild(meta);
+          row.appendChild(copy);
           row.appendChild(revoke);
           box.appendChild(row);
         });
@@ -215,13 +243,17 @@
   }
 
   function createShare() {
-    var ttl = Number(el('v2-share-ttl').value) || 0;
+    var ttlDays = Number(el('v2-share-ttl').value) || 0;
     var maxDl = Number(el('v2-share-max').value) || 0;
     var one = el('v2-share-one').checked;
+    var pw = ((el('v2-share-password') || {}).value || '').trim();
     var body = { filename: relPath() };
-    if (ttl) { body.ttl = ttl; }
+    // **口径修正**：服务端接受「纯数字 = 天数」，但显式传 Go duration 更无歧义（旧实现只认 duration，
+    // 传数字会被当成解析失败——现在两边都支持，这里仍用显式单位）。
+    if (ttlDays) { body.ttl = ttlDays + 'd'; }
     if (maxDl) { body.max_downloads = maxDl; }
     if (one) { body.one_time = true; }
+    if (pw) { body.password = pw; }
     api.json('POST', '/api/shares', {
       body: new TextEncoder().encode(JSON.stringify(body)),
       contentType: 'application/json'

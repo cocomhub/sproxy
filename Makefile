@@ -302,6 +302,8 @@ web-test:
 	@node --check web/static/v2/cloud-ops.test.js
 	@node --check web/static/v2/settings.js
 	@node --check web/static/v2/mesh-console.js
+	@node --check web/static/v2/shares-console.js
+	@node --check web/static/v2/shares-console.test.js
 	@node --check web/static/v2/i18n.js
 	@node --check web/static/v2/i18n.test.js
 	@node --check web/static/v2/pending-upload.js
@@ -348,6 +350,7 @@ web-test:
 	node --test web/static/v2/i18n.test.js
 	node --test web/static/v2/pending-upload.test.js
 	node --test web/static/v2/chain-download.test.js
+	node --test web/static/v2/shares-console.test.js
 	node --test web/static/v2/shell.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js

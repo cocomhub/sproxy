@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,11 +54,17 @@ func (h *Handlers) createShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 访问口令：只存 scrypt 哈希（明文不落盘、不入审计）。
+	pwHash, pwErr := share.HashSharePassword(req.Password)
+	if pwErr != nil {
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "口令加密失败"}, http.StatusInternalServerError)
+		return
+	}
 	link, err := h.shareStore.Create(share.Spec{
 		Filename: req.Filename, TenantID: src.TenantID, Rel: src.Rel, Volume: src.Volume,
 		Owner: ActorFrom(r.Context()),
 		TTL:   ttl, MaxDownloads: req.MaxDownloads, OneTime: req.OneTime, ReadOnly: req.ReadOnly,
-		WatermarkSeed: req.Watermark,
+		WatermarkSeed: req.Watermark, PasswordHash: pwHash,
 	})
 	if err != nil {
 		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "创建分享链接失败"}, http.StatusInternalServerError)
@@ -171,21 +178,52 @@ func (h *Handlers) validateShareSourceFile(w http.ResponseWriter, src *ownerSour
 }
 
 // resolveShareTTL 解析并限制分享 TTL：缺省 24h，超过 share.MaxShareTTL 取上限，非法返回错误回包。
+//
+// **接受的写法**（缺陷修复 2026-11-25）：
+//   - Go duration：`90m` / `24h` / `168h`；
+//   - `d` / `w` 后缀：`7d` / `2w`（Go 不认，人类最常用）；
+//   - **纯数字 = 天数**：`7` —— Web UI「有效期」下拉传的就是它；旧实现只认 duration
+//     ⇒ `{"ttl":7}` 直接被 JSON 解码拒绝（"请求体解析失败"），v2 创建分享从未成功过。
 func resolveShareTTL(w http.ResponseWriter, ttlStr string) (time.Duration, bool) {
 	ttl := 24 * time.Hour
-	if ttlStr != "" {
-		d, ttlErr := time.ParseDuration(ttlStr)
-		if ttlErr != nil {
-			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "无效的 TTL 格式"}, http.StatusBadRequest)
-			return 0, false
-		}
-		if d <= 0 {
-			sendJSONResponse(w, share.CreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
-			return 0, false
-		}
-		ttl = min(d, share.MaxShareTTL)
+	s := strings.TrimSpace(ttlStr)
+	if s == "" {
+		return ttl, true
 	}
-	return ttl, true
+	d, ok := parseShareTTL(s)
+	if !ok {
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "无效的 TTL 格式（支持 90m/24h/7d/2w/7）"}, http.StatusBadRequest)
+		return 0, false
+	}
+	if d <= 0 {
+		sendJSONResponse(w, share.CreateResponse{Success: false, Message: "TTL 必须大于 0"}, http.StatusBadRequest)
+		return 0, false
+	}
+	return min(d, share.MaxShareTTL), true
+}
+
+// parseShareTTL 把「Go duration / d / w / 纯数字天」统一解析为正时长。
+func parseShareTTL(s string) (time.Duration, bool) {
+	if d, err := time.ParseDuration(s); err == nil {
+		return d, true
+	}
+	unit := s[len(s)-1]
+	body := s[:len(s)-1]
+	switch unit {
+	case 'd', 'D':
+		if n, err := strconv.ParseFloat(body, 64); err == nil {
+			return time.Duration(n * float64(24*time.Hour)), true
+		}
+	case 'w', 'W':
+		if n, err := strconv.ParseFloat(body, 64); err == nil {
+			return time.Duration(n * float64(7*24*time.Hour)), true
+		}
+	}
+	// 纯数字 = 天（UI 下拉语义）。
+	if n, err := strconv.ParseFloat(s, 64); err == nil {
+		return time.Duration(n * float64(24*time.Hour)), true
+	}
+	return 0, false
 }
 
 // accessShareHandler 处理 GET /s/{token}，直接流式传输文件内容。
@@ -239,6 +277,12 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
 		return nil, nil, false
 	}
+	// 访问口令（分享密码）：有口令保护时必须提供且正确，**未通过不得消费计数**。
+	// 口令从 `?password=` 或 `X-Share-Password` 头读取（后者避免落入访问日志/Referer）。
+	if !share.VerifySharePassword(link.PasswordHash, sharePasswordFromRequest(r)) {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享口令错误或缺失"}, http.StatusUnauthorized)
+		return nil, nil, false
+	}
 	// 纵深防御：Rel 是存储字段，拒绝越桶引用其它功能桶。
 	if !strings.HasPrefix(link.Rel, "user/") {
 		sendJSONResponse(w, UploadResponse{Success: false, Message: msgShareInvalid}, http.StatusNotFound)
@@ -257,6 +301,15 @@ func (h *Handlers) resolveShareAccess(w http.ResponseWriter, r *http.Request, to
 		return nil, nil, false
 	}
 	return src, link, true
+}
+
+// sharePasswordFromRequest 取访问口令：优先 `X-Share-Password` 头（不进 URL/日志），
+// 其次 `?password=`（兼容文档既有约定与浏览器直达）。
+func sharePasswordFromRequest(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Share-Password")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(r.URL.Query().Get("password"))
 }
 
 // resolveShareAccessSource 解析分享源的**卷感知**定位：
@@ -317,7 +370,11 @@ func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
 		MaxDownloads int    `json:"max_downloads"`
 		Downloads    int    `json:"downloads"`
 		OneTime      bool   `json:"one_time"`
-		Expired      bool   `json:"expired"`
+		ReadOnly     bool   `json:"readonly,omitempty"`
+		Watermark    string `json:"watermark,omitempty"`
+		// PasswordProtected 只暴露「有无口令」，**绝不暴露哈希**（列表是运维视图）。
+		PasswordProtected bool `json:"password_protected,omitempty"`
+		Expired           bool `json:"expired"`
 	}
 
 	now := time.Now()
@@ -325,15 +382,18 @@ func (h *Handlers) listSharesHandler(w http.ResponseWriter, r *http.Request) {
 	for _, l := range links {
 		expired := now.After(l.ExpiresAt) || (l.MaxDownloads > 0 && l.Downloads >= l.MaxDownloads)
 		items = append(items, shareItem{
-			Token:        l.Token,
-			Filename:     l.Filename,
-			Volume:       l.Volume,
-			CreatedAt:    l.CreatedAt.Format(time.RFC3339),
-			ExpiresAt:    l.ExpiresAt.Format(time.RFC3339),
-			MaxDownloads: l.MaxDownloads,
-			Downloads:    l.Downloads,
-			OneTime:      l.OneTime,
-			Expired:      expired,
+			Token:             l.Token,
+			Filename:          l.Filename,
+			Volume:            l.Volume,
+			CreatedAt:         l.CreatedAt.Format(time.RFC3339),
+			ExpiresAt:         l.ExpiresAt.Format(time.RFC3339),
+			MaxDownloads:      l.MaxDownloads,
+			Downloads:         l.Downloads,
+			OneTime:           l.OneTime,
+			ReadOnly:          l.ReadOnly,
+			Watermark:         l.WatermarkSeed,
+			PasswordProtected: l.PasswordHash != "",
+			Expired:           expired,
 		})
 	}
 
@@ -369,4 +429,6 @@ type shareCreateRequest struct {
 	OneTime      bool   `json:"one_time"`
 	ReadOnly     bool   `json:"readonly"`
 	Watermark    string `json:"watermark"`
+	// Password 是访问口令（明文，仅本请求内使用；服务端只存 scrypt 哈希）。
+	Password string `json:"password"`
 }

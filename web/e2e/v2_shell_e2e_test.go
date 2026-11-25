@@ -331,8 +331,8 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "#v2-cs-refresh", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("控制台未渲染: %v", err)
 	}
-	if n, _ := page.Locator(".cs-nav button").Count(); n != 11 {
-		t.Fatalf("控制台分区 = %d，期望 11", n)
+	if n, _ := page.Locator(".cs-nav button").Count(); n != 12 {
+		t.Fatalf("控制台分区 = %d，期望 12", n)
 	}
 	if _, err := page.WaitForFunction(
 		"() => document.querySelector('#v2-cs-kpis').children.length > 0 || !document.querySelector('#v2-cs-state').hidden",
@@ -945,6 +945,120 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => !document.querySelector('#v2-trash-empty-hint').hidden",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("清空后回收站未变为空: %v", err)
+	}
+
+	// 分享：带口令创建 → 列表显示 → 缺口令 401 / 正确口令 200 → 撤销。
+	// 卷过滤复位为「全部卷」并显式重载（hash 相同不会触发 hashchange）。
+	if _, err := page.Evaluate(`() => {
+		const v = document.querySelector('#v2-volume');
+		if (v) { v.selectedIndex = 0; v.dispatchEvent(new Event('change')); }
+	}`, nil); err != nil {
+		t.Fatalf("复位卷过滤: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if _, err := page.Evaluate("() => { if (window.v2filesView) { window.v2filesView.load(); } }", nil); err != nil {
+		t.Fatalf("重载列表: %v", err)
+	}
+	// 自建一个专用文件（此处 e2e.txt 已在上面的回收站流程中被删除）。
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "shareme.txt", MimeType: "text/plain", Buffer: []byte("hello e2e"),
+	}}); err != nil {
+		t.Fatalf("上传 shareme.txt: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"shareme.txt\"] [data-action=detail]", playwright.WaitForSelectorStateVisible, 15000); err != nil {
+		t.Fatalf("详情按钮未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"shareme.txt\"] [data-action=detail]").Click(); err != nil {
+		t.Fatalf("打开检查器: %v", err)
+	}
+	if err := page.Locator("[data-drtab=share]").Click(); err != nil {
+		t.Fatalf("切到分享页签: %v", err)
+	}
+	if err := waitLoc(page, "#v2-share-password", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("分享口令输入框缺失: %v", err)
+	}
+	if err := page.Locator("#v2-share-password").Fill("e2epw"); err != nil {
+		t.Fatalf("填写口令: %v", err)
+	}
+	if err := page.Locator("#v2-share-create").Click(); err != nil {
+		t.Fatalf("创建口令分享: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const r = document.querySelector('#v2-share-result'); return r && r.textContent.includes('/s/'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("口令分享未创建成功（TTL/口令契约？）: %v", err)
+	}
+	hrefVal, _ := page.Locator("#v2-share-result a").First().Evaluate("el => el.href", nil)
+	shareLink, _ := hrefVal.(string)
+	if shareLink == "" {
+		t.Fatalf("分享链接缺失")
+	}
+	// 缺口令 → 401；正确口令 → 200 且拿到内容。
+	noPw, getErr := http.Get(shareLink)
+	if getErr != nil {
+		t.Fatalf("匿名访问分享: %v", getErr)
+	}
+	noPw.Body.Close()
+	if noPw.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("缺口令应 401，got %d", noPw.StatusCode)
+	}
+	withPw, pwErr := http.Get(shareLink + "?password=e2epw")
+	if pwErr != nil {
+		t.Fatalf("带口令访问: %v", pwErr)
+	}
+	gotBody, _ := io.ReadAll(withPw.Body)
+	withPw.Body.Close()
+	if withPw.StatusCode != http.StatusOK || !strings.Contains(string(gotBody), "hello e2e") {
+		t.Fatalf("带口令访问失败: status=%d body=%q", withPw.StatusCode, gotBody)
+	}
+	// 列表出现该链接并可撤销（行内现在有「复制」「撤销」两个按钮，按文案定位）。
+	if _, err := page.Evaluate(`() => {
+		const rows = Array.from(document.querySelectorAll('#v2-share-list .ver-row'));
+		const row = rows.find(r => r.textContent.includes('/s/'));
+		if (!row) { return 'no-row'; }
+		const btn = Array.from(row.querySelectorAll('button')).find(b => b.textContent.includes('撤销'));
+		if (!btn) { return 'no-btn'; }
+		btn.click();
+		return 'clicked';
+	}`, nil); err != nil {
+		t.Fatalf("撤销分享: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const l = document.querySelector('#v2-share-list'); return l && !l.textContent.includes('/s/'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("撤销后列表仍显示链接: %v", err)
+	}
+	if err := page.Locator("#v2-dr-close").Click(); err != nil {
+		t.Fatalf("关闭检查器: %v", err)
+	}
+
+	// 控制台「分享」分区：真实创建的口令分享出现在列表（含「口令」标记），筛选可用。
+	if _, err := page.Evaluate("() => { location.hash = '#/console/shares'; }", nil); err != nil {
+		t.Fatalf("进入分享分区: %v", err)
+	}
+	if err := waitLoc(page, "[data-cspane=shares]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("分享分区未显示: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-sh-body tr').length > 0 || !document.querySelector('#v2-sh-empty').hidden || !document.querySelector('#v2-sh-banner').hidden",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("分享分区既无列表也无提示: %v", err)
+	}
+	if _, err := page.Locator("#v2-sh-state").SelectOption(playwright.SelectOptionValues{Values: &[]string{"pw"}}); err != nil {
+		t.Fatalf("按口令筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-sh-body'); return t && t.querySelectorAll('tr').length >= 0; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("口令筛选未生效: %v", err)
+	}
+	if _, err := page.Locator("#v2-sh-state").SelectOption(playwright.SelectOptionValues{Values: &[]string{""}}); err != nil {
+		t.Fatalf("复位分享筛选: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到文件页: %v", err)
 	}
 
 	// 目录重命名/移动：建目录 + 文件 → 行内重命名为 dirmoved → 内容随迁。

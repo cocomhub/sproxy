@@ -48,6 +48,8 @@ type Spec struct {
 	OneTime       bool
 	ReadOnly      bool
 	WatermarkSeed string
+	// PasswordHash 是访问口令哈希（空 = 无口令；明文不落库）。
+	PasswordHash string
 }
 
 // StoreIface 是分享存储的业务接口（*Store 本地形态与 *StateBackedStore

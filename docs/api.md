@@ -632,20 +632,33 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### POST /api/shares
 
-创建分享链接。请求体：`{filename, password?, expire_in?}`。
+创建分享链接。请求体：`{filename, volume?, ttl?, max_downloads?, one_time?, readonly?, watermark?, password?}`。
 
-- `filename`：要分享的文件相对路径；`password` 可选访问密码；`expire_in` 可选过期时长（Go duration 字符串）。
-- 响应：`{token, filename, password?, expire_at?, ...}`（分享令牌）。
+- `filename`：要分享的**文件**相对路径（目录不支持分享，服务端 400）。
+- `volume`：源卷名（可选；缺省自动定位，多卷同名时建议显式指定）。
+- `ttl`：有效期。**支持三种写法**：Go duration（`24h`/`90m`）、`d`/`w` 后缀（`7d`/`2w`）、
+  **纯数字 = 天数**（`7`，Web UI 下拉语义）。缺省 24h，超过 30 天夹紧到 30 天。非法 ⇒ 400。
+- `max_downloads`：下载次数上限（0 = 不限）；`one_time`：下载一次后失效。
+- `password`：**访问口令（可选）**。服务端只存 `scrypt` 哈希（随机盐、N=2^15），
+  明文不落盘、不入审计；访问时校验，**未通过不消耗下载计数**。
+- `readonly` / `watermark`：只读标志（响应头 `X-Share-ReadOnly`）与水印种子（`X-Share-Watermark`）。
+- 响应：`{success, token, filename, created_at, expires_at, ...}`。
 - **持久化**：分享链接落 `<默认卷根>/anonymous/meta/share/<token>.json`（原子写，重启恢复未过期链接；
   一次性/计数/撤销/过期同步删文件；纯内存形态 = 未装配持久化目录时）。
 
 ### GET /s/{token}
 
-通过分享 token 访问文件（无需认证）。`password` 分享需在 query 携带 `?password=`。
+通过分享 token 访问文件（无需认证）。
+
+- 有口令的分享必须提供口令：优先 `X-Share-Password` 请求头（**推荐**，不进 URL/访问日志/Referer），
+  也支持 `?password=`（兼容浏览器直达）。缺失或错误 ⇒ **401**，且**不消耗下载计数**。
+- 分享文件已删除/移走/卷 ACL 收紧 ⇒ 410；一次性/超额 ⇒ 409。
 
 ### GET /api/shares
 
-列出当前 owner 的所有分享链接。
+列出当前 owner 的所有分享链接（`{shares: [...]}`）。每项含 `token`/`filename`/`volume`/`created_at`/
+`expires_at`/`max_downloads`/`downloads`/`one_time`/`readonly`/`watermark`/`expired` 与
+`password_protected`（**只暴露有无口令，绝不返回哈希**）。
 
 ### DELETE /api/shares/{token}
 
