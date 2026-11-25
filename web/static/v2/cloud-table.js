@@ -106,6 +106,9 @@
       if (o.onDetail) {
         actTd.appendChild(actionBtn('详情', function () { o.onDetail(t); }));
       }
+      if (o.onPreview && t.status === 'completed') {
+        actTd.appendChild(actionBtn('预览', function () { o.onPreview(t); }));
+      }
       if (t.status === 'pending' || t.status === 'downloading') {
         actTd.appendChild(actionBtn('取消', function () { fire('cancel'); }));
       }

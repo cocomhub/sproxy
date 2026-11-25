@@ -71,7 +71,12 @@
     if (!body) { return; }
     var rows = state.tasks.filter(matchFilter);
     window.v2cloudTable.render(body, rows, {
-      onAction: function (kind, t) { taskAction(kind, t); }
+      onAction: function (kind, t) { taskAction(kind, t); },
+      onPreview: function (t) {
+        if (window.v2preview && window.v2preview.openCloudTask) {
+          window.v2preview.openCloudTask(t.id, t.filename);
+        }
+      }
     });
     var empty = el('v2-tf-empty');
     if (empty) { empty.hidden = rows.length > 0; }

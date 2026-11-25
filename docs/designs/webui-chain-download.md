@@ -66,7 +66,7 @@
 | --- | --- | --- |
 | 重试下载 | `POST /api/cloud/tasks/retry`（`transfer_volume` + `transfer_path`，或 `url`） | 与 CLI 同一内核；失败原因由服务端重新登记 |
 | 打包已完成项 | 若能定位到所属组（detail 内含 `task=`），用组归档（不带 `require_all`）；否则对该单任务归档 | 允许"先拿到已完成的部分" |
-| 预览已完成文件 | 任务 completed 时用 cloud 桶文件预览（`kind=cloud_task` 下载路径） | 预览完可直接下载 |
+| 预览已完成文件 | 任务 completed 时直接打开预览浮层（`kind=cloud_task` 下载路径，图片/文本/可播视频） | 预览完可直接下载；传输页与事项分区都可触发 |
 
 事项行的「解决」仍保留（人工写说明闭环，写审计）。
 
@@ -82,7 +82,7 @@
 | --- | --- |
 | `require_all` 全有语义 | Go 单测：混合状态组 ⇒ 409 + pending 列表，且 archive 桶无新文件；全 completed ⇒ 200 |
 | 链式下载主流程 | e2e：两个不可达 URL 建组 ⇒ 组行失败数=2 ⇒ 「重试失败项」触发真实 retry ⇒ 「打包已完成」在不满足时被 409 拒绝并回显 |
-| 失败转人工三动作 | e2e：事项行按钮可见、点击后发起对应请求（预览在有 completed 任务时可用） |
+| 失败转人工三动作 | e2e：事项行按钮可见；预览路径由传输页「预览」按钮实测（真实完成了的 loopback 云任务 → 预览浮层显示正文） |
 | Hub 踢节点 | e2e：admin 场景按钮可见 + 二次确认（测试服务端无 hub 时按钮隐藏，断言二者其一） |
 | 零回归 | `make web-test`、`go test ./pkg/server/cloudtasks ./web/e2e -run TestV2Shell`、archcheck、golangci-lint |
 

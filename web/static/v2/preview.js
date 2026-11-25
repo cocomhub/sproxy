@@ -73,7 +73,7 @@
         .then(api.ensureOk)
         .then(function (resp) { return resp.text(); })
         .then(function (body) {
-          text.textContent = body.length > TEXT_LIMIT ? body.slice(0, TEXT_LIMIT) + '\n…（已截断）' : body;
+          text.textContent = body.length > TEXT_LIMIT ? body.slice(0, TEXT_LIMIT) + String.fromCharCode(10) + '…（已截断）' : body;
         })
         .catch(function (e) { text.textContent = '读取失败：' + (e.message || e); });
       return;
@@ -82,6 +82,54 @@
     msg.textContent = (window.isBrowserPlayable && !window.isBrowserPlayable(name) && /\.(mp4|mkv|avi|mov|webm|wmv|flv|rmvb)$/i.test(name))
       ? '该视频格式浏览器不支持播放，请下载后用本地播放器打开。'
       : '该类型暂不支持在线预览，请下载查看。';
+  }
+
+  /**
+   * 预览云任务产物（cloud 桶 `<taskID>/<filename>`，需 `kind=cloud_task` 由服务端按 owner 拼接）。
+   * 与 open() 共用浮层与判定逻辑；差异只在 URL/读取路径都带 kind=cloud_task。
+   */
+  function openCloudTask(taskID, filename) {
+    if (!taskID || !filename) { return; }
+    var rel = String(taskID) + '/' + String(filename);
+    var name = String(filename);
+    state.name = name;
+    syncCredGlobals();
+    resetStage();
+    el('v2-pv-title').textContent = name;
+    el('v2-pv-meta').textContent = '云端任务 · ' + rel;
+    var overlay = el('v2-preview');
+    overlay.hidden = false;
+    document.body.classList.add('pv-open');
+
+    var img = el('v2-pv-img'), video = el('v2-pv-video'), text = el('v2-pv-text'), msg = el('v2-pv-msg');
+    var type = ext(name);
+    var imageType = ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.avif'].indexOf(type) >= 0;
+    var textType = ['.txt', '.md', '.json', '.log', '.yaml', '.yml', '.srt', '.csv', '.xml'].indexOf(type) >= 0;
+    var baseQuery = 'filename=' + enc(rel) + '&kind=cloud_task';
+
+    if (imageType || (window.isBrowserPlayable && window.isBrowserPlayable(name))) {
+      window.withUrlSig(baseQuery).then(function (signed) {
+        var url = '/download?' + signed;
+        state.url = url;
+        if (imageType) { img.src = url; img.hidden = false; return; }
+        video.src = url; video.hidden = false; video.play().catch(function () { /* 自动播放被拒 */ });
+      }).catch(function (e) { msg.hidden = false; msg.textContent = '无法生成预览链接：' + (e.message || e); });
+      return;
+    }
+    if (textType) {
+      text.textContent = '加载中…';
+      text.hidden = false;
+      api.request('GET', '/download?' + baseQuery)
+        .then(api.ensureOk)
+        .then(function (resp) { return resp.text(); })
+        .then(function (body) {
+          text.textContent = body.length > TEXT_LIMIT ? body.slice(0, TEXT_LIMIT) + String.fromCharCode(10) + '…（已截断）' : body;
+        })
+        .catch(function (e) { text.textContent = '读取失败：' + (e.message || e); });
+      return;
+    }
+    msg.hidden = false;
+    msg.textContent = '该类型暂不支持在线预览，请下载查看。';
   }
 
   function close() {
@@ -110,7 +158,8 @@
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
   }
 
-  window.v2preview = { open: open, close: close, download: download };
+  window.v2preview = {
+    openCloudTask: openCloudTask, open: open, close: close, download: download };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
