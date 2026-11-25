@@ -334,6 +334,27 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
 		t.Fatalf("分组过滤后任务为空: %v", err)
 	}
+	// 体积筛选：不可达任务 total_size=-1 ⇒ 归入「未知大小」；大体积区间应为空。
+	if _, err := page.Locator("#v2-cs-tasks-size").SelectOption(playwright.SelectOptionValues{Values: &[]string{"unknown"}}); err != nil {
+		t.Fatalf("按未知大小筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("未知大小筛选后无任务: %v", err)
+	}
+	if _, err := page.Locator("#v2-cs-tasks-size").SelectOption(playwright.SelectOptionValues{Values: &[]string{"gt10g"}}); err != nil {
+		t.Fatalf("按大体积筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr').length === 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("大体积筛选后仍有任务: %v", err)
+	}
+	if _, err := page.Locator("#v2-cs-tasks-size").SelectOption(playwright.SelectOptionValues{Values: &[]string{""}}); err != nil {
+		t.Fatalf("复位体积筛选: %v", err)
+	}
+
 	// 深链：hash 携带筛选参数，刷新后自动恢复分区与筛选。
 	if hash, _ := page.Evaluate("() => location.hash", nil); hash == nil || !strings.Contains(hash.(string), "q=nope") {
 		t.Fatalf("任务筛选未写入 hash: %v", hash)

@@ -86,7 +86,7 @@
 | --- | --- | --- | --- | --- | --- |
 | F1 | 汇总 + 类别 chips（点击按类别重试） | `cloud-tasks.js` | 汇总条 + chips | 🟢 VERIFIED | ｜ 类别 chips：传输页状态筛选（服务端无 category 字段） ｜ 以「状态 chips」承载（服务端无 category 字段），与 D1 同一实现 |
 | F2 | 按卷分组 chips（点击过滤） | `ctGroupByVolume` | 分组 chips | 🟢 VERIFIED |  ｜ 卷分组 chips；e2e 未指定卷 |
-| F3 | 列表 + 筛选（卷/类别/关键字/体积） | `cloud-tasks.js` 筛选 | 筛选栏 | 🟢 VERIFIED | 组合过滤 ｜ 卷/状态/关键字筛选；体积筛选未做（见备注） |
+| F3 | 列表 + 筛选（卷/类别/关键字/体积） | `cloud-tasks.js` 筛选 | 筛选栏 | 🟢 VERIFIED | 卷/类别/关键字/体积（未知、<100MiB、100MiB-1GiB、1-10GiB、>10GiB）筛选；e2e 未知与大体积区间 |
 | F4 | 排序 / 分页 | 同上 | 表格排序 + 分页 | 🟢 VERIFIED |  ｜ 排序 + 分页；e2e 深链 |
 | F5 | 任务详情 | 行内展开/详情 | 抽屉 | 🟢 VERIFIED | 字段完整 ｜ 详情 JSON；e2e |
 | F6 | 单条重试 / 取消 | 行操作 | 行操作 | 🟢 VERIFIED | 重试自动换源 ｜ 单条取消/重试/删除 |
