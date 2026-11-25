@@ -20,6 +20,7 @@
 
 | 行为 | 说明 | 锁定测试 |
 |---|---|---|
+| **gateway 转发器**（URL 拼接式，如 `http://sr.suixi.space:18081/`）：目标 `https://host/path` → `<forwarder>/host/path`；**不是**标准代理（不支持 CONNECT） | `pkg/netutil.GatewayForwarder` + `NewGatewayHTTPClient`；**默认关闭**（`pikpak.gateway_proxy` 为空 = 直连）。2026-11-25 实测：本机直连 keepshare/pikpak ~4.2s/请求，经转发器 ~0.5s（8 倍）；但该转发器当前不可用，故不默认启用 | `TestGatewayForwarder_Rewrite` / `TestGatewayHTTPClient_RewritesAndPreservesQuery` / `TestGatewayHTTPClient_FollowsRedirectThroughGateway` |
 | captcha 签名 = `WEB_CLIENT_ID+VERSION+PACKAGE+deviceId+ts` 逐轮 MD5 × 15 盐 → `"1."+32hex` | 算法与 gopeed 扩展 `TeamBreakerr@gopeed-extension-pikpak/index.js` **完全一致**（纯 Go 移植，crypto/md5） | `TestCaptchaSign_Deterministic` / `TestCaptchaSign_DiffersByInput` |
 | `captcha/init` 的 action 需 **`GET:/drive/v1/share`**（含路径） | action 错误 → HTTP 400 `invalid action`（实测踩坑） | `TestShareResolver_Resolve`（fake 校验 action） |
 | device_id 32 位小写 hex（随机） | 签名随机性；重试同 device 复用 captcha token | —（实现细节） |
