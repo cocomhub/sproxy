@@ -88,7 +88,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("云任务 60s 内未进入 failed")
 		}
-		time.Sleep(200 * time.Millisecond)
+		<-time.After(200 * time.Millisecond)
 	}
 
 	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
