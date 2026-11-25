@@ -184,6 +184,69 @@ func TestCloudTasksPanel_DetailAndBatchRetry(t *testing.T) {
 	}
 }
 
+// TestCloudTasksPanel_DetailLoadsProgress 锁定「详情展开会拉进度并渲染速率曲线/占位」
+// （用户 2026-11-26：v2 页面每任务可见历史速率）。
+func TestCloudTasksPanel_DetailLoadsProgress(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	body := []byte(`{"url":"http://127.0.0.1:1/nope3.bin","filename":"nope3.bin","download_local":true,"save":true}`)
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+		t.Fatalf("创建任务失败: %d %s", code, resp)
+	}
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	// 记录 /progress 请求（证明前端确实按需拉取，而不是只在 DOM 里造假）。
+	progCh := make(chan string, 4)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodGet && strings.Contains(r.URL(), "/progress") {
+			select {
+			case progCh <- r.URL():
+			default:
+			}
+		}
+	})
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("点击云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-detail-btn", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("任务行未渲染: %v", err)
+	}
+	if err := page.Locator("#cloud-tasks-panel .ct-detail-btn").First().Click(); err != nil {
+		t.Fatalf("点击详情: %v", err)
+	}
+	select {
+	case u := <-progCh:
+		if !strings.Contains(u, "/api/cloud/tasks/") || !strings.Contains(u, "/progress") {
+			t.Fatalf("进度请求 URL 异常: %s", u)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("详情展开未请求 /progress")
+	}
+	// 采样槽必须收敛成曲线或明确占位（不允许停在「加载中…」）。
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		slot := page.Locator("#cloud-tasks-panel .ct-spark-slot").First()
+		txt, terr := slot.InnerText()
+		if terr == nil && (strings.Contains(txt, "暂无采样") || strings.Contains(txt, "峰值")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("速率曲线槽未收敛（当前文本 %q）", txt)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // waitFailedTask 轮询直到存在 failed 任务（服务端异步）。
 func waitFailedTask(t *testing.T, baseURL string) {
 	t.Helper()

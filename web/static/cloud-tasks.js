@@ -355,6 +355,57 @@ function ctFailuresOnly(tasks) {
   });
 }
 
+// ctRateSeries 提取速率序列（B/s）：只取 >0 的点（首点/空闲点不计，避免曲线贴地）。
+function ctRateSeries(samples) {
+  const list = Array.isArray(samples) ? samples : [];
+  const out = [];
+  list.forEach(function (s) {
+    if (!s) return;
+    const r = Number(s.rate_bps || 0);
+    if (r > 0) out.push(r);
+  });
+  return out;
+}
+
+// ctSparklinePath 生成速率折线的 SVG path（宽 w、高 h；点 <2 返回 ''）。
+// 归一化到自身最大值（相对曲线：只表达趋势，绝对速率在标签里给）。
+function ctSparklinePath(samples, w, h) {
+  const rates = ctRateSeries(samples);
+  if (rates.length < 2) return '';
+  const width = Number(w) > 0 ? Number(w) : 160;
+  const height = Number(h) > 0 ? Number(h) : 36;
+  const mx = Math.max.apply(null, rates);
+  if (!(mx > 0)) return '';
+  const step = width / (rates.length - 1);
+  return rates.map(function (r, i) {
+    const x = (i * step).toFixed(1);
+    const y = (height - (r / mx) * height).toFixed(1);
+    return (i === 0 ? 'M' : 'L') + x + ' ' + y;
+  }).join(' ');
+}
+
+// ctSparklineSvg 生成速率曲线 SVG（无数据 ⇒ 空串；调用方决定占位文案）。
+function ctSparklineSvg(samples, w, h) {
+  const d = ctSparklinePath(samples, w, h);
+  if (!d) return '';
+  const rates = ctRateSeries(samples);
+  const mx = Math.max.apply(null, rates);
+  const label = '速率曲线：' + rates.length + ' 点，峰值 ' + ctRateText(mx);
+  return '<svg class="ct-spark" width="' + (Number(w) || 160) + '" height="' + (Number(h) || 36) +
+    '" viewBox="0 0 ' + (Number(w) || 160) + ' ' + (Number(h) || 36) + '" role="img" aria-label="' +
+    ctEsc(label) + '"><path d="' + d + '" fill="none" stroke="#1f6feb" stroke-width="1.5"/></svg>' +
+    '<div style="font-size:11px;color:var(--text-muted);">峰值 ' + ctRateText(mx) + '（' + rates.length + ' 点）</div>';
+}
+
+// ctRateText 人类可读速率（B/s → KB/s / MB/s）。
+function ctRateText(bps) {
+  const n = Number(bps || 0);
+  if (!(n > 0)) return '0 B/s';
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB/s';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB/s';
+  return Math.round(n) + ' B/s';
+}
+
 // ctDetailHtml 渲染单任务详情（展开行）：阶段/尝试次数/失败原文/部分产物路径。
 // 目的：面板列表只给摘要，**排障需要原文与产物位置**（此前只能看 CLI 或日志）。
 function ctDetailHtml(t) {
@@ -369,12 +420,14 @@ function ctDetailHtml(t) {
     ['失败类别', ctClassInfo(d.last_error_class).label + '（' + ctClassInfo(d.last_error_class).hint + '）'],
     ['失败原文', d.last_error || '-'],
     ['部分产物', d.partial_path ? d.partial_path + '（' + Math.round((d.partial_size || 0) / 1048576) + ' MiB）' : '-'],
+    ['速率曲线', '<span class="ct-spark-slot" data-id="' + ctEsc(t.id) + '">加载中…</span>'],
   ];
   let html = '<tr class="ct-detail" data-detail-for="' + ctEsc(t.id) + '"><td colspan="7" ' +
     'style="background:rgba(127,127,127,.06);padding:10px 12px;"><table style="font-size:12px;">';
   rows.forEach(function (r) {
+    const isHtml = r[0] === '速率曲线'; // 该行由 ctFillSparkline 异步填充 SVG
     html += '<tr><td style="color:var(--text-muted);padding:2px 12px 2px 0;white-space:nowrap;">' + ctEsc(r[0]) +
-      '</td><td style="padding:2px 0;word-break:break-all;">' + ctEsc(r[1]) + '</td></tr>';
+      '</td><td style="padding:2px 0;word-break:break-all;">' + (isHtml ? r[1] : ctEsc(r[1])) + '</td></tr>';
   });
   return html + '</table></td></tr>';
 }
@@ -512,6 +565,10 @@ if (typeof module !== 'undefined' && module.exports) {
     ctBatchCancelTargets: ctBatchCancelTargets,
     ctClassRetryPayloads: ctClassRetryPayloads,
     ctDetailHtml: ctDetailHtml,
+    ctRateSeries: ctRateSeries,
+    ctSparklinePath: ctSparklinePath,
+    ctSparklineSvg: ctSparklineSvg,
+    ctRateText: ctRateText,
     ctSummaryHtml: ctSummaryHtml,
     ctRowHtml: ctRowHtml,
     ctTableHtml: ctTableHtml,
@@ -549,6 +606,22 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     const res = await window.sclientTransport.coreRequest('GET', '/api/cloud/tasks', {});
     const data = window.sclientUtil.decodeJSON(res.body);
     return Array.isArray(data) ? data : (data.tasks || []);
+  }
+
+  // ctFillSparkline 异步拉取任务进度采样并填充展开行的速率曲线（用户 2026-11-26）。
+  // 失败不打断面板（只在该槽位给出原因），避免"看不到曲线"演变成"整页报错"。
+  async function ctFillSparkline(panel, id) {
+    const slot = panel.querySelector('.ct-spark-slot[data-id="' + id + '"]');
+    if (!slot) return;
+    try {
+      const res = await window.sclientTransport.coreRequest(
+        'GET', '/api/cloud/tasks/' + encodeURIComponent(id) + '/progress', {});
+      const data = window.sclientUtil.decodeJSON(res.body);
+      const svg = ctSparklineSvg((data && data.samples) || [], 220, 40);
+      slot.innerHTML = svg || '<span style="color:var(--text-muted);">暂无采样（任务尚未产生进度）</span>';
+    } catch (e) {
+      slot.innerHTML = '<span style="color:#c0392b;">进度加载失败：' + ctEsc(e.message) + '</span>';
+    }
   }
 
   // showCloudTasks 渲染面板并绑定操作（重试/取消/刷新/自动刷新）。
@@ -752,7 +825,10 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
         if (exists) { exists.remove(); return; }
         const row = btn.closest('tr');
         const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
-        if (row && t) row.insertAdjacentHTML('afterend', ctDetailHtml(t));
+        if (row && t) {
+          row.insertAdjacentHTML('afterend', ctDetailHtml(t));
+          void ctFillSparkline(panel, id);
+        }
       });
     });
 

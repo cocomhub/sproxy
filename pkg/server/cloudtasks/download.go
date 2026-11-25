@@ -384,6 +384,13 @@ func (s *Service) ListTasks(w http.ResponseWriter, r *http.Request, owner string
 	status := r.URL.Query().Get("status")
 	offset, limit := ParseOffsetLimit(r)
 	tasks, total := s.deps.Tasks.ListTasks(status, offset, limit, owner)
+	// 列表**不返回进度采样**（每任务最多 240 点，会把列表响应放大一个数量级）；
+	// 进度按需经 GET /api/cloud/tasks/{id}/progress 增量拉取。
+	for i := range tasks {
+		if tasks[i] != nil {
+			tasks[i].Progress = nil
+		}
+	}
 	s.writeJSON(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
 }
 
