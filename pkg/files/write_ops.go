@@ -1105,7 +1105,8 @@ type RenameFileInput struct {
 	// From / To 是用户可见相对路径（原始值；本方法内校验，非法 → 400）。
 	From string
 	To   string
-	// ExpectedChecksum 是客户端声明的源文件 SHA-256（**必填**，不符即拒绝）。
+	// ExpectedChecksum 是客户端声明的源文件 SHA-256（**文件必填**，不符即拒绝；
+	// **目录重命名不需要**——目录没有单一校验和，其安全由「目标不存在 409 + 原子改名」承担）。
 	ExpectedChecksum string
 	// ExplicitVol 是 `?volume=` 显式卷（空 = 按 owner 卷视图定位源）。
 	ExplicitVol string
@@ -1150,10 +1151,6 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	if from == to {
 		return RenameFileResult{From: from, To: to, Message: "源与目标相同，无需移动", NoOp: true}, nil
 	}
-	if input.ExpectedChecksum == "" {
-		return RenameFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgMissingChecksum, Reason: reasonChecksumMissing}
-	}
-
 	owner := normalizeOwner(input.Owner)
 	fromRel, toRel, tnt, ok := s.resolveRenamePaths(owner, from, to)
 	if !ok || tnt == nil || tnt.Root() == nil {
@@ -1187,14 +1184,22 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		return RenameFileResult{}, locErr
 	}
 
-	// AD-4 唯一性：目标 rel 不得已存在于 owner 视图其它卷（否则 rename 后同逻辑路径跨卷
-	// 双份）。目标已在同一 home 卷由 renameInHome 的 Stat 捕获（409）；目标在其它卷 →
-	// 直接 409（跨卷移动非本任务语义）。单卷/无卷语义时 homeVol 空 → 跳过。
+	// **目录重命名**：目录没有单一 checksum，且允许同名目录跨卷并存（与 rmdir 同口径）
+	// ⇒ 不走 checksum 门禁与 AD-4 唯一性，改走 renameDirInHome（整棵子树 + meta 子树 +
+	// 台账前缀）。判定放在 checksum 门禁之前，避免目录被「缺少 X-File-Checksum」拒绝。
+	if s.isDirAt(root, fromRel) {
+		return s.renameDirectory(ctx, owner, homeVol, root, from, to, fromRel, toRel, input.Origin)
+	}
+
+	// 文件：checksum 门禁（目录分支已在上方返回）。
+	if input.ExpectedChecksum == "" {
+		return RenameFileResult{}, &HTTPError{Status: http.StatusBadRequest, Message: errMsgMissingChecksum, Reason: reasonChecksumMissing}
+	}
+
 	if dstErr := s.rejectRenameDestOnOtherVolume(owner, toRel, homeVol); dstErr != nil {
 		return RenameFileResult{}, dstErr
 	}
-
-	if renErr := s.renameInHome(ctx, renameHomeArgs{
+	return s.renameFileInHome(ctx, renameHomeArgs{
 		owner:            owner,
 		root:             root,
 		volName:          homeVol,
@@ -1205,7 +1210,16 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 		expectedChecksum: input.ExpectedChecksum,
 		origin:           input.Origin,
 		logger:           logger,
-	}); renErr != nil {
+	})
+}
+
+// renameFileInHome 执行文件重命名（RenameFile 的文件分支尾段，独立成函数控制复杂度）。
+func (s *Service) renameFileInHome(ctx context.Context, a renameHomeArgs) (RenameFileResult, error) {
+	input := RenameFileInput{ExpectedChecksum: a.expectedChecksum, Origin: a.origin}
+	owner := a.owner
+	from, to := a.from, a.to
+	logger := a.logger
+	if renErr := s.renameInHome(ctx, a); renErr != nil {
 		// **外部卷兜底（2026-10-27 修复）**：无显式卷时 resolveRenameHome 会**回落默认租户**
 		// （err=nil）而不是报 404 ⇒ 外部卷文件走 renameInHome（本地）恒「源文件不存在」，
 		// **永远到不了 renameExternalVolume**（单条带 ?volume= 才能命中，因为 explicitVol≠""
@@ -1221,7 +1235,7 @@ func (s *Service) RenameFile(ctx context.Context, input RenameFileInput) (Rename
 	s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to)
 	logger.InfoContext(ctx, "文件已重命名", "from", from, "to", to, "checksum", input.ExpectedChecksum)
 	// 文件变更事件：rename 成功（rel = to 目标路径；from 由事件内容表达）。
-	s.rt.publishFileEvent(EventRename, normalizeOwner(input.Owner), to, 0)
+	s.rt.publishFileEvent(EventRename, normalizeOwner(owner), to, 0)
 	return RenameFileResult{
 		From:     from,
 		To:       to,
@@ -1439,6 +1453,138 @@ func (s *Service) releaseChargeFor(volName, owner, remotePath string, fallback i
 		return n
 	}
 	return fallback
+}
+
+// renameDirectory 执行一次目录重命名并产出领域结果（RenameFile 的目录分支，独立成函数
+// 以控制 RenameFile 的认知复杂度）。
+func (s *Service) renameDirectory(ctx context.Context, owner, volName string, root *storage.Root,
+	from, to, fromRel, toRel, origin string) (RenameFileResult, error) {
+	logger := s.rt.logger()
+	a := renameHomeArgs{
+		owner: owner, root: root, volName: volName,
+		fromRel: fromRel, toRel: toRel, from: from, to: to,
+		origin: origin, logger: logger,
+	}
+	if err := s.renameDirInHome(ctx, a); err != nil {
+		return RenameFileResult{}, err
+	}
+	s.rt.recordFileAudit(ctx, "rename", from, auditResultSuccess, "to="+to+"（目录）")
+	s.rt.publishFileEvent(EventRename, owner, to, 0)
+	return RenameFileResult{From: from, To: to, Message: fmt.Sprintf("目录已重命名: %s -> %s", from, to)}, nil
+}
+
+// isDirAt 报告 rel 在给定 root 内是否为目录（不存在/错误一律 false，不改变既有错误语义）。
+func (s *Service) isDirAt(root *storage.Root, rel string) bool {
+	if root == nil {
+		return false
+	}
+	info, err := root.Lstat(rel)
+	return err == nil && info.IsDir()
+}
+
+// renameDirInHome 在 home 卷租户内重命名**目录**（整棵子树一起搬）。
+//
+// 与文件重命名的差异（都来自「目录不是单文件」这一事实）：
+//   - **无 checksum 门禁**：目录没有单一 SHA-256；
+//   - **不做 AD-4 跨卷唯一性**：目录允许在多个卷同名并存（rmdir 同口径），目标只要求
+//     「同一 home 卷内不存在」；
+//   - **必须联动**：meta sidecar 子树（`meta/<from>` → `meta/<to>`）与 checksum 台账前缀
+//     （`user/<from>/` → `user/<to>/`）——否则改名后所有 sidecar 成孤儿、列表 checksum 全丢，
+//     用户后续删除/分享等依赖校验和的操作恒失败；
+//   - **配额按子树结算**：跨子目录改名时把子树内所有文件的占用从源 Scope 转移到目标 Scope。
+func (s *Service) renameDirInHome(ctx context.Context, a renameHomeArgs) error {
+	a.logger.InfoContext(ctx, "开始目录重命名", "from", a.fromRel, "to", a.toRel)
+	if _, err := a.root.Lstat(a.fromRel); os.IsNotExist(err) {
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, errMsgSrcNotExist)
+		return &HTTPError{Status: http.StatusNotFound, Message: errMsgSrcNotExist}
+	}
+	if _, err := a.root.Lstat(a.toRel); err == nil {
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultDenied, renameAuditDetail(errMsgDestExists, a.to, a.origin))
+		return &HTTPError{Status: http.StatusConflict, Message: errMsgDestExists}
+	}
+	if err := a.root.MkdirAll(filepath.Dir(a.toRel), 0o755); err != nil {
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, renameAuditDetail("创建父目录失败", a.to, a.origin))
+		return &HTTPError{Status: http.StatusInternalServerError, Message: errMsgCreateParentDirFailed, Reason: reasonMkdirFailed}
+	}
+
+	// 子树文件清单（配额转移按每文件**同一口径**计算；与 rmdir 释放同源）。
+	var files []rmdirFileStat
+	sumRootDirFiles(a.root, a.fromRel, &files)
+
+	if err := atomicRenameRoot(a.root, a.fromRel, a.toRel); err != nil {
+		s.rt.recordFileAudit(ctx, "rename", a.from, auditResultError, renameAuditDetail("重命名失败", a.to, a.origin))
+		return &HTTPError{Status: http.StatusInternalServerError, Message: "重命名失败"}
+	}
+
+	s.renameDirMetaSubtree(a)
+	s.renameDirChecksumPrefix(a, files)
+	s.transferDirQuota(ctx, a, files)
+	return nil
+}
+
+// renameDirMetaSubtree 整棵搬 meta sidecar 子树（可信卷；未启用 meta 时 no-op）。
+// 失败只记 Warn（不阻断主改名——与文件重命名的 meta 联动同款取舍）。
+func (s *Service) renameDirMetaSubtree(a renameHomeArgs) {
+	if !s.rt.fileMetaEnabled() || a.root == nil {
+		return
+	}
+	fromMeta := meta.MetaDirPath(a.fromRel)
+	toMeta := meta.MetaDirPath(a.toRel)
+	if err := a.root.MkdirAll(filepath.Dir(toMeta), 0o755); err != nil {
+		a.logger.Warn("目录重命名创建 meta 目标父目录失败", "meta", toMeta, "error", err)
+		return
+	}
+	if err := a.root.Rename(fromMeta, toMeta); err != nil {
+		a.logger.Warn("目录重命名联动 meta 子树失败", "from", fromMeta, "to", toMeta, "error", err)
+	}
+}
+
+// renameDirChecksumPrefix 把子树内每个文件的 checksum 台账键换前缀（卷维度优先）。
+func (s *Service) renameDirChecksumPrefix(a renameHomeArgs, files []rmdirFileStat) {
+	cs := s.rt.checksumStore(a.owner)
+	if cs == nil {
+		return
+	}
+	fromPrefix := "user/" + a.from + "/"
+	toPrefix := "user/" + a.to + "/"
+	if pr, ok := cs.(checksum.PrefixRenamer); ok && a.volName != "" {
+		pr.RenamePrefixInVolume(a.volName, fromPrefix, toPrefix)
+		return
+	}
+	// 回落：旧无卷键实现（测试替身/未升级后端）→ 逐条 Rename。
+	for _, f := range files {
+		rel := strings.TrimPrefix(f.rel, "user/")
+		checksumRename(cs, a.volName, "user/"+rel, "user/"+strings.TrimPrefix(a.to, "/")+strings.TrimPrefix(rel, a.from))
+	}
+}
+
+// transferDirQuota 把子树内文件占用从源目录 Scope 转移到目标目录 Scope（同 Scope 零操作）。
+// 失败只记 Error（改名已完成，配额差分由后续对账收敛）——与 rmdir 的释放口径一致。
+func (s *Service) transferDirQuota(ctx context.Context, a renameHomeArgs, files []rmdirFileStat) {
+	if len(files) == 0 {
+		return
+	}
+	var total int64
+	for _, f := range files {
+		rel := strings.TrimPrefix(f.rel, "user/")
+		total += s.releaseChargeFor(a.volName, a.owner, rel, f.size)
+	}
+	if total <= 0 {
+		return
+	}
+	fromScope := s.rt.quotaScope(a.owner, a.fromRel)
+	toScope := s.rt.quotaScope(a.owner, a.toRel)
+	if fromScope == nil || toScope == nil || fromScope == toScope {
+		return
+	}
+	res, err := toScope.WaitReserve(ctx, total, s.rt.waitTimeout())
+	if err != nil {
+		a.logger.WarnContext(ctx, "目录重命名目标配额不足（预留失败，建立对账偏差）",
+			"from", a.fromRel, "to", a.toRel, "size", total, "error", err)
+		return
+	}
+	res.Commit(total)
+	fromScope.ReleaseUsage(total)
 }
 
 // renameHomeArgs 是 renameInHome 的参数集合（go:S107：参数过多时收敛为结构体）。

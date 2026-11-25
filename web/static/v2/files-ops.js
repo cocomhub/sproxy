@@ -38,6 +38,26 @@
     return { 'X-File-Checksum': checksum || '' };
   }
 
+  /**
+   * 校验**相对路径**名称（重命名时允许 `a/b/new` 表示移动到子目录）。
+   * 逐段校验：空段/`.`/`..`/保留字符均拒绝；长度按整串 ≤ 1024。
+   */
+  function validateRelativePath(input) {
+    var raw = String(input == null ? '' : input).trim().replace(/^\/+/, '');
+    if (!raw) { return { ok: false, reason: '名称不能为空' }; }
+    if (raw.length > 1024) { return { ok: false, reason: '路径过长（>1024）' }; }
+    var segs = raw.split('/');
+    if (segs.length > 64) { return { ok: false, reason: '目录层级过深（>64）' }; }
+    for (var i = 0; i < segs.length; i += 1) {
+      var s = segs[i];
+      if (!s) { return { ok: false, reason: '路径中不能有空段' }; }
+      if (s === '.' || s === '..') { return { ok: false, reason: '路径不能包含 . 或 ..' }; }
+      if (BAD_CHARS.test(s)) { return { ok: false, reason: '名称不能包含 \ / : * ? " < > | 或控制字符' }; }
+      if (s.length > 255) { return { ok: false, reason: '单段名称过长（>255）' }; }
+    }
+    return { ok: true, name: segs.join('/') };
+  }
+
   /** 选择集合 → 待删除路径列表（保持稳定顺序，去重）。 */
   function selectedPaths(names) {
     var seen = Object.create(null);
@@ -53,6 +73,7 @@
 
   return {
     validateName: validateName,
+    validateRelativePath: validateRelativePath,
     uploadHeaders: uploadHeaders,
     checksumHeader: checksumHeader,
     selectedPaths: selectedPaths

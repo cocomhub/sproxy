@@ -11,7 +11,7 @@
   if (!api || !auth || !f) { return; }
 
   var TEXT_LIMIT = 512 * 1024;
-  var state = { name: '', url: '' };
+  var state = { name: '', url: '', mode: 'file' };
 
   function el(id) { return document.getElementById(id); }
   function enc(s) { return encodeURIComponent(s); }
@@ -29,6 +29,12 @@
     var raw = window.videoPlayerUrl({ filename: rel, volume: volume || '' });
     var q = raw.indexOf('?') >= 0 ? raw.slice(raw.indexOf('?') + 1) : '';
     return window.withUrlSig(q).then(function (signed) { return '/download?' + signed; });
+  }
+
+  /** 悬浮关闭按钮：与头部关闭同源，保证视频控件/全屏态下也能关闭。 */
+  function showFloatClose(on) {
+    var f = el('v2-pv-float-close');
+    if (f) { f.hidden = !on; }
   }
 
   function resetStage() {
@@ -52,6 +58,8 @@
     var overlay = el('v2-preview');
     overlay.hidden = false;
     document.body.classList.add('pv-open');
+    showFloatClose(true);
+    state.mode = 'file';
 
     var img = el('v2-pv-img'), video = el('v2-pv-video'), text = el('v2-pv-text'), msg = el('v2-pv-msg');
     var type = ext(name);
@@ -92,6 +100,7 @@
     if (!taskID || !filename) { return; }
     var rel = String(taskID) + '/' + String(filename);
     var name = String(filename);
+    state.cloudRel = rel;
     state.name = name;
     syncCredGlobals();
     resetStage();
@@ -100,6 +109,8 @@
     var overlay = el('v2-preview');
     overlay.hidden = false;
     document.body.classList.add('pv-open');
+    showFloatClose(true);
+    state.mode = 'file';
 
     var img = el('v2-pv-img'), video = el('v2-pv-video'), text = el('v2-pv-text'), msg = el('v2-pv-msg');
     var type = ext(name);
@@ -137,6 +148,7 @@
     if (!overlay || overlay.hidden) { return; }
     overlay.hidden = true;
     document.body.classList.remove('pv-open');
+    showFloatClose(false);
     resetStage();
   }
 
@@ -155,8 +167,33 @@
 
   function init() {
     el('v2-pv-close').addEventListener('click', close);
+    var fc = el('v2-pv-float-close');
+    if (fc) { fc.addEventListener('click', close); }
     el('v2-pv-backdrop').addEventListener('click', close);
+    // 点击舞台空白处关闭（视频/图片区域自身不关闭，避免误触暂停/选中）。
+    var stage = el('v2-pv-stage');
+    if (stage) {
+      stage.addEventListener('click', function (e) { if (e.target === stage) { close(); } });
+    }
+    // 头部「下载」：按当前预览对象下载（文件走签名 URL，云任务走 kind=cloud_task）。
+    var dl = el('v2-pv-download');
+    if (dl) {
+      dl.addEventListener('click', function () {
+        if (state.mode === 'cloud') { downloadCloud(state.cloudRel || state.name); return; }
+        download(state.name);
+      });
+    }
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
+  }
+
+  /** 云任务产物下载（cloud 桶，kind=cloud_task）。 */
+  function downloadCloud(rel) {
+    window.withUrlSig('filename=' + enc(rel) + '&kind=cloud_task').then(function (signed) {
+      var a = document.createElement('a');
+      a.href = '/download?' + signed;
+      a.download = rel.split('/').pop();
+      document.body.appendChild(a); a.click(); a.remove();
+    }).catch(function (e) { if (window.v2toast) { window.v2toast('bad', '下载失败：' + (e.message || e)); } });
   }
 
   window.v2preview = {

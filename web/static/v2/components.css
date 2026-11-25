@@ -247,13 +247,22 @@ body {
 .preview-backdrop[hidden] { display: none; }
 .preview { position: fixed; inset: 0; z-index: 31; display: flex; flex-direction: column; pointer-events: none; }
 .preview[hidden] { display: none; }
-.preview header { pointer-events: auto; display: flex; align-items: center; gap: 10px;
+.preview header { pointer-events: auto; position: relative; z-index: 3;
+  display: flex; align-items: center; gap: 10px;
   padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .preview header b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview .pv-stage { pointer-events: auto; flex: 1; min-height: 0; display: grid;
   place-items: center; padding: 16px; }
 .preview img, .preview video { max-width: min(1100px, 96vw); max-height: calc(100vh - 120px);
   border-radius: var(--radius-lg); background: #000; }
+/* 悬浮关闭按钮：视频控件/全屏态下头部可能被遮，始终有一个明确关闭点。 */
+.pv-float-close { position: fixed; top: 12px; right: 14px; z-index: 33; pointer-events: auto;
+  width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%;
+  border: 1px solid var(--border-strong); background: rgba(20,20,20,.72); color: #fff;
+  font-size: 15px; line-height: 1; cursor: pointer; backdrop-filter: blur(4px); }
+.pv-float-close:hover { background: rgba(40,40,40,.86); }
+.pv-float-close[hidden] { display: none; }
+.preview .pv-stage { cursor: zoom-out; }
 .preview pre { width: min(1000px, 96vw); max-height: calc(100vh - 120px); overflow: auto;
   margin: 0; padding: 14px; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius-lg); font-family: var(--mono); font-size: 12px; line-height: 1.6;

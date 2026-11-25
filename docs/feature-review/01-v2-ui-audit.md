@@ -106,3 +106,35 @@ golangci-lint run web/e2e/...                      # 0 issues
 - 后端端点自身正确性（本次只核前端调用契约；后端由各自包测试覆盖）；
 - 浏览器兼容矩阵（仅 Chromium 实测；File System Access 自动续传仅 Chromium 可用）；
 - 真实外部云盘编排（e2e 用 loopback 源替代 pikpak/百度）。
+
+---
+
+## 第二批（2026-11-25 续）：文件/目录全套操作 + 预览关闭交互
+
+### 能力补齐
+
+| 项 | 结论 |
+| --- | --- |
+| 目录重命名/移动 | **后端原不支持**（`RenameFile` 先要求 checksum，目录恒 400/校验失败）。新增 `renameDirInHome`：整棵子树搬迁 + meta 子树联动 + checksum 台账前缀改名 + 跨 Scope 配额转移；`RenameFile` 按 `Lstat` 自动分派，目录**不需要** checksum（TDD 4 例：子树/409/meta 子树/台账前缀） |
+| 台账前缀改名 | 新增可选能力 `checksum.PrefixRenamer.RenamePrefixInVolume`（`ChecksumStore` + `StateBackedChecksumStore` 双实现 + 单测）——不实现的话目录改名后列表 checksum 全丢，后续删除/分享会恒失败 |
+| 重命名即可移动 | 目标输入支持相对路径（`a/b/new`）⇒ 同时移动到该目录并自动建目录；纯逻辑 `v2ops.validateRelativePath`（拒绝 `..`/空段/保留字符）+ 单测 |
+| 目录打包下载 | 目录行新增「打包下载」（`GET /api/archive-dir`），此前只有文件/多选打包 |
+| 预览关闭 | 新增悬浮关闭按钮（视频控件/全屏遮挡时仍可关）、头部「下载」按钮、点击舞台空白关闭；云任务预览下载走 `kind=cloud_task` |
+
+### 本轮修复的交互缺陷（用户反馈）
+
+**视频预览只能 Esc 退出**：头部关闭按钮在视频元素/原生控件层之下，且没有其他关闭点。
+修复：`.preview header { z-index: 3 }` + 独立 `.pv-float-close`（固定在右上、高 z-index）+ 舞台空白点击关闭 + 头部「关闭 ✕」文案明确快捷键。
+
+### 验证
+
+- `go test ./pkg/files`、`./pkg/checksum`、`./pkg/server`、`./internal/archcheck` 全绿；
+- `make web-test` exit 0；`go test ./web/e2e -run TestV2Shell -count=2` 全绿（含目录重命名→内容随迁、
+  悬浮关闭、舞台空白关闭、第三次打开用头部关闭）；
+- `golangci-lint run pkg/files/... pkg/checksum/... web/e2e/...` 0 issues。
+
+### 已知边界
+
+- 目录重命名的**外部卷**（加密/网盘）仍走 `renameExternalVolume` 单文件语义 ⇒ 目录不支持（服务端接缝只有文件级 `ExternalRename`）；
+- 目录重命名的配额转移在「目标 Scope 预留失败」时只记 Warn 不回滚（改名已成功，差分由对账收敛）——
+  与 rmdir 的释放口径一致，但会在账本上留下待收敛偏差。

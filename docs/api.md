@@ -175,6 +175,11 @@ BuildAt: 2026-06-01T12:00:00Z
 
 ### POST /rename?from=&to=
 
+> `to` 可含子目录 ⇒ 同时完成**移动**（中间目录自动创建）。服务端按 `Lstat(from)` 区分：
+> **文件**必须带 `X-File-Checksum`（不符 400）；**目录**不需要 checksum，整棵子树一起搬迁，
+> 并联动 `meta/<from>`→`meta/<to>`（可信卷 sidecar）与 checksum 台账前缀
+> （`user/<from>/`→`user/<to>/`）。两者目标已存在均 409。
+
 重命名 / 移动文件。`from` 必须存在、`to` 必须不存在；服务端会自动 `mkdir -p`
 中间目录。**对称要求 `X-File-Checksum`（源文件当前 SHA-256）**，防误覆盖。
 
@@ -840,6 +845,7 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
 
 批量归档（请求体含任务 ID 列表）。支持与单任务相同的 `target_volume` 统一转存语义。
 
+
 ### POST /api/cloud/groups/{id}/archive
 
 组归档（打包组内已完成文件）。可选 `require_all`（bool，默认 false）：
@@ -883,6 +889,7 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
   （结果文件 + `.partial` + `.partial.etag`）重新下载；`false`/缺省 = 保留 `.partial` 由下载器续传
 - 响应：`{"status": "resumed"}`
 - 错误：`404` 组不存在；`400` 子任务恢复失败（多个错误合并返回）
+
 
 ### POST /api/cloud/groups/{id}/archive
 

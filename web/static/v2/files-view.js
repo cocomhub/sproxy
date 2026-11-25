@@ -127,8 +127,11 @@
       actTd.appendChild(actionBtn('详情', file.name, 'detail'));
       if (!file.isDir) {
         actTd.appendChild(actionBtn('下载', file.name, 'download'));
-        actTd.appendChild(actionBtn('重命名', file.name, 'rename'));
+      } else {
+        actTd.appendChild(actionBtn('打包下载', file.name, 'archive'));
       }
+      // 目录也支持重命名/移动（服务端已支持整棵子树搬迁，无需 checksum）。
+      actTd.appendChild(actionBtn('重命名', file.name, 'rename'));
       actTd.appendChild(actionBtn('删除', file.name, 'delete'));
       tr.appendChild(actTd);
 
