@@ -359,6 +359,41 @@ func (c *FileClient) GetCloudTask(ctx context.Context, taskID string) (*CloudTas
 	return &task, nil
 }
 
+// CloudProgressSample 是一次进度采样（与 pkg/cloud.ProgressSample 同形）。
+type CloudProgressSample struct {
+	At         time.Time `json:"at"`
+	Downloaded int64     `json:"downloaded"`
+	Total      int64     `json:"total"`
+	RateBps    int64     `json:"rate_bps"`
+	Stage      string    `json:"stage,omitempty"`
+}
+
+// CloudTaskProgress 是 `GET /api/cloud/tasks/{id}/progress` 的响应。
+type CloudTaskProgress struct {
+	TaskID  string                `json:"task_id"`
+	Status  string                `json:"status"`
+	Samples []CloudProgressSample `json:"samples"`
+	Now     int64                 `json:"now"`
+}
+
+// GetCloudTaskProgress 拉取任务进度采样（`since` 为零值 ⇒ 全量；否则只取之后的新增点）。
+//
+// 设计（用户 2026-11-26）：v2 页面按增量轮询画速率曲线，避免每次全量传输。
+func (c *FileClient) GetCloudTaskProgress(ctx context.Context, taskID string, since time.Time) (*CloudTaskProgress, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("云端下载: taskID 不能为空")
+	}
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/progress"
+	if !since.IsZero() {
+		apiPath += "?since=" + strconv.FormatInt(since.Unix(), 10)
+	}
+	var out CloudTaskProgress
+	if err := c.doJSON(ctx, http.MethodGet, apiPath, nil, &out); err != nil {
+		return nil, fmt.Errorf("获取任务进度: %w", err)
+	}
+	return &out, nil
+}
+
 // CancelCloudTask 取消云端下载任务。
 func (c *FileClient) CancelCloudTask(ctx context.Context, taskID string) error {
 	if taskID == "" {

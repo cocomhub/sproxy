@@ -38,6 +38,7 @@ func Routes() []router.Route[Handler] {
 		{Method: "POST", Path: "/download/batch", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CreateBatchDownload, Mutating: true},
 		{Method: "GET", Path: "/tasks", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ListTasks},
 		{Method: "GET", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).GetTask},
+		{Method: "GET", Path: "/tasks/{id}/progress", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).GetTaskProgress},
 		{Method: "POST", Path: "/tasks/{id}/cancel", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).CancelTask, Mutating: true},
 		{Method: "DELETE", Path: "/tasks/{id}", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).DeleteTask, Mutating: true},
 		{Method: "POST", Path: "/tasks/{id}/resume", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Service).ResumeTask, Mutating: true},

@@ -1188,7 +1188,8 @@ type PikpakHybridConfig struct {
 	// Disable 是否禁用 hybrid（默认 false = 功能**默认打开**；true 才显式禁用）。
 	// 语义与仓库其它模块的 Enabled 相反：hybrid 是增强能力，默认启用不破坏旧 pikpak。
 	Disable bool `yaml:"disable" mapstructure:"disable"`
-	// ChunkSize 是分片大小（字节，默认 64MB）。
+	// ChunkSize 是分片大小（字节）；**0 = 自适应**（按总大小取满足「chunk 数 ≤ 20 行」的
+	// 最小 2^k MiB，2–64MiB）。续传粒度由 1MiB 子块位图承担，与 pikget 同一规则。
 	ChunkSize int64 `yaml:"chunk_size" mapstructure:"chunk_size"`
 	// ShareRatio 是匿名分享区比例上限：0（默认）= **auto**（以 416 边界探测结果为准，
 	// 探测失败回落 50%）；>0 = 显式上限（与探测取小，clamp 到 (0,1]）。

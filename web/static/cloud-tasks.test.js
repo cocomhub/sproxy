@@ -280,3 +280,38 @@ test('ctAppendAudit 追加并裁剪；ctAuditHtml 渲染最近操作', () => {
   assert.ok(html.includes('x4'));
   assert.ok(m.ctAuditHtml([]).includes('暂无操作'));
 });
+
+test('ctRateSeries/ctSparklinePath 生成速率曲线（过滤 0 点、相对归一化）', () => {
+  const samples = [
+    { at: 't0', rate_bps: 0 },
+    { at: 't1', rate_bps: 100 },
+    { at: 't2', rate_bps: 200 },
+    { at: 't3', rate_bps: 0 },
+  ];
+  assert.deepStrictEqual(m.ctRateSeries(samples), [100, 200]);
+  assert.strictEqual(m.ctRateSeries([]).length, 0);
+  const d = m.ctSparklinePath(samples, 100, 20);
+  // 两点：x=0 与 x=100；y 按最大值归一化（200 → y=0，100 → y=10）
+  assert.strictEqual(d, 'M0.0 10.0 L100.0 0.0');
+  // 单点/空 ⇒ 无曲线
+  assert.strictEqual(m.ctSparklinePath([{ rate_bps: 5 }], 100, 20), '');
+  assert.strictEqual(m.ctSparklinePath([], 100, 20), '');
+});
+
+test('ctSparklineSvg 带可访问标签与峰值；ctRateText 人类可读', () => {
+  const svg = m.ctSparklineSvg([{ rate_bps: 1048576 }, { rate_bps: 2097152 }], 120, 30);
+  assert.ok(svg.includes('<svg'));
+  assert.ok(svg.includes('role="img"'));
+  assert.ok(svg.includes('aria-label="速率曲线'));
+  assert.ok(svg.includes('峰值 2.0 MB/s'));
+  assert.strictEqual(m.ctSparklineSvg([], 120, 30), '');
+  assert.strictEqual(m.ctRateText(0), '0 B/s');
+  assert.strictEqual(m.ctRateText(2048), '2.0 KB/s');
+  assert.strictEqual(m.ctRateText(3145728), '3.0 MB/s');
+});
+
+test('ctDetailHtml 含速率曲线槽（异步填充）', () => {
+  const html = m.ctDetailHtml({ id: 'cloud-x-1', status: 'failed', diagnostics: {} });
+  assert.ok(html.includes('ct-spark-slot'));
+  assert.ok(html.includes('data-id="cloud-x-1"'));
+});

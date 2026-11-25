@@ -13,8 +13,8 @@ func TestPikpakHybridDefaults_MatchPikget(t *testing.T) {
 	t.Parallel()
 	d := Default()
 	h := d.Pikpak.Hybrid
-	if h.ChunkSize != 32<<20 {
-		t.Fatalf("ChunkSize 默认 = %d，应与 pikget 一致（32MiB）", h.ChunkSize)
+	if h.ChunkSize != 0 {
+		t.Fatalf("ChunkSize 默认 = %d，应与 pikget 一致（0 = 自适应 ≤20 行）", h.ChunkSize)
 	}
 	if h.Concurrency != 0 {
 		t.Fatalf("Concurrency 默认 = %d，应留 0 由内核取默认 4（与 pikget 一致）", h.Concurrency)

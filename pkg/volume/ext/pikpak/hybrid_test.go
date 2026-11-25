@@ -2028,7 +2028,7 @@ func TestHybridManifest_InitAtStart(t *testing.T) {
 		target:   &ShareFile{ID: "share-f1", Hash: payloadSHA1(payload), Size: int64(len(payload))},
 		destPath: dest,
 	}
-	m := hd.initManifest(dc, int64(len(payload)/2))
+	m := hd.initManifest(dc, int64(len(payload)/2), 4<<20)
 	if m == nil || len(m.Chunks) != 0 {
 		t.Fatalf("initManifest should create empty chunks, got %+v", m)
 	}

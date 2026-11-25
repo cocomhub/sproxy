@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/cloud"
@@ -383,6 +384,13 @@ func (s *Service) ListTasks(w http.ResponseWriter, r *http.Request, owner string
 	status := r.URL.Query().Get("status")
 	offset, limit := ParseOffsetLimit(r)
 	tasks, total := s.deps.Tasks.ListTasks(status, offset, limit, owner)
+	// 列表**不返回进度采样**（每任务最多 240 点，会把列表响应放大一个数量级）；
+	// 进度按需经 GET /api/cloud/tasks/{id}/progress 增量拉取。
+	for i := range tasks {
+		if tasks[i] != nil {
+			tasks[i].Progress = nil
+		}
+	}
 	s.writeJSON(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
 }
 
@@ -395,6 +403,35 @@ func (s *Service) GetTask(w http.ResponseWriter, r *http.Request, owner string) 
 		return
 	}
 	s.writeJSON(w, task, http.StatusOK)
+}
+
+// GetTaskProgress 处理 GET /api/cloud/tasks/{id}/progress?since=<unix 秒>。
+//
+// 增量返回进度采样（`since` 之后），供 v2 页面画速率曲线：客户端只拉新增点，
+// 避免每次全量传输（单任务最多 progressSampleCap 点）。
+func (s *Service) GetTaskProgress(w http.ResponseWriter, r *http.Request, owner string) {
+	id := r.PathValue("id")
+	task, ok := s.deps.Tasks.SnapshotTask(id, owner)
+	if !ok {
+		s.writeJSON(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
+		return
+	}
+	var since time.Time
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		sec, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			s.writeJSON(w, map[string]string{"error": "invalid since（需要 unix 秒）"}, http.StatusBadRequest)
+			return
+		}
+		since = time.Unix(sec, 0).UTC()
+	}
+	s.writeJSON(w, map[string]any{
+		"task_id":  task.ID,
+		"status":   task.Status,
+		"samples":  task.ProgressSince(since),
+		"now":      time.Now().UTC().Unix(),
+		"capacity": 240,
+	}, http.StatusOK)
 }
 
 // CancelTask 处理 POST /api/cloud/tasks/{id}/cancel。

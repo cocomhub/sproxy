@@ -776,6 +776,16 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 > 回落到下载**开始**时刻，绝不使用「下载完成时刻」冒充源时间；目标卷 `ctime` 是首次
 > 写入时刻，源创建时间见 `download_stats.source_created_at` / meta `x_source_created_at`。
 
+### GET /api/cloud/tasks/{id}/progress?since=<unix 秒>
+
+返回任务的**进度采样**（增量）：`{task_id, status, samples:[{at, downloaded, total, rate_bps, stage}], now}`。
+
+- 服务端每 10s 采样一次（阶段变化立即采样），每任务环形保留 240 点（≈40 分钟）；
+  采样随任务持久化，重启后历史仍在。
+- `since` 省略 = 全量；否则只返回 `at > since` 的新增点（v2 页面按此增量轮询画速率曲线）。
+- `rate_bps` 是相邻两次采样的**实测**增量速率（首点为 0，不编造）。
+- 任务不存在或不可见 ⇒ 404。
+
 ### POST /api/cloud/tasks/{id}/cancel
 
 取消下载任务（幂等）。
