@@ -65,9 +65,9 @@ BuildAt: 2026-06-01T12:00:00Z
 
 嵌入式 Web UI（**旧版，稳定可用**）。静态文件来源 `web/static/`。
 
-### GET /ui/v2/
+### /ui/v2/（新版 Web UI，灰度）
 
-**新版 Web UI（灰度）**。静态文件来源 `web/static/v2/` + 共用 `web/static/shared/` 与
+`/ui/v2/` 是**新版 Web UI**。静态文件来源 `web/static/v2/` + 共用 `web/static/shared/` 与
 `web/static/sclient/*.js`（不复制实现）。要点：
 
 - **入口与回退**：旧页顶栏「试用新版」→ `/ui/v2/`；v2 顶栏「旧版」→ `/ui/`。两套 UI 共用同一后端
