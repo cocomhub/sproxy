@@ -1173,6 +1173,8 @@ func (m *CloudDownloadManager) runDownloadAttempt(ctx context.Context, dlCtx con
 		if total > 0 {
 			task.TotalSize = total
 		}
+		// 进度采样（节流 10s / 阶段变化立即采样）：驱动 /progress 增量接口与 v2 速率曲线。
+		recordProgressSample(task, downloaded, total, time.Now())
 		id := task.ID
 		m.mu.Unlock()
 		// 在 m.mu 外调用 markDirty，避免与 flushDirty 的 dirtyMu → m.mu 形成 ABBA 死锁。

@@ -143,6 +143,9 @@ type CloudTask struct {
 	FallbackSources  []string `json:"fallback_sources,omitempty"`
 	SourceIndex      int      `json:"source_index,omitempty"`
 
+	// Progress 是**进度采样环形缓冲**（时间/已下/总/窗口速率/阶段），供增量进度接口与
+	// v2 页面速率曲线（随任务持久化，重启后历史仍在；上限 progressSampleCap）。
+	Progress []ProgressSample `json:"progress,omitempty"`
 	// Diagnostics 是**持久化诊断快照**（阶段/尝试次数/失败归类/部分产物）。
 	// 为什么需要（2026-11-21）：失败任务此前只留 error 文本且 1h 后即被清理 ⇒ 用户看不到
 	// 任务、看不出进度、无从重试。诊断随任务持久化后，失败仍可查、可据此决定重试策略。
