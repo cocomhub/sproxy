@@ -161,9 +161,9 @@ func registerHybridIfEnabled(cfg *server.Config, api *pikpak.API, dl *pikpak.Pik
 		ShareRatio:  cfg.Pikpak.Hybrid.ShareRatio,
 		Concurrency: cfg.Pikpak.Hybrid.Concurrency,
 		AutoDelete:  cfg.Pikpak.Hybrid.AutoDelete,
-		// 云端下载（含受损文件修复）路径：GCID 失配时清续传状态从零重下一次
-		// （2026-11-25 事故：跨重启续传被污染 ⇒ 永远拼不出正确内容）。
-		ResetOnGCIDMismatch: true,
+		// GCID 失配时清续传状态从零重下一次（2026-11-25 事故）。配置化：
+		// 默认启用（Disable 语义，bool 默认 false）；显式 disable 才关闭。
+		ResetOnGCIDMismatch: !cfg.Pikpak.Hybrid.DisableResetOnGCIDMismatch,
 		Logger:              slog.Default(),
 		Metrics:             &pikpak.HybridMetrics{},
 		GCIDStats:           pikpakGCIDStats,
