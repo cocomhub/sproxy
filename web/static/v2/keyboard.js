@@ -289,6 +289,25 @@
       if (target) { ev.preventDefault(); pendingG = 0; goRoute(target); return; }
     }
     if ((window.location.hash || '').indexOf('#/files') === 0) {
+      // Ctrl/Cmd+A 全选；Delete/Backspace 删除所选（复用批量删除入口，需用户确认）。
+      if (mod && (ev.key === 'a' || ev.key === 'A')) {
+        var all = document.getElementById('v2-select-all');
+        if (all) {
+          ev.preventDefault();
+          all.checked = true;
+          all.dispatchEvent(new Event('change', { bubbles: true }));
+          announce('已全选');
+        }
+        return;
+      }
+      if (ev.key === 'Delete' || ev.key === 'Backspace') {
+        var batch = document.getElementById('v2-batch-delete');
+        if (batch && !batch.disabled) {
+          ev.preventDefault();
+          batch.click();
+        }
+        return;
+      }
       if (ev.key === 'j') { ev.preventDefault(); moveRow(1); return; }
       if (ev.key === 'k') { ev.preventDefault(); moveRow(-1); return; }
       if (ev.key === 'x') { ev.preventDefault(); toggleRowSelection(); return; }

@@ -454,7 +454,15 @@
             <div data-cspane="issues" hidden>
               <div class="toolbar" style="margin-bottom:10px">
                 <b>待处理事项</b><span class="muted" style="font-size:12px">人工处置需填写说明（写入审计）</span>
+                <select id="v2-cs-issues-status" aria-label="按状态筛选">
+                  <option value="">全部状态</option>
+                  <option value="needs_human">需人工</option>
+                  <option value="pending">等待重试</option>
+                  <option value="resolved">已解决</option>
+                </select>
+                <input id="v2-cs-issues-q" placeholder="关键字（路径/说明）" style="width:180px">
                 <span style="flex:1"></span>
+                <button class="btn btn-ghost" id="v2-cs-issues-export" type="button">导出 CSV</button>
                 <button class="btn" id="v2-cs-issues-refresh" type="button">刷新</button>
               </div>
               <div class="card">
