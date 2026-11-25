@@ -36,6 +36,7 @@
     if (tasks.q) { q.push('q=' + encodeURIComponent(tasks.q)); }
     if (tasks.status) { q.push('status=' + encodeURIComponent(tasks.status)); }
     if (tasks.vol) { q.push('vol=' + encodeURIComponent(tasks.vol)); }
+    if (tasks.size) { q.push('size=' + encodeURIComponent(tasks.size)); }
     if (tasks.sort !== 'updated') { q.push('sort=' + encodeURIComponent(tasks.sort)); }
     if (tasks.order !== 'desc') { q.push('order=' + encodeURIComponent(tasks.order)); }
     if (tasks.page > 1) { q.push('page=' + tasks.page); }
@@ -52,11 +53,15 @@
     tasks.q = p.q || '';
     tasks.status = p.status || '';
     tasks.vol = p.vol || '';
+    tasks.size = SIZE_RANGES[p.size] || p.size === 'unknown' ? p.size : '';
     tasks.sort = p.sort || 'updated';
     tasks.order = p.order === 'asc' ? 'asc' : 'desc';
     tasks.page = Math.max(1, Number(p.page) || 1);
     var q = el('v2-cs-tasks-q'); if (q) { q.value = tasks.q; }
     var st = el('v2-cs-tasks-status'); if (st) { st.value = tasks.status; }
+    var sz = el('v2-cs-tasks-size'); if (sz) { sz.value = tasks.size; }
+    var szSel = el('v2-cs-tasks-size');
+    if (szSel) { szSel.addEventListener('change', function () { tasks.size = szSel.value; tasks.page = 1; renderTaskRows(); syncTaskHash(); }); }
     var so = el('v2-cs-tasks-sort'); if (so) { so.value = tasks.sort; }
     var od = el('v2-cs-tasks-order'); if (od) { od.value = tasks.order; }
   }
@@ -208,7 +213,23 @@
     if (name === 'hub' && window.v2mesh) { window.v2mesh.initHub(); }
   }
 
-  var tasks = { all: [], selected: Object.create(null), q: '', status: '', vol: '', sort: 'updated', order: 'desc', page: 1, pageSize: 50 };
+  var tasks = { all: [], selected: Object.create(null), q: '', status: '', vol: '', size: '', sort: 'updated', order: 'desc', page: 1, pageSize: 50 };
+  var SIZE_RANGES = {
+    'lt100m': [0, 100 * 1024 * 1024],
+    '100m-1g': [100 * 1024 * 1024, 1024 * 1024 * 1024],
+    '1g-10g': [1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024],
+    'gt10g': [10 * 1024 * 1024 * 1024, Number.MAX_SAFE_INTEGER]
+  };
+
+  /** 体积区间判定（unknown = total_size <= 0，服务端以 -1 表示未知）。 */
+  function sizeMatches(t) {
+    if (!tasks.size) { return true; }
+    var size = Number(t.total_size) || 0;
+    if (tasks.size === 'unknown') { return size <= 0; }
+    var r = SIZE_RANGES[tasks.size];
+    if (!r) { return true; }
+    return size >= r[0] && size < r[1];
+  }
   var CS_ORDER = ['overview', 'tasks', 'issues', 'audit', 'config', 'notify', 'verify', 'access', 'volumes', 'mesh', 'hub'];
 
   function taskVolume(t) { return (t.transfer && t.transfer.volume) || ''; }
@@ -219,6 +240,7 @@
       var v = taskVolume(t) || '__none__';
       if (v !== tasks.vol) { return false; }
     }
+    if (!sizeMatches(t)) { return false; }
     if (!tasks.q) { return true; }
     var q = tasks.q.toLowerCase();
     return ((t.filename || '') + ' ' + (t.id || '') + ' ' + (t.url || '')).toLowerCase().indexOf(q) !== -1;
@@ -619,6 +641,8 @@
     if (tq) { tq.addEventListener('input', function () { tasks.q = tq.value.trim(); tasks.page = 1; renderTaskRows(); syncTaskHash(); }); }
     var ts = el('v2-cs-tasks-status');
     if (ts) { ts.addEventListener('change', function () { tasks.status = ts.value; tasks.page = 1; renderTaskRows(); syncTaskHash(); }); }
+    var szSel = el('v2-cs-tasks-size');
+    if (szSel) { szSel.addEventListener('change', function () { tasks.size = szSel.value; tasks.page = 1; renderTaskRows(); syncTaskHash(); }); }
     var so = el('v2-cs-tasks-sort');
     if (so) { so.addEventListener('change', function () { tasks.sort = so.value; renderTaskRows(); syncTaskHash(); }); }
     var od = el('v2-cs-tasks-order');
