@@ -965,5 +965,41 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	href, err := page.Locator("#v2-entry-link").GetAttribute("href")
 	if err != nil || href != "/ui/v2/" {
 		t.Fatalf("旧版试用入口 href = %v（err=%v）", href, err)
+
+		// TOTP 注册：真实 POST /api/credentials/register → 展示 AK/Base32/二维码。
+		if err := page.Locator("#v2-set-register-toggle").Click(); err != nil {
+			t.Fatalf("展开注册: %v", err)
+		}
+		if err := waitLoc(page, "#v2-reg-submit", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+			t.Fatalf("注册表单未显示: %v", err)
+		}
+		if err := page.Locator("#v2-reg-owner").Fill("e2ereg"); err != nil {
+			t.Fatalf("填写 owner: %v", err)
+		}
+		if err := page.Locator("#v2-reg-submit").Click(); err != nil {
+			t.Fatalf("提交注册: %v", err)
+		}
+		if _, err := page.WaitForFunction(
+			"() => { const b = document.querySelector('#v2-reg-result'); return b && b.textContent.includes('AccessKey') && b.textContent.length > 40; }",
+			nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+			t.Fatalf("注册结果未渲染 (result=%q banner=%q): %v", mustText(page, "#v2-reg-result"), mustText(page, "#v2-set-state"), err)
+		}
+		if _, err := page.WaitForFunction(
+			"() => { const q = document.querySelector('#v2-reg-qr'); return q && q.children.length > 0; }",
+			nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+			t.Fatalf("注册二维码未渲染 (qr=%q): %v", mustText(page, "#v2-reg-qr"), err)
+		}
+		if err := page.Locator("#v2-set-register-toggle").Click(); err != nil {
+			t.Fatalf("收起注册: %v", err)
+		}
 	}
+}
+
+// mustText 返回选择器文本（失败返回空串，仅用于失败诊断）。
+func mustText(page playwright.Page, sel string) string {
+	el, err := page.Locator(sel).TextContent()
+	if err != nil {
+		return ""
+	}
+	return el
 }

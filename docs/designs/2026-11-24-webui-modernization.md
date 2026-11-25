@@ -470,7 +470,7 @@
 | 控制台 · 卷（表单化建卷） | ✅ | 系统卷（类型/模式/容量/已用/水位/状态）、用户卷（创建/删除）、Secret 卷（随机创建一次展示/删除）；单卷/全部刷新 |
 | 控制台 · Mesh | ✅ | 只读：读/写面启用·监听·pin 数、node 角色、信令 |
 | 控制台 · Hub | ✅ | 只读：注册节点（服务/质量/RTT/虚拟 IP）+ 转发统计；未启用时明确提示 |
-| 连接设置 | ✅ | AccessKey/Secret 保存并校验（失败回滚）、TOTP 登录（复用 login.js）、退出；Web 隧道开关（PUT /api/config） |
+| 连接设置 | ✅ | AccessKey/Secret 保存并校验（失败回滚）、TOTP 登录与**注册**（密钥 + 二维码）、退出；Web 隧道开关（PUT /api/config） |
 | 键盘与 a11y | ✅ | ⌘K 命令面板、g 前缀跳转、j/k/x/Enter 列表操作、? 帮助、密度切换持久化、aria-live 播报 |
 
 验证：`make web-test`、`go test ./internal/archcheck -run TestWebAssets`、`go build ./...`、

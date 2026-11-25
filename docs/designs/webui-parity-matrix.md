@@ -18,7 +18,7 @@
 | A2 | 语言切换（i18n） | `#lang-toggle`；`i18n.js` | 顶栏/设置菜单 | 🟢 VERIFIED | 保留全部词条键 ｜ v2/i18n.js（壳层+表头+弹窗/toast 词条）；v2/i18n.test.js |
 | A3 | 主题切换（亮/暗） | `#theme-toggle-btn`；`style.css` 双份暗色 token | 亮/暗/跟随系统 | 🟢 VERIFIED | **默认亮色**（已定） ｜ 主题切换 + 跟随系统；e2e 主题断言 |
 | A4 | AccessKey/Secret 保存 | `#accessKey/#token/#save-access-btn` | 连接设置浮层 | 🟢 VERIFIED | 值仍存 localStorage ｜ v2/settings.js 保存并校验（失败回滚）；e2e 保存→退出 |
-| A5 | 登录 / 注册（弹窗） | `#login-btn/#login-modal`；`login.js` | 连接设置浮层内 tab | ✅ DONE | 含 owner/AK/验证码流程 ｜ TOTP 登录复用 login.js；注册仍走旧版（需二维码） |
+| A5 | 登录 / 注册（弹窗） | `#login-btn/#login-modal`；`login.js` | 连接设置浮层内 tab | 🟢 VERIFIED | 含 owner/AK/验证码流程 ｜ TOTP 登录复用 login.js；注册/登录均在 v2（二维码 + 密钥展示）；e2e 真实注册渲染 AK/Base32/二维码 |
 | A6 | 隧道调试开关 | `#use-tunnel-checkbox` | 高级选项（默认收起） | 🟢 VERIFIED | 不得默认开启 ｜ 设置内「Web 域方法默认走加密隧道」读写 /api/config |
 | A7 | Toast 通知 | `#toast`；`showToast` | 统一 toast 组件 + `aria-live` | 🟢 VERIFIED | 需支持失败常驻 ｜ toast + aria-live；e2e 多处断言 toast 文本 |
 
@@ -142,12 +142,12 @@
 
 ## 核验快照（2026-11-25）
 
-- 统计：**66 VERIFIED / 1 DONE / 4 RETIRED / 0 TODO**（A–H 功能行）。
-- 唯一 DONE：A5 TOTP 登录（复用 `login.js` 流程，已验证可用；**注册**含二维码仍在旧版）。
+- 统计：**67 VERIFIED / 0 DONE / 4 RETIRED / 0 TODO**（A–H 功能行）。
+- A5 TOTP 注册/登录：v2 内完成（复用 `login.js` + `qrcode.js`），e2e 断言 AK/Base32/二维码渲染。
 - 4 条 RETIRED 及理由：
   - D3/D6 链式/组链式下载：需产品定义（服务端 `retry` 仅接受 `task_id`/`url`/`transfer_path`/`group_id`）；
   - G5 凭据新增/轮换：写操作走 `sclient trust` / `POST /api/credentials/register`，页面只做只读摘要；
   - G7 同步冲突：冲突策略在「新建同步任务」时选择，服务端无独立冲突管理视图。
-- 删旧页门禁（见文末 §下线门禁）：① 本表 0 行 TODO/WIP/DONE **尚未满足**（A5 仍 DONE）；
+- 删旧页门禁（见文末 §下线门禁）：① 功能行 0 行 TODO/WIP/DONE **已满足**（仅余 4 条 RETIRED）；
   ② 需连续一个发布周期无 P0/P1；③ 旧页 e2e 需迁移或等价替换；④ 文档记录；⑤ 单独 PR。
 - 因此**本期不删旧页**；A5 的注册流程迁移（二维码 + 密钥确认）是唯一剩余功能缺口。
