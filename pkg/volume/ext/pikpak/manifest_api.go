@@ -158,7 +158,7 @@ func OfflineScan(dest string, chunkSize, zeroRun int64) (OfflineReport, error) {
 		chunkSize = sum.ChunkSize
 	}
 	if chunkSize <= 0 {
-		chunkSize = defaultHybridChunkSize
+		chunkSize = adaptiveChunkSize(total) // 0 = 自适应（≤20 行）
 	}
 	suspects, err := ScanZeroTailSpans(path, total, chunkSize, ZeroScanOptions{ZeroRun: zeroRun})
 	if err != nil {

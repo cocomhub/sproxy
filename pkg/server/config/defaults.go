@@ -142,9 +142,10 @@ func Default() *Config {
 			// 「Pack From Shared」restore 副本（NH-P1 加固），不会误删用户自有文件。
 			Hybrid: PikpakHybridConfig{
 				AutoDelete: true,
-				// ChunkSize 32MiB（与 hybrid.go defaultHybridChunkSize 及 pikget 对齐：
-				// 分片更细，中断恢复粒度更小）
-				ChunkSize: 32 << 20,
+				// ChunkSize 0 = **自适应**：按总大小取满足「chunk 数 ≤ 20 行」的最小 2^k MiB
+				// （2–64MiB，见 pikpak.adaptiveChunkSize），与 pikget 同一规则。
+				// 续传粒度由 1MiB 子块位图承担（chunk 大小不再决定浪费量）。
+				ChunkSize: 0,
 			},
 		},
 	}

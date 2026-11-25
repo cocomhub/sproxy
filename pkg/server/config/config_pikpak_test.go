@@ -38,10 +38,15 @@ func TestConfig_PikpakHybridDefaults(t *testing.T) {
 	if c.Pikpak.Hybrid.Disable {
 		t.Fatal("expected hybrid.disable default false (= enabled)")
 	}
-	// ChunkSize 默认 32MiB（2026-10-07 对齐：分片更细中断粒度更小，与 hybrid.go 常量一致）；
+	// ChunkSize 默认 0 = 自适应（用户 2026-11-26：按总大小取满足「chunk 数 ≤20 行」的
+	// 最小 2^k MiB，与 pikget 同一规则）；续传粒度由 1MiB 子块位图承担。
 	// ShareRatio/Concurrency 保持零默认（下载器内部回落）。
-	if c.Pikpak.Hybrid.ChunkSize != 32<<20 {
-		t.Fatalf("expected hybrid.chunk_size default 32MiB, got %d", c.Pikpak.Hybrid.ChunkSize)
+	if c.Pikpak.Hybrid.ChunkSize != 0 {
+		t.Fatalf("expected hybrid.chunk_size default 0 (adaptive), got %d", c.Pikpak.Hybrid.ChunkSize)
+	}
+	// GCID 失配自愈默认启用（Disable 语义，bool 默认 false）。
+	if c.Pikpak.Hybrid.DisableResetOnGCIDMismatch {
+		t.Fatal("expected hybrid GCID reset self-heal enabled by default")
 	}
 	if c.Pikpak.Hybrid.ShareRatio != 0 || c.Pikpak.Hybrid.Concurrency != 0 {
 		t.Fatal("expected hybrid share_ratio/concurrency zero defaults (downloader falls back)")

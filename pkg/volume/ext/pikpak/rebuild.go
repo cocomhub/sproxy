@@ -108,7 +108,7 @@ func (d *HybridDownloader) newRebuildSession(ctx context.Context, source, destPa
 		chunkSize = opt.ChunkSize
 	}
 	if chunkSize <= 0 {
-		chunkSize = defaultHybridChunkSize
+		chunkSize = adaptiveChunkSize(target.Size) // 0 = 自适应（≤20 行）
 	}
 	return &rebuildSession{
 		d: d, source: source, shareID: shareID, destPath: destPath,

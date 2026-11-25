@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"math/bits"
 	"net"
 	"net/http"
 	"os"
@@ -40,8 +42,59 @@ const (
 // （用户裁定 2026-10-28：匿名区上限由探测决定，不再固定按 50% 截断）。
 const hybridShareRatioMax = 1.0
 
-// defaultHybridChunkSize 是分片大小（默认 32MiB：分片更细 → 中断恢复粒度更小，与 pikget 对齐）。
-const defaultHybridChunkSize = 32 << 20 // 32MiB
+// 子块续传参数（用户 2026-11-26 裁定）：
+//
+//   - 续传粒度 = **1 MiB 子块**（chunk 内位图记录完成位点）——中断后只重下缺失子块，
+//     不再整 chunk 重下（接近完成时此前会浪费 chunkSize-1MiB）；
+//   - chunk 大小 = **2^k MiB 自适应**：取满足 ceil(total/chunk) ≤ 20 的最小 2 的幂
+//     （页面一屏 20 行，一行一个 chunk），下限 2MiB、上限 64MiB；
+//   - 分享/账号边界允许落在 1 MiB 子块上（见 downloadRun），并**分享优先**。
+const (
+	hybridSubBlockSize = 1 << 20 // 续传子块 1 MiB
+	hybridMinChunkSize = 2 << 20 // chunk 下限 2 MiB
+	hybridMaxChunkSize = 64 << 20
+	hybridMaxChunkRows = 20 // 页面行数上限（一屏可见）
+)
+
+// adaptiveChunkSize 返回满足「chunk 数 ≤ 20 行」的最小 2^k MiB（clamp 到 [2MiB, 64MiB]）。
+// total ≤ 0 时返回下限（调用方保证 total > 0）。
+func adaptiveChunkSize(total int64) int64 {
+	size := int64(hybridMinChunkSize)
+	for size < hybridMaxChunkSize && (total+size-1)/size > hybridMaxChunkRows {
+		size <<= 1
+	}
+	return size
+}
+
+// subBitCount 返回 chunk 覆盖的子块数（≤64，1MiB/块；尾块计入）。
+func subBitCount(length int64) int {
+	if length <= 0 {
+		return 0
+	}
+	n := min(int((length+hybridSubBlockSize-1)/hybridSubBlockSize), 64)
+	return n
+}
+
+// subRuns 返回 chunk 内**未完成**的连续子块区间（按 1MiB 对齐，连续缺失合并成一个 Range）。
+func subRuns(c chunk, mask uint64) []chunk {
+	n := subBitCount(c.length)
+	var out []chunk
+	for i := 0; i < n; i++ {
+		if mask&(uint64(1)<<uint(i)) != 0 {
+			continue
+		}
+		start := int64(i) * hybridSubBlockSize
+		end := min(start+hybridSubBlockSize, c.length)
+		j := i + 1
+		for j < n && mask&(uint64(1)<<uint(j)) == 0 {
+			end = min(int64(j+1)*hybridSubBlockSize, c.length)
+			j++
+		}
+		out = append(out, chunk{offset: c.offset + start, length: end - start})
+		i = j - 1
+	}
+	return out
+}
 
 // hybridWorkingSuffix 是下载期临时文件后缀（全部分片完成且权威校验通过后才 rename 到 destPath）。
 const hybridWorkingSuffix = ".hybrid.downloading"
@@ -272,9 +325,10 @@ type downloadCtx struct {
 	reusedID     string        // 缓存 idempotent/owned **未登记**命中的文件 ID（round-7 性能：
 	// 避免每账号 chunk 重跑全盘 walk；round-8 改为 ID 而非直链——每次 DownloadLink 重取
 	// 新链接防 TTL 过期。不登记即不删，NH-P1 不变）
-	reusedMu   sync.Mutex      // 保护 reusedID（round-11 Critical：并发账号 chunk 无锁读写竞态）
-	manifestMu sync.Mutex      // manifest 写串行化（markChunkDone）
-	journal    ProgressJournal // 进度日志（audit WAL；nil = 仅 manifest）
+	reusedMu   sync.Mutex       // 保护 reusedID（round-11 Critical：并发账号 chunk 无锁读写竞态）
+	manifestMu sync.Mutex       // manifest 写串行化（markChunkDone/markSub）
+	masks      map[int64]uint64 // chunk offset → 已完成子块位图（内存镜像，与 manifest.Blocks 同步）
+	journal    ProgressJournal  // 进度日志（audit WAL；nil = 仅 manifest）
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
 	shareID    string
@@ -294,6 +348,7 @@ type downloadCtx struct {
 	onProgress    downloader.ProgressFunc
 	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
 	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
+	chunkSize     int64             // 本次分片几何（manifest 缺省时写入）
 	shareEnd      int64             // 分享区边界（chunk 来源判定）
 	// 下载审计统计（用户裁定 2026-10-28）：起止时刻 + 分通道字节（并发分片原子累加）。
 	// 统计口径：chunk **成功**时的完整长度（重试/续传跳过的块不计入本次会话字节）。
@@ -313,10 +368,9 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	if cfg.API == nil {
 		return nil, fmt.Errorf("hybrid: api required")
 	}
+	// chunkSize == 0 ⇒ **自适应**（按总大小取满足 ≤20 行的 2^k MiB，见 adaptiveChunkSize）；
+	// >0 ⇒ 显式指定（可小于 1MiB 子块——此时整 chunk 就是 1 个子块）。
 	chunk := cfg.ChunkSize
-	if chunk <= 0 {
-		chunk = defaultHybridChunkSize
-	}
 	// ShareRatio<=0 → auto（探测权威，失败回落 defaultShareRatioFallback）；
 	// >0 → 显式上限（clamp 到 (0, hybridShareRatioMax]）。
 	ratio := cfg.ShareRatio
@@ -548,18 +602,40 @@ func (d *HybridDownloader) hybridSinkReplay(ctx context.Context, dc *downloadCtx
 	return nil
 }
 
-// prepareManifest 加载/创建 manifest 并预置续传进度基准（已完成 chunk 字节入 prog）。
-func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+// prepareManifest 加载/创建 manifest 并预置续传进度基准（已完成 chunk/子块字节入 prog）。
+// chunkSize 为 in/out：manifest 已记录几何 ⇒ 沿用旧值（续传必须同几何）；否则回填新值。
+func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64, chunkSize *int64) *hybridManifest {
 	manifest := d.loadValidManifest(dc.destPath, dc.shareID, dc.target)
+	if manifest != nil {
+		if manifest.ChunkSize > 0 {
+			*chunkSize = manifest.ChunkSize // 续传沿用旧几何（防 offset 错位跳过错误区间）
+		} else {
+			manifest.ChunkSize = *chunkSize // 旧 manifest 无几何：沿用本次（与旧行为一致）
+		}
+	}
 	// 两文件配套出现：开始下载立刻创建空 manifest——中断/退出也 .hybrid 与
 	// .hybrid.downloading 成对存在（直观可续）。已有同源 manifest 保留（崩溃续传）。
 	if manifest == nil {
-		manifest = d.initManifest(dc, shareEnd)
+		manifest = d.initManifest(dc, shareEnd, *chunkSize)
+	} else if manifest.ChunkSize != *chunkSize {
+		*chunkSize = manifest.ChunkSize
 	}
-	// 续传进度基准：已完成 chunk 字节预置进 prog（进度从已完成处继续，不从头计数）。
+	// 子块位图内存镜像（续传只补缺失子块）。
+	dc.manifestMu.Lock()
+	dc.masks = make(map[int64]uint64, len(manifest.Blocks))
+	maps.Copy(dc.masks, manifest.Blocks)
+	dc.manifestMu.Unlock()
+	// 续传进度基准：整块完成 + 部分完成的子块字节都计入（进度不从 0 重来）。
 	var done int64
 	for _, ln := range manifest.Chunks {
 		done += ln
+	}
+	for off, mask := range manifest.Blocks {
+		done += int64(bits.OnesCount64(mask)) * hybridSubBlockSize
+		_ = off
+	}
+	if done > dc.currentTotal {
+		done = dc.currentTotal
 	}
 	dc.prog.Store(done)
 	return manifest
@@ -636,20 +712,26 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 	if err := ensureWorkDir(dc.working); err != nil {
 		return nil, err
 	}
-	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", d.chunkSize)
-	chunks := planChunks(0, dc.currentTotal, shareEnd, d.chunkSize)
-	d.log.Info("hybrid chunks", "count", len(chunks))
-	dc.chunkOffsets = make([]int64, 0, len(chunks))
-	dc.shareEnd = shareEnd
-	for _, c := range chunks {
-		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
+	// chunk 几何：显式配置优先；0 ⇒ 按总大小自适应（≤20 行）。续传时沿用 manifest 记录的几何。
+	chunkSize := d.chunkSize
+	if chunkSize <= 0 {
+		chunkSize = adaptiveChunkSize(dc.currentTotal)
 	}
+	dc.shareEnd = shareEnd
 	// 崩溃恢复：读 manifest（源身份 + 工作文件一致性 + 零尾扫描），缺失则创建空 manifest
 	// （两文件配套），续传进度基准预置 prog。抽 helper 控制认知复杂度。
 	// **必须在 preallocate 之前**：预分配会让「工作文件存在且大小=total」恒真——先分配再校验，
 	// 「成品已改名 + manifest 残留」这类异常状态会通过校验 → 跳过全部缺失分片 →
 	// 产出大小正确但内容残缺的文件（静默损坏）。
-	manifest := d.prepareManifest(dc, shareEnd)
+	manifest := d.prepareManifest(dc, shareEnd, &chunkSize)
+	dc.chunkSize = chunkSize
+	d.log.Info("hybrid plan", "total", dc.currentTotal, "share_end", shareEnd, "chunk", chunkSize)
+	chunks := planChunks(0, dc.currentTotal, shareEnd, chunkSize)
+	d.log.Info("hybrid chunks", "count", len(chunks))
+	dc.chunkOffsets = make([]int64, 0, len(chunks))
+	for _, c := range chunks {
+		dc.chunkOffsets = append(dc.chunkOffsets, c.offset)
+	}
 	// 进度日志（audit WAL）：恢复已完成分片 + 后续逐片落盘（用户裁定 2026-10-28）。
 	// 失败不阻断下载（日志是增强能力，manifest 仍是主路径）。
 	d.attachJournal(ctx, dc, manifest)
@@ -803,44 +885,136 @@ func acquireOrDone(ctx context.Context, sem chan struct{}) bool {
 	}
 }
 
-// downloadOneChunk 单个 chunk：分享区（含降级）或账号区。
+// downloadOneChunk 单个 chunk：**按 1MiB 子块区间驱动**（只下未完成子块）。
+//
+// 子块续传（用户 2026-11-26）：chunk 内位图记录已完成子块 ⇒ 中断后仅补缺失子块，
+// 不再整 chunk 重下（接近完成时此前浪费可达 chunkSize-1MiB）。
+// 每个未完成**连续区间**合并成一次 Range 请求（减少请求数）；区间跨越分享/账号边界时
+// 按边界拆成两段分别下载（边界允许落在子块内部，**分享优先**）。
 func (d *HybridDownloader) downloadOneChunk(ctx context.Context, dc *downloadCtx, c chunk, shareEnd int64) error {
 	idx := dc.chunkIndex(c.offset)
-	var cerr error
-	// 标记 downloading（per-chunk 回调，pikget 显示该分片开始下载）
 	d.chunkPhase(dc, idx, c, "downloading", 0, nil)
-	if c.offset >= shareEnd {
-		cerr = d.downloadAccountChunk(ctx, dc, c)
-		if cerr == nil {
-			dc.acctBytes.Add(c.length)
-		}
-	} else {
-		cerr = d.downloadShareChunk(ctx, dc, c)
-		if cerr == nil {
-			dc.anonBytes.Add(c.length) // 匿名（免账号配额）通道
-		} else {
-			d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
-			d.log.Warn("hybrid share chunk failed, downgrade to account", "offset", c.offset, "err", cerr)
-			cerr = d.downloadAccountChunk(ctx, dc, c)
-			if cerr == nil {
-				dc.acctBytes.Add(c.length) // 分享区降级到账号通道
+	runs := subRuns(c, dc.subMask(c.offset))
+	var done int64
+	for _, run := range runs {
+		if cerr := d.downloadRun(ctx, dc, run, shareEnd); cerr != nil {
+			if ctx.Err() != nil {
+				// fail-fast 取消的兄弟分片：区别于真失败（进度条显示 cancelled，不误报 failed）。
+				d.chunkPhase(dc, idx, c, "cancelled", done, cerr)
+			} else {
+				d.chunkPhase(dc, idx, c, "failed", done, cerr)
 			}
+			return cerr
 		}
+		done += run.length
+		d.markSub(ctx, dc, c, run) // 位图落盘；整块完成时转 Chunks + WAL
+		d.chunkPhase(dc, idx, c, "downloading", done, nil)
 	}
+	d.chunkPhase(dc, idx, c, "done", c.length, nil)
+	return nil
+}
+
+// downloadRun 下载一个未完成子块区间：按 shareEnd 拆分并**分享优先**（分享能下的一律走分享，
+// 只有分享不可达的字节才走账号）。
+func (d *HybridDownloader) downloadRun(ctx context.Context, dc *downloadCtx, run chunk, shareEnd int64) error {
+	runEnd := run.offset + run.length
 	switch {
-	case cerr == nil:
-		// 完成：写 manifest（崩溃恢复跳过；记录源身份）。
-		d.markChunkDone(ctx, dc, c, manifestSource{
-			ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size, URL: dc.sourceURL,
-		})
-		d.chunkPhase(dc, idx, c, "done", c.length, nil)
-	case ctx.Err() != nil:
-		// fail-fast 取消的兄弟分片：区别于真失败（进度条显示 cancelled，不误报 failed）。
-		d.chunkPhase(dc, idx, c, "cancelled", 0, cerr)
+	case runEnd <= shareEnd:
+		return d.downloadSegment(ctx, dc, run, true)
+	case run.offset >= shareEnd:
+		return d.downloadSegment(ctx, dc, run, false)
 	default:
-		d.chunkPhase(dc, idx, c, "failed", 0, cerr)
+		// 边界落在该区间内部：前半分享、后半账号（**边界可落在 1MiB 子块内部**）。
+		sharePart := chunk{offset: run.offset, length: shareEnd - run.offset}
+		acctPart := chunk{offset: shareEnd, length: runEnd - shareEnd}
+		if err := d.downloadSegment(ctx, dc, sharePart, true); err != nil {
+			return err
+		}
+		return d.downloadSegment(ctx, dc, acctPart, false)
 	}
-	return cerr
+}
+
+// downloadSegment 下载一段字节：share=true 走匿名分享直链（失败降级账号），false 走账号区。
+func (d *HybridDownloader) downloadSegment(ctx context.Context, dc *downloadCtx, seg chunk, share bool) error {
+	if !share {
+		if err := d.downloadAccountChunk(ctx, dc, seg); err != nil {
+			return err
+		}
+		dc.acctBytes.Add(seg.length)
+		return nil
+	}
+	if err := d.downloadShareChunk(ctx, dc, seg); err == nil {
+		dc.anonBytes.Add(seg.length) // 匿名（免账号配额）通道
+		return nil
+	} else {
+		d.metricsInc(func(m *HybridMetrics) { m.ShareSegmentFailed.Add(1); m.DowngradeTotal.Add(1) })
+		d.log.Warn("hybrid share segment failed, downgrade to account", "offset", seg.offset, "err", err)
+	}
+	if err := d.downloadAccountChunk(ctx, dc, seg); err != nil {
+		return err
+	}
+	dc.acctBytes.Add(seg.length) // 分享区降级到账号通道
+	return nil
+}
+
+// subMask 返回 chunk 已完成子块位图（内存镜像；nil 安全）。
+func (dc *downloadCtx) subMask(offset int64) uint64 {
+	dc.manifestMu.Lock()
+	defer dc.manifestMu.Unlock()
+	return dc.masks[offset]
+}
+
+// markSub 记录一个子块区间已完成（位图落盘）；整块完成时转 Chunks + WAL（崩溃恢复跳过）。
+func (d *HybridDownloader) markSub(ctx context.Context, dc *downloadCtx, c chunk, run chunk) {
+	dc.manifestMu.Lock()
+	if dc.masks == nil {
+		dc.masks = map[int64]uint64{}
+	}
+	mask := dc.masks[c.offset]
+	first := int((run.offset - c.offset) / hybridSubBlockSize)
+	last := int((run.offset + run.length - 1 - c.offset) / hybridSubBlockSize)
+	for i := first; i <= last && i < 64; i++ {
+		mask |= uint64(1) << uint(i)
+	}
+	dc.masks[c.offset] = mask
+	n := subBitCount(c.length)
+	full := (uint64(1) << uint(n)) - 1
+	complete := mask&full == full
+	dc.manifestMu.Unlock()
+	src := manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size, URL: dc.sourceURL}
+	if complete {
+		d.markChunkDone(ctx, dc, c, src) // 整块完成：写 Chunks（并清位图）
+		return
+	}
+	d.persistSubMask(dc, c, mask, src)
+}
+
+// persistSubMask 把子块位图写入 manifest（部分完成时；整块完成走 markChunkDone）。
+func (d *HybridDownloader) persistSubMask(dc *downloadCtx, c chunk, mask uint64, src manifestSource) {
+	dc.manifestMu.Lock()
+	defer dc.manifestMu.Unlock()
+	m := loadManifest(dc.destPath)
+	if m != nil && !m.SourceMatches(src.ShareID, &ShareFile{ID: src.FileID, Size: src.Size, Hash: src.Hash}) {
+		m = nil // 源身份不一致（异常残留）⇒ 重建，避免污染
+	}
+	if m == nil {
+		m = &hybridManifest{Chunks: map[int64]int64{}, ChunkSize: dc.chunkSize}
+	}
+	if m.Blocks == nil {
+		m.Blocks = map[int64]uint64{}
+	}
+	m.Blocks[c.offset] = mask
+	m.ChunkSize = manifestChunkSize(m, dc)
+	m.Source = src
+	writeManifest(dc.destPath, m)
+}
+
+// manifestChunkSize 返回应记录的 chunk 几何（已有值优先；缺失时用本次几何）。
+func manifestChunkSize(m *hybridManifest, dc *downloadCtx) int64 {
+	if m.ChunkSize > 0 {
+		return m.ChunkSize
+	}
+	return dc.chunkSize
 }
 
 // ensureWorkDir 确保工作文件所在目录存在（WorkPaths 超长名拆出的子目录）。
@@ -1492,8 +1666,14 @@ type ChunkProgressFunc func(info ChunkInfo)
 type hybridManifest struct {
 	Total    int64           `json:"total"`
 	ShareEnd int64           `json:"share_end"`
-	Chunks   map[int64]int64 `json:"chunks"` // offset → length
-	Source   manifestSource  `json:"source"`
+	Chunks   map[int64]int64 `json:"chunks"` // offset → length（**整块**完成）
+	// Blocks 是子块位图（1MiB/位，最多 64 位/chunk）：offset → 已完成子块掩码。
+	// 续传只重下未置位子块；旧 manifest 无此字段 ⇒ 掩码 0 = 整块未完成（零回归）。
+	Blocks map[int64]uint64 `json:"blocks,omitempty"`
+	// ChunkSize 记录分片几何（续传必须沿用同一几何，否则 offset 对不上会跳过错误区间）。
+	// 0 = 旧 manifest（按 legacyDefaultChunkSize 解释）。
+	ChunkSize int64          `json:"chunk_size,omitempty"`
+	Source    manifestSource `json:"source"`
 }
 
 // manifestSource 记录源分享身份（C4：恢复时校验源一致，否则全量重下）。
@@ -1548,9 +1728,9 @@ func (m *hybridManifest) Has(offset int64) bool {
 
 // initManifest 创建并落盘初始 manifest（空 Chunks + 源身份）——
 // 下载开始即与 .hybrid.downloading 配套出现，中断/立即退出也两个文件都在。
-func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd int64) *hybridManifest {
+func (d *HybridDownloader) initManifest(dc *downloadCtx, shareEnd, chunkSize int64) *hybridManifest {
 	m := &hybridManifest{
-		Total: dc.currentTotal, ShareEnd: shareEnd,
+		Total: dc.currentTotal, ShareEnd: shareEnd, ChunkSize: chunkSize,
 		Chunks: map[int64]int64{},
 		Source: manifestSource{ShareID: dc.shareID, FileID: dc.target.ID, Hash: dc.target.Hash, Size: dc.target.Size, URL: dc.sourceURL},
 	}
@@ -1727,6 +1907,7 @@ func (d *HybridDownloader) markChunkDone(ctx context.Context, dc *downloadCtx, c
 		m = &hybridManifest{Chunks: map[int64]int64{}}
 	}
 	m.Chunks[c.offset] = c.length
+	delete(m.Blocks, c.offset) // 整块完成 ⇒ 子块位图不再需要
 	m.Source = src
 	writeManifest(dc.destPath, m)
 	dc.manifestMu.Unlock()
