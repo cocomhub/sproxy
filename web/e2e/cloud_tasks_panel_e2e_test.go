@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/server"
+	"github.com/cocomhub/sproxy/pkg/testutil"
 	"github.com/mxschmitt/playwright-go"
 )
 
@@ -233,18 +234,10 @@ func TestCloudTasksPanel_DetailLoadsProgress(t *testing.T) {
 		t.Fatal("详情展开未请求 /progress")
 	}
 	// 采样槽必须收敛成曲线或明确占位（不允许停在「加载中…」）。
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		slot := page.Locator("#cloud-tasks-panel .ct-spark-slot").First()
-		txt, terr := slot.InnerText()
-		if terr == nil && (strings.Contains(txt, "暂无采样") || strings.Contains(txt, "峰值")) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("速率曲线槽未收敛（当前文本 %q）", txt)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		txt, terr := page.Locator("#cloud-tasks-panel .ct-spark-slot").First().InnerText()
+		return terr == nil && (strings.Contains(txt, "暂无采样") || strings.Contains(txt, "峰值"))
+	}, "速率曲线槽未收敛为曲线或「暂无采样」占位")
 }
 
 // waitFailedTask 轮询直到存在 failed 任务（服务端异步）。
