@@ -247,6 +247,7 @@
             <button type="button" data-cs="access" data-i18n="cs.access">接入</button>
             <button type="button" data-cs="mesh" data-i18n="cs.mesh">Mesh</button>
             <button type="button" data-cs="hub" data-i18n="cs.hub">Hub</button>
+            <button type="button" data-cs="shares" data-i18n="cs.shares">分享</button>
           </nav>
           <div class="cs-body">
             <div class="toolbar" style="margin-bottom:12px">
@@ -415,6 +416,31 @@
                 </table>
                 <div class="empty" id="v2-hub-empty" hidden><b>没有已注册节点</b>
                   <div class="muted">Hub 未启用时此分区不可用。</div></div>
+              </div>
+            </div>
+
+            <div data-cspane="shares" hidden>
+              <div class="toolbar" style="margin-bottom:10px">
+                <b>分享链接</b><span class="muted" style="font-size:12px">全部链接（含口令/一次性/水印状态）</span>
+                <select id="v2-sh-state" aria-label="按状态筛选">
+                  <option value="">全部</option>
+                  <option value="active">有效</option>
+                  <option value="expired">已失效</option>
+                  <option value="ot">一次性</option>
+                  <option value="pw">有口令</option>
+                </select>
+                <span style="flex:1"></span>
+                <button class="btn" id="v2-sh-refresh" type="button">刷新</button>
+              </div>
+              <div id="v2-sh-banner" class="banner" hidden role="status"></div>
+              <div class="card">
+                <table class="table">
+                  <thead><tr><th>文件</th><th style="width:100px">卷</th><th style="width:130px">状态</th>
+                    <th style="width:110px" class="r">下载</th><th style="width:170px">过期</th><th style="width:150px"></th></tr></thead>
+                  <tbody id="v2-sh-body"></tbody>
+                </table>
+                <div class="empty" id="v2-sh-empty" hidden><b>暂无分享链接</b>
+                  <div class="muted">在文件检查器的「分享」页签创建。</div></div>
               </div>
             </div>
 
@@ -636,6 +662,8 @@
         <label class="muted">下载上限
           <input id="v2-share-max" type="number" min="0" value="0" style="width:70px"> 次</label>
       </div>
+      <label class="muted">访问口令（留空 = 无需口令）
+        <input id="v2-share-password" type="password" autocomplete="new-password" placeholder="可选"></label>
       <label class="dr-check"><input id="v2-share-one" type="checkbox"> 一次性链接（下载后失效）</label>
       <button class="btn btn-primary btn-sm" id="v2-share-create" type="button">创建分享</button>
       <div id="v2-share-result" class="muted" style="font-size:12px"></div>
@@ -777,6 +805,7 @@
 <script src="keyboard.js"></script>
 <script src="settings.js"></script>
 <script src="mesh-console.js"></script>
+<script src="shares-console.js"></script>
 <script src="trash.js"></script>
 </body>
 </html>

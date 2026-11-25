@@ -47,6 +47,7 @@ type Link struct {
 	// WatermarkSeed 是分享绑定水印种子（roadmap P2 残余）：创建时指定 →
 	// 访问带 X-Share-Watermark 头 + ?transform=thumb&watermark=<seed> 自动叠加。
 	WatermarkSeed string `json:"watermark_seed,omitempty"`
+	PasswordHash  string `json:"password_hash,omitempty"` // 访问口令 scrypt 哈希（空 = 无口令）
 }
 
 // LinkPersist 是分享链接的**持久化形态**：Link 的 TenantID/Rel 在公开
@@ -66,6 +67,9 @@ type LinkPersist struct {
 	OneTime       bool      `json:"one_time"`
 	ReadOnly      bool      `json:"readonly,omitempty"`
 	WatermarkSeed string    `json:"watermark_seed,omitempty"`
+	// PasswordHash 是访问口令的 scrypt 哈希串（空 = 无口令保护）。
+	// **明文口令绝不落盘、绝不入审计**；校验见 VerifySharePassword。
+	PasswordHash string `json:"password_hash,omitempty"`
 }
 
 func (p LinkPersist) toLink() *Link {
@@ -83,6 +87,7 @@ func (p LinkPersist) toLink() *Link {
 		OneTime:       p.OneTime,
 		ReadOnly:      p.ReadOnly,
 		WatermarkSeed: p.WatermarkSeed,
+		PasswordHash:  p.PasswordHash,
 	}
 }
 
@@ -101,6 +106,7 @@ func (l *Link) ToPersist() LinkPersist {
 		OneTime:       l.OneTime,
 		ReadOnly:      l.ReadOnly,
 		WatermarkSeed: l.WatermarkSeed,
+		PasswordHash:  l.PasswordHash,
 	}
 }
 
@@ -330,6 +336,7 @@ func (s *Store) Create(spec Spec) (*Link, error) {
 		OneTime:       spec.OneTime,
 		ReadOnly:      spec.ReadOnly,
 		WatermarkSeed: spec.WatermarkSeed,
+		PasswordHash:  spec.PasswordHash,
 	}
 	if s.evictIfFullLocked(token, link) {
 		return link, nil

@@ -138,3 +138,37 @@ golangci-lint run web/e2e/...                      # 0 issues
 - 目录重命名的**外部卷**（加密/网盘）仍走 `renameExternalVolume` 单文件语义 ⇒ 目录不支持（服务端接缝只有文件级 `ExternalRename`）；
 - 目录重命名的配额转移在「目标 Scope 预留失败」时只记 Warn 不回滚（改名已成功，差分由对账收敛）——
   与 rmdir 的释放口径一致，但会在账本上留下待收敛偏差。
+
+---
+
+## 第三批（2026-11-25 续）：分享功能专项审查
+
+### 发现的真实缺陷（P1）
+
+| # | 缺陷 | 影响 | 修复 |
+| --- | --- | --- | --- |
+| 1 | **v2「创建分享」从未成功过**：UI 传 `ttl: 7`（下拉的**天数数字**），服务端只接受 Go duration ⇒ 400「请求体解析失败」 | 用户点创建只看到报错 | `resolveShareTTL` 支持三种写法：duration / `7d`、`2w` / **纯数字=天**；UI 改为显式 `7d`（双保险） |
+| 2 | **分享口令从未实现**：`docs/api.md` 写了 `password?`，服务端零实现（文档腐化） | 无法给分享加口令 | 新增 `share.HashSharePassword` / `VerifySharePassword`（scrypt N=2^15 + 16B 随机盐 + 常量时间比较）；创建时只存哈希、访问时校验 |
+| 3 | 口令校验位置若放错会**消耗下载计数** | 爆破一次就烧掉配额 | 校验放在 `Peek` 之后、`Consume` 之前；测试断言「3 次失败后 downloads 仍为 0」 |
+| 4 | 无页面级「分享」视图（旧页有「管理分享」） | 只能逐个文件检查器里看 | 控制台新增「分享」分区：全部链接 + 状态/一次性/口令筛选 + 复制 + 撤销 |
+
+### 安全要点
+
+- 口令**明文不落盘**：`LinkPersist.PasswordHash` 存 `scrypt$N$r$p$salt$hash`；明文只在请求内存在。
+- **不返回哈希**：列表接口只给 `password_protected`（bool）。
+- **不写审计口令**：审计 action=`share_create` / `share_revoke`，detail 仅含文件名与「有无口令」。
+- 口令来源优先 `X-Share-Password` 头（避免落 URL、访问日志、Referer）。
+
+### 验证
+
+- `TestResolveShareTTL_Units`（12 组：空/duration/`7d`/`2w`/`7`/上限夹紧/非法拒绝）；
+- `TestHashSharePassword`（空口令=空串、随机盐、正确通过、错误拒绝、**损坏哈希串不得 fail-open**）；
+- `TestSharePassword_Access`（端到端：401 三次不计数 → 正确口令 200 且计数 1 → 无口令分享零回归）；
+- **变异命中**：把口令校验改成 `if false && ...` ⇒ `缺口令 status=200 want 401` 红；还原后绿；
+- e2e：v2 UI 创建口令分享 → 缺口令 401 → 带口令 200 且正文正确 → 撤销后列表清空 → 控制台分享分区可见可筛选。
+
+### 仍开放
+
+- 分享目录：服务端明确 400（`不支持分享目录`），v2 未提供入口；
+- 口令修改：需撤销后重建（无「改口令」接口）；
+- 分享访问统计（IP/UA）：服务端只记次数。
