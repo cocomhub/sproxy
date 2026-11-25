@@ -651,14 +651,17 @@
   <header>
     <b id="v2-pv-title">预览</b>
     <span id="v2-pv-meta" class="muted"></span>
-    <button class="icon-btn" id="v2-pv-close" type="button" title="关闭">✕</button>
+    <button class="btn btn-ghost btn-sm" id="v2-pv-download" type="button">下载</button>
+    <button class="btn btn-sm" id="v2-pv-close" type="button" title="关闭（Esc）">关闭 ✕</button>
   </header>
-  <div class="pv-stage">
+  <div class="pv-stage" id="v2-pv-stage">
     <img id="v2-pv-img" alt="" hidden>
-    <video id="v2-pv-video" controls hidden></video>
+    <video id="v2-pv-video" controls playsinline hidden></video>
     <pre id="v2-pv-text" hidden></pre>
     <div id="v2-pv-msg" class="muted" hidden></div>
   </div>
+  <!-- 悬浮关闭：视频全屏/控件遮挡时仍可关闭（头部在视频控件下方时用这个） -->
+  <button class="pv-float-close" id="v2-pv-float-close" type="button" title="关闭（Esc）" aria-label="关闭预览">✕</button>
 </div>
 
 <div class="uploads" id="v2-uploads" hidden aria-live="polite"></div>

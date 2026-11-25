@@ -40,3 +40,15 @@ test('selectedPaths：去重保序、过滤空值', () => {
   assert.deepStrictEqual(m.selectedPaths(['b', '', 'a', 'b', null]), ['b', 'a']);
   assert.deepStrictEqual(m.selectedPaths(null), []);
 });
+
+test('validateRelativePath：允许 a/b/new、拒绝 .. 与空段', () => {
+  const m = require('./files-ops.js');
+  assert.deepStrictEqual(m.validateRelativePath('a'), { ok: true, name: 'a' });
+  assert.deepStrictEqual(m.validateRelativePath('a/b/c'), { ok: true, name: 'a/b/c' });
+  assert.deepStrictEqual(m.validateRelativePath('/a/b'), { ok: true, name: 'a/b' });
+  assert.strictEqual(m.validateRelativePath('../x').ok, false);
+  assert.strictEqual(m.validateRelativePath('a//b').ok, false);
+  assert.strictEqual(m.validateRelativePath('a/./b').ok, false);
+  assert.strictEqual(m.validateRelativePath('').ok, false);
+  assert.strictEqual(m.validateRelativePath('a/b:c').ok, false);
+});

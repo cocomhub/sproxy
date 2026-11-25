@@ -303,6 +303,30 @@ func (s *StateBackedChecksumStore) RenameInVolume(vol, from, to string) {
 	s.merger.Mark("rename_in_volume", "volume", vol, "from", from, "to", to)
 }
 
+// RenamePrefixInVolume 把该卷下以 fromPrefix 开头的键整体换到 toPrefix（目录重命名）。
+func (s *StateBackedChecksumStore) RenamePrefixInVolume(vol, fromPrefix, toPrefix string) {
+	s.ensureLoaded()
+	fromFull, toFull := volumeKey(vol, fromPrefix), volumeKey(vol, toPrefix)
+	s.mu.Lock()
+	moved := 0
+	next := make(map[string]string, len(s.checksums))
+	for k, v := range s.checksums {
+		if after, ok := strings.CutPrefix(k, fromFull); ok {
+			next[toFull+after] = v
+			moved++
+			continue
+		}
+		next[k] = v
+	}
+	if moved > 0 {
+		s.checksums = next
+	}
+	s.mu.Unlock()
+	if moved > 0 {
+		s.merger.Mark("rename_prefix_in_volume", "volume", vol, "from", fromPrefix, "to", toPrefix, "moved", moved)
+	}
+}
+
 // SnapshotLegacy 返回旧无卷键快照（迁移兼容）。
 func (s *StateBackedChecksumStore) SnapshotLegacy() map[string]string {
 	s.ensureLoaded()

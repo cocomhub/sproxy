@@ -120,6 +120,9 @@ func (s *Service) BatchRename(w http.ResponseWriter, r *http.Request) {
 // 本处理器只做「解析三个入参（from/to/checksum + 可选 volume）→ 调域方法 → 写响应」；
 // 全部领域逻辑（跨卷定位、AD-4 唯一性、checksum 门禁、配额转移、审计）在 write_ops.go
 // 的 RenameFile 内（远程写面复用同一份语义，见 write_ops.go 顶注）。
+// Rename 处理 POST /rename?from=&to=[&volume=]。
+// 文件与**目录**同一入口：目录不带 X-File-Checksum（目录无单一校验和），
+// 域侧按 Lstat 自动分派（见 RenameFile）。
 func (s *Service) Rename(w http.ResponseWriter, r *http.Request) {
 	res, err := s.RenameFile(r.Context(), RenameFileInput{
 		Owner:            s.rt.actorOf(r),

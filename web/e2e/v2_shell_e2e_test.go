@@ -194,6 +194,39 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("文本预览内容不正确: %v", err)
 	}
+	// 预览交互：悬浮关闭按钮可见且可用（视频/控件遮挡时仍能关闭），
+	// 头部「下载」按钮存在，点击舞台空白关闭。
+	if _, err := page.WaitForFunction(
+		"() => { const f = document.querySelector('#v2-pv-float-close'); const d = document.querySelector('#v2-pv-download'); return f && !f.hidden && d; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("预览缺少悬浮关闭/下载按钮: %v", err)
+	}
+	if err := page.Locator("#v2-pv-float-close").Click(); err != nil {
+		t.Fatalf("悬浮关闭点击失败: %v", err)
+	}
+	if err := waitLoc(page, "#v2-preview", playwright.WaitForSelectorStateHidden, 4000); err != nil {
+		t.Fatalf("悬浮关闭未关闭预览: %v", err)
+	}
+	// 再次打开，验证舞台空白点击关闭。
+	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
+		t.Fatalf("再次打开预览: %v", err)
+	}
+	if err := waitLoc(page, "#v2-preview", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("预览未再次打开: %v", err)
+	}
+	if _, err := page.Evaluate(`() => { const s = document.querySelector('#v2-pv-stage'); const r = s.getBoundingClientRect(); s.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + 2, clientY: r.top + 2 })); }`, nil); err != nil {
+		t.Fatalf("点击舞台空白: %v", err)
+	}
+	if err := waitLoc(page, "#v2-preview", playwright.WaitForSelectorStateHidden, 4000); err != nil {
+		t.Fatalf("舞台空白点击未关闭预览: %v", err)
+	}
+	// 重新打开用头部关闭收尾（保持原有断言路径）。
+	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
+		t.Fatalf("第三次打开预览: %v", err)
+	}
+	if err := waitLoc(page, "#v2-pv-close", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("第三次预览未打开: %v", err)
+	}
 	if err := page.Locator("#v2-pv-close").Click(); err != nil {
 		t.Fatalf("关闭预览: %v", err)
 	}
@@ -868,8 +901,12 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if _, err := page.Evaluate(`() => { const s = document.querySelector('#v2-volume'); if (s) { s.selectedIndex = 0; s.dispatchEvent(new Event('change')); } }`, nil); err != nil {
 		t.Fatalf("复位卷过滤: %v", err)
 	}
-	// 切卷会按「该卷上次目录」恢复路径（可能回到根），显式回 v2demo 再删。
-	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+	// 切卷会按「该卷上次目录」恢复路径（可能回到根）：显式回 v2demo 并强制重载列表
+	// （hash 相同时不会触发 hashchange，必须显式 load）。
+	if _, err := page.Evaluate(`() => {
+		location.hash = '#/files/v2demo';
+		if (window.v2filesView) { window.v2filesView.load(); }
+	}`, nil); err != nil {
 		t.Fatalf("回到 v2demo: %v", err)
 	}
 	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
@@ -908,6 +945,66 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => !document.querySelector('#v2-trash-empty-hint').hidden",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("清空后回收站未变为空: %v", err)
+	}
+
+	// 目录重命名/移动：建目录 + 文件 → 行内重命名为 dirmoved → 内容随迁。
+	if _, err := page.Evaluate("() => { location.hash = '#/files'; }", nil); err != nil {
+		t.Fatalf("回到文件页: %v", err)
+	}
+	if err := waitLoc(page, "#v2-mkdir", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("文件页未就绪: %v", err)
+	}
+	if err := page.Locator("#v2-mkdir").Click(); err != nil {
+		t.Fatalf("打开新建目录: %v", err)
+	}
+	if err := page.Locator("#v2-dlg-input").Fill("dirsrc"); err != nil {
+		t.Fatalf("填写目录名: %v", err)
+	}
+	if err := page.Locator("[data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("提交新建目录: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"dirsrc\"]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("目录未出现: %v", err)
+	}
+	// 进目录放一个文件，再返回父目录重命名整个目录。
+	if err := page.Locator("#v2-file-body tr[data-name=\"dirsrc\"] a").Click(); err != nil {
+		t.Fatalf("进入目录: %v", err)
+	}
+	if err := waitLoc(page, "#v2-upload-input", playwright.WaitForSelectorStateAttached, 8000); err != nil {
+		t.Fatalf("目录内上传控件不可用: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "inner.txt", MimeType: "text/plain", Buffer: []byte("inside"),
+	}}); err != nil {
+		t.Fatalf("上传 inner.txt: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"inner.txt\"]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("inner.txt 未出现: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files'; }", nil); err != nil {
+		t.Fatalf("回到根目录: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"dirsrc\"] [data-action=rename]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("目录行缺少重命名按钮（目录应可重命名）: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"dirsrc\"] [data-action=rename]").Click(); err != nil {
+		t.Fatalf("点击目录重命名: %v", err)
+	}
+	if err := page.Locator("#v2-dlg-input").Fill("dirmoved"); err != nil {
+		t.Fatalf("填写新目录名: %v", err)
+	}
+	if err := page.Locator("[data-dlg=ok]").Click(); err != nil {
+		t.Fatalf("提交目录重命名: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"dirmoved\"]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("目录重命名后未出现新名: %v", err)
+	}
+	// 子树随迁：进 dirmoved 应看到 inner.txt。
+	if err := page.Locator("#v2-file-body tr[data-name=\"dirmoved\"] a").Click(); err != nil {
+		t.Fatalf("进入改名后目录: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"inner.txt\"]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("目录内容未随改名迁移: %v", err)
 	}
 
 	// 批量重命名 + 打包下载（真实 /api/batch/rename 与 /api/archive）。

@@ -75,7 +75,8 @@
     var cfg = dlg.cfg;
     var value = cfg.input ? dlg.input.value : '';
     if (cfg.input) {
-      var v = ops.validateName(value);
+      // 重命名/移动允许相对路径（a/b/new）；建目录仍是单段名称。
+      var v = cfg.allowPath ? ops.validateRelativePath(value) : ops.validateName(value);
       if (!v.ok) { toast('warn', v.reason); return; }
       value = v.name;
     }
@@ -269,16 +270,20 @@
     });
   }
 
-  function doRename(name, checksum) {
-    var sub = view() ? view().subdir() : '';
+  function doRename(name, checksum, isDir) {
     var from = relOf(name);
     openDialog({
-      title: T('dlg.rename.title'), message: T('dlg.rename.current') + from, input: true, value: name, okText: T('dlg.save'),
+      title: T('dlg.rename.title'),
+      message: T('dlg.rename.current') + from + String.fromCharCode(10) + T('dlg.rename.hint'),
+      input: true, value: name, okText: T('dlg.save'), allowPath: true,
       onOk: function (newName) {
         // 目标路径：与源同目录（搜索态源是完整路径，必须用其目录前缀，而不是当前 subdir）。
+        // 输入里带 "/" 视为**移动到该相对路径**（目录自动创建），否则是同目录改名。
         var dir = from.indexOf('/') >= 0 ? from.slice(0, from.lastIndexOf('/')) : '';
-        var to = f.joinSubdir(dir, newName);
-        run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), { headers: ops.checksumHeader(checksum) }), T('toast.renamed') + ' ' + newName);
+        var to = String(newName || '').indexOf('/') >= 0 ? f.joinSubdir('', newName) : f.joinSubdir(dir, newName);
+        // 目录没有单一 checksum：不带校验头（服务端按 Lstat 分派到目录重命名）。
+        var opts = isDir ? {} : { headers: ops.checksumHeader(checksum) };
+        run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), opts), T('toast.renamed') + ' ' + newName);
       }
     });
   }
@@ -300,7 +305,7 @@
 
   function batchRenameSelected() {
     var items = selectedFiles().filter(function (it) { return !it.info || !it.info.isDir; });
-    if (!items.length) { toast('warn', '请选择文件（目录不支持批量重命名）'); return; }
+    if (!items.length) { toast('warn', '请选择文件（目录请用行内「重命名」，批量仅对文件生效）'); return; }
     var wrap = document.createElement('div');
     wrap.className = 'modal-backdrop';
     wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true">' +
@@ -338,6 +343,24 @@
     });
     var input = wrap.querySelector('#v2-br-prefix');
     if (input) { input.focus(); }
+  }
+
+  /** 目录打包下载：GET /api/archive-dir?dirname=… 流式 tar.gz。 */
+  function archiveDir(name) {
+    var rel = relOf(name);
+    var url = '/api/archive-dir?dirname=' + enc(rel);
+    toast('info', '正在打包目录…');
+    api.request('GET', url).then(api.ensureOk).then(function (resp) { return resp.blob(); })
+      .then(function (blob) {
+        var objURL = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = objURL;
+        a.download = name + '.tar.gz';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(function () { URL.revokeObjectURL(objURL); }, 2000);
+        toast('ok', '已开始下载 ' + name + '.tar.gz');
+      })
+      .catch(function (e) { toast('bad', '打包失败：' + (e.message || e)); });
   }
 
   function archiveSelected() {
@@ -392,7 +415,9 @@
                 var info = view() && view().rowInfo(name);
                 var rel = relOf(name);
                 var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
-                return api.json('POST', path, { headers: ops.checksumHeader(info ? info.checksum : '') });
+                // rmdir 不需要 checksum 头（目录无单一校验和），只有单文件删除需要。
+                var opts = info && info.isDir ? {} : { headers: ops.checksumHeader(info ? info.checksum : '') };
+                return api.json('POST', path, opts);
               });
             });
             run(chain, T('toast.deleted') + names.length);
@@ -412,8 +437,9 @@
         var act = b.getAttribute('data-action');
         if (act === 'detail' && window.v2inspector) { window.v2inspector.open(name); return; }
         if (act === 'download' && window.v2preview) { window.v2preview.download(name); return; }
+        if (act === 'archive') { archiveDir(name); return; }
         if (act === 'delete') { doDelete(name, info.isDir, info.checksum); }
-        if (act === 'rename') { doRename(name, info.checksum); }
+        if (act === 'rename') { doRename(name, info.checksum, info.isDir); }
       });
     }
   }

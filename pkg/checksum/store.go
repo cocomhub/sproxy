@@ -48,6 +48,15 @@ type VolumeKeyedStore interface {
 
 var _ VolumeKeyedStore = (*ChecksumStore)(nil)
 
+// PrefixRenamer 是**可选扩展**：把某卷下以 fromPrefix 开头的键整体改名为 toPrefix
+// （目录重命名的台账跟随：子树内每个文件的 checksum 都要换前缀，否则列表 checksum 丢失、
+// 后续删除/分享等依赖校验和的操作恒失败）。
+type PrefixRenamer interface {
+	RenamePrefixInVolume(vol, fromPrefix, toPrefix string)
+}
+
+var _ PrefixRenamer = (*ChecksumStore)(nil)
+
 // Iterator 是**可选扩展**：分批遍历台账（**锁外回调**），用于校验类运维入口，
 // 避免 `GetAll()` 的全量 map 拷贝。实现先取键列表（O(N) 个键头），再逐批在锁内取值、
 // 锁外回调；并发删除的键自动跳过。
@@ -193,6 +202,29 @@ func (cs *ChecksumStore) RenameInVolume(vol, from, to string) {
 	cs.checksums[toKey] = v
 	cs.mu.Unlock()
 	cs.persist("rename_in_volume", vol, from, to)
+}
+
+// RenamePrefixInVolume 把该卷下以 fromPrefix 开头的键整体换到 toPrefix（目录重命名）。 */
+func (cs *ChecksumStore) RenamePrefixInVolume(vol, fromPrefix, toPrefix string) {
+	fromFull, toFull := volumeKey(vol, fromPrefix), volumeKey(vol, toPrefix)
+	cs.mu.Lock()
+	moved := 0
+	next := make(map[string]string, len(cs.checksums))
+	for k, v := range cs.checksums {
+		if after, ok := strings.CutPrefix(k, fromFull); ok {
+			next[toFull+after] = v
+			moved++
+			continue
+		}
+		next[k] = v
+	}
+	if moved > 0 {
+		cs.checksums = next
+	}
+	cs.mu.Unlock()
+	if moved > 0 {
+		cs.persist("rename_prefix_in_volume", vol, fromPrefix, toPrefix, moved)
+	}
 }
 
 // SplitVolumeKey 把卷维度复合键拆成 `(vol, rel)`；不是卷维度键 → ok=false。
