@@ -327,3 +327,17 @@ func finalizeWorking(destPath string) error {
 	removeManifest(destPath)
 	return nil
 }
+
+// RebuildTo 实现 downloader.Rebuilder：对已有产物做零尾扫描 + 定点补片（共享 rebuild 实现）。
+// 返回 rebuilt=true 表示产物已就地修好（或已通过权威校验），调用方无需整份重下。
+func (d *HybridDownloader) RebuildTo(ctx context.Context, source, destPath string, dryRun bool) (bool, error) {
+	rep, err := d.Rebuild(ctx, source, destPath, RebuildOptions{DryRun: dryRun}, nil)
+	if err != nil {
+		return false, err
+	}
+	if rep == nil {
+		return false, nil
+	}
+	// 快路径（现有数据已通过权威哈希）或已定稿/已补片 ⇒ 视为修好。
+	return rep.HashVerified || rep.Finalized || rep.DownloadedChunks > 0, nil
+}

@@ -233,6 +233,12 @@ func TestCloudTasksPanel_DetailLoadsProgress(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("详情展开未请求 /progress")
 	}
+	// 分块矩阵槽必须有内容（无分块状态时给明确占位，不允许停在「加载中…」）。
+	testutil.WaitFor(t, 10*time.Second, func() bool {
+		txt, terr := page.Locator("#cloud-tasks-panel .ct-matrix-slot").First().InnerText()
+		return terr == nil && txt != "" && !strings.Contains(txt, "加载中")
+	}, "分块矩阵槽未收敛")
+
 	// 采样槽必须收敛成曲线或明确占位（不允许停在「加载中…」）。
 	testutil.WaitFor(t, 10*time.Second, func() bool {
 		txt, terr := page.Locator("#cloud-tasks-panel .ct-spark-slot").First().InnerText()

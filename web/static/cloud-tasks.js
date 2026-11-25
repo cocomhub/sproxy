@@ -406,6 +406,55 @@ function ctRateText(bps) {
   return Math.round(n) + ' B/s';
 }
 
+// ctBlockMatrix 把分块状态转成「一行多小块」的矩阵数据（用户 2026-11-26）。
+// 每块按 1MiB 拆小块（上限 64 小块/行，避免一行过宽）；小块状态：done/active/todo。
+function ctBlockMatrix(chunks) {
+  const list = (Array.isArray(chunks) ? chunks : []).slice().sort(function (a, b) {
+    return Number(a && a.index || 0) - Number(b && b.index || 0);
+  });
+  const SUB = 1048576;
+  return list.map(function (c) {
+    const len = Number(c && c.length || 0);
+    const done = Math.max(0, Math.min(Number(c && c.done || 0), len));
+    const total = Math.max(1, Math.min(64, Math.ceil(len / SUB) || 1));
+    const filled = Math.min(total, Math.floor(done / SUB));
+    const blocks = [];
+    for (let i = 0; i < total; i++) {
+      if (i < filled) blocks.push('done');
+      else if (i === filled && done > 0 && done < len) blocks.push('active');
+      else blocks.push(c && c.phase === 'failed' ? 'failed' : 'todo');
+    }
+    return {
+      index: Number(c && c.index || 0),
+      phase: (c && c.phase) || 'todo',
+      source: (c && c.source) || '',
+      done: done,
+      length: len,
+      blocks: blocks,
+    };
+  });
+}
+
+// ctBlockMatrixHtml 渲染块矩阵（无分块状态 ⇒ 明确占位，不伪造）。
+function ctBlockMatrixHtml(chunks) {
+  const rows = ctBlockMatrix(chunks);
+  if (!rows.length) {
+    return '<span style="color:var(--text-muted);">暂无分块状态（下载开始后按 1MiB 小块显示）</span>';
+  }
+  const color = { done: '#2da44e', active: '#1f6feb', todo: 'rgba(127,127,127,.25)', failed: '#c0392b' };
+  let html = '<div class="ct-block-matrix" style="font-family:monospace;font-size:10px;line-height:1;">';
+  rows.forEach(function (r) {
+    html += '<div class="ct-block-row" data-chunk="' + r.index + '" style="white-space:nowrap;">';
+    r.blocks.forEach(function (b) {
+      html += '<span class="ct-block ct-block-' + b + '" style="display:inline-block;width:7px;height:10px;margin-right:1px;background:' +
+        color[b] + ';"></span>';
+    });
+    html += '<span style="margin-left:6px;color:var(--text-muted);">#' + r.index + ' ' + r.phase +
+      (r.source ? ' · ' + r.source : '') + '</span></div>';
+  });
+  return html + '</div>';
+}
+
 // ctDetailHtml 渲染单任务详情（展开行）：阶段/尝试次数/失败原文/部分产物路径。
 // 目的：面板列表只给摘要，**排障需要原文与产物位置**（此前只能看 CLI 或日志）。
 function ctDetailHtml(t) {
@@ -421,11 +470,12 @@ function ctDetailHtml(t) {
     ['失败原文', d.last_error || '-'],
     ['部分产物', d.partial_path ? d.partial_path + '（' + Math.round((d.partial_size || 0) / 1048576) + ' MiB）' : '-'],
     ['速率曲线', '<span class="ct-spark-slot" data-id="' + ctEsc(t.id) + '">加载中…</span>'],
+    ['分块进度', '<span class="ct-matrix-slot" data-id="' + ctEsc(t.id) + '">加载中…</span>'],
   ];
   let html = '<tr class="ct-detail" data-detail-for="' + ctEsc(t.id) + '"><td colspan="7" ' +
     'style="background:rgba(127,127,127,.06);padding:10px 12px;"><table style="font-size:12px;">';
   rows.forEach(function (r) {
-    const isHtml = r[0] === '速率曲线'; // 该行由 ctFillSparkline 异步填充 SVG
+    const isHtml = r[0] === '速率曲线' || r[0] === '分块进度'; // 这两行由异步填充（SVG/矩阵）
     html += '<tr><td style="color:var(--text-muted);padding:2px 12px 2px 0;white-space:nowrap;">' + ctEsc(r[0]) +
       '</td><td style="padding:2px 0;word-break:break-all;">' + (isHtml ? r[1] : ctEsc(r[1])) + '</td></tr>';
   });
@@ -569,6 +619,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctSparklinePath: ctSparklinePath,
     ctSparklineSvg: ctSparklineSvg,
     ctRateText: ctRateText,
+    ctBlockMatrix: ctBlockMatrix,
+    ctBlockMatrixHtml: ctBlockMatrixHtml,
     ctSummaryHtml: ctSummaryHtml,
     ctRowHtml: ctRowHtml,
     ctTableHtml: ctTableHtml,
@@ -827,6 +879,8 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
         const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
         if (row && t) {
           row.insertAdjacentHTML('afterend', ctDetailHtml(t));
+          const slot = panel.querySelector('.ct-matrix-slot[data-id="' + id + '"]');
+          if (slot) slot.innerHTML = ctBlockMatrixHtml(t.chunks);
           void ctFillSparkline(panel, id);
         }
       });

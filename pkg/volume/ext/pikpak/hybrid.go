@@ -346,10 +346,11 @@ type downloadCtx struct {
 	working       string // 下载期写盘目标 = destPath + ".hybrid.downloading"（见 openWorking）
 	prog          atomic.Int64
 	onProgress    downloader.ProgressFunc
-	chunkProgress ChunkProgressFunc // per-chunk 回调（pikget 逐行显示每个分片）
-	chunkOffsets  []int64           // 所有 chunk offset（升序，编号映射）
-	chunkSize     int64             // 本次分片几何（manifest 缺省时写入）
-	shareEnd      int64             // 分享区边界（chunk 来源判定）
+	chunkProgress ChunkProgressFunc            // per-chunk 回调（pikget 逐行显示每个分片）
+	onChunk       downloader.ChunkProgressFunc // ctx 级分块进度（sproxy 云端按任务隔离）
+	chunkOffsets  []int64                      // 所有 chunk offset（升序，编号映射）
+	chunkSize     int64                        // 本次分片几何（manifest 缺省时写入）
+	shareEnd      int64                        // 分享区边界（chunk 来源判定）
 	// 下载审计统计（用户裁定 2026-10-28）：起止时刻 + 分通道字节（并发分片原子累加）。
 	// 统计口径：chunk **成功**时的完整长度（重试/续传跳过的块不计入本次会话字节）。
 	startedAt time.Time
@@ -718,6 +719,7 @@ func (d *HybridDownloader) runHybridWithShareEnd(ctx context.Context, dc *downlo
 		chunkSize = adaptiveChunkSize(dc.currentTotal)
 	}
 	dc.shareEnd = shareEnd
+	dc.onChunk = downloader.ChunkProgressFrom(ctx)
 	// 崩溃恢复：读 manifest（源身份 + 工作文件一致性 + 零尾扫描），缺失则创建空 manifest
 	// （两文件配套），续传进度基准预置 prog。抽 helper 控制认知复杂度。
 	// **必须在 preallocate 之前**：预分配会让「工作文件存在且大小=total」恒真——先分配再校验，
@@ -1053,17 +1055,33 @@ func (d *HybridDownloader) chunkSource(dc *downloadCtx, c chunk) string {
 }
 
 func (d *HybridDownloader) chunkPhase(dc *downloadCtx, idx int, c chunk, phase string, done int64, cerr error) {
-	if dc.chunkProgress == nil {
-		return
-	}
 	src := "acct"
 	if c.offset < dc.shareEnd {
 		src = "share"
+	}
+	d.emitCtxChunk(dc, idx, c, phase, done, src, cerr)
+	if dc.chunkProgress == nil {
+		return
 	}
 	dc.chunkProgress(ChunkInfo{
 		Index: idx, Offset: c.offset, Length: c.length,
 		Source: src, Phase: phase, Done: done, Total: c.length, Err: cerr,
 	})
+}
+
+// emitCtxChunk 向 ctx 级回调上报通用分块状态（sproxy 云端用于任务级块矩阵）。
+func (d *HybridDownloader) emitCtxChunk(dc *downloadCtx, idx int, c chunk, phase string, done int64, src string, cerr error) {
+	if dc.onChunk == nil {
+		return
+	}
+	st := downloader.ChunkState{
+		Index: idx, Offset: c.offset, Length: c.length,
+		Phase: phase, Done: done, Source: src,
+	}
+	if cerr != nil {
+		st.Err = cerr.Error()
+	}
+	dc.onChunk(st)
 }
 
 // filterChunks 过滤掉 manifest 已完成的 chunk（崩溃恢复跳过，分享区免配额不浪费）。
