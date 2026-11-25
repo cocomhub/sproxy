@@ -1193,6 +1193,9 @@ type PikpakHybridConfig struct {
 	// 启用时分片完成即写 audit WAL（节点本地 `<storage_root>/meta/state/pikpak-journal`），
 	// 进程重启后可恢复已完成分片（manifest 丢失/被改名也能续传）；成功后写提交记录。
 	DisableProgressJournal bool `yaml:"disable_progress_journal" mapstructure:"disable_progress_journal"`
+	// DisableResetOnGCIDMismatch 关闭「GCID 失配 ⇒ 清续传状态从零重下一次」（默认 false = 启用）。
+	// 语义反转（bool 默认 false 规则）：默认开启自愈，显式 true 才关闭。
+	DisableResetOnGCIDMismatch bool `yaml:"disable_reset_on_gcid_mismatch" mapstructure:"disable_reset_on_gcid_mismatch"`
 	// Concurrency 是并行 chunk 数（默认 4）。
 	Concurrency int `yaml:"concurrency" mapstructure:"concurrency"`
 	// AutoDelete 下载完成后永久删转存（默认 true，释放 6GB 空间）。
