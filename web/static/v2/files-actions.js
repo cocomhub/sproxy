@@ -201,6 +201,12 @@
     return run();
   }
 
+  /** 供「未完成上传」续传复用：按指定目录上传（分块走既有断点逻辑）。 */
+  function resumeUpload(file, dir) {
+    return uploadChunkedFile(file, dir || '');
+  }
+  window.v2uploadResume = resumeUpload;
+
   function uploadSimpleFile(file, sub) {
     return file.arrayBuffer().then(function (buf) {
       var bytes = new Uint8Array(buf);

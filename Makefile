@@ -304,6 +304,8 @@ web-test:
 	@node --check web/static/v2/mesh-console.js
 	@node --check web/static/v2/i18n.js
 	@node --check web/static/v2/i18n.test.js
+	@node --check web/static/v2/pending-upload.js
+	@node --check web/static/v2/pending-upload.test.js
 	@node --check web/static/v2/upload-chunked.js
 	@node --check web/static/v2/upload-chunked.test.js
 	@node --check web/static/v2/api.js
@@ -342,6 +344,7 @@ web-test:
 	node --test web/static/v2/volumes-console.test.js
 	node --test web/static/v2/cloud-ops.test.js
 	node --test web/static/v2/i18n.test.js
+	node --test web/static/v2/pending-upload.test.js
 	node --test web/static/v2/shell.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js

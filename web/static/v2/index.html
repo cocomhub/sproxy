@@ -89,6 +89,14 @@
             <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存" data-i18n="volRefresh">清缓存</button>
           </div>
           <div id="v2-files-state" class="banner" hidden role="status"></div>
+          <div id="v2-pending" class="banner" hidden role="status">
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+              <span id="v2-pending-text"></span>
+              <span style="flex:1"></span>
+              <button class="btn btn-sm" id="v2-pending-continue" type="button">自动续传 / 选择文件</button>
+              <button class="btn btn-ghost btn-sm" id="v2-pending-ignore" type="button">忽略</button>
+            </div>
+          </div>
           <table class="table">
             <thead>
               <tr><th style="width:34px"><input class="cb" id="v2-select-all" type="checkbox" aria-label="全选"></th>
@@ -683,6 +691,7 @@
 <script src="api.js"></script>
 <script src="../sclient/sha256.js"></script>
 <script src="upload-chunked.js"></script>
+<script src="pending-upload.js"></script>
 <script src="files-ops.js"></script>
 <script src="files-view.js"></script>
 <script src="files-actions.js"></script>

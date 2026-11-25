@@ -105,13 +105,27 @@
           if (init.upload_id === 'already_exists') { return { skipped: true }; }
           sessionId = init.upload_id;
           if (o.onSession) { o.onSession(sessionId); }
+          if (window.v2pending) {
+            window.v2pending.save({
+              name: rel, base: file.name, size: total, mtime: file.lastModified || 0,
+              dir: o.subdir || '',
+              uploadID: sessionId, total: total, received: 0, ts: Date.now()
+            });
+          }
           return deps.api.json('GET', '/upload/status?upload_id=' + encodeURIComponent(sessionId))
             .catch(function () { return {}; })
             .then(function (st) {
               var serverChunk = init.chunk_size || chunkHint;
               var totalChunks = Math.ceil(total / serverChunk);
               var indices = buildChunkIndices(totalChunks, st && st.success ? st.missing_chunks : null);
-              var loaded = 0;
+              // 断点续传：已接收分块按字节计入初始进度（避免从 0% 跳变）。
+              var missingBytes = 0;
+              (st && st.success && Array.isArray(st.missing_chunks) ? st.missing_chunks : []).forEach(function (idx) {
+                var start = idx * serverChunk;
+                missingBytes += Math.min(start + serverChunk, total) - start;
+              });
+              var loaded = st && st.success ? Math.max(0, total - missingBytes) : 0;
+              if (o.onProgress && loaded > 0) { o.onProgress(loaded, total); }
               var seq = Promise.resolve();
               indices.forEach(function (idx) {
                 seq = seq.then(function () {
@@ -142,6 +156,7 @@
                 });
               });
               return seq.then(function () {
+                if (window.v2pending) { window.v2pending.clear(); }
                 return deps.api.json('POST', '/upload/complete', {
                   body: new TextEncoder().encode(JSON.stringify({ upload_id: sessionId })),
                   contentType: 'application/json'
