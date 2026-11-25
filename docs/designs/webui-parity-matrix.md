@@ -107,7 +107,7 @@
 | G6 | Secret 卷管理 | `secrets-format.js`；`showSecrets` | 分区 | 🟢 VERIFIED |  ｜ Secret 列表/创建/删除；e2e 创建→删除 |
 | G7 | 同步冲突 | `sync-conflicts-format.js`；`showSyncConflicts` | 分区 | ⚪ RETIRED |  ｜ 同步冲突策略在新建任务时选择，无独立冲突管理页（服务端无该视图） |
 | G8 | Mesh 状态 | `mesh-status-format.js`；`showMeshStatus` | 分区 | 🟢 VERIFIED |  ｜ Mesh 状态；e2e ≥3 行 |
-| G9 | Hub（节点/统计） | `showHub` | 分区 | 🟢 VERIFIED |  ｜ Hub 节点/统计；e2e 提示或数据 |
+| G9 | Hub（节点/统计） | `showHub` | 分区 | 🟢 VERIFIED | 节点/统计 + 踢出（DELETE /api/hub/nodes/{id}，仅 admin 显式显示 + 二次确认）；e2e 覆盖可见性 |
 | G10 | 运行时配置 | `showConfig` | 表单 + 校验 | 🟢 VERIFIED | 字段与后端一致 ｜ 运行时配置读写；e2e 配置分区 |
 
 ## H. 键盘 / 深链 / 可访问性（存量能力）

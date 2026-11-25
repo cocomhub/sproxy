@@ -61,16 +61,26 @@
       .catch(function (e) { banner('v2-mesh-state', 'Mesh 状态读取失败：' + (e.message || e), 'warn'); });
   }
 
+  var hubAdmin = false;
+
   function renderHub(nodes, stats) {
     var tbody = el('v2-hub-body');
     if (!tbody) { return; }
     tbody.textContent = '';
     nodes.forEach(function (n) {
-      tbody.appendChild(row([
+      var tr = row([
         n.id || n.node_id || '', (n.services || []).join(', ') || '—',
         (n.quality || '—'), n.rtt_ms == null ? '—' : (n.rtt_ms < 0 ? '未采样' : n.rtt_ms + ' ms'),
         (n.virtual_ip || '—')
-      ]));
+      ]);
+      if (hubAdmin) {
+        var act = document.createElement('td');
+        act.className = 'r actions';
+        var id = n.id || n.node_id || '';
+        if (id) { act.appendChild(kickBtn(id)); }
+        tr.appendChild(act);
+      }
+      tbody.appendChild(tr);
     });
     var empty = el('v2-hub-empty');
     if (empty) { empty.hidden = nodes.length > 0; }
@@ -81,6 +91,37 @@
         ' · 在线 ' + (stats.online != null ? stats.online : '—') +
         ' · 转发 ' + (stats.relayed != null ? stats.relayed : '—');
     }
+  }
+
+  /** 「踢出」按钮（仅 admin 渲染）：二次确认后 DELETE /api/hub/nodes/{id}。 */
+  function kickBtn(id) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn btn-ghost btn-sm';
+    b.textContent = '踢出';
+    b.setAttribute('data-kick', id);
+    b.addEventListener('click', function () { kickNode(id); });
+    return b;
+  }
+
+  function kickNode(id) {
+    if (!window.confirm('踢出节点 ' + id + '？该节点将从中继路由与 DHT 中移除，需重新注册才能加入。')) { return; }
+    api.json('DELETE', '/api/hub/nodes/' + encodeURIComponent(id))
+      .then(function () {
+        if (window.v2toast) { window.v2toast('ok', '已踢出节点 ' + id); }
+        loadHub();
+      })
+      .catch(function (e) {
+        banner('v2-hub-state', '踢出失败：' + (e.message || e), 'warn');
+      });
+  }
+
+  /** 探测当前凭据角色（admin 才显示踢出按钮）；无权限/接口不可用时保持只读。 */
+  function probeAdmin() {
+    return api.json('GET', '/api/config')
+      .then(function () { return api.json('GET', '/api/credentials'); })
+      .then(function () { hubAdmin = true; })
+      .catch(function () { hubAdmin = false; });
   }
 
   function loadHub() {
@@ -113,7 +154,7 @@
       var r = el('v2-hub-refresh'); if (r) { r.addEventListener('click', loadHub); }
       hubInited = true;
     }
-    if (el('v2-hub-body')) { loadHub(); }
+    if (el('v2-hub-body')) { probeAdmin().then(loadHub); }
   }
 
   if (typeof window !== 'undefined') { window.v2mesh = { initMesh: initMesh, initHub: initHub }; }
