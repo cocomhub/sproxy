@@ -44,7 +44,7 @@ func TestShareResolver_FileInfoParallel(t *testing.T) {
 			// 分享列表：返回 files 个文件
 			var sb strings.Builder
 			sb.WriteString(`{"files":[`)
-			for i := 0; i < files; i++ {
+			for i := range files {
 				if i > 0 {
 					sb.WriteString(",")
 				}
