@@ -17,20 +17,20 @@
       <div class="brand-tag">v2 · P0</div>
     </div>
 
-    <div class="rail-group">工作区</div>
+    <div class="rail-group" data-i18n="group.workspace">工作区</div>
     <div class="nav" data-route="files" role="link" tabindex="0">
-      <span>文件</span><span class="count num">128</span>
+      <span data-i18n="files">文件</span><span class="count num">128</span>
     </div>
     <div class="nav" data-route="transfer" role="link" tabindex="0">
-      <span>传输</span><span class="count num">3</span>
+      <span data-i18n="transfer">传输</span><span class="count num">3</span>
     </div>
     <div class="nav" data-route="trash" role="link" tabindex="0">
-      <span>回收站</span><span class="count num">4</span>
+      <span data-i18n="trash">回收站</span><span class="count num">4</span>
     </div>
 
-    <div class="rail-group">系统</div>
+    <div class="rail-group" data-i18n="group.system">系统</div>
     <div class="nav" data-route="console" role="link" tabindex="0">
-      <span>控制台</span>
+      <span data-i18n="console">控制台</span>
     </div>
 
     <div class="rail-foot">
@@ -51,10 +51,10 @@
       <span class="spacer"></span>
       <span class="pill pill-info">v2 预览</span>
       <button class="btn btn-ghost" id="v2-density-toggle" type="button" aria-pressed="false"
-        title="切换表格密度">密度</button>
-      <button class="btn btn-ghost" id="v2-cmdk-open" type="button" title="命令面板（⌘K / Ctrl+K）">⌘K</button>
-      <button class="btn btn-ghost" id="v2-settings-open" type="button" title="连接设置">设置</button>
-      <a class="btn btn-ghost" href="/ui/" title="返回旧版">旧版</a>
+        title="切换表格密度" data-i18n="density">密度</button>
+      <button class="btn btn-ghost" id="v2-cmdk-open" type="button" title="命令面板（⌘K / Ctrl+K）" data-i18n="cmdk">⌘K</button>
+      <button class="btn btn-ghost" id="v2-settings-open" type="button" title="连接设置" data-i18n="settings">设置</button>
+      <a class="btn btn-ghost" href="/ui/" title="返回旧版" data-i18n="legacy">旧版</a>
       <button class="icon-btn" id="v2-theme-toggle" type="button" title="切换亮/暗" aria-label="切换亮/暗">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
       </button>
@@ -75,18 +75,18 @@
             <span class="hint" id="v2-count"></span>
             <span class="spacer" style="flex:1"></span>
             <select id="v2-volume" aria-label="按卷过滤" style="height:28px"></select>
-            <input id="v2-search" type="search" placeholder="搜索文件名（/ 聚焦）" aria-label="搜索文件名"
+            <input id="v2-search" type="search" placeholder="搜索文件名（/ 聚焦）" data-i18n-ph="search" aria-label="搜索文件名"
               style="width:190px">
-            <button class="btn btn-ghost" id="v2-search-btn" type="button">搜索</button>
-            <button class="btn btn-ghost" id="v2-search-clear" type="button" hidden>清除</button>
-            <label class="btn btn-primary" for="v2-upload-input">上传</label>
+            <button class="btn btn-ghost" id="v2-search-btn" type="button" data-i18n="searchBtn">搜索</button>
+            <button class="btn btn-ghost" id="v2-search-clear" type="button" hidden data-i18n="clear">清除</button>
+            <label class="btn btn-primary" for="v2-upload-input" data-i18n="upload">上传</label>
             <input id="v2-upload-input" type="file" multiple hidden>
-            <button class="btn" id="v2-mkdir" type="button">新建目录</button>
-            <button class="btn" id="v2-batch-delete" type="button" disabled>删除所选</button>
-            <button class="btn btn-ghost" id="v2-batch-rename" type="button" disabled>重命名所选</button>
-            <button class="btn btn-ghost" id="v2-batch-archive" type="button" disabled>打包下载</button>
-            <button class="btn" id="v2-refresh" type="button">刷新</button>
-            <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存">清缓存</button>
+            <button class="btn" id="v2-mkdir" type="button" data-i18n="mkdir">新建目录</button>
+            <button class="btn" id="v2-batch-delete" type="button" disabled data-i18n="deleteSel">删除所选</button>
+            <button class="btn btn-ghost" id="v2-batch-rename" type="button" disabled data-i18n="renameSel">重命名所选</button>
+            <button class="btn btn-ghost" id="v2-batch-archive" type="button" disabled data-i18n="archiveSel">打包下载</button>
+            <button class="btn" id="v2-refresh" type="button" data-i18n="refresh">刷新</button>
+            <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存" data-i18n="volRefresh">清缓存</button>
           </div>
           <div id="v2-files-state" class="banner" hidden role="status"></div>
           <table class="table">
@@ -211,17 +211,17 @@
       <section class="panel" data-panel="console" aria-labelledby="v2-title">
         <div class="console">
           <nav class="cs-nav" aria-label="控制台分区">
-            <button type="button" data-cs="overview" aria-current="page">概览</button>
-            <button type="button" data-cs="tasks">云端任务</button>
-            <button type="button" data-cs="issues">待处理事项</button>
-            <button type="button" data-cs="audit">审计</button>
-            <button type="button" data-cs="volumes">卷</button>
-            <button type="button" data-cs="config">配置</button>
-            <button type="button" data-cs="notify">通知</button>
-            <button type="button" data-cs="verify">巡检</button>
-            <button type="button" data-cs="access">接入</button>
-            <button type="button" data-cs="mesh">Mesh</button>
-            <button type="button" data-cs="hub">Hub</button>
+            <button type="button" data-cs="overview" data-i18n="cs.overview" aria-current="page">概览</button>
+            <button type="button" data-cs="tasks" data-i18n="cs.tasks">云端任务</button>
+            <button type="button" data-cs="issues" data-i18n="cs.issues">待处理事项</button>
+            <button type="button" data-cs="audit" data-i18n="cs.audit">审计</button>
+            <button type="button" data-cs="volumes" data-i18n="cs.volumes">卷</button>
+            <button type="button" data-cs="config" data-i18n="cs.config">配置</button>
+            <button type="button" data-cs="notify" data-i18n="cs.notify">通知</button>
+            <button type="button" data-cs="verify" data-i18n="cs.verify">巡检</button>
+            <button type="button" data-cs="access" data-i18n="cs.access">接入</button>
+            <button type="button" data-cs="mesh" data-i18n="cs.mesh">Mesh</button>
+            <button type="button" data-cs="hub" data-i18n="cs.hub">Hub</button>
           </nav>
           <div class="cs-body">
             <div class="toolbar" style="margin-bottom:12px">
@@ -584,6 +584,8 @@
     <button class="btn btn-ghost" type="button" id="v2-settings-close">关闭</button></header>
   <div class="sheet-body">
     <div id="v2-set-state" class="banner" hidden role="status"></div>
+    <label>语言 <select id="v2-set-lang" aria-label="语言">
+      <option value="zh">中文</option><option value="en">English</option></select></label>
     <div class="card-title">AccessKey / Secret</div>
     <div class="form-grid">
       <label>AccessKey<input id="v2-set-ak" autocomplete="off"></label>
@@ -664,6 +666,7 @@
 <script src="transfer.js"></script>
 <script src="console.js"></script>
 <script src="preview.js"></script>
+<script src="i18n.js"></script>
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
 <script src="settings.js"></script>
