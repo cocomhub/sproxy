@@ -311,8 +311,8 @@ func (s *StateBackedChecksumStore) RenamePrefixInVolume(vol, fromPrefix, toPrefi
 	moved := 0
 	next := make(map[string]string, len(s.checksums))
 	for k, v := range s.checksums {
-		if strings.HasPrefix(k, fromFull) {
-			next[toFull+strings.TrimPrefix(k, fromFull)] = v
+		if after, ok := strings.CutPrefix(k, fromFull); ok {
+			next[toFull+after] = v
 			moved++
 			continue
 		}
