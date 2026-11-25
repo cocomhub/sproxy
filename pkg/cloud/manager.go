@@ -145,6 +145,9 @@ type CloudTask struct {
 
 	// Chunks 是**分块状态**（phase/done/length），供 v2 块矩阵（一行一个 chunk、行内多小块）。
 	Chunks []downloader.ChunkState `json:"chunks,omitempty"`
+	// rebuildFirst 是**运行时**标记：本次执行先尝试「零尾扫描 + 定点补片」（damaged 恢复），
+	// 失败/不可用再回落整份下载。不持久化（重启后由 resume 重新置位）。
+	rebuildFirst bool
 	// Progress 是**进度采样环形缓冲**（时间/已下/总/窗口速率/阶段），供增量进度接口与
 	// v2 页面速率曲线（随任务持久化，重启后历史仍在；上限 progressSampleCap）。
 	Progress []ProgressSample `json:"progress,omitempty"`

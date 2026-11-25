@@ -162,6 +162,9 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.resumeSelfOverwrite = false
 	if task.Status == "completed" && task.IntegrityStatus == "damaged" {
 		task.resumeSelfOverwrite = true
+		// 定点修复优先（用户 2026-11-26 收敛）：damaged 先走「零尾扫描 + 定点补片」，
+		// 只有无法定点修复时才整份重下（pikget 的 rebuild 能力在云端同样可用）。
+		task.rebuildFirst = true
 	}
 
 	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态

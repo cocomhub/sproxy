@@ -46,3 +46,12 @@ func ChunkProgressFrom(ctx context.Context) ChunkProgressFunc {
 	fn, _ := ctx.Value(chunkProgressKey{}).(ChunkProgressFunc)
 	return fn
 }
+
+// Rebuilder 是**可选**能力（用户 2026-11-26 收敛）：对已有（可能受损）产物做
+// 「零尾扫描 + 定点补片」重建，而不是整份重下。实现方需保证就地修复语义。
+//
+// 与 Download 的关系：`rebuilt=false` 表示无需/无法定点修复（调用方回落整份下载），
+// `err != nil` 表示修复过程失败（调用方同样回落下载，但应记录原因）。
+type Rebuilder interface {
+	RebuildTo(ctx context.Context, sourceURL, destPath string, dryRun bool) (rebuilt bool, err error)
+}

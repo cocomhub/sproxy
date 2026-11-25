@@ -1198,6 +1198,14 @@ func (m *CloudDownloadManager) runDownloadAttempt(ctx context.Context, dlCtx con
 	// 下载器选择：按 URL 自动发现（downloader.Find，注册了 pikpak 后 mypikpak 分享 URL
 	// 自动命中；http 等未注册 URL 回落配置默认下载器 m.dl——不改默认下载器语义）。
 	dl := m.downloaderFor(task.URL)
+	// damaged 定点修复优先（用户 2026-11-26）：先尝试「零尾扫描 + 定点补片」，
+	// 修好则跳过整份下载；无法定点修复/失败则回落正常下载（不阻断任务）。
+	if res, done := m.tryRebuildInPlace(attemptCtx, task, dl, destPath); done {
+		if attemptCancel != nil {
+			attemptCancel()
+		}
+		return res, nil, false
+	}
 	sinkFactory := m.downloadSinkFactory(task)
 	var result *downloader.Result
 	var downloadErr error
@@ -2019,4 +2027,48 @@ func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg str
 	if d := task.Diagnostics; d != nil && d.PartialPath == "" {
 		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
 	}
+}
+
+// takeRebuildFirst 取出并清除「先尝试定点修复」标记（每次 resume 只尝试一次）。
+func (m *CloudDownloadManager) takeRebuildFirst(task *CloudTask) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	first := task.rebuildFirst
+	task.rebuildFirst = false
+	return first
+}
+
+// rebuiltResult 构造「已就地修复」的下载结果（size + sha256 从磁盘实测，不编造）。
+func (m *CloudDownloadManager) rebuiltResult(destPath string) *downloader.Result {
+	st, err := os.Stat(destPath)
+	if err != nil {
+		return &downloader.Result{}
+	}
+	sum, herr := sha256FileHex(destPath)
+	if herr != nil {
+		m.logger.Warn("rebuilt file checksum failed", "dest", destPath, "err", herr)
+	}
+	return &downloader.Result{Size: st.Size(), Checksum: sum, ChecksumAlgorithm: downloader.IntegrityChecksumSHA256}
+}
+
+// tryRebuildInPlace 尝试「就地定点修复」（damaged 恢复路径）。
+// 返回 (结果, true) 表示已修好（调用方跳过整份下载）；否则 (nil, false) 回落下载。
+func (m *CloudDownloadManager) tryRebuildInPlace(ctx context.Context, task *CloudTask, dl downloader.Downloader, destPath string) (*downloader.Result, bool) {
+	if !m.takeRebuildFirst(task) {
+		return nil, false
+	}
+	rb, ok := dl.(downloader.Rebuilder)
+	if !ok {
+		return nil, false
+	}
+	rebuilt, err := rb.RebuildTo(ctx, task.URL, destPath, false)
+	if err != nil {
+		m.logger.Warn("cloud rebuild failed, fallback to full download", "task_id", task.ID, "err", err)
+		return nil, false
+	}
+	if !rebuilt {
+		return nil, false
+	}
+	m.logger.Info("cloud download rebuilt in place", "task_id", task.ID, "dest", destPath)
+	return m.rebuiltResult(destPath), true
 }
