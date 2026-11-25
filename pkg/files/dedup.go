@@ -25,7 +25,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"strings"
 	"sync"
@@ -264,9 +263,21 @@ func (ds *DedupStore) save() error {
 	ds.saveMu.Lock()
 	defer ds.saveMu.Unlock()
 
-	ds.mu.RLock()
+	// **深拷贝**：maps.Copy 只复制指针，而 Add/RemoveRef 会在锁外被 marshal 期间修改
+	// entry.Refs 切片 ⇒ data race（-race 实测：Add 写 vs json marshal 读）。
 	snapshot := make(map[string]*dedupEntry, len(ds.entries))
-	maps.Copy(snapshot, ds.entries)
+	ds.mu.RLock()
+	for k, e := range ds.entries {
+		if e == nil {
+			snapshot[k] = nil
+			continue
+		}
+		cp := *e
+		if e.Refs != nil {
+			cp.Refs = append(make([]dedupRef, 0, len(e.Refs)), e.Refs...)
+		}
+		snapshot[k] = &cp
+	}
 	ds.mu.RUnlock()
 
 	data, err := json.MarshalIndent(snapshot, "", "  ")

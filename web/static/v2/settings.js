@@ -12,6 +12,23 @@
 
   function el(id) { return document.getElementById(id); }
 
+  // login.js 的凭据端点走 sclientTransport.coreRequest（旧版由 app.js 注入）；v2 用裸 fetch
+  // 适配同一协议：公开端点（/api/credentials/*）不需签名，返回 {status, body} 供其解析。
+  if (!window.sclientTransport) {
+    window.sclientTransport = {
+      coreRequest: function (method, path, opts) {
+        var o = opts || {};
+        var init = { method: method, credentials: 'same-origin', headers: Object.assign({}, o.headers || {}) };
+        if (o.bodyBytes) { init.body = o.bodyBytes; }
+        return fetch(path, init).then(function (resp) {
+          return resp.arrayBuffer().then(function (buf) {
+            return { status: resp.status, body: new Uint8Array(buf) };
+          });
+        });
+      }
+    };
+  }
+
   function banner(text, kind) {
     var box = el('v2-set-state');
     if (!box) { return; }
@@ -102,6 +119,72 @@
       .catch(function (e) { banner('登录失败：' + (e.message || e), 'warn'); });
   }
 
+  function toggleRegister(force) {
+    var box = el('v2-register');
+    if (!box) { return; }
+    var show = force === undefined ? box.hidden : force;
+    box.hidden = !show;
+    if (show) {
+      var o = el('v2-reg-owner');
+      if (o) { o.focus(); }
+    }
+  }
+
+  /** 注册：生成 TOTP 密钥 → 展示 AK/Base32/otpauth + 二维码（复用 qrcode.js）。 */
+  function register() {
+    if (typeof window.registerTOTPByCore !== 'function') { banner('登录模块未加载', 'warn'); return; }
+    var owner = ((el('v2-reg-owner') || {}).value || '').trim();
+    var box = el('v2-reg-result');
+    if (box) { box.textContent = '生成中…'; }
+    banner('');
+    window.registerTOTPByCore({}, owner)
+      .then(function (data) {
+        if (!box) { return; }
+        box.textContent = '';
+        var d = data || {};
+        var add = function (label, text, mono) {
+          var p = document.createElement('div');
+          p.className = 'muted';
+          p.style.cssText = 'font-size:12px;margin:8px 0 2px';
+          p.textContent = label;
+          box.appendChild(p);
+          var pre = document.createElement('code');
+          pre.style.cssText = 'display:block;padding:8px;background:var(--surface-2);border:1px solid var(--border);' +
+            'border-radius:6px;font-size:12px;word-break:break-all';
+          pre.textContent = text || '—';
+          box.appendChild(pre);
+          if (mono) { /* 占位：保持签名一致 */ }
+        };
+        if (d.admin) {
+          var adm = document.createElement('div');
+          adm.className = 'banner';
+          adm.textContent = '你是首个注册用户，将成为管理员';
+          box.appendChild(adm);
+        }
+        add('AccessKey（请妥善保存）', d.ak);
+        add('TOTP 密钥（Base32，录入 Authenticator）', d.base32_secret);
+        var qr = document.createElement('div');
+        qr.id = 'v2-reg-qr';
+        qr.style.cssText = 'margin-top:10px;display:flex;justify-content:center';
+        box.appendChild(qr);
+        if (d.otpauth_uri && window.sproxyQR && window.sproxyQR.renderToSVG) {
+          qr.innerHTML = window.sproxyQR.renderToSVG(d.otpauth_uri);
+        }
+        add('otpauth 链接', d.otpauth_uri);
+        var tip = document.createElement('div');
+        tip.className = 'muted';
+        tip.style.cssText = 'font-size:12px;margin-top:10px';
+        tip.textContent = '注册完成：用上方密钥在身份验证器添加账号，再用动态码登录。密钥只显示这一次。';
+        box.appendChild(tip);
+        var akInput = el('v2-set-totp-ak');
+        if (akInput && d.ak) { akInput.value = d.ak; }
+      })
+      .catch(function (e) {
+        if (box) { box.textContent = ''; }
+        banner('注册失败：' + (e.message || e), 'warn');
+      });
+  }
+
   function loadTunnel() {
     var cb = el('v2-set-tunnel');
     if (!cb) { return; }
@@ -148,6 +231,8 @@
     var out = el('v2-set-signout'); if (out) { out.addEventListener('click', signOut); }
     var login = el('v2-set-login'); if (login) { login.addEventListener('click', totpLogin); }
     var tSave = el('v2-set-tunnel-save'); if (tSave) { tSave.addEventListener('click', saveTunnel); }
+    var rt = el('v2-set-register-toggle'); if (rt) { rt.addEventListener('click', function () { toggleRegister(); }); }
+    var rs = el('v2-reg-submit'); if (rs) { rs.addEventListener('click', register); }
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
   }
 
