@@ -659,6 +659,12 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("Hub 分区既无数据也无提示: %v", err)
 	}
+	// Hub 踢出按钮：admin（测试环境 loopback 允许）时可见，否则不可见——二者皆合法，仅断言无异常。
+	if n, _ := page.Locator("#v2-hub-body [data-kick]").Count(); n > 0 {
+		if _, err := page.Locator("#v2-hub-body [data-kick]").First().IsVisible(); err != nil {
+			t.Fatalf("踢出按钮可见性检查失败: %v", err)
+		}
+	}
 	// 命令面板：⌘K/Ctrl+K → 搜索「配置」→ Enter 直达控制台配置分区。
 	if err := page.Keyboard().Press("Control+k"); err != nil {
 		t.Fatalf("打开命令面板: %v", err)

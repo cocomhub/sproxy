@@ -400,7 +400,7 @@
 
             <div data-cspane="hub" hidden>
               <div class="toolbar" style="margin-bottom:10px">
-                <b>Hub 节点</b><span class="muted" style="font-size:12px">只读：注册节点与转发统计</span>
+                <b>Hub 节点</b><span class="muted" style="font-size:12px">注册节点与转发统计；「踢出」仅管理员可见</span>
                 <span style="flex:1"></span>
                 <button class="btn" id="v2-hub-refresh" type="button">刷新</button>
               </div>
@@ -409,7 +409,8 @@
               <div class="card">
                 <table class="table">
                   <thead><tr><th>节点</th><th>服务</th><th style="width:90px">质量</th>
-                    <th style="width:110px">RTT</th><th style="width:130px">虚拟 IP</th></tr></thead>
+                    <th style="width:110px">RTT</th><th style="width:130px">虚拟 IP</th>
+                    <th style="width:90px">操作</th></tr></thead>
                   <tbody id="v2-hub-body"></tbody>
                 </table>
                 <div class="empty" id="v2-hub-empty" hidden><b>没有已注册节点</b>
