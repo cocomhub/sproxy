@@ -26,6 +26,7 @@
   }
 
   var api = window.v2api;
+  function T(k) { return (window.v2i18n ? window.v2i18n.t(k) : k); }
 
   window.v2toast = toast;
 
@@ -165,7 +166,7 @@
     item.pause.addEventListener('click', function () {
       if (item.cancelled) { run(); return; }
       item.cancelled = true;
-      item.pause.textContent = '已暂停';
+      item.pause.textContent = T('toast.paused');
     });
     item.cancel.addEventListener('click', function () {
       item.cancelled = true;
@@ -174,7 +175,7 @@
     });
     var run = function () {
       item.cancelled = false;
-      item.pause.textContent = '暂停';
+      item.pause.textContent = T('dlg.cancel') === 'Cancel' ? 'Pause' : '暂停';
       item.started = Date.now();
       return chunked.uploadChunked(file, {
         api: api, util: util, cryptoLib: cryptoLib, shaCtor: window.sclientSha256, join: f.joinSubdir
@@ -185,17 +186,17 @@
       }).then(function (res) {
         item.row.remove();
         if (!el('v2-uploads').children.length) { el('v2-uploads').hidden = true; }
-        toast('ok', res && res.skipped ? ('已存在，跳过 ' + file.name) : ('已上传 ' + file.name));
+        toast('ok', res && res.skipped ? (T('toast.exists') + file.name) : (T('toast.uploaded') + file.name));
         if (view()) { view().load(); }
       }).catch(function (err) {
         if (err && err.code === 'E_CANCELLED') {
-          item.pause.textContent = '继续';
+          item.pause.textContent = T('toast.resume');
           item.info.textContent = '已暂停 · ' + (item.info.textContent.split(' · ')[0] || '');
           return;
         }
         item.row.remove();
         if (!el('v2-uploads').children.length) { el('v2-uploads').hidden = true; }
-        toast('bad', '上传失败：' + (err && err.message ? err.message : '网络错误'));
+        toast('bad', T('toast.uploadFailed') + (err && err.message ? err.message : T('toast.network')));
       });
     };
     return run();
@@ -236,13 +237,13 @@
       });
     });
     chain.then(function () { if (view()) { view().load(); } })
-      .catch(function (err) { toast('bad', '上传失败：' + (err && err.message ? err.message : '网络错误')); });
+      .catch(function (err) { toast('bad', T('toast.uploadFailed') + (err && err.message ? err.message : T('toast.network'))); });
   }
 
   function mkdir() {
     openDialog({
-      title: '新建目录', message: '在当前目录下创建；名称不能包含 / \\ : * ? " < > |',
-      input: true, value: '', okText: '创建',
+      title: T('dlg.mkdir.title'), message: T('dlg.mkdir.msg'),
+      input: true, value: '', okText: T('dlg.create'),
       onOk: function (name) {
         var sub = view() ? view().subdir() : '';
         var rel = f.joinSubdir(sub, name);
@@ -255,12 +256,12 @@
     var sub = view() ? view().subdir() : '';
     var rel = f.joinSubdir(sub, name);
     openDialog({
-      title: isDir ? '删除目录？' : '删除文件？',
-      message: (isDir ? '目录及其内容将被删除' : '文件将从存储中删除') + '：' + rel,
-      danger: true, okText: '删除',
+      title: isDir ? T('dlg.delDir.title') : T('dlg.delFile.title'),
+      message: (isDir ? T('dlg.delDir.msg') : T('dlg.delFile.msg')) + rel,
+      danger: true, okText: T('dlg.delete'),
       onOk: function () {
         var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
-        run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), '已删除 ' + name);
+        run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), T('toast.deleted') + name);
       }
     });
   }
@@ -269,10 +270,10 @@
     var sub = view() ? view().subdir() : '';
     var from = f.joinSubdir(sub, name);
     openDialog({
-      title: '重命名', message: '当前：' + from, input: true, value: name, okText: '保存',
+      title: T('dlg.rename.title'), message: T('dlg.rename.current') + from, input: true, value: name, okText: T('dlg.save'),
       onOk: function (newName) {
         var to = f.joinSubdir(sub, newName);
-        run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), { headers: ops.checksumHeader(checksum) }), '已重命名为 ' + newName);
+        run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), { headers: ops.checksumHeader(checksum) }), T('toast.renamed') + ' ' + newName);
       }
     });
   }
@@ -327,7 +328,7 @@
         var okN = results.filter(function (r) { return r.success; }).length;
         toast(okN === results.length ? 'ok' : 'warn', '重命名成功 ' + okN + '/' + results.length);
         if (view()) { view().load(); }
-      }).catch(function (e) { toast('bad', '批量重命名失败：' + (e.message || e)); });
+      }).catch(function (e) { toast('bad', T('toast.batchRenameFailed') + (e.message || e)); });
     });
     var input = wrap.querySelector('#v2-br-prefix');
     if (input) { input.focus(); }
@@ -374,9 +375,9 @@
         var names = view() ? view().selected() : [];
         if (!names.length) { return; }
         openDialog({
-          title: '删除所选 ' + names.length + ' 项？',
-          message: '文件会移入回收站（可恢复）；目录将直接删除并连同内容。',
-          danger: true, okText: '删除',
+          title: T('dlg.delSel.title'),
+          message: T('dlg.delSel.msg'),
+          danger: true, okText: T('dlg.delete'),
           onOk: function () {
             var sub = view() ? view().subdir() : '';
             var chain = Promise.resolve();
@@ -388,7 +389,7 @@
                 return api.json('POST', path, { headers: ops.checksumHeader(info ? info.checksum : '') });
               });
             });
-            run(chain, '已删除 ' + names.length + ' 项');
+            run(chain, T('toast.deleted') + names.length);
           }
         });
       });

@@ -31,3 +31,9 @@ test('normalizeSecrets：仅保留非空字符串', () => {
   assert.deepStrictEqual(m.normalizeSecrets({ secrets: ['a', '', 3, null, 'b'] }), ['a', 'b']);
   assert.deepStrictEqual(m.normalizeSecrets(null), []);
 });
+
+test('parseKV：忽略空行/注释、按首个 = 切分、去空白', () => {
+  const out = m.parseKV(['# comment', 'url=https://example.com/a', '', '  user = demo  ', 'novalue', ''].join(String.fromCharCode(10)));
+  assert.deepStrictEqual(out, { url: 'https://example.com/a', user: 'demo' });
+  assert.deepStrictEqual(m.parseKV(''), {});
+});

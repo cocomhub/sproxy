@@ -18,7 +18,20 @@
       'cs.overview': '概览', 'cs.tasks': '云端任务', 'cs.issues': '待处理事项',
       'cs.audit': '审计', 'cs.config': '配置', 'cs.notify': '通知', 'cs.verify': '巡检',
       'cs.access': '接入', 'cs.volumes': '卷', 'cs.mesh': 'Mesh', 'cs.hub': 'Hub',
-      'title.files': '文件', 'title.transfer': '传输', 'title.trash': '回收站', 'title.console': '控制台'
+      'title.files': '文件', 'title.transfer': '传输', 'title.trash': '回收站', 'title.console': '控制台',
+      'dlg.cancel': '取消', 'dlg.ok': '确定', 'dlg.create': '创建', 'dlg.save': '保存', 'dlg.delete': '删除',
+      'dlg.mkdir.title': '新建目录', 'dlg.mkdir.msg': '在当前目录下创建；名称不能包含 / \ : * ? " < > |',
+      'dlg.rename.title': '重命名', 'dlg.rename.current': '当前：',
+      'dlg.delSel.title': '删除所选？', 'dlg.delSel.msg': '文件会移入回收站（可恢复）；目录将直接删除并连同内容。',
+      'toast.paused': '已暂停', 'toast.resume': '继续', 'toast.uploading': '上传中 ',
+      'toast.uploaded': '已上传 ', 'toast.exists': '已存在，跳过 ',
+      'toast.uploadFailed': '上传失败：', 'toast.deleted': '已删除 ', 'toast.renamed': '已重命名',
+      'toast.renameFailed': '重命名失败：', 'toast.mkdirFailed': '新建目录失败：',
+      'toast.network': '网络错误',
+      'dlg.delFile.title': '删除文件？', 'dlg.delDir.title': '删除目录？',
+      'dlg.delFile.msg': '文件将从存储中删除：',
+      'dlg.delDir.msg': '目录及其内容将被删除：',
+      'toast.batchRenameFailed': '批量重命名失败：', 'toast.batchDeleteFailed': '批量删除失败：'
     },
     en: {
       files: 'Files', transfer: 'Transfer', trash: 'Trash', console: 'Console',
@@ -30,7 +43,20 @@
       'cs.overview': 'Overview', 'cs.tasks': 'Cloud tasks', 'cs.issues': 'Issues',
       'cs.audit': 'Audit', 'cs.config': 'Config', 'cs.notify': 'Notify', 'cs.verify': 'Verify',
       'cs.access': 'Access', 'cs.volumes': 'Volumes', 'cs.mesh': 'Mesh', 'cs.hub': 'Hub',
-      'title.files': 'Files', 'title.transfer': 'Transfer', 'title.trash': 'Trash', 'title.console': 'Console'
+      'title.files': 'Files', 'title.transfer': 'Transfer', 'title.trash': 'Trash', 'title.console': 'Console',
+      'dlg.cancel': 'Cancel', 'dlg.ok': 'OK', 'dlg.create': 'Create', 'dlg.save': 'Save', 'dlg.delete': 'Delete',
+      'dlg.mkdir.title': 'New folder', 'dlg.mkdir.msg': 'Created under current folder; name must not contain / \ : * ? " < > |',
+      'dlg.rename.title': 'Rename', 'dlg.rename.current': 'Current: ',
+      'dlg.delSel.title': 'Delete selected items?', 'dlg.delSel.msg': 'Files move to trash (recoverable); folders are deleted with their contents.',
+      'toast.paused': 'Paused', 'toast.resume': 'Resume', 'toast.uploading': 'Uploading ',
+      'toast.uploaded': 'Uploaded ', 'toast.exists': 'Already exists, skipped ',
+      'toast.uploadFailed': 'Upload failed: ', 'toast.deleted': 'Deleted ', 'toast.renamed': 'Renamed',
+      'toast.renameFailed': 'Rename failed: ', 'toast.mkdirFailed': 'Create folder failed: ',
+      'toast.network': 'network error',
+      'dlg.delFile.title': 'Delete file?', 'dlg.delDir.title': 'Delete folder?',
+      'dlg.delFile.msg': 'File will be removed from storage: ',
+      'dlg.delDir.msg': 'Folder and its contents will be deleted: ',
+      'toast.batchRenameFailed': 'Batch rename failed: ', 'toast.batchDeleteFailed': 'Batch delete failed: '
     }
   };
 
