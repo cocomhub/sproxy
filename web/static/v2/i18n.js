@@ -34,6 +34,79 @@
     }
   };
 
+  var ZH2EN = {
+    "名称": "Name",
+    "状态": "Status",
+    "卷": "Volume",
+    "大小": "Size",
+    "修改时间": "Modified",
+    "校验": "Checksum",
+    "操作": "Actions",
+    "任务": "Task",
+    "进度": "Progress",
+    "更新": "Updated",
+    "类型": "Type",
+    "模式": "Mode",
+    "容量": "Capacity",
+    "已用": "Used",
+    "用量": "Usage",
+    "路径": "Path",
+    "详情": "Detail",
+    "结果": "Result",
+    "动作": "Action",
+    "主体": "Actor",
+    "对象": "Object",
+    "对象 / 详情": "Object / Detail",
+    "尝试": "Attempts",
+    "最近": "Last seen",
+    "服务": "Services",
+    "质量": "Quality",
+    "节点": "Node",
+    "虚拟 IP": "Virtual IP",
+    "时间": "Time",
+    "渠道": "Channel",
+    "失败": "Failed",
+    "方向": "Direction",
+    "组": "Group",
+    "路径 / 说明": "Path / Detail",
+    "面 / 角色": "Face / Role",
+    "备注": "Notes",
+    "SK 数": "SK count",
+    "存活 SK": "Alive SK",
+    "AccessKey / Secret": "AccessKey / Secret",
+    "TOTP 登录": "TOTP login",
+    "任务详情": "Task detail",
+    "加密隧道": "Encrypted tunnel",
+    "只读信息": "Read-only info",
+    "接入指引": "Onboarding",
+    "问题明细（只隔离不删除）": "Issues (quarantined, not deleted)",
+    "回收站为空": "Trash is empty",
+    "无数据": "No data",
+    "暂无云端任务": "No cloud tasks",
+    "暂无任务组": "No task groups",
+    "暂无凭据": "No credentials",
+    "暂无卷": "No volumes",
+    "暂无同步任务": "No sync tasks",
+    "暂无审计条目": "No audit entries",
+    "暂无待处理事项": "No pending issues",
+    "暂无通知记录": "No notifications",
+    "没有可用卷": "No available volumes",
+    "没有已注册节点": "No registered nodes",
+    "没有用户卷": "No user volumes",
+  };
+
+  /** 静态表头/卡片标题/空态标题的中英替换（原始中文存 dataset.zh，可无损切回）。 */
+  function applyTexts() {
+    var en = lang() === 'en';
+    Array.prototype.forEach.call(document.querySelectorAll('th, .card-title, .empty b'), function (n) {
+      if (n.hasAttribute('data-i18n')) { return; }
+      if (!n.dataset.zh) { n.dataset.zh = n.textContent; }
+      var zh = n.dataset.zh.trim();
+      var tr = ZH2EN[zh];
+      if (tr) { n.textContent = en ? tr : n.dataset.zh; }
+    });
+  }
+
   function lang() {
     var v = null;
     try { v = localStorage.getItem(KEY); } catch (e) { v = null; }
@@ -66,6 +139,7 @@
     var sel = document.getElementById('v2-set-lang');
     if (sel) { sel.value = lang(); }
     document.documentElement.setAttribute('lang', lang() === 'en' ? 'en' : 'zh-CN');
+    applyTexts();
   }
 
   function setLang(v) {
@@ -93,6 +167,6 @@
   }
 
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { t: t, lang: lang, DICT: DICT };
+    module.exports = { t: t, lang: lang, DICT: DICT, ZH2EN: ZH2EN };
   }
 })();

@@ -16,3 +16,11 @@ test('t：缺省中文，未知键原样返回', () => {
   assert.strictEqual(m.t('cs.overview'), '概览');
   assert.strictEqual(m.t('missing.key'), 'missing.key');
 });
+
+test('静态文案表：无空译文，关键表头有映射', () => {
+  const keys = Object.keys(m.ZH2EN);
+  assert.ok(keys.length >= 40);
+  keys.forEach((k) => { assert.ok(String(m.ZH2EN[k]).trim().length > 0, k); });
+  assert.strictEqual(m.ZH2EN['名称'], 'Name');
+  assert.strictEqual(m.ZH2EN['暂无云端任务'], 'No cloud tasks');
+});
