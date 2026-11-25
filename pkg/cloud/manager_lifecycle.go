@@ -190,6 +190,14 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	task.DownloadDone = false
 	task.DownloadedSize = 0
 	task.DownloadedChecksum = ""
+	// 进度不得凭空归零（用户 2026-11-25：点击重试后进度 20% → 0%）：
+	// 磁盘上仍可能有 `.partial`/hybrid 工作文件（续传基础），把 Downloaded 初始化为**实际残留字节**，
+	// 让 UI/进度与磁盘一致；真正的续传判定仍由下载器/manifest 负责（本字段只表达"已落盘多少"）。
+	if n := m.diskUsageOfTask(task.Owner, task.ID); n > 0 {
+		task.Downloaded = n
+	} else {
+		task.Downloaded = 0
+	}
 
 	// 释放过存储的任务需要重新占位（全局 storageMgr；Scope 侧由下载流 QuotaWriter 边写边记重建）
 	// resumeReserved 记录**本次调用**新落的占位（0 = 未新增，此时 task.ReservedSize 是任务失败时

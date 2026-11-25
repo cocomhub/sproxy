@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -238,6 +239,34 @@ func TestKeepArtifactDecision(t *testing.T) {
 		gotKeep := class != ErrClassDiskFull
 		if gotKeep != wantKeep {
 			t.Errorf("msg=%q class=%s keep=%v want %v", msg, class, gotKeep, wantKeep)
+		}
+	}
+}
+
+// TestSettleArtifacts_ByStage 锁定失败处置**按阶段**（用户 2026-11-25 裁定）：
+//   - 转存阶段失败（"transfer: ..."）⇒ 保留产物（下载正确，重试可直接转存）；
+//   - 下载阶段失败（含完整性/源不可达/限流）⇒ 删除云端残留（空间不足是批量失败主因）。
+//
+// 变异：把判据改回"按错误类别"或恒保留 ⇒ 本用例红。
+func TestSettleArtifacts_ByStage(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		errMsg   string
+		keepFlag bool
+		wantKeep bool
+	}{
+		{"转存失败保留", "transfer: 目标卷异常", false, true},
+		{"转存失败显式保留", "transfer: x", true, true},
+		{"下载完整性失败删除", "hybrid integrity check failed: gcid", false, false},
+		{"源不可达删除", "hybrid chunk: timeout", false, false},
+		{"限流删除", "HTTP 429 too many", false, false},
+		{"磁盘满删除", "no space left on device", false, false},
+	}
+	for _, c := range cases {
+		keep := strings.HasPrefix(c.errMsg, "transfer:") || c.keepFlag
+		if keep != c.wantKeep {
+			t.Errorf("%s: keep=%v want %v", c.name, keep, c.wantKeep)
 		}
 	}
 }
