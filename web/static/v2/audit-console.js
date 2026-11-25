@@ -124,10 +124,11 @@
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a');
         a.href = url;
-        a.download = 'audit-' + new Date().toISOString().slice(0, 10) + '.ndjson';
+        // 服务端 /api/audit/export 返回 JSON 数组（时间正序），扩展名保持一致。
+        a.download = 'audit-' + new Date().toISOString().slice(0, 10) + '.json';
         document.body.appendChild(a); a.click(); a.remove();
         setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
-        if (window.v2toast) { window.v2toast('ok', '已导出审计 NDJSON'); }
+        if (window.v2toast) { window.v2toast('ok', '已导出审计 JSON'); }
       })
       .catch(function (e) { banner('导出失败：' + (e.message || e), 'warn'); });
   }

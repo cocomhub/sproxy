@@ -44,7 +44,7 @@
     if (!file) { return; }
     state.name = name;
     var sub = view().subdir();
-    var rel = f.joinSubdir(sub, name);
+    var rel = f.resolveRel(sub, name, !!(view().search && view().search()));
     syncCredGlobals();
     resetStage();
     el('v2-pv-title').textContent = name;
@@ -143,12 +143,13 @@
   function download(name) {
     var file = view() ? view().file(name) : null;
     if (!file) { return; }
-    var rel = f.joinSubdir(view().subdir(), name);
+    var rel = f.resolveRel(view().subdir(), name, !!(view().search && view().search()));
     syncCredGlobals();
     signedUrl(rel, file.volume).then(function (url) {
       var a = document.createElement('a');
       a.href = url; a.download = name;
       document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
     }).catch(function (e) { if (window.v2toast) { window.v2toast('bad', '下载失败：' + e.message); } });
   }
 

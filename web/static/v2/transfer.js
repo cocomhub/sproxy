@@ -433,6 +433,11 @@
   function isActive() { return (window.location.hash || '').indexOf('#/transfer') === 0; }
 
   function init() {
+    // 页面卸载时清掉轮询定时器（chain 运行器 + 自动刷新），避免后台空转。
+    window.addEventListener('beforeunload', function () {
+      Object.keys(chainRuns).forEach(function (gid) { stopChain(gid); });
+      if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    });
     Array.prototype.forEach.call(document.querySelectorAll('[data-tf]'), function (c) {
       c.addEventListener('click', function () {
         Array.prototype.forEach.call(document.querySelectorAll('[data-tf]'), function (x) { x.setAttribute('aria-pressed', 'false'); });

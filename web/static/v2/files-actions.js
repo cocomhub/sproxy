@@ -213,7 +213,7 @@
     return file.arrayBuffer().then(function (buf) {
       var bytes = new Uint8Array(buf);
       return cryptoLib.sha256Hex(bytes).then(function (sum) {
-        var rel = f.joinSubdir(sub, file.name);
+        var rel = relOf(file.name);
         var mp = util.buildMultipart({}, { name: 'file', filename: rel, contentType: 'application/octet-stream', bytes: bytes });
         var path = '/upload' + (vol ? '?volume=' + encodeURIComponent(vol) : '');
         return api.request('POST', path, { body: mp.body, contentType: mp.contentType, headers: ops.uploadHeaders(rel, sum, file.lastModified) })
@@ -249,7 +249,7 @@
       input: true, value: '', okText: T('dlg.create'),
       onOk: function (name) {
         var sub = view() ? view().subdir() : '';
-        var rel = f.joinSubdir(sub, name);
+        var rel = relOf(name);
         run(api.json('POST', '/mkdir?dirname=' + enc(rel)), '已创建目录 ' + name);
       }
     });
@@ -257,7 +257,7 @@
 
   function doDelete(name, isDir, checksum) {
     var sub = view() ? view().subdir() : '';
-    var rel = f.joinSubdir(sub, name);
+    var rel = relOf(name);
     openDialog({
       title: isDir ? T('dlg.delDir.title') : T('dlg.delFile.title'),
       message: (isDir ? T('dlg.delDir.msg') : T('dlg.delFile.msg')) + rel,
@@ -271,20 +271,23 @@
 
   function doRename(name, checksum) {
     var sub = view() ? view().subdir() : '';
-    var from = f.joinSubdir(sub, name);
+    var from = relOf(name);
     openDialog({
       title: T('dlg.rename.title'), message: T('dlg.rename.current') + from, input: true, value: name, okText: T('dlg.save'),
       onOk: function (newName) {
-        var to = f.joinSubdir(sub, newName);
+        // 目标路径：与源同目录（搜索态源是完整路径，必须用其目录前缀，而不是当前 subdir）。
+        var dir = from.indexOf('/') >= 0 ? from.slice(0, from.lastIndexOf('/')) : '';
+        var to = f.joinSubdir(dir, newName);
         run(api.json('POST', '/rename?from=' + enc(from) + '&to=' + enc(to), { headers: ops.checksumHeader(checksum) }), T('toast.renamed') + ' ' + newName);
       }
     });
   }
 
+  /** 行名 → 相对路径（搜索态 name 已是完整路径，见 v2files.resolveRel）。 */
   function relOf(name) {
     var sub = view() ? view().subdir() : '';
-    var j = window.v2files && window.v2files.joinSubdir ? window.v2files.joinSubdir(sub, name) : name;
-    return j || name;
+    var search = !!(view() && view().search && view().search());
+    return f.resolveRel(sub, name, search) || name;
   }
 
   function selectedFiles() {
@@ -387,7 +390,7 @@
             names.forEach(function (name) {
               chain = chain.then(function () {
                 var info = view() && view().rowInfo(name);
-                var rel = f.joinSubdir(sub, name);
+                var rel = relOf(name);
                 var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
                 return api.json('POST', path, { headers: ops.checksumHeader(info ? info.checksum : '') });
               });

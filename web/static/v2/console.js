@@ -582,8 +582,13 @@
     api.json('GET', '/api/cloud/tasks/' + encodeURIComponent(taskID))
       .then(function (task) {
         var gid = (task && task.group_id) || '';
-        if (!gid) { throw new Error('该任务不属于任务组，请到传输页打包'); }
-        return api.json('POST', '/api/cloud/groups/' + encodeURIComponent(gid) + '/archive', {
+        if (gid) {
+          return api.json('POST', '/api/cloud/groups/' + encodeURIComponent(gid) + '/archive', {
+            body: new TextEncoder().encode(JSON.stringify({})), contentType: 'application/json'
+          });
+        }
+        // 无组：回落单任务归档（服务端已有 /tasks/{id}/archive）。
+        return api.json('POST', '/api/cloud/tasks/' + encodeURIComponent(taskID) + '/archive', {
           body: new TextEncoder().encode(JSON.stringify({})), contentType: 'application/json'
         });
       })

@@ -23,6 +23,16 @@
     try { localStorage.setItem(KEY, JSON.stringify(rec)); } catch (e) { /* 忽略 */ }
   }
 
+  /** 更新已接收字节（供「已接收 N%」真实显示；未保存过则忽略）。 */
+  function updateProgress(received, total) {
+    var rec = load();
+    if (!rec) { return; }
+    rec.received = Math.max(0, Number(received) || 0);
+    if (total) { rec.total = Number(total) || rec.total; }
+    rec.ts = Date.now();
+    save(rec);
+  }
+
   function clear() {
     try { localStorage.removeItem(KEY); } catch (e) { /* 忽略 */ }
     idb(function (db) { db.delete(STORE, 'pending'); }).catch(function () {});
@@ -140,7 +150,8 @@
   }
 
   if (typeof window !== 'undefined') {
-    window.v2pending = { init: init, save: save, load: load, clear: clear, render: render, sameFile: sameFile, continueUpload: continueUpload };
+    window.v2pending = { init: init, save: save, load: load, clear: clear, render: render, sameFile: sameFile,
+      continueUpload: continueUpload, updateProgress: updateProgress };
   }
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { sameFile: sameFile };
