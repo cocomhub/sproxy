@@ -1070,3 +1070,30 @@ JSON 响应写即红（基线表已删除）；豁免 `internal/httpjson/`（实
 3. 装配根通过构造参数注入依赖，**不**让切片反向 import `pkg/server`；
 4. 搬移对应测试；跨域测试改为经 `Register`/构造入口做黑盒；
 5. 更新按路径扫描的门禁清单（R38 路由文件、R25/R26 白名单、R43 目录等）。
+
+## Web UI 双轨与前端分层（2026-11-25）
+
+**双轨**：旧页 `/ui/`（`web/static/`）与新页 `/ui/v2/`（`web/static/v2/`）并存，
+共用同一后端与同一凭据契约（`sessionStorage` 三键 `sproxy_access_key[_secret|_id]`）。
+灰度与回退都靠路由切换，无后端开关。
+
+**分层（依赖方向单向）**：
+
+```
+web/static/shared/           纯逻辑单一来源（format / creds …）
+web/static/sclient/*.js      协议与签名原语（crypto / sig / sha256 / util）
+        ↑
+web/static/v2/               视图与壳层（不 import 旧页 app.js）
+web/static/*.js              旧页（含 app.js / cloud-tasks.js / overview-cards.js 等）
+```
+
+- **禁止复制 JS**：v2 需要的能力先查 `shared/`、`sclient/`、旧页纯函数模块（如 `cloud-tasks.js`、
+  `overview-cards.js`）能否直接复用；只有视图层代码才落在 `v2/`。
+- **门禁**：新增 v2 JS 必须登记 `make web-test`（R10，`internal/archcheck/web_assets_test.go`）；
+  纯函数配 `node --test`，交互配 Playwright e2e（`web/e2e/v2_shell_e2e_test.go`）。
+- **旧页下线**：以 `docs/designs/webui-parity-matrix.md`（功能对照）与
+  `docs/designs/webui-e2e-migration-map.md`（e2e 等价映射）为门禁证据；删除旧页需单独 PR。
+
+**设计系统**：`v2/tokens.css`（颜色/间距/圆角/阴影 token，亮暗两套）+ `v2/components.css`
+（表格/卡片/抽屉/弹窗/toast/命令面板/帮助面板）；`data-density` 控制表格密度，
+`data-theme` 控制亮暗，均持久化到 `localStorage`。

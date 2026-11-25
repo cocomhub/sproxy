@@ -66,7 +66,7 @@
 | e2e\share_version_e2e_test.go | `TestShare_CreateAndPublicAccess` | V2 分享创建（v2 未覆盖 /s/{token} 公开访问） |
 | e2e\share_version_e2e_test.go | `TestVersioning_UploadCreatesVersions` | V2 版本页签 |
 | e2e\share_version_e2e_test.go | `TestVersioning_DisabledReturns501` | V2 版本页签 501 提示 |
-| e2e\sync_carrier_badge_e2e_test.go | `TestSyncCarrierBadge_RendersFromServerData` | V2 同步任务（载体徽标未单列） |
+| e2e\sync_carrier_badge_e2e_test.go | `TestSyncCarrierBadge_RendersFromServerData` | V2 同步任务（载体列：kind · transport · carriers） |
 | e2e\sync_carrier_badge_e2e_test.go | `TestSyncCarrierBadge_MeshRemoteShowsDeclaredTransport` | 同上 |
 | e2e\trash_view_e2e_test.go | `TestTrashView_Panel` | V2 回收站 |
 | e2e\trash_view_e2e_test.go | `TestTrashView_MultiVolume_VolumeColumnFilterAndEmpty` | V2 回收站多卷列 |
@@ -106,9 +106,9 @@
 
 | 项 | 现状 | 建议 |
 | --- | --- | --- |
-| `/s/{token}` 公开分享页 | v2 只覆盖「创建分享」，未覆盖匿名访问页 | 公开页与 UI 壳无关，可保留独立页面（不阻塞下线） |
+| `/s/{token}` 公开分享页 | v2 只覆盖「创建分享」；公开页与 UI 壳无关（服务端独立渲染 JSON/文件），保留为独立入口 | **不阻塞下线**（决定：保留） |
 | 云端任务完整性徽标 | ✅ 已补：`integrity_status` → 完整/损坏 badge（`cloud-table.js`） | — |
-| 同步任务「载体徽标」 | v2 同步页签未显示 carrier badge | 后端字段已有，可按需补 |
+| 同步任务载体徽标 | ✅ 已补：同步表新增「载体」列（kind · transport · 终态 carriers 计数） | — |
 | 按卷记忆子目录 | ✅ 已补：`sproxy_v2_subdir_by_vol` 记录每卷上次目录，切卷自动跳回 | — |
 | 上传到指定卷 | ✅ 已补：简单上传 `?volume=`、分块 init body `volume`（e2e 实测落卷） | — |
 | 事项手动扫描 | ✅ 已补：「立即扫描」按钮调用 `POST /api/issues/scan` 并回显登记数 | — |

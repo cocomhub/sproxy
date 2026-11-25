@@ -63,7 +63,23 @@ BuildAt: 2026-06-01T12:00:00Z
 
 ### GET /ui/
 
-嵌入式 Web UI。静态文件来源 `web/static/`。
+嵌入式 Web UI（**旧版，稳定可用**）。静态文件来源 `web/static/`。
+
+### /ui/v2/（新版 Web UI，灰度）
+
+`/ui/v2/` 是**新版 Web UI**。静态文件来源 `web/static/v2/` + 共用 `web/static/shared/` 与
+`web/static/sclient/*.js`（不复制实现）。要点：
+
+- **入口与回退**：旧页顶栏「试用新版」→ `/ui/v2/`；v2 顶栏「旧版」→ `/ui/`。两套 UI 共用同一后端
+  与同一凭据契约（`sessionStorage` 三键），互不影响。
+- **前端分层**：`shared/`（格式化/凭据等纯逻辑，唯一来源）← `v2/`（视图与壳层）；v2 **不 import** 旧页
+  `app.js`；新增 JS 必须登记 `make web-test`（门禁 R10）。
+- **能力覆盖**：文件（列表/卷过滤+按卷记忆目录/搜索/上传含指定卷与断点续传/预览/检查器含 Meta 编辑、
+  版本、分享）、回收站、传输（云端任务含筛选排序分页深链与 TSV 导入导出、任务组、同步任务含载体列）、
+  控制台 11 个分区（概览/任务/事项/审计/配置/通知/巡检/接入/卷/Mesh/Hub）、连接设置（AK 校验、TOTP
+  登录与注册含二维码、隧道开关）、键盘（⌘K / g 前缀 / j k x / ? / 密度）。
+- **对照与下线**：功能对照见 `docs/designs/webui-parity-matrix.md`，旧页 e2e 的等价映射见
+  `docs/designs/webui-e2e-migration-map.md`；旧页在门禁全绿前不删除。
 
 - **多语言（i18n，roadmap 11.10-H1）**：内置 zh/en 双语（`web/static/i18n.js`）——静态文案经
   `data-i18n` / `data-i18n-placeholder` 批量替换，动态文案经 `I18N.t(key, vars)` 插值；语言解析

@@ -201,6 +201,18 @@
     });
   }
 
+  /** 载体文本：kind（+transport），终态再附实际载体计数。 */
+  function carrierText(t) {
+    var parts = [];
+    if (t.kind) { parts.push(t.kind); }
+    if (t.transport) { parts.push(t.transport); }
+    if (t.carriers && typeof t.carriers === 'object') {
+      var segs = Object.keys(t.carriers).map(function (k) { return k + '×' + t.carriers[k]; });
+      if (segs.length) { parts.push(segs.join(' ')); }
+    }
+    return parts.length ? parts.join(' · ') : '—';
+  }
+
   function syncStatusLabel(s) {
     var m = { pending: '排队中', running: '同步中', syncing: '同步中', completed: '已完成', failed: '失败', cancelled: '已取消' };
     return m[s] || s || '—';
@@ -233,6 +245,14 @@
       pill.textContent = syncStatusLabel(t.status);
       stTd.appendChild(pill);
       tr.appendChild(stTd);
+
+      // 载体可见性（W1）：kind / transport / 终态 carriers 计数（服务端快照字段）。
+      var carTd = document.createElement('td');
+      carTd.className = 'muted';
+      carTd.style.fontSize = '11.5px';
+      carTd.textContent = carrierText(t);
+      carTd.setAttribute('data-carrier', t.kind || '');
+      tr.appendChild(carTd);
 
       var pgTd = document.createElement('td');
       pgTd.className = 'num muted';
