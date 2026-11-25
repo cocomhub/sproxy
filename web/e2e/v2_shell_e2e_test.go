@@ -934,6 +934,51 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("打包下载未回显: %v", err)
 	}
 
+	// 链式下载：两个不可达 URL 建组 → 组行失败 → 「打包全部」被 409 拒绝（全有语义）。
+	if err := page.Locator("[data-route=transfer]").Click(); err != nil {
+		t.Fatalf("回到传输页: %v", err)
+	}
+	if err := page.Locator("#v2-chain-open").Click(); err != nil {
+		t.Fatalf("打开链式下载: %v", err)
+	}
+	if err := waitLoc(page, "#v2-chain-urls", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("链式下载对话框未显示: %v", err)
+	}
+	chainURLs := "http://127.0.0.1:1/chain1.bin\nhttp://127.0.0.1:1/chain2.bin"
+	if err := page.Locator("#v2-chain-urls").Fill(chainURLs); err != nil {
+		t.Fatalf("填写链式链接: %v", err)
+	}
+	if err := page.Locator("#v2-chain-ok").Click(); err != nil {
+		t.Fatalf("提交链式下载: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('链式下载'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		toasts, _ := page.Locator("#v2-toasts").TextContent()
+		t.Fatalf("链式下载未回显 (toasts=%q): %v", toasts, err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-grp-body tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		toasts, _ := page.Locator("#v2-toasts").TextContent()
+		gstate, _ := page.Locator("#v2-grp-state").TextContent()
+		t.Fatalf("任务组列表为空 (toasts=%q grp_state=%q): %v", toasts, gstate, err)
+	}
+	// 等组内任务真实失败，再点「打包全部」→ 服务端 require_all 409（前端 toast 报错）。
+	if _, err := page.WaitForFunction(
+		"() => { const rows = document.querySelectorAll('#v2-grp-body tr'); return Array.from(rows).some(r => r.querySelector('button') && /打包全部/.test(r.textContent)); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(60000)}); err != nil {
+		t.Fatalf("组未进入可打包状态（失败数未体现）: %v", err)
+	}
+	if err := page.Locator("#v2-grp-body tr").First().Locator("button", playwright.LocatorLocatorOptions{HasText: "打包全部"}).Click(); err != nil {
+		t.Fatalf("点击打包全部: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && (t.textContent.includes('打包失败') || t.textContent.includes('not fully completed')); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("打包全部未被 409 拒绝（全有语义失效）: %v", err)
+	}
+
 	// 云任务 TSV 导入：按 url 触发真实重试，回显导入结果并记录最近操作。
 	if _, err := page.Evaluate("() => { location.hash = '#/console'; }", nil); err != nil {
 		t.Fatalf("回到控制台: %v", err)

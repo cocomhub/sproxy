@@ -57,6 +57,10 @@ type CloudArchiveRequest struct {
 	Cipher string `json:"cipher,omitempty"`
 	// Compression 是压缩算法选型（空 = gzip）；gzip/zstd/brotli，非法值 400（不静默回退）。
 	Compression string `json:"compression,omitempty"`
+	// RequireAll 仅组归档使用（POST /api/cloud/groups/{id}/archive）：true ⇒ 组内任一子任务
+	// 非 completed 直接 409（列 pending_tasks），不产生任何归档文件（「全有或全无」语义）。
+	// false/缺省 = 既有行为（跳过未完成并回 skipped_tasks），零回归。
+	RequireAll bool `json:"require_all,omitempty"`
 }
 
 // CloudArchiveBatchRequest 是 POST /api/cloud/archive 的请求体。

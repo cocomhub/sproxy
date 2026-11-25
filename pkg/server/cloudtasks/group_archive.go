@@ -39,6 +39,10 @@ func (s *Service) ArchiveGroup(w http.ResponseWriter, r *http.Request, owner str
 		return
 	}
 
+	if !s.archiveGroupEnsureAllComplete(w, req, groupID, owner) {
+		return
+	}
+
 	// 确定归档文件名。默认使用 groupID 保证唯一性。
 	archiveName, ok := s.archiveGroupResolveName(w, req, groupID)
 	if !ok {
@@ -279,4 +283,38 @@ func (s *Service) ArchiveGroupToVolume(w http.ResponseWriter, r *http.Request, g
 		Encrypt: req.Encrypt, Cipher: req.Cipher, Compression: req.Compression,
 		Entries: entries, TotalSize: archiveTotalSize(sources),
 	}, s.deps.Logger.With("archive", "group", "group_id", groupID), onSuccess)
+}
+
+// archiveGroupEnsureAllComplete 执行 require_all 前置校验（未启用直接通过）。
+// 不满足时已写 409 响应并返回 false（调用方立即返回，不产生任何归档文件）。
+func (s *Service) archiveGroupEnsureAllComplete(w http.ResponseWriter, req CloudArchiveRequest, groupID, owner string) bool {
+	if !req.RequireAll {
+		return true
+	}
+	pending := s.archiveGroupPendingTasks(groupID, owner)
+	if len(pending) == 0 {
+		return true
+	}
+	s.writeJSON(w, CloudArchiveResult{
+		Success: false, Message: "group not fully completed",
+		SkippedCount: len(pending), SkippedTasks: pending,
+	}, http.StatusConflict)
+	return false
+}
+
+// archiveGroupPendingTasks 返回组内**尚未完成**的子任务 ID（require_all 全有语义的判据）。
+// 「完成」= 状态 completed 且任务仍可取到（任务被删视作未完成，避免归档空集）。
+func (s *Service) archiveGroupPendingTasks(groupID, owner string) []string {
+	group, ok := s.deps.Groups.GetGroup(groupID, owner)
+	if !ok {
+		return nil
+	}
+	var pending []string
+	for _, taskID := range group.TaskIDs {
+		task, found := s.deps.Tasks.SnapshotTask(taskID, owner)
+		if !found || task.Status != "completed" {
+			pending = append(pending, taskID)
+		}
+	}
+	return pending
 }

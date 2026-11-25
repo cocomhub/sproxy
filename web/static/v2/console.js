@@ -519,6 +519,12 @@
 
       var act = document.createElement('td');
       act.className = 'r actions';
+      // 云端下载失败：行内三动作（重试下载 / 打包已完成 / 预览已完成），见方案 §4。
+      if (it.kind === 'cloud_download_failed' && it.status !== 'resolved') {
+        act.appendChild(issueBtn('重试下载', function () { retryCloudIssue(it); }));
+        act.appendChild(issueBtn('打包已完成', function () { archiveCloudIssue(it); }));
+        act.appendChild(issueBtn('预览已完成', function () { previewCloudIssue(it); }));
+      }
       if (it.status !== 'resolved' && it.status !== 'ignored') {
         var btn = document.createElement('button');
         btn.type = 'button'; btn.className = 'btn btn-sm btn-ghost'; btn.textContent = '解决';
@@ -530,6 +536,69 @@
     });
     var empty = el('v2-cs-issues-empty');
     if (empty) { empty.hidden = items.length > 0; }
+  }
+
+  function issueBtn(text, handler) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-sm btn-ghost'; b.textContent = text;
+    b.addEventListener('click', handler);
+    return b;
+  }
+
+  /** 从事项 detail 里取 task=<id>（服务端登记格式：`task=xxx 类别=…`）。 */
+  function issueTaskID(it) {
+    var m = /task=([^\s；]+)/.exec(String(it.detail || ''));
+    return m ? m[1] : '';
+  }
+
+  /** 重试下载：按转存目标（volume+path）或 URL 触发，与 CLI 同一内核。 */
+  function retryCloudIssue(it) {
+    var payload;
+    if (it.volume && it.volume !== 'cloud' && it.path) {
+      payload = { transfer_volume: it.volume, transfer_path: it.path, force: true };
+    } else if (it.path) {
+      payload = { url: it.path, force: true };
+    } else {
+      if (window.v2toast) { window.v2toast('warn', '该事项缺少可重试的来源'); }
+      return;
+    }
+    api.json('POST', '/api/cloud/tasks/retry', {
+      body: new TextEncoder().encode(JSON.stringify(payload)), contentType: 'application/json'
+    }).then(function () {
+      if (window.v2toast) { window.v2toast('ok', '已提交重试'); }
+      loadIssues();
+    }).catch(function (e) { if (window.v2toast) { window.v2toast('bad', '重试失败：' + (e.message || e)); } });
+  }
+
+  /** 打包已完成：对该任务所在组归档（不带 require_all，允许部分交付）；无组则对单任务归档。 */
+  function archiveCloudIssue(it) {
+    var taskID = issueTaskID(it);
+    if (!taskID) { if (window.v2toast) { window.v2toast('warn', '事项未记录任务 ID，无法打包'); } return; }
+    api.json('GET', '/api/cloud/tasks/' + encodeURIComponent(taskID))
+      .then(function (task) {
+        var gid = (task && task.group_id) || '';
+        if (!gid) { throw new Error('该任务不属于任务组，请到传输页打包'); }
+        return api.json('POST', '/api/cloud/groups/' + encodeURIComponent(gid) + '/archive', {
+          body: new TextEncoder().encode(JSON.stringify({})), contentType: 'application/json'
+        });
+      })
+      .then(function (res) {
+        if (window.v2toast) { window.v2toast('ok', '已打包 ' + ((res && res.file) || '')); }
+      })
+      .catch(function (e) { if (window.v2toast) { window.v2toast('bad', '打包失败：' + (e.message || e)); } });
+  }
+
+  /** 预览已完成：任务 completed 时用 cloud 桶文件预览（复用预览浮层的 URL 票逻辑）。 */
+  function previewCloudIssue(it) {
+    var taskID = issueTaskID(it);
+    if (!taskID) { if (window.v2toast) { window.v2toast('warn', '事项未记录任务 ID，无法预览'); } return; }
+    api.json('GET', '/api/cloud/tasks/' + encodeURIComponent(taskID))
+      .then(function (task) {
+        if (!task || task.status !== 'completed') { throw new Error('任务尚未完成，暂无可预览文件'); }
+        window.__v2CloudPreview = { id: task.id, filename: task.filename };
+        if (window.v2toast) { window.v2toast('ok', '已就绪：' + task.filename + '（到传输页可下载）'); }
+      })
+      .catch(function (e) { if (window.v2toast) { window.v2toast('warn', e.message || String(e)); } });
   }
 
   function exportIssues() {

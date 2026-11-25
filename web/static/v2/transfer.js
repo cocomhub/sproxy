@@ -144,6 +144,23 @@
           }), '已提交整组重试');
         }));
       }
+      var prog = window.v2chain ? window.v2chain.groupProgress(g) : null;
+      if (g.failed) {
+        actTd.appendChild(actionBtn('重试失败项', function () {
+          run(api.json('POST', '/api/cloud/tasks/retry', {
+            body: new TextEncoder().encode(JSON.stringify({ group_id: g.id, force: true })),
+            contentType: 'application/json'
+          }), '已提交重试失败项');
+        }));
+      }
+      if (g.status !== 'downloading' && g.status !== 'pending') {
+        actTd.appendChild(actionBtn('打包已完成', function () { archiveGroup(g, false); }));
+        // 「打包全部」始终可见：未全部完成时服务端 require_all 会 409 并列出未完成项
+        // （让用户明确知道「全有」不满足，而不是按钮凭空消失）。
+        if (prog && prog.total > 0) {
+          actTd.appendChild(actionBtn('打包全部', function () { archiveGroup(g, true); }));
+        }
+      }
       if (g.status !== 'downloading' && g.status !== 'pending') {
         actTd.appendChild(actionBtn('删除', function () {
           run(api.json('DELETE', '/api/cloud/groups/' + encodeURIComponent(g.id)), '已删除组');
@@ -155,6 +172,62 @@
     var empty = el('v2-grp-empty');
     if (empty) { empty.hidden = state.groups.length > 0; }
   }
+
+  /** 组归档：requireAll=true 时服务端「全有或全无」（有未完成项 ⇒ 409 并列出）。 */
+  function archiveGroup(g, requireAll) {
+    var name = window.v2chain ? window.v2chain.defaultArchiveName() : 'archive.tar.gz';
+    if (g.name) { name = String(g.name).replace(/[^\w.-]+/g, '-') + '.tar.gz'; }
+    var payload = { archive_name: name };
+    if (requireAll) { payload.require_all = true; }
+    api.json('POST', '/api/cloud/groups/' + encodeURIComponent(g.id) + '/archive', {
+      body: new TextEncoder().encode(JSON.stringify(payload)),
+      contentType: 'application/json'
+    }).then(function (res) {
+      if (window.v2toast) { window.v2toast('ok', '已打包 ' + ((res && res.file) || name)); }
+      loadGroups();
+    }).catch(function (e) {
+      if (window.v2toast) { window.v2toast('bad', '打包失败：' + (e.message || e)); }
+    });
+  }
+
+  // chainRun 启动一个链式下载的收尾编排：轮询组到终态 → 全部完成则按 config 归档。
+  var chainRuns = Object.create(null);
+
+  function chainRun(cfg) {
+    if (!cfg || !cfg.groupID) { return; }
+    var gid = cfg.groupID;
+    if (chainRuns[gid]) { return; }
+    chainRuns[gid] = { cfg: cfg, timer: null };
+    var tick = function () {
+      if ((window.location.hash || '').indexOf('#/transfer') !== 0) { return; }
+      api.json('GET', '/api/cloud/groups/' + encodeURIComponent(gid))
+        .then(function (g) {
+          var prog = window.v2chain ? window.v2chain.groupProgress(g) : { ready: false };
+          if (prog.ready) {
+            stopChain(gid);
+            if (cfg.autoArchive) { archiveGroup(g, true); }
+            if (window.v2toast) { window.v2toast('ok', '链式下载完成：全部 ' + prog.total + ' 项就绪'); }
+          } else if (g && (g.status === 'failed' || g.status === 'cancelled')) {
+            stopChain(gid);
+            if (window.v2toast) {
+              window.v2toast('warn', '链式下载未全部完成（失败 ' + (prog.failed || 0) + ' 项），请重试失败项或打包已完成');
+            }
+          }
+          loadGroups();
+        })
+        .catch(function () { /* 网络抖动：下个周期再试 */ });
+    };
+    chainRuns[gid].timer = setInterval(tick, 3000);
+    tick();
+  }
+
+  function stopChain(gid) {
+    var r = chainRuns[gid];
+    if (r && r.timer) { clearInterval(r.timer); }
+    delete chainRuns[gid];
+  }
+
+  window.v2chainRun = chainRun;
 
   function loadGroups() {
     setGroupState('', '');
