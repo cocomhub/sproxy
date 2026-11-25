@@ -61,10 +61,10 @@
 | --- | --- | --- | --- | --- | --- |
 | D1 | 频道筛选（状态） | `#transfer-channel-bar`；`renderTransferChannelBar` | chips + 计数 | 🟢 VERIFIED |  ｜ 传输页状态 chips；e2e |
 | D2 | 云任务列表 + 自动刷新 | `#transfer-body`；`refreshCloudTasks` | 任务行 + 轮询 | 🟢 VERIFIED | 轮询间隔不变 ｜ 云任务列表 + 5s 自动刷新 |
-| D3 | 链式下载 | `#cloud-chain-btn` | 提交区主操作 | ⚪ RETIRED | 透传 checksum/fallback ｜ 链式下载依赖产品定义（服务端 retry 仅 task_id/url/group_id），本期不做 |
+| D3 | 链式下载 | `#cloud-chain-btn` | 提交区主操作 | 🟢 VERIFIED |  链式下载 = 建组 + 轮询 + 归档（require_all 全有），见 docs/designs/webui-chain-download.md；e2e 覆盖 |
 | D4 | 仅提交 | `#cloud-submit-btn` | 次级操作 | 🟢 VERIFIED |  ｜ 仅提交（不下载）：cloud-download 表单 submit-only |
 | D5 | 创建组 | `#cloud-create-group-btn` | 组管理入口 | 🟢 VERIFIED |  ｜ 创建组；e2e 组对话框 |
-| D6 | 组链式下载 | `#cloud-chain-group-btn` | 组管理入口 | ⚪ RETIRED |  ｜ 组链式下载同 D3（无产品定义） |
+| D6 | 组链式下载 | `#cloud-chain-group-btn` | 组管理入口 | 🟢 VERIFIED |  组链式 = 组归档（同上）；e2e 覆盖「打包全部」409 |
 | D7 | 云任务详情/审计 | `showTaskAudit` | 右侧抽屉 | 🟢 VERIFIED | 含诊断分类 ｜ 任务详情 JSON + 审计（控制台详情按钮） |
 | D8 | 同步任务创建 | `#sync-create-row`（7 字段） | 表单浮层 | 🟢 VERIFIED | 字段不可少 ｜ 同步任务新建；e2e 对话框 |
 | D9 | 同步任务查看/取消/删除 | `refreshSyncTasks`/`cancelSyncTask`/`deleteSyncTask` | 同步分区 | 🟢 VERIFIED |  ｜ 同步任务列表/取消/删除 |
@@ -142,12 +142,11 @@
 
 ## 核验快照（2026-11-25）
 
-- 统计：**67 VERIFIED / 0 DONE / 4 RETIRED / 0 TODO**（A–H 功能行）。
+- 统计：**69 VERIFIED / 0 DONE / 2 RETIRED / 0 TODO**（A–H 功能行）。
 - A5 TOTP 注册/登录：v2 内完成（复用 `login.js` + `qrcode.js`），e2e 断言 AK/Base32/二维码渲染。
-- 4 条 RETIRED 及理由：
-  - D3/D6 链式/组链式下载：需产品定义（服务端 `retry` 仅接受 `task_id`/`url`/`transfer_path`/`group_id`）；
+- 2 条 RETIRED 及理由（D3/D6 已于 2026-11-25 实现并转 VERIFIED）：
   - G5 凭据新增/轮换：写操作走 `sclient trust` / `POST /api/credentials/register`，页面只做只读摘要；
   - G7 同步冲突：冲突策略在「新建同步任务」时选择，服务端无独立冲突管理视图。
-- 删旧页门禁（见文末 §下线门禁）：① 功能行 0 行 TODO/WIP/DONE **已满足**（仅余 4 条 RETIRED）；
+- 删旧页门禁（见文末 §下线门禁）：① 功能行 0 行 TODO/WIP/DONE **已满足**（仅余 2 条 RETIRED）；
   ② 需连续一个发布周期无 P0/P1；③ 旧页 e2e 需迁移或等价替换；④ 文档记录；⑤ 单独 PR。
-- 因此**本期不删旧页**；A5 的注册流程迁移（二维码 + 密钥确认）是唯一剩余功能缺口。
+- 因此**本期不删旧页**；按用户 2026-11-25 决策改为**长期双轨**（新功能只在新页，旧页仅兼容，多版本验证后再移除）。

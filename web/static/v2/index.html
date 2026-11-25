@@ -134,6 +134,7 @@
             <h2>任务组</h2><span class="hint">组内任务共享来源与目标卷；组链式即按组批量下载</span>
             <span style="flex:1"></span>
             <button class="btn" id="v2-grp-refresh" type="button">刷新</button>
+            <button class="btn" id="v2-chain-open" type="button">链式下载</button>
             <button class="btn btn-primary" id="v2-grp-create" type="button">创建组</button>
           </div>
           <div id="v2-grp-state" class="banner" hidden role="status"></div>
@@ -195,6 +196,21 @@
           <div class="modal-actions">
             <button class="btn" id="v2-grp-cancel" type="button">取消</button>
             <button class="btn btn-primary" id="v2-grp-ok" type="button">创建并开始</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-backdrop" id="v2-chain-backdrop" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="v2-chain-title">
+          <h3 id="v2-chain-title">链式下载</h3>
+          <p class="muted">每行一个链接；可写 <code>URL&lt;TAB&gt;文件名</code> 指定保存名。全部完成后自动打包（全有或全无）。</p>
+          <label class="field">链接<textarea id="v2-chain-urls" rows="6" placeholder="https://…&#10;https://…"></textarea></label>
+          <label class="field">目标卷（可选）<input id="v2-chain-volume" placeholder="留空 = 默认行为" autocomplete="off"></label>
+          <label class="field">归档名（可选）<input id="v2-chain-archive" placeholder="留空 = chain-<时间戳>.tar.gz" autocomplete="off"></label>
+          <div class="modal-actions">
+            <label class="dr-check" style="margin-right:auto"><input type="checkbox" id="v2-chain-autoarchive" checked> 全部完成后自动打包</label>
+            <button class="btn" id="v2-chain-cancel" type="button">取消</button>
+            <button class="btn btn-primary" id="v2-chain-ok" type="button">开始链式下载</button>
           </div>
         </div>
       </div>
@@ -742,6 +758,7 @@
 <script src="../cloud-tasks.js"></script>
 <script src="cloud-table.js"></script>
 <script src="cloud-ops.js"></script>
+<script src="chain-download.js"></script>
 <script src="audit-console.js"></script>
 <script src="config-console.js"></script>
 <script src="notify-console.js"></script>

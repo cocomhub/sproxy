@@ -840,6 +840,15 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
 
 批量归档（请求体含任务 ID 列表）。支持与单任务相同的 `target_volume` 统一转存语义。
 
+### POST /api/cloud/groups/{id}/archive
+
+组归档（打包组内已完成文件）。可选 `require_all`（bool，默认 false）：
+
+- `false`（默认）：既有行为 —— 跳过未完成子任务，响应带 `skipped_tasks`；
+- `true`：**全有或全无** —— 组内任一子任务非 `completed` ⇒ **409**
+  `{"success":false,"message":"group not fully completed","skipped_tasks":[...]}`，
+  且**不产生任何归档文件/不预留配额**（fail-closed，无半成品）。
+
 ### DELETE /api/cloud/tasks/{id}
 
 删除任务（含云端文件）。
