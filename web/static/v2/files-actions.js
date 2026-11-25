@@ -159,7 +159,7 @@
     };
   }
 
-  function uploadChunkedFile(file, sub) {
+  function uploadChunkedFile(file, sub, vol) {
     var item = uploadItem(file);
     if (!item) { return Promise.resolve(); }
     var total = file.size;
@@ -181,6 +181,7 @@
         api: api, util: util, cryptoLib: cryptoLib, shaCtor: window.sclientSha256, join: f.joinSubdir
       }, {
         subdir: sub,
+        volume: vol || '',
         onProgress: progressHandler(item, total),
         isCancelled: function () { return item.cancelled; }
       }).then(function (res) {
@@ -208,13 +209,14 @@
   }
   window.v2uploadResume = resumeUpload;
 
-  function uploadSimpleFile(file, sub) {
+  function uploadSimpleFile(file, sub, vol) {
     return file.arrayBuffer().then(function (buf) {
       var bytes = new Uint8Array(buf);
       return cryptoLib.sha256Hex(bytes).then(function (sum) {
         var rel = f.joinSubdir(sub, file.name);
         var mp = util.buildMultipart({}, { name: 'file', filename: rel, contentType: 'application/octet-stream', bytes: bytes });
-        return api.request('POST', '/upload', { body: mp.body, contentType: mp.contentType, headers: ops.uploadHeaders(rel, sum, file.lastModified) })
+        var path = '/upload' + (vol ? '?volume=' + encodeURIComponent(vol) : '');
+        return api.request('POST', path, { body: mp.body, contentType: mp.contentType, headers: ops.uploadHeaders(rel, sum, file.lastModified) })
           .then(api.ensureOk)
           .then(function (resp) { return resp.json().catch(function () { return {}; }); })
           .then(function (body) {
@@ -227,13 +229,14 @@
 
   function uploadFiles(files) {
     var sub = view() ? view().subdir() : '';
+    var vol = view() && view().volume ? view().volume() : '';
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) { return; }
     var chain = Promise.resolve();
     list.forEach(function (file) {
       chain = chain.then(function () {
-        if (chunked && file.size > chunked.SIMPLE_LIMIT) { return uploadChunkedFile(file, sub); }
-        return uploadSimpleFile(file, sub);
+        if (chunked && file.size > chunked.SIMPLE_LIMIT) { return uploadChunkedFile(file, sub, vol); }
+        return uploadSimpleFile(file, sub, vol);
       });
     });
     chain.then(function () { if (view()) { view().load(); } })
