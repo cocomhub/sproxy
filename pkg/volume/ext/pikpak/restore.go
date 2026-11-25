@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // RestoreLease 收归「转存副本释放」单一实现（2026-10-05 用户裁决：
@@ -92,13 +93,15 @@ func (l *RestoreLease) Release(ctx context.Context) {
 	for acct, ids := range by {
 		// 账号池路径：该账号副本必须在该账号会话内删（并发 Use 已把会话切走/或将切走）。
 		if l.pool == nil || acct == "" {
-			if err := l.deleteIn(ctx, "" /* 当前会话 */, ids); err != nil {
-				l.log.Warn("restore lease release failed", "acct", acct, "ids", ids, "err", err)
+			if err := l.deleteWithRetry(ctx, "" /* 当前会话 */, ids); err != nil {
+				l.log.Warn("restore lease release failed (after retries)",
+					"acct", acct, "ids", ids, "err", err)
 			}
 			continue
 		}
-		if err := l.pool.Use(ctx, acct, func() error { return l.deleteIn(ctx, acct, ids) }); err != nil {
-			l.log.Warn("restore lease release (account) failed", "acct", acct, "ids", ids, "err", err)
+		if err := l.deleteWithRetry(ctx, acct, ids); err != nil {
+			l.log.Warn("restore lease release (account) failed (after retries)",
+				"acct", acct, "ids", ids, "err", err)
 		}
 	}
 }
@@ -111,4 +114,40 @@ func (l *RestoreLease) deleteIn(ctx context.Context, acct string, ids []string) 
 	}
 	l.log.Info("restore lease released (permanent)", "acct", acct, "count", len(ids))
 	return nil
+}
+
+// restoreReleaseBackoff 是转存副本释放的重试退避（实测 502/超时会导致漏删 ⇒ 账号空间被占满）。
+var restoreReleaseBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// deleteWithRetry 删除副本并在瞬时失败（502/超时）时退避重试。
+//
+// 为什么必须重试（2026-11-25 实测）：`restore lease release failed ... api-drive.mypikpak.com`
+// 反复出现 ⇒ 转存副本残留在账号里，累积占满 PikPak 空间，后续下载报"空间不足"/取链失败。
+// 重试仍失败则**明确告警**（不静默；后续可由上层巡检补齐）。
+func (l *RestoreLease) deleteWithRetry(ctx context.Context, acct string, ids []string) error {
+	del := func() error {
+		if l.pool == nil || acct == "" {
+			return l.deleteIn(ctx, "" /* 当前会话 */, ids)
+		}
+		return l.pool.Use(ctx, acct, func() error { return l.deleteIn(ctx, acct, ids) })
+	}
+	var err error
+	for i := 0; ; i++ {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if err = del(); err == nil {
+			return nil
+		}
+		if i >= len(restoreReleaseBackoff) {
+			return err
+		}
+		l.log.Warn("restore lease delete failed, retrying",
+			"acct", acct, "ids", ids, "attempt", i+1, "err", err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(restoreReleaseBackoff[i]):
+		}
+	}
 }
