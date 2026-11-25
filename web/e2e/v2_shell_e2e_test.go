@@ -5,6 +5,8 @@
 package e2e
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,8 +54,41 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	createTask, _ := http.NewRequest(http.MethodPost, baseURL+"/api/cloud/download",
 		strings.NewReader(`{"url":"http://127.0.0.1:1/nope.bin","filename":"nope.bin","download_local":true,"save":true}`))
 	createTask.Header.Set("Content-Type", "application/json")
-	if resp, err := http.DefaultClient.Do(createTask); err == nil {
+	if resp, err := http.DefaultClient.Do(createTask); err != nil {
+		t.Fatalf("创建云任务: %v", err)
+	} else if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		t.Fatalf("创建云任务失败: %d %s", resp.StatusCode, body)
+	} else {
+		resp.Body.Close()
+	}
+	// 等待任务真实进入 failed（服务端异步；最多 60s），后续 UI 断言不再受调度延迟影响。
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		listResp, lerr := http.Get(baseURL + "/api/cloud/tasks?limit=200")
+		if lerr == nil {
+			var payload struct {
+				Tasks []struct {
+					Status string `json:"status"`
+				} `json:"tasks"`
+			}
+			_ = json.NewDecoder(listResp.Body).Decode(&payload)
+			listResp.Body.Close()
+			failed := false
+			for _, tk := range payload.Tasks {
+				if tk.Status == "failed" {
+					failed = true
+				}
+			}
+			if failed {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("云任务 60s 内未进入 failed")
+		}
+		<-time.After(200 * time.Millisecond)
 	}
 
 	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
@@ -284,6 +319,37 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已处理'); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
 		t.Fatalf("批量重试未回显结果: %v", err)
+	}
+	// 卷分组 chips：全部卷 / 未指定卷（真实任务无 transfer.volume）。
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks-groups .chip').length >= 2",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("任务分组 chips 未渲染: %v", err)
+	}
+	if err := page.Locator("#v2-cs-tasks-groups [data-vol=\"__none__\"]").Click(); err != nil {
+		t.Fatalf("按未指定卷分组: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("分组过滤后任务为空: %v", err)
+	}
+	// 深链：hash 携带筛选参数，刷新后自动恢复分区与筛选。
+	if hash, _ := page.Evaluate("() => location.hash", nil); hash == nil || !strings.Contains(hash.(string), "q=nope") {
+		t.Fatalf("任务筛选未写入 hash: %v", hash)
+	}
+	if _, err := page.Reload(); err != nil {
+		t.Fatalf("刷新页面: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const q = document.querySelector('#v2-cs-tasks-q'); const pane = document.querySelector('[data-cspane=tasks]'); return q && q.value === 'nope' && pane && !pane.hidden; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("刷新后未恢复任务分区/筛选: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-cs-tasks tr').length > 0",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("刷新后任务列表为空: %v", err)
 	}
 	if err := page.Locator("#v2-cs-tasks-q").Fill(""); err != nil {
 		t.Fatalf("清空任务筛选: %v", err)
