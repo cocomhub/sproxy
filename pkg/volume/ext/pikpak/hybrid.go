@@ -207,8 +207,11 @@ type HybridConfig struct {
 	ShareRatio  float64
 	Concurrency int  // 并行 chunk 数（默认 4）
 	AutoDelete  bool // 完成后永久删转存（释放 6GB 空间）
-	Logger      *slog.Logger
-	Metrics     *HybridMetrics
+	// ResetOnGCIDMismatch: GCID 失配时清理续传状态并从零重下一次（2026-11-25 事故）。
+	// 默认 false（Rebuild 的升级全量重建依赖既有行为）；sproxy 云端下载路径显式开启。
+	ResetOnGCIDMismatch bool
+	Logger              *slog.Logger
+	Metrics             *HybridMetrics
 	// ChunkRetryBackoff 是分片取链/下载失败的重试退避基数（指数 + 抖动）；<=0 → 默认 500ms。
 	ChunkRetryBackoff time.Duration
 	// ChunkProgress 是 per-chunk 进度回调（nil = 不回调）。pikget 用它逐行显示每个分片
@@ -235,25 +238,26 @@ type HybridConfig struct {
 // 分片并行：分享区 [0, shareEnd) 匿名直链下载 + 账号区 [shareEnd, total) 转存后 FETCH 直链下载。
 // 每 chunk 独立 Range → os.WriteAt 写入预分配文件 → 全部成功 = 文件完整。
 type HybridDownloader struct {
-	resolver       *ShareResolver
-	api            *API
-	client         *http.Client
-	chunkSize      int64
-	shareRatio     float64
-	autoRatio      bool // ShareRatio==0：匿名区上限以探测结果为准
-	concurrency    int
-	autoDelete     bool
-	log            *slog.Logger
-	metrics        *HybridMetrics
-	journalFactory func(destPath, sourceKey string) (ProgressJournal, error)
-	chunkProgress  ChunkProgressFunc          // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
-	pool           *AccountPool               // 多账号会话池（nil = 单账号现状）
-	acctSems       map[string]chan struct{}   // 每账号 1 个 sem（同账号串行，不同账号并发）
-	acctSemMu      sync.Mutex                 // 保护 acctSems
-	gcidStats      *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
-	fallback       downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
-	chunkBackoff   time.Duration              // 分片重试退避基数（0 = 默认；见 chunkRetryDelay）
-	normalizer     *ShareSourceNormalizer     // keepshare 镜像归一（nil = 原样用）
+	resolver        *ShareResolver
+	api             *API
+	client          *http.Client
+	chunkSize       int64
+	shareRatio      float64
+	autoRatio       bool // ShareRatio==0：匿名区上限以探测结果为准
+	resetOnMismatch bool // 见 HybridConfig.ResetOnGCIDMismatch
+	concurrency     int
+	autoDelete      bool
+	log             *slog.Logger
+	metrics         *HybridMetrics
+	journalFactory  func(destPath, sourceKey string) (ProgressJournal, error)
+	chunkProgress   ChunkProgressFunc          // per-chunk 进度回调（pikget 逐行显示；nil=不回调）
+	pool            *AccountPool               // 多账号会话池（nil = 单账号现状）
+	acctSems        map[string]chan struct{}   // 每账号 1 个 sem（同账号串行，不同账号并发）
+	acctSemMu       sync.Mutex                 // 保护 acctSems
+	gcidStats       *integrity.GCIDVerifyStats // GCID 校验命中统计（nil=不统计）
+	fallback        downloader.Downloader      // 匿名路径整体失败的降级下载器（设计 §1.2；nil=无降级）
+	chunkBackoff    time.Duration              // 分片重试退避基数（0 = 默认；见 chunkRetryDelay）
+	normalizer      *ShareSourceNormalizer     // keepshare 镜像归一（nil = 原样用）
 	// 注意：本实例是注册表单例（cloud manager 并发任务共享）——
 	// **只保留只读配置**；单次下载私有状态（lease/currentTotal/reusedID）放 downloadCtx，
 	// 每次 Download 调用独立创建，防跨任务数据污染（🔴 Critical 修复）。
@@ -346,7 +350,8 @@ func NewHybridDownloader(cfg HybridConfig) (*HybridDownloader, error) {
 	return &HybridDownloader{
 		resolver: cfg.Resolver, api: cfg.API, client: client,
 		chunkSize: chunk, shareRatio: ratio, autoRatio: autoRatio, concurrency: conc, autoDelete: cfg.AutoDelete,
-		log: log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
+		resetOnMismatch: cfg.ResetOnGCIDMismatch,
+		log:             log, metrics: cfg.Metrics, pool: cfg.AccountPool, fallback: cfg.Fallback,
 		chunkProgress:  cfg.ChunkProgress,
 		gcidStats:      cfg.GCIDStats,
 		chunkBackoff:   cfg.ChunkRetryBackoff,
@@ -583,7 +588,39 @@ func (d *HybridDownloader) runHybrid(ctx context.Context, dc *downloadCtx, sinkF
 	// 分享直链实际可下 ~55%（实测 750MB/1.28GB），但恒 ≤0.5 上限（防 PikPak 收紧）；
 	// 探测边界 < ratio 上限时用探测值（分享区可下更多免配额）。
 	shareEnd := d.computeShareEnd(ctx, dc.target, dc.currentTotal)
+	res, err := d.runHybridWithShareEnd(ctx, dc, sinkFactory, shareEnd)
+	if err == nil || !errors.Is(err, ErrIntegrityMismatch) || !d.resetOnMismatch {
+		return res, err
+	}
+	// **GCID 失配 ⇒ 残留续传状态可能已被污染，必须清掉从零重下**（2026-11-25 事故）。
+	// 事故经过：任务跨重启反复续传同一 .hybrid 工作文件 + manifest；被标记"已完成"的分块不再重取，
+	// 最终字节与权威 GCID 不符（同源同参数，清状态重下即通过 ⇒ 证明是状态污染而非内容变化）。
+	// 只重试一次：仍失配则交由上层按 content_mismatch 保留产物 + 转人工（不静默）。
+	d.log.Warn("hybrid gcid mismatch，清理续传状态后从零重下", "dest", dc.destPath)
+	if cerr := resetHybridState(dc.destPath); cerr != nil {
+		return nil, fmt.Errorf("%w（清理残留续传状态失败: %v）", err, cerr)
+	}
+	dc.prog.Store(0)
+	dc.chunkOffsets = nil
 	return d.runHybridWithShareEnd(ctx, dc, sinkFactory, shareEnd)
+}
+
+// resetHybridState 清理混合下载的**续传状态**：工作文件（含预分配空洞）+ manifest。
+//
+// 为什么需要（2026-11-25）：manifest 把"曾写入过的分块"视为已完成；一旦某次写入的字节有误
+// （崩溃/断线/账号回落异常），后续所有续传都会跳过该分块 ⇒ 永远拼不出正确内容。
+// GCID 失配是"内容不可信"的强信号，此时唯一可靠做法是丢弃状态从头再来。
+func resetHybridState(destPath string) error {
+	working := WorkingPath(destPath)
+	if err := os.Remove(working); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove working %s: %w", working, err)
+	}
+	if mp := ManifestPath(destPath); mp != "" {
+		if err := os.Remove(mp); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove manifest %s: %w", mp, err)
+		}
+	}
+	return nil
 }
 
 // runHybridWithShareEnd 是 runHybrid 的主体（shareEnd 由调用方给定）：
