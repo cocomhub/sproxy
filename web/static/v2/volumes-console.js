@@ -227,24 +227,63 @@
       .catch(function (e) { banner('删除卷失败：' + (e.message || e), 'warn'); });
   }
 
+  function buildVolumeDialog(types) {
+    var wrap = document.createElement('div');
+    wrap.className = 'modal-backdrop';
+    var opts = types.map(function (t) {
+      return '<option value="' + t + '">' + t + '</option>';
+    }).join('');
+    wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true">' +
+      '<h3>创建用户卷</h3>' +
+      '<label class="field">名称<input id="v2-vc-name" autocomplete="off" placeholder="alnum/-/_"></label>' +
+      '<label class="field">类型<select id="v2-vc-type">' + opts + '</select></label>' +
+      '<label class="field">容量（字节，0 = 不限）<input id="v2-vc-cap" inputmode="numeric" value="0"></label>' +
+      '<label class="field">额外配置（每行 key=value）<textarea id="v2-vc-extra" rows="4" ' +
+      'placeholder="url=https://example.com/dav"></textarea></label>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-vc="cancel">取消</button>' +
+      '<button type="button" class="btn btn-primary" data-vc="ok">创建</button></div></div>';
+    document.body.appendChild(wrap);
+    return wrap;
+  }
+
+  /** 解析 "key=value" 行（忽略空行/# 注释；全部按字符串提交，数字/布尔由服务端解析）。 */
+  function parseKV(text) {
+    var out = {};
+    String(text || '').split(new RegExp('\r?\n')).forEach(function (line) {
+      var t = line.trim();
+      if (!t || t.charAt(0) === '#') { return; }
+      var i = t.indexOf('=');
+      if (i <= 0) { return; }
+      out[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+    });
+    return out;
+  }
+
   function createUserVolume() {
-    var name = window.prompt('卷名称（字母/数字/-/_）');
-    if (!name) { return; }
-    var type = window.prompt('类型（如 webdav / baidupcs）', 'webdav');
-    if (!type) { return; }
-    var cap = window.prompt('容量字节（0 = 不限）', '0');
-    if (cap === null) { return; }
-    var extra = window.prompt('extra JSON（可选，例如 {"url":"https://example.com/dav"}）', '{}');
-    if (extra === null) { return; }
-    var body = { name: name.trim(), type: type.trim(), capacity: Math.max(0, Number(cap) || 0) };
-    try { body.extra = extra.trim() ? JSON.parse(extra) : {}; } catch (e) { banner('extra 不是合法 JSON', 'warn'); return; }
-    api.json('POST', '/api/volumes/user', {
-      body: new TextEncoder().encode(JSON.stringify(body)),
-      contentType: 'application/json'
-    }).then(function () {
-      if (window.v2toast) { window.v2toast('ok', '已创建卷 ' + name); }
-      load(); loadUser();
-    }).catch(function (e) { banner('创建卷失败：' + (e.message || e), 'warn'); });
+    var types = ['webdav', 'baidupcs', 's3', 'sftp'];
+    var wrap = buildVolumeDialog(types);
+    var close = function () { wrap.remove(); };
+    wrap.addEventListener('click', function (e) { if (e.target === wrap) { close(); } });
+    wrap.querySelector('[data-vc=cancel]').addEventListener('click', close);
+    wrap.querySelector('[data-vc=ok]').addEventListener('click', function () {
+      var name = (wrap.querySelector('#v2-vc-name').value || '').trim();
+      var type = wrap.querySelector('#v2-vc-type').value;
+      var cap = Number(wrap.querySelector('#v2-vc-cap').value) || 0;
+      var extra = parseKV(wrap.querySelector('#v2-vc-extra').value);
+      if (!name) { banner('卷名称必填', 'warn'); return; }
+      close();
+      api.json('POST', '/api/volumes/user', {
+        body: new TextEncoder().encode(JSON.stringify({
+          name: name, type: type, capacity: Math.max(0, cap), extra: extra
+        })),
+        contentType: 'application/json'
+      }).then(function () {
+        if (window.v2toast) { window.v2toast('ok', '已创建卷 ' + name); }
+        load(); loadUser();
+      }).catch(function (e) { banner('创建卷失败：' + (e.message || e), 'warn'); });
+    });
+    var n = wrap.querySelector('#v2-vc-name');
+    if (n) { n.focus(); }
   }
 
   var inited = false;
@@ -262,6 +301,6 @@
 
   if (typeof window !== 'undefined') { window.v2volumes = { init: init, load: load, loadUser: loadUser, normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes }; }
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes, normalizeSecrets: normalizeSecrets };
+    module.exports = { normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes, normalizeSecrets: normalizeSecrets, parseKV: parseKV };
   }
 })();

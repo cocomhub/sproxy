@@ -439,6 +439,25 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("单卷刷新未回显: %v", err)
 	}
+	// 建卷表单：打开对话框 → 填名称/类型 → 取消（不真正建卷，避免污染状态）。
+	if err := page.Locator("#v2-vl-create").Click(); err != nil {
+		t.Fatalf("打开建卷对话框: %v", err)
+	}
+	if err := waitLoc(page, "#v2-vc-name", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("建卷表单未显示: %v", err)
+	}
+	if err := page.Locator("#v2-vc-name").Fill("e2evol"); err != nil {
+		t.Fatalf("填写卷名: %v", err)
+	}
+	if err := page.Locator("[data-vc=cancel]").Click(); err != nil {
+		t.Fatalf("取消建卷: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => !document.querySelector('#v2-vc-name')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("建卷对话框未关闭: %v", err)
+	}
+
 	// 未完成上传续传提示：写入 pending 记录 → 刷新 → 提示可见 → 忽略后清除。
 	if _, err := page.Evaluate(`() => { localStorage.setItem('sproxy_v2_pending_upload', JSON.stringify({
 		name: 'v2demo/big.bin', base: 'big.bin', size: 1048576, mtime: 1700000000000,
