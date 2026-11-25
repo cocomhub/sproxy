@@ -15,7 +15,7 @@ import (
 func TestRegisterPikpakResolver_InsecureTLS(t *testing.T) {
 	t.Parallel()
 	reg := downloader.NewRegistry()
-	registerPikpakResolver(reg, true)
+	registerPikpakResolver(reg, true, "")
 	res, ok := reg.ResolverFor("https://keepshare.org/k1/magnet:?xt=urn:btih:abc")
 	if !ok || res == nil {
 		t.Fatal("keepshare URL 应被解析器识别")
@@ -27,5 +27,17 @@ func TestRegisterPikpakResolver_InsecureTLS(t *testing.T) {
 	res2, ok2 := reg.ResolverFor("https://mypikpak.com/s/abc")
 	if !ok2 || res2 == nil {
 		t.Fatal("mypikpak URL 应被识别")
+	}
+}
+
+// TestRegisterPikpakResolver_GatewayProxyOptional 验证 gateway_proxy 为空（默认）时
+// 仍能正常注册（直连），不影响解析器识别能力——符合「配置默认值安全」纪律。
+func TestRegisterPikpakResolver_GatewayProxyOptional(t *testing.T) {
+	t.Parallel()
+	reg := downloader.NewRegistry()
+	registerPikpakResolver(reg, false, "")
+	res, ok := reg.ResolverFor("https://keepshare.org/k1/magnet:?xt=urn:btih:abc")
+	if !ok || res == nil {
+		t.Fatal("空 gateway_proxy 时 keepshare URL 仍应被识别（直连）")
 	}
 }

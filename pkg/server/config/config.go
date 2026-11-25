@@ -1155,6 +1155,11 @@ type TrustedVolumeConfig struct {
 type PikpakConfig struct {
 	// BinaryPath 是 pikpak 可执行路径；空 = PATH 查找。
 	BinaryPath string `yaml:"binary_path" mapstructure:"binary_path"`
+	// GatewayProxy 是「URL 拼接式」前置转发器（gateway 模式），用于加速 keepshare/pikpak 出网。
+	// 形如 "http://sr.suixi.space:18081/"：目标 https://host/path → <forwarder>/host/path。
+	// **默认空 = 直连**（2026-11-25 实测：本机直连 ~4.2s/请求，经转发器 ~0.5s；但转发器可能不可用）。
+	GatewayProxy string `yaml:"gateway_proxy" mapstructure:"gateway_proxy"`
+
 	// InstallDir 是自动安装目录；空 = 默认（~/.local/bin 或 %LOCALAPPDATA%\pikpak-cli）。
 	InstallDir string `yaml:"install_dir" mapstructure:"install_dir"`
 	// AutoInstall 是否允许自动下载官方 CLI（默认 false：先手动 install/login）。

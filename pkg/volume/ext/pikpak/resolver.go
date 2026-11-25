@@ -203,19 +203,42 @@ func (r *ShareResolver) Resolve(ctx context.Context, shareURL string) (*ShareMet
 	if err != nil {
 		return nil, err
 	}
-	// 2. 每个文件拿直链
-	out := make([]ShareFile, 0, len(files))
-	for _, f := range files {
-		link, hash, ferr := r.fileInfo(ctx, shareID, f.ID, tok, dev)
-		if ferr != nil {
-			r.log.Warn("share file_info failed", "file", f.ID, "err", ferr)
-			continue
-		}
-		created, modified := f.SourceTimes()
-		out = append(out, ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash, DirectLink: link,
-			CreatedTime: created, ModifiedTime: modified})
+	// 2. 每个文件拿直链（并行：用户 2026-11-25 实测优化）
+	//    串行时单个分享 31 个文件 = 31 次 API 往返（每次 1~3s）⇒ 单分享 60s+，
+	//    是 /api/resolve 慢的主因。文件之间互不依赖，并行后 ≈ ceil(N/并发) 批。
+	//    上限 6：pikpak 对匿名身份有速率限制，过高会互相拖慢或触发限流。
+	const fileInfoConcurrency = 6
+	out := make([]ShareFile, len(files))
+	ok := make([]bool, len(files))
+	sem := make(chan struct{}, fileInfoConcurrency)
+	var wg sync.WaitGroup
+	for i := range files {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			f := files[i]
+			link, hash, ferr := r.fileInfo(ctx, shareID, f.ID, tok, dev)
+			if ferr != nil {
+				r.log.Warn("share file_info failed", "file", f.ID, "err", ferr)
+				return
+			}
+			created, modified := f.SourceTimes()
+			out[i] = ShareFile{ID: f.ID, Name: f.Name, Kind: f.Kind, Size: int64(f.Size), Hash: hash,
+				DirectLink: link, CreatedTime: created, ModifiedTime: modified}
+			ok[i] = true
+		}(i)
 	}
-	return &ShareMeta{ShareID: shareID, Files: out}, nil
+	wg.Wait()
+	// 3. 按原顺序过滤成功项（保持稳定顺序）
+	res := make([]ShareFile, 0, len(files))
+	for i := range out {
+		if ok[i] {
+			res = append(res, out[i])
+		}
+	}
+	return &ShareMeta{ShareID: shareID, Files: res}, nil
 }
 
 // listShareRecursive 递归列分享文件（根 + 所有子目录；folder 记录但无直链）。

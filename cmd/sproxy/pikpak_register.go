@@ -135,7 +135,7 @@ func registerPikpakDownloader(cfg *server.Config, set *registry.Set) {
 		registerHybridIfEnabled(cfg, api, dl, pool)
 		// URL 解析扩展（/api/resolve）：分享 URL → 文件清单（含 hash，供 GCID 校验）。
 		// 漏注册会使 /api/resolve 对分享 URL 回落 generic（2026-10-26 实测缺陷）。
-		registerPikpakResolver(downloader.DefaultRegistry, cfg.Pikpak.InsecureTLS)
+		registerPikpakResolver(downloader.DefaultRegistry, cfg.Pikpak.InsecureTLS, cfg.Pikpak.GatewayProxy)
 		// 可选媒体探测：解析结果里**尽力**补 width/height/resolution（外部 ffprobe）。
 		// 未安装 ffprobe / 探测失败 ⇒ 字段留空，**不影响**解析本身（见 downloader.FFProbe 注释）。
 		// 可用 disable_resolve_probe: true 显式关闭（默认 false = 启用）。
@@ -207,7 +207,7 @@ var registerPikpakOnce sync.Once
 // 设计：解析能力唯一实现在 pkg/volume/ext/pikpak（URLResolver：登录态列举优先、
 // 匿名解析回落），装配层只做一次注册；未注册时 /api/resolve 对分享 URL 返回
 // 通用回落结果（kind=generic，无文件清单）。
-func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
+func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool, gatewayProxy string) {
 	if reg == nil {
 		return
 	}
@@ -217,6 +217,14 @@ func registerPikpakResolver(reg *downloader.Registry, insecureTLS bool) {
 		// 本地自签证书（WSL 联调等）：注入跳过校验的 HTTPClient（生产必须 false）。
 		httpClient = httpc.NewHTTPClient(httpc.Options{Transport: netutil.InsecureTransport(), Timeout: 30 * time.Second})
 		cfg.HTTPClient = httpClient
+	}
+	// gateway 转发器（URL 拼接式）：加速 keepshare/pikpak 出网（默认空 = 直连）。
+	if gp, err := netutil.NewGatewayHTTPClient(gatewayProxy, 60*time.Second); err != nil {
+		slog.Warn("pikpak gateway proxy 配置非法，回落直连", "gateway_proxy", gatewayProxy, "err", err)
+	} else if gatewayProxy != "" {
+		httpClient = gp
+		cfg.HTTPClient = gp
+		slog.Info("pikpak gateway proxy enabled", "forwarder", gatewayProxy)
 	}
 	reg.RegisterResolver(downloader.Plugin[downloader.URLResolver]{
 		Name:     pikpak.URLResolverName,

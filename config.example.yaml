@@ -383,6 +383,10 @@ tls:
 # 绕过 PikPak 分享链接 40-50% 下载限制（官方对分享链接的反下载设计）。
 # 前置：安装官方 CLI 并登录（`sproxy pikpak install` + `sproxy pikpak login`）。
 # pikpak:
+#   # 「URL 拼接式」前置转发器（gateway）：加速 keepshare/pikpak 出网。
+#   # 目标 https://host/path → <forwarder>/host/path（**不是**标准代理，不走 CONNECT）。
+#   # 默认空 = 直连。实测本机直连 ~4.2s/请求；转发器可用时 ~0.5s（快 8 倍）。
+#   gateway_proxy: ""              # 例：http://sr.suixi.space:18081/
 #   binary_path: ""                # pikpak 可执行路径；空 = PATH 查找
 #   install_dir: ""                # 自动安装目录；空 = 默认（~/.local/bin 或 %LOCALAPPDATA%\pikpak-cli）
 #   auto_install: false             # 是否允许自动下载官方 CLI（默认 false：先手动 install/login）
