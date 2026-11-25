@@ -198,6 +198,42 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("关闭预览: %v", err)
 	}
 
+	// Meta extra 编辑（merge）：真实 PUT /api/files/meta → 回读含新键。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回到 v2demo: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "meta.txt", MimeType: "text/plain", Buffer: []byte("meta me"),
+	}}); err != nil {
+		t.Fatalf("上传 meta.txt: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"meta.txt\"] [data-action=detail]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("详情按钮未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"meta.txt\"] [data-action=detail]").Click(); err != nil {
+		t.Fatalf("打开检查器: %v", err)
+	}
+	if err := page.Locator("[data-drtab=meta]").Click(); err != nil {
+		t.Fatalf("切到 Meta 页签: %v", err)
+	}
+	if err := waitLoc(page, "#v2-meta-edit", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("meta 编辑框未出现: %v", err)
+	}
+	if err := page.Locator("#v2-meta-edit").Fill(`{"code":"EXAMPLE-001"}`); err != nil {
+		t.Fatalf("填写 extra: %v", err)
+	}
+	if err := page.Locator("#v2-meta-save").Click(); err != nil {
+		t.Fatalf("保存 extra: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const p = document.querySelector('#v2-meta-json'); return p && p.textContent.includes('EXAMPLE-001'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("保存后回读未含新键: %v", err)
+	}
+	if err := page.Locator("#v2-dr-close").Click(); err != nil {
+		t.Fatalf("关闭检查器: %v", err)
+	}
+
 	// 切换路由：hash + 面板可见性。
 	if err := page.Locator(".nav[data-route='transfer']").Click(); err != nil {
 		t.Fatalf("点击传输: %v", err)
@@ -384,6 +420,15 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	// 待处理事项：筛选控件与 CSV 导出入口可用（无条目时导出给出提示）。
 	if err := waitLoc(page, "#v2-cs-issues-q", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("事项筛选输入框缺失: %v", err)
+	}
+	// 事项「立即扫描」：真实 POST /api/issues/scan → 回显登记数（未装配则给明确错误）。
+	if err := page.Locator("#v2-cs-issues-scan").Click(); err != nil {
+		t.Fatalf("触发事项扫描: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); const b = document.querySelector('#v2-cs-state'); return (t && t.textContent.includes('扫描')) || (b && !b.hidden && b.textContent.includes('扫描')); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(20000)}); err != nil {
+		t.Fatalf("事项扫描未回显: %v", err)
 	}
 	if err := page.Locator("#v2-cs-issues-q").Fill("e2e"); err != nil {
 		t.Fatalf("事项关键字筛选: %v", err)

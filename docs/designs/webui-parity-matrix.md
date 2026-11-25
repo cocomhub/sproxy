@@ -32,7 +32,7 @@
 | B4 | 进入子目录 | 行点击；`currentSubdir` | 行点击/Enter | 🟢 VERIFIED | 键盘可达 ｜ hash 子目录深链；e2e |
 | B5 | 搜索 | `#search-input/#search-btn/#clear-search-btn` | 顶栏搜索 + `⌘K` | 🟢 VERIFIED | 保留子目录内搜索语义 ｜ /api/files/search；e2e 搜索命中/清除 |
 | B6 | 强制刷新（清卷状态缓存） | `#refresh-btn` | 刷新按钮 + 说明 tooltip | 🟢 VERIFIED | 行为语义不变 ｜ /api/volumes/refresh「清缓存」；e2e 单卷刷新 |
-| B7 | 文件元数据弹窗 | `#meta-modal`；`showMetaModal` | 右侧检查器 | 🟢 VERIFIED | 字段一个不能少 ｜ 检查器概览/Meta；e2e 打开抽屉 |
+| B7 | 文件元数据弹窗 | `#meta-modal`；`showMetaModal` | 右侧检查器 | 🟢 VERIFIED |字段一个不能少 ｜ 检查器概览/Meta；e2e 打开抽屉 ｜ 检查器 Meta 页签支持 extra 编辑（merge/replace/delete）并由 e2e 验证 |
 | B8 | 版本管理（列表/恢复/删除） | `#version-modal`；`showVersioning` | 检查器「版本」页签 | 🟢 VERIFIED | 依赖 `versioning.enabled` ｜ 检查器版本页签（列表/恢复/删除） |
 | B9 | 文本预览 | `showTextPreview` | 预览浮层 | 🟢 VERIFIED | 需保留截断策略 ｜ 文本预览；e2e 内容断言 hello e2e |
 | B10 | 视频预览（本地播放器） | `#video-player-modal`；`showVideoPlayer`/`openWithLocalPlayer` | 预览浮层 | 🟢 VERIFIED | 依赖 Range 能力 ｜ 视频预览复用 video-player（URL 票） |
