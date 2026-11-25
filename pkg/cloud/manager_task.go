@@ -1891,11 +1891,14 @@ func (m *CloudDownloadManager) cleanupTaskTempsOnFail(task *CloudTask) {
 // `.partial`（慢源下几小时的下载不应被清空），并把产物目录记入诊断供事项通知人工。
 // 调用方 `keepFiles=true`（转存失败）时同样保留。
 func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg string, keepFiles []bool) {
-	keep := classifyCloudError(errMsg) != ErrClassDiskFull
-	if len(keepFiles) > 0 && keepFiles[0] {
-		keep = true
-	}
-	if !keep {
+	// 决策依据是**失败阶段**而非错误类别（用户 2026-11-25 裁定）：
+	//   - **转存阶段失败**（errMsg 前缀 "transfer:"，或调用方显式 keepFiles）：下载产物是正确的，
+	//     保留供直接重试/复传，避免慢源重下（此前 1.24 GiB 白跑两轮）；
+	//   - **下载阶段失败**（含完整性校验失败、源不可达、限流等）：云端桶里的残留（.partial /
+	//     半成品）继续占用空间（实测空间不足是批量失败的主因）⇒ **删除**，让后续任务有空间跑。
+	transferStage := strings.HasPrefix(errMsg, "transfer:") ||
+		(len(keepFiles) > 0 && keepFiles[0])
+	if !transferStage {
 		m.cleanupTaskDirOnFail(task)
 		return
 	}
