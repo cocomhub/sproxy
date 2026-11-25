@@ -940,6 +940,78 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("打包下载未回显: %v", err)
 	}
 
+	// 云任务产物预览：真实上传一个可完成的云任务（loopback 源），完成后点「预览」看文本内容。
+	textSrc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("cloud preview body"))
+	}))
+	defer textSrc.Close()
+	previewBody := `{"url":"` + textSrc.URL + `/pv.txt","filename":"pv.txt","download_local":false,"save":true}`
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", []byte(previewBody)); code != http.StatusOK {
+		t.Fatalf("创建预览用云任务失败: %d %s", code, resp)
+	}
+	// 等任务完成（服务端异步），再回到传输页用 UI 预览。
+	pvDeadline := time.Now().Add(60 * time.Second)
+	for {
+		listResp, lerr := http.Get(baseURL + "/api/cloud/tasks?limit=200")
+		done := false
+		if lerr == nil {
+			var payload struct {
+				Tasks []struct {
+					Filename string `json:"filename"`
+					Status   string `json:"status"`
+				} `json:"tasks"`
+			}
+			_ = json.NewDecoder(listResp.Body).Decode(&payload)
+			listResp.Body.Close()
+			for _, tk := range payload.Tasks {
+				if tk.Filename == "pv.txt" && tk.Status == "completed" {
+					done = true
+				}
+			}
+		}
+		if done {
+			break
+		}
+		if time.Now().After(pvDeadline) {
+			t.Fatalf("预览用云任务 60s 未完成")
+		}
+		<-time.After(300 * time.Millisecond)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/transfer'; }", nil); err != nil {
+		t.Fatalf("回到传输页: %v", err)
+	}
+	if err := page.Locator("#v2-tf-refresh").Click(); err != nil {
+		t.Fatalf("刷新任务列表: %v", err)
+	}
+	if err := waitLoc(page, "#v2-tf-body tr", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("任务列表未渲染: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => Array.from(document.querySelectorAll('#v2-tf-body tr')).some(r => r.textContent.includes('pv.txt') && r.textContent.includes('预览'));",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("已完成任务未出现预览按钮: %v", err)
+	}
+	if _, err := page.Evaluate(`() => {
+		const rows = Array.from(document.querySelectorAll('#v2-tf-body tr'));
+		const row = rows.find(r => r.textContent.includes('pv.txt'));
+		if (!row) { return 'no-row'; }
+		const btn = Array.from(row.querySelectorAll('button')).find(b => b.textContent.includes('预览'));
+		if (!btn) { return 'no-btn'; }
+		btn.click();
+		return 'clicked';
+	}`, nil); err != nil {
+		t.Fatalf("点击任务预览: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const p = document.querySelector('#v2-preview'); const t = document.querySelector('#v2-pv-text'); return p && !p.hidden && t && t.textContent.includes('cloud preview body'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("云任务预览未展示内容: %v", err)
+	}
+	if err := page.Locator("#v2-pv-close").Click(); err != nil {
+		t.Fatalf("关闭预览: %v", err)
+	}
+
 	// 链式下载：两个不可达 URL 建组 → 组行失败 → 「打包全部」被 409 拒绝（全有语义）。
 	if err := page.Locator("[data-route=transfer]").Click(); err != nil {
 		t.Fatalf("回到传输页: %v", err)

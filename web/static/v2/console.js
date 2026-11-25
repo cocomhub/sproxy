@@ -335,6 +335,11 @@
       isSelected: function (t) { return !!tasks.selected[t.id]; },
       onToggle: function (t, on) { if (on) { tasks.selected[t.id] = true; } else { delete tasks.selected[t.id]; } syncTaskActions(); },
       onDetail: showTaskDetail,
+      onPreview: function (t) {
+        if (window.v2preview && window.v2preview.openCloudTask) {
+          window.v2preview.openCloudTask(t.id, t.filename);
+        }
+      },
       onAction: function (kind, t) {
         window.v2cloudTable.perform(kind, t, api, function (ok, e) {
           if (ok) { if (window.v2toast) { window.v2toast('ok', '已处理任务'); } loadTasks(); }
@@ -588,15 +593,15 @@
       .catch(function (e) { if (window.v2toast) { window.v2toast('bad', '打包失败：' + (e.message || e)); } });
   }
 
-  /** 预览已完成：任务 completed 时用 cloud 桶文件预览（复用预览浮层的 URL 票逻辑）。 */
+  /** 预览已完成：任务 completed 时直接打开预览浮层（cloud 桶文件，kind=cloud_task）。 */
   function previewCloudIssue(it) {
     var taskID = issueTaskID(it);
     if (!taskID) { if (window.v2toast) { window.v2toast('warn', '事项未记录任务 ID，无法预览'); } return; }
     api.json('GET', '/api/cloud/tasks/' + encodeURIComponent(taskID))
       .then(function (task) {
         if (!task || task.status !== 'completed') { throw new Error('任务尚未完成，暂无可预览文件'); }
-        window.__v2CloudPreview = { id: task.id, filename: task.filename };
-        if (window.v2toast) { window.v2toast('ok', '已就绪：' + task.filename + '（到传输页可下载）'); }
+        if (!window.v2preview || !window.v2preview.openCloudTask) { throw new Error('预览模块不可用'); }
+        window.v2preview.openCloudTask(task.id, task.filename);
       })
       .catch(function (e) { if (window.v2toast) { window.v2toast('warn', e.message || String(e)); } });
   }
