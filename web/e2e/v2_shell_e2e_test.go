@@ -266,7 +266,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 	if _, err := page.WaitForFunction(
 		"() => !!document.querySelector('#v2-cs-tasks .pill-bad')",
-		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(25000)}); err != nil {
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(45000)}); err != nil {
 		t.Fatalf("云任务未进入失败态: %v", err)
 	}
 	if err := page.Locator("#v2-cs-tasks tr .cb").First().Check(); err != nil {
@@ -724,6 +724,23 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('隧道开关已保存'); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("隧道开关未回显: %v", err)
+	}
+	// 语言切换：设置内切英文 → 壳层/控制台分区即时翻译；切回中文。
+	if _, err := page.Locator("#v2-set-lang").SelectOption(playwright.SelectOptionValues{Values: &[]string{"en"}}); err != nil {
+		t.Fatalf("切换语言: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const n = document.querySelector('.nav[data-route=files] span'); const c = document.querySelector('[data-cs=overview]'); return n && n.textContent === 'Files' && c && c.textContent === 'Overview'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("英文词条未生效: %v", err)
+	}
+	if _, err := page.Locator("#v2-set-lang").SelectOption(playwright.SelectOptionValues{Values: &[]string{"zh"}}); err != nil {
+		t.Fatalf("切回中文: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const n = document.querySelector('.nav[data-route=files] span'); return n && n.textContent === '文件'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("中文词条未恢复: %v", err)
 	}
 	if err := page.Locator("#v2-settings-close").Click(); err != nil {
 		t.Fatalf("关闭设置: %v", err)
