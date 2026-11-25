@@ -109,13 +109,17 @@ func TestCloudDownloadManager_OrphanPendingRecoveredAsFailed(t *testing.T) {
 	}
 	lifecycleNoRunningMark(t, mgr2, task.ID, "recoverTasks")
 
-	// 最关键的用户可见后果：同 URL 的新请求必须**不再**被吸收到这条任务上。
+	// 最关键的用户可见后果（2026-11-26 语义更新）：同 URL 新请求**复用**该任务并复活为
+	// pending（此前"新建任务从 0 重下"；复活后由 SubmitAndStart 启动，不再永久卡死）。
 	fresh, err := mgr2.CreateTask("url", orphanURL, "orphan.bin", 1024, "", TaskParams{Save: true})
 	if err != nil {
 		t.Fatalf("同 URL 重建任务: %v", err)
 	}
-	if fresh.ID == task.ID {
-		t.Fatalf("同 URL 新请求仍被去重吸收到孤儿任务 %s（下载永不发生）", task.ID)
+	if fresh.ID != task.ID {
+		t.Fatalf("同 URL 新请求应复活原任务 %s，实际新建 %s", task.ID, fresh.ID)
+	}
+	if fresh.Status != "pending" {
+		t.Fatalf("复活后应为 pending（可被 SubmitAndStart 启动），实际 %q", fresh.Status)
 	}
 }
 

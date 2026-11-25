@@ -49,6 +49,15 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		return existing, nil
 	}
 
+	// 终态复用（用户 2026-11-26）：同一 URL 再次提交时——
+	//   failed/cancelled（7d 内）⇒ 复活为 pending 并**保留已下载进度**（不再从 0 重下）；
+	//   completed 且转存目标仍存在 ⇒ 幂等短路，直接返回该任务（不重复下载）。
+	if reused := m.reuseTerminalTask(url, owner, params); reused != nil {
+		m.logger.Info("resubmit reused terminal task",
+			"url", url, "task_id", reused.ID, "status", reused.Status)
+		return reused, nil
+	}
+
 	// 预留存储空间（全局账本 storageMgr 保留，供 /api/stats 与既有测试；租户配额并行）。
 	reserved := totalSize
 	if reserved <= 0 {
@@ -129,6 +138,99 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	)
 	m.metrics.TasksCreated.Add(1)
 	return task, nil
+}
+
+// resubmitReuseWindow 是同 URL 重提时允许**复活**终态任务的时间窗（与 failed 任务保留期一致）。
+const resubmitReuseWindow = 7 * 24 * time.Hour
+
+// reuseTerminalTask 处理「同一 URL 再次提交」的终态复用（用户 2026-11-26）。
+//
+//   - failed / cancelled（7d 内）⇒ **复活为 pending**，保留 Downloaded / .partial / hybrid 续传状态，
+//     调用方（SubmitAndStart）随即启动 ⇒ 慢源重试不再从 0 开始；
+//   - completed 且**转存目标确实仍存在** ⇒ 幂等短路返回（避免重复下载同一内容）。
+//
+// 只复用 sameTaskParams 一致的任务：语义不同（transfer/save/download_local/integrity）时
+// 吸收会静默吞掉本次请求意图。
+func (m *CloudDownloadManager) reuseTerminalTask(url, owner string, params TaskParams) *CloudTask {
+	revive, completed := m.collectTerminalCandidates(url, owner, params)
+	// completed 幂等短路：转存目标必须仍存在（避免"任务 completed 但文件已被删"的假成功）。
+	for _, c := range completed {
+		if m.transferTargetExists(c) {
+			return c
+		}
+	}
+	if revive == nil {
+		return nil
+	}
+	return m.reviveTerminalTask(revive)
+}
+
+// isRevivableStatus 判断任务状态是否可被「同 URL 重提」复活（失败/取消）。
+func isRevivableStatus(status string) bool {
+	return status == "failed" || status == "cancelled"
+}
+
+// collectTerminalCandidates 收集可复用的终态任务快照（failed/cancelled 取最新，completed 全部）。
+func (m *CloudDownloadManager) collectTerminalCandidates(url, owner string, params TaskParams) (revive *CloudTask, completed []*CloudTask) {
+	now := time.Now()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, t := range m.tasks {
+		if t.URL != url || !ownerVisible(t.Owner, owner) || !sameTaskParams(t, params) {
+			continue
+		}
+		if isRevivableStatus(t.Status) && now.Sub(t.UpdatedAt) <= resubmitReuseWindow {
+			if revive == nil || t.UpdatedAt.After(revive.UpdatedAt) {
+				revive = snapshotTask(t)
+			}
+			continue
+		}
+		if t.Status == "completed" && t.Transfer != nil {
+			// 无转存的 completed 无法证明产物仍在，交给新建任务。
+			completed = append(completed, snapshotTask(t))
+		}
+	}
+	return revive, completed
+}
+
+// reviveTerminalTask 把失败/取消的任务复活为 pending（保留 Downloaded / 续传状态）。
+func (m *CloudDownloadManager) reviveTerminalTask(revive *CloudTask) *CloudTask {
+	m.mu.Lock()
+	stored, ok := m.tasks[revive.ID]
+	if !ok || m.running[stored.ID] || !isRevivableStatus(stored.Status) {
+		m.mu.Unlock()
+		return nil // 并发已变化（被删/被重试/已运行）⇒ 交回新建路径
+	}
+	stored.Status = "pending"
+	stored.Error = ""
+	stored.TransferErr = ""
+	stored.UpdatedAt = time.Now()
+	stored.ExpiresAt = time.Now().Add(m.config.TaskTTL)
+	snap := snapshotTask(stored)
+	m.mu.Unlock()
+	_ = m.saveTask(stored)
+	m.metrics.TasksCreated.Add(1)
+	return snap
+}
+
+// snapshotTask 返回任务的对外快照（不暴露运行时配额句柄）。
+func snapshotTask(t *CloudTask) *CloudTask {
+	c := *t
+	c.account = nil
+	return &c
+}
+
+// transferTargetExists 判断 completed 任务的转存目标是否仍存在（幂等短路的前置条件）。
+func (m *CloudDownloadManager) transferTargetExists(t *CloudTask) bool {
+	if t == nil || t.Transfer == nil {
+		return false
+	}
+	tfs, _ := m.transferFS(t.Transfer.Volume)
+	if tfs == nil {
+		return false
+	}
+	_, err := tfs.Stat(context.Background(), t.Transfer.Path)
+	return err == nil
 }
 
 // cloneMetaExtra 深拷贝 meta_extra（防组内多子任务共享同一请求 map 的写-写竞态）。

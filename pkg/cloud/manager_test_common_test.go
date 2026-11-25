@@ -204,6 +204,9 @@ func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.Stor
 		// RemoveFile 构造 opt（测试注入）：随构造器一次性设置，运行期不可变。
 		o.RemoveFile = opts[0].RemoveFile
 	}
+	if len(opts) > 0 && opts[0].TransferFSFor != nil {
+		o.TransferFSFor = opts[0].TransferFSFor // 转存目标卷解析（测试注入本地卷）
+	}
 	mgr := NewCloudDownloadManager(o)
 	t.Cleanup(func() { mgr.Close() })
 	return mgr

@@ -373,7 +373,9 @@ func TestCloudDownloadManager_URLDedup(t *testing.T) {
 	}
 }
 
-func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
+// TestCloudDownloadManager_URLDedupRevivesFailedAndCancelled 锁定 2026-11-26 语义：
+// 同 URL 重提命中 failed/cancelled ⇒ **复活同一任务**（保留进度），不再新建从 0 重下。
+func TestCloudDownloadManager_URLDedupRevivesFailedAndCancelled(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
@@ -392,8 +394,11 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task2.ID == task1.ID {
-		t.Fatal("expected new task ID for failed task URL")
+	if task2.ID != task1.ID {
+		t.Fatalf("failed 任务应被复活复用（id=%s），实际新建 %s", task1.ID, task2.ID)
+	}
+	if task2.Status != "pending" {
+		t.Fatalf("复活后应为 pending，实际 %q", task2.Status)
 	}
 
 	// 取消任务同理
@@ -404,8 +409,11 @@ func TestCloudDownloadManager_URLDedupSkipFailedAndCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task3.ID == task2.ID {
-		t.Fatal("expected new task ID for cancelled task URL")
+	if task3.ID != task2.ID {
+		t.Fatalf("cancelled 任务应被复活复用（id=%s），实际新建 %s", task2.ID, task3.ID)
+	}
+	if task3.Status != "pending" {
+		t.Fatalf("复活后应为 pending，实际 %q", task3.Status)
 	}
 }
 
