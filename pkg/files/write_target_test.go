@@ -12,7 +12,9 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -320,5 +322,91 @@ func TestWriteTargetPresentSettle_ExternalRegistersDeclaredMeta(t *testing.T) {
 	}
 	if res.Checksum != want || sink.metaSize != 4 || sink.metaSHA != want || sink.metaX["x_direct"] != "1" {
 		t.Fatalf("res=%+v sink=%+v", res, sink)
+	}
+}
+
+// mtimeCapturePolicy 在 WriteMeta 时记录文件当前 mtime，用于钉住「先落 mtime 再算 sidecar」
+// 的顺序（否则本地卷 meta 记录的是上传时刻而非客户端声明时间）。
+type mtimeCapturePolicy struct {
+	got  time.Time
+	seen bool
+}
+
+func (p *mtimeCapturePolicy) Enabled() bool { return true }
+func (p *mtimeCapturePolicy) WriteMeta(_ context.Context, _ string, root *storage.Root, rel string, _ map[string]any) error {
+	fi, err := root.Stat(rel)
+	if err != nil {
+		return err
+	}
+	p.got, p.seen = fi.ModTime(), true
+	return nil
+}
+func (p *mtimeCapturePolicy) VerifyDownload(_ context.Context, _ *storage.Root, _ string, r SeekReadCloser) (SeekReadCloser, error) {
+	return r, nil
+}
+func (p *mtimeCapturePolicy) ReadMetaRaw(context.Context, *storage.Root, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+func (p *mtimeCapturePolicy) UpdateMetaExtra(context.Context, string, *storage.Root, string, map[string]any) error {
+	return os.ErrNotExist
+}
+
+// TestWriteTarget_MetaSeesClientMTime 钉住本地单次上传的副作用顺序：必须先落客户端
+// mtime，再生成 sidecar；否则 meta 的 mtime 会被记录成上传时刻（跨存储一致性缺口）。
+func TestWriteTarget_MetaSeesClientMTime(t *testing.T) {
+	t.Parallel()
+	e := newDirsEnv(t)
+	policy := &mtimeCapturePolicy{}
+	e.metaPolicy = policy
+	e.enableWriteDefaults()
+	want := time.Unix(1_700_000_000, 0).UTC()
+	in := wtInput("alice", "mtime-order.bin")
+	in.Mtime = want.UnixNano()
+	if _, err := e.svc.WriteTarget(context.Background(), in, bytes.NewReader([]byte("mtime-order"))); err != nil {
+		t.Fatalf("WriteTarget: %v", err)
+	}
+	if !policy.seen {
+		t.Fatal("WriteMeta 未被调用")
+	}
+	if delta := policy.got.Sub(want); delta > time.Second || delta < -time.Second {
+		t.Fatalf("sidecar 看到 mtime=%s want %s（必须先落 mtime 再写 meta）", policy.got, want)
+	}
+}
+
+// TestWriteTargetPresent_MetaSeesClientMTime 钉住本地卷 presign 直传登记的顺序：
+// 必须先应用客户端 mtime，再写 sidecar（与普通上传同一副作用顺序）。
+func TestWriteTargetPresent_MetaSeesClientMTime(t *testing.T) {
+	t.Parallel()
+	e := newDirsEnv(t)
+	policy := &mtimeCapturePolicy{}
+	e.metaPolicy = policy
+	e.enableWriteDefaults()
+	tnt := e.tenantFor("alice")
+	if err := tnt.Root().MkdirAll("user", 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	abs, _ := tnt.Root().Abs("user/present.bin")
+	if err := os.WriteFile(abs, []byte("present"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	want := time.Unix(1_700_000_001, 0).UTC()
+	if err := tnt.Root().Chtimes("user/present.bin", want, want); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	sum := sha256.Sum256([]byte("present"))
+	route := UploadRoute{Tenant: tnt, VolumeName: "main", Release: func() {}}
+	_, err := e.svc.writeTargetPresentSettle(context.Background(), "alice", "user/present.bin", "present.bin", WriteTargetInput{
+		Owner: "alice", RemotePath: "present.bin", NoQuota: true,
+		Mtime:          want.UnixNano(),
+		ContentPresent: &ContentPresentSpec{Size: int64(len("present")), SHA256: hex.EncodeToString(sum[:])},
+	}, route, e.logger)
+	if err != nil {
+		t.Fatalf("present settle: %v", err)
+	}
+	if !policy.seen {
+		t.Fatal("WriteMeta 未被调用")
+	}
+	if delta := policy.got.Sub(want); delta > time.Second || delta < -time.Second {
+		t.Fatalf("presign sidecar 看到 mtime=%s want %s", policy.got, want)
 	}
 }

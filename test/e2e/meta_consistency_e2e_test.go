@@ -70,6 +70,7 @@ func TestMetaConsistencyRealVolumes(t *testing.T) {
 			if err != nil || mi.Extra["x_meta_e2e"] != vol {
 				t.Fatalf("normal meta: extra=%+v err=%v", mi.Extra, err)
 			}
+			assertMetaMTime(t, "normal", mi.MTime, old)
 			if uerr := fc.UpdateFileMeta(ctx, remote, map[string]any{"x_meta_update": "ok"}); uerr != nil {
 				t.Fatalf("update meta: %v", uerr)
 			}
@@ -94,6 +95,19 @@ func TestMetaConsistencyRealVolumes(t *testing.T) {
 			if err != nil || cmi.Extra["x_meta_e2e"] != vol {
 				t.Fatalf("chunked meta: extra=%+v err=%v", cmi.Extra, err)
 			}
+			assertMetaMTime(t, "chunked", cmi.MTime, old)
 		})
+	}
+}
+
+// assertMetaMTime 校验 meta 读取的 mtime 与客户端声明值一致（秒级容差，兼容各后端精度）。
+func assertMetaMTime(t *testing.T, label, raw string, want time.Time) {
+	t.Helper()
+	got, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		t.Fatalf("%s meta mtime=%q 无法解析: %v", label, raw, err)
+	}
+	if delta := got.Sub(want); delta > time.Second || delta < -time.Second {
+		t.Fatalf("%s meta mtime=%s want %s", label, got, want)
 	}
 }

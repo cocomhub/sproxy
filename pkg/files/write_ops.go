@@ -2511,13 +2511,14 @@ func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remo
 	checksum := strings.ToLower(spec.SHA256)
 	if route.Sink == nil {
 		root := route.Tenant.Root()
+		// **必须先落 mtime 再写 sidecar**：sidecar 从文件当前时间取 mtime。
+		if !input.NoRecord {
+			s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, checksum, input.Mtime, logger)
+		}
 		if s.rt.fileMetaEnabled() {
 			if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel, input.MetaExtra); mErr != nil {
 				logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 			}
-		}
-		if !input.NoRecord {
-			s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, checksum, input.Mtime, logger)
 		}
 	} else {
 		s.settlePresentExternal(ctx, owner, rel, remotePath, input, route, spec.Size, checksum, logger)
@@ -2628,16 +2629,18 @@ func (s *Service) writeTargetSettleCommon(ctx context.Context, owner, rel, remot
 	if !input.NoQuota {
 		route.Commit(prev, s.settleSize(route, owner, remotePath, written))
 	}
+	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。
+	// NoRecord：调用方自己发布语义事件（版本恢复 version 事件等），不重复 upload 事件/台账。
+	// **必须在 sidecar 之前**：sidecar 的 mtime 取自落盘文件当前时间，晚于 Chtimes 才能
+	// 记录客户端声明值（否则本地卷 meta mtime 变成上传时刻，跨存储不一致）。
+	if !input.NoRecord {
+		s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, serverChecksum, input.Mtime, logger)
+	}
 	// sidecar 内置（!Exclusive）：写成功后生成配套 FileMeta（meta 恒生成；失败只 Warn 兜底）。
 	if s.rt.fileMetaEnabled() {
 		if mErr := s.rt.writeMetaSidecar(ctx, owner, root, rel, input.MetaExtra); mErr != nil {
 			logger.Warn("可信卷 meta 落盘失败（读侧将不校验）", "file_name", remotePath, "error", mErr)
 		}
-	}
-	// 台账 + mtime（成功副作用；跳过 Exclusive 的 archive 语义——台账/统计对 user 桶文件）。
-	// NoRecord：调用方自己发布语义事件（版本恢复 version 事件等），不重复 upload 事件/台账。
-	if !input.NoRecord {
-		s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, serverChecksum, input.Mtime, logger)
 	}
 	return WriteTargetResult{
 		VolumeName: route.VolumeName, Checksum: serverChecksum, Size: written,
