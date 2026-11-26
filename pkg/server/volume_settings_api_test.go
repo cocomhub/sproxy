@@ -572,3 +572,31 @@ func TestForgetVolumeSettings_ClearsStateAndCache(t *testing.T) {
 		t.Fatal("删除后应清除该卷的注入缓存")
 	}
 }
+
+// TestRefreshVolume_ReloadsBlockPolicy 锁定 refresh 入口**顺带重载卷设置**（审查 P1-2）：
+// 多实例共享 StateStore 时，A 保存规则后 B 仍用旧规则；`POST /api/volumes/refresh?volume=X`
+// 是全仓既有的运维收敛通道，应在这里把规则重新载入（不新增 API）。
+func TestRefreshVolume_ReloadsBlockPolicy(t *testing.T) {
+	t.Parallel()
+	b := &reloadableBackend{}
+	h := newSettingsTestHandlers(t, "reload-me", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+
+	if err := h.volumeSettingsRefresh(context.Background(), "reload-me"); err != nil {
+		t.Fatalf("volumeSettingsRefresh: %v", err)
+	}
+	if b.setCalls != 1 {
+		t.Fatalf("refresh 应重新注入持久化后端（触发重载），得到 %d", b.setCalls)
+	}
+}
+
+// reloadableBackend 记录 SetSettingsStore 调用次数（模拟「载入最新规则」）。
+type reloadableBackend struct {
+	fakeSettingsBackend
+	setCalls int
+}
+
+func (b *reloadableBackend) SetSettingsStore(registry.SettingsStore) error {
+	b.setCalls++
+	return nil
+}

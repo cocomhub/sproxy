@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -110,12 +111,18 @@ func TestBackend_Settings_ReportsBlockPolicySection(t *testing.T) {
 	if len(s.Fields) == 0 {
 		t.Fatal("Fields 不应为空")
 	}
-	var got policy.Policy
-	if uerr := json.Unmarshal(s.Value, &got); uerr != nil {
-		t.Fatalf("Value 应可解析为 policy.Policy: %v", uerr)
+	var got struct {
+		Rules         []policy.Rule `json:"rules"`
+		BaselineRules []policy.Rule `json:"baseline_rules"`
+		Version       int64         `json:"version"`
 	}
-	if got.Version != 3 || len(got.Rules) != 1 {
-		t.Fatalf("回显规则不符: %+v", got)
+	if uerr := json.Unmarshal(s.Value, &got); uerr != nil {
+		t.Fatalf("Value 应可解析: %v", uerr)
+	}
+	// 构造期传入的 Policy 是**静态基线** ⇒ 经 baseline_rules 回显；rules 只含运行期覆盖（此处空）。
+	// version 是**持久化版本**、只属运行期覆盖 ⇒ 无运行期记录时为 0（基线不带版本）。
+	if got.Version != 0 || len(got.BaselineRules) != 1 || len(got.Rules) != 0 {
+		t.Fatalf("回显不符（基线应走 baseline_rules）: %+v", got)
 	}
 }
 
@@ -235,10 +242,13 @@ func TestBackend_SetSettingsStore_LoadFailureKeepsBaseline(t *testing.T) {
 		t.Fatalf("载入失败不应阻断装配，得到: %v", serr)
 	}
 	sections, _ := b.Settings(context.Background())
-	var got policy.Policy
+	var got struct {
+		Rules         []policy.Rule `json:"rules"`
+		BaselineRules []policy.Rule `json:"baseline_rules"`
+	}
 	_ = json.Unmarshal(sections[0].Value, &got)
-	if len(got.Rules) != 1 || got.Rules[0].PathRegex != `^baseline/` {
-		t.Fatalf("应保留静态基线，得到 %+v", got)
+	if len(got.BaselineRules) != 1 || got.BaselineRules[0].PathRegex != `^baseline/` {
+		t.Fatalf("应保留静态基线（baseline_rules），得到 %+v", got)
 	}
 }
 
@@ -356,4 +366,139 @@ func TestBackend_InvalidPayloadSentinel(t *testing.T) {
 			t.Fatalf("payload=%s 应映射 ErrSettingsPayloadInvalid，得到 %v", payload, err)
 		}
 	}
+}
+
+// TestBackend_Settings_ReportsEffectiveSourceAndLimits 锁定回显包含**生效来源**与实际上限
+// （审查 P2-1/P2-3）：清空运行期规则后回显 rules:[] 但实际生效的是静态基线——运维必须能
+// 区分「没配」与「回落到基线」，UI 也要能提示单条规则的真实上限。
+func TestBackend_Settings_ReportsEffectiveSourceAndLimits(t *testing.T) {
+	t.Parallel()
+	baseline, err := policy.Compile(policy.Policy{Rules: []policy.Rule{
+		{PathRegex: `^baseline/`, MaxSize: 1 << 20, Mode: shardseal.BlockModeSingle},
+	}}, 0)
+	if err != nil {
+		t.Fatalf("Compile baseline: %v", err)
+	}
+
+	readValue := func(b *backend) map[string]any {
+		sections, serr := b.Settings(context.Background())
+		if serr != nil {
+			t.Fatalf("Settings: %v", serr)
+		}
+		var v map[string]any
+		if uerr := json.Unmarshal(sections[0].Value, &v); uerr != nil {
+			t.Fatalf("解析 value: %v", uerr)
+		}
+		return v
+	}
+
+	// ① 只有基线 ⇒ effective_source=baseline，baseline_rules 可见
+	b1, _ := newBackendForSettings(t, Options{Policy: baseline})
+	v1 := readValue(b1)
+	if v1["effective_source"] != "baseline" {
+		t.Fatalf("只有基线时来源应为 baseline，得到 %v", v1["effective_source"])
+	}
+	if rules, _ := v1["baseline_rules"].([]any); len(rules) != 1 {
+		t.Fatalf("baseline_rules 应回显 1 条，得到 %v", v1["baseline_rules"])
+	}
+
+	// ② 运行期规则覆盖基线 ⇒ effective_source=runtime
+	st := &memSettingsStore{}
+	b2, _ := newBackendForSettings(t, Options{Policy: baseline})
+	if serr := b2.SetSettingsStore(st); serr != nil {
+		t.Fatalf("SetSettingsStore: %v", serr)
+	}
+	if uerr := b2.UpdateSettings(context.Background(), settingsSectionBlockPolicy,
+		json.RawMessage(`{"rules":[{"path_regex":"^runtime/","max_size":"1MiB","mode":"single"}]}`)); uerr != nil {
+		t.Fatalf("UpdateSettings: %v", uerr)
+	}
+	if v := readValue(b2); v["effective_source"] != "runtime" {
+		t.Fatalf("运行期规则应生效，来源应 runtime，得到 %v", v["effective_source"])
+	}
+
+	// ③ 无基线也无运行期 ⇒ effective_source=volume_default
+	b3, _ := newBackendForSettings(t, Options{})
+	if v := readValue(b3); v["effective_source"] != "volume_default" {
+		t.Fatalf("无规则时来源应 volume_default，得到 %v", v["effective_source"])
+	}
+
+	// ④ limits 回显实际上限（hard_max 与卷块上限取小）
+	v := readValue(b3)
+	limits, _ := v["limits"].(map[string]any)
+	if limits == nil {
+		t.Fatalf("limits 缺失: %v", v)
+	}
+	if got := int64(limits["hard_max"].(float64)); got != policy.HardMaxSingleBytes {
+		t.Fatalf("hard_max = %d，期望 %d", got, policy.HardMaxSingleBytes)
+	}
+	if got := int64(limits["volume_block_max"].(float64)); got != 1<<20 {
+		t.Fatalf("volume_block_max = %d，期望 %d（测试卷块上限）", got, 1<<20)
+	}
+	// 测试卷块上限 1MiB < 硬顶 64MiB ⇒ effective_max = 1MiB（min 语义）
+	if got := int64(limits["effective_max"].(float64)); got != 1<<20 {
+		t.Fatalf("effective_max = %d，期望 min(硬顶, 卷块上限)=%d", got, 1<<20)
+	}
+}
+
+// TestBlockPolicyView_EffectiveSourceForEmptyRuntime 锁定「运行期快照存在但规则为空」也回落基线
+// （热更新清空后 SetPolicy(nil)，但若将来有人写入空 Compiled，来源仍须判为 baseline）。
+func TestBlockPolicyView_EffectiveSourceForEmptyRuntime(t *testing.T) {
+	t.Parallel()
+	empty, err := policy.Compile(policy.Policy{}, 0)
+	if err != nil {
+		t.Fatalf("Compile empty: %v", err)
+	}
+	if got := effectiveSourceOf(empty, empty); got != "baseline" {
+		t.Fatalf("空运行期规则应判 baseline，得到 %q", got)
+	}
+	if got := effectiveSourceOf(empty, nil); got != "volume_default" {
+		t.Fatalf("空运行期且无基线应判 volume_default，得到 %q", got)
+	}
+}
+
+// TestBackend_ErasureSingleWarnsOnHotUpdate 锁定热更新侧也告警「erasure × single」
+// （审查 P3-2）：装配期有告警，但运行期把规则改成 single 后此前无任何提示，
+// 用户会以为文件仍有冗余（单块不产 parity）。
+func TestBackend_ErasureSingleWarnsOnHotUpdate(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	fs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: shardseal.BlockModeRandom, Min: 64, Max: 1 << 20},
+		TempDir:   t.TempDir(),
+		Erasure:   true,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	b := &backend{fs: fs}
+	st := &memSettingsStore{}
+	if serr := b.SetSettingsStore(st); serr != nil {
+		t.Fatalf("SetSettingsStore: %v", serr)
+	}
+	n := erasureSingleWarningsForTest(b, json.RawMessage(`{"rules":[
+		{"path_regex":"^archive/","max_size":"1MiB","mode":"single"}]}`))
+	if n == 0 {
+		t.Fatal("erasure 卷热更新写入 single 规则应告警一次")
+	}
+	// random 规则不告警
+	if got := erasureSingleWarningsForTest(b, json.RawMessage(`{"rules":[
+		{"path_regex":"^archive/","max_size":"1MiB","mode":"random"}]}`)); got != 0 {
+		t.Fatalf("random 规则不应告警，得到 %d", got)
+	}
+}
+
+// erasureSingleWarningsForTest 统计一次 UpdateSettings 触发的「erasure × single」告警次数。
+func erasureSingleWarningsForTest(b *backend, payload json.RawMessage) int {
+	before := atomic.LoadInt32(&erasureSingleWarnCount)
+	err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, payload)
+	if err != nil {
+		// 规则校验失败不算告警路径
+		return 0
+	}
+	return int(atomic.LoadInt32(&erasureSingleWarnCount) - before)
 }

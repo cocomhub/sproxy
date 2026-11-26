@@ -1104,8 +1104,18 @@ func (h *Handlers) refreshExternalVolume(w http.ResponseWriter, r *http.Request,
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "索引重建失败: " + err.Error()}, http.StatusInternalServerError)
 		return
 	}
-	h.auditVolumeRefresh(r, volName, "索引重建（外部改动收敛）")
-	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName}, http.StatusOK)
+	// **卷设置（分块规则）同步重载**：多实例共享 StateStore 时，别处保存的规则要靠这里收敛
+	// （否则本实例继续用旧规则写 ⇒ 同卷不同实例产出不同块布局）。失败不阻断索引重建的
+	// 成功语义，但必须显式回显（否则运维以为已收敛）。
+	settingsNote := ""
+	if rerr := h.volumeSettingsRefresh(r.Context(), volName); rerr != nil {
+		h.logger.Warn("卷设置重载失败", "volume", volName, "error", rerr.Error())
+		settingsNote = "（卷设置重载失败：" + rerr.Error() + "）"
+	} else {
+		settingsNote = "，卷设置已重载"
+	}
+	h.auditVolumeRefresh(r, volName, "索引重建 + 卷设置重载（外部改动收敛）")
+	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName + settingsNote}, http.StatusOK)
 }
 
 // auditVolumeRefresh 记录 refresh 成功审计（R35-b：action=volume_refresh）。

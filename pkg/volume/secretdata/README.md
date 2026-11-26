@@ -27,7 +27,10 @@
   blocklet 仍按扩展名/显式配置选型。详见 `docs/secret-volume.md` §3.4.1。
 - **卷设置分区**：后端实现 `registry.SettingsProvider/SettingsWriter/SettingsStoreSetter`，
   把 `block_policy` 分区暴露给 `GET /api/volumes/{name}/detail` 与
-  `PUT /api/volumes/{name}/settings/{section}`（持久化走 `state_store`，CAS 版本）。
+  `PUT /api/volumes/{name}/settings/{section}`（持久化走 `state_store`，CAS 版本）。回显含
+  `baseline_rules`/`effective_source`/`limits`（排障：先看 `effective_source`）。
+  **多实例**：默认单机用本地兜底 StateStore（CAS 仅进程内）⇒ 多实例须配 mongo，并用
+  `POST /api/volumes/refresh?volume=<卷>` 重载规则（refresh 会顺带重载卷设置）。
 - **冗余（实验性）**：`Options.Erasure` 启用 XOR parity（k-of-k+1，纯 stdlib），任一分块丢失/损坏
   可由其余分块复原；未生产验证、默认关。
 - **多 target 复制（实验性）**：`Options.Targets` 声明副本**本地路径**（非卷名），写路径复制自包含容器到全部 target、

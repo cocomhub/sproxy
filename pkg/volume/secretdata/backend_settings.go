@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -37,10 +38,17 @@ var (
 // 纯内存读（不 I/O）：值来自 FS 的规则快照；ReadOnly 由「是否已注入持久化后端」决定——
 // 未注入时无法落盘，UI 应禁用保存而不是让人以为改了（静默丢失配置比拒绝更糟）。
 func (b *backend) Settings(_ context.Context) ([]registry.VolumeSettings, error) {
-	c := b.fs.policySnapshot()
-	value := policy.Policy{}
-	if c != nil {
-		value = policy.Policy{Rules: c.Rules(), Version: c.Version()}
+	runtime, baseline := b.fs.PolicyState()
+	value := blockPolicyView{
+		Rules:           rulesOf(runtime),
+		BaselineRules:   rulesOf(baseline),
+		EffectiveSource: effectiveSourceOf(runtime, baseline),
+		Limits: blockPolicyLimits{
+			HardMax:        policy.HardMaxSingleBytes,
+			VolumeBlockMax: b.fs.opts.Block.Max,
+			EffectiveMax:   effectiveSingleMax(b.fs.opts.Block.Max),
+		},
+		Version: runtime.Version(), // nil-safe（Compiled.Version 对 nil 返回 0）
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -57,6 +65,75 @@ func (b *backend) Settings(_ context.Context) ([]registry.VolumeSettings, error)
 		Value:    raw,
 		ReadOnly: b.loadSettingsStore() == nil,
 	}}, nil
+}
+
+// erasureSingleWarnCount 统计「erasure × single」告警次数（测试可断言；生产只用于日志节流）。
+var erasureSingleWarnCount int32
+
+// warnErasureSingle 在 erasure 卷写入含 single 规则时告警一次（装配期与热更新期同源）。
+//
+// 为什么热更新也要告警：erasure 的 parity 只在 ≥2 个数据块时生成 ⇒ 命中 single 的文件
+// **没有冗余**。装配期已有告警，但运行期把规则改成 single 后此前无任何提示，用户会以为
+// 文件仍有冗余（审查 P3-2）。
+func (b *backend) warnErasureSingle(rules []policy.Rule) {
+	if !b.fs.opts.Erasure {
+		return
+	}
+	for _, r := range rules {
+		if r.Mode != shardseal.BlockModeSingle {
+			continue
+		}
+		atomic.AddInt32(&erasureSingleWarnCount, 1)
+		slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
+			"volume", b.fs.opts.VolumeName, "path_regex", r.PathRegex, "source", "hot-update")
+		return
+	}
+}
+
+// blockPolicyView 是 `block_policy` 分区的**回显形状**（向后兼容：保留 rules/version 字段，
+// 新增 baseline_rules / effective_source / limits 供排障与 UI 提示）。
+//
+// 为什么需要：清空运行期规则后 `rules` 为空，但实际生效的是静态基线或卷默认——只回显运行期
+// 规则会让运维无法区分「没配」与「配了但回落到基线」，也无法在 UI 提示单条规则的真实上限。
+type blockPolicyView struct {
+	Rules           []policy.Rule     `json:"rules"`
+	BaselineRules   []policy.Rule     `json:"baseline_rules,omitempty"`
+	EffectiveSource string            `json:"effective_source"`
+	Limits          blockPolicyLimits `json:"limits"`
+	Version         int64             `json:"version"`
+}
+
+// blockPolicyLimits 是单条 `single` 规则的真实上限（UI 校验与提示复用）。
+type blockPolicyLimits struct {
+	// HardMax 是算法层硬顶（shardseal.MaxSingleBlockBytes）。
+	HardMax int64 `json:"hard_max"`
+	// VolumeBlockMax 是本卷 block_policy.max。
+	VolumeBlockMax int64 `json:"volume_block_max"`
+	// EffectiveMax = min(HardMax, VolumeBlockMax>0 ? VolumeBlockMax : HardMax)。
+	EffectiveMax int64 `json:"effective_max"`
+}
+
+// rulesOf 返回快照规则（nil ⇒ nil）。
+func rulesOf(c *policy.Compiled) []policy.Rule { return c.Rules() }
+
+// effectiveSourceOf 判定**实际生效**的规则来源（与 FS 的两级优先级一致）。
+func effectiveSourceOf(runtime, baseline *policy.Compiled) string {
+	switch {
+	case runtime != nil && runtime.Version() >= 0 && len(runtime.Rules()) > 0:
+		return "runtime"
+	case baseline != nil:
+		return "baseline"
+	default:
+		return "volume_default"
+	}
+}
+
+// effectiveSingleMax 返回单条 single 规则的实际可用上限（卷级 max 未知/未配时取硬顶）。
+func effectiveSingleMax(volumeBlockMax int64) int64 {
+	if volumeBlockMax > 0 && volumeBlockMax < policy.HardMaxSingleBytes {
+		return volumeBlockMax
+	}
+	return policy.HardMaxSingleBytes
 }
 
 // UpdateSettings 实现 registry.SettingsWriter：校验 → 落盘（CAS）→ 热生效。
@@ -95,6 +172,7 @@ func (b *backend) UpdateSettings(ctx context.Context, section string, payload js
 		b.fs.SetPolicy(nil)
 		return nil
 	}
+	b.warnErasureSingle(p.Rules)
 	applied := policy.Policy{Rules: p.Rules, Version: newVer}
 	compiled, cerr := policy.Compile(applied, b.fs.opts.Block.Max)
 	if cerr != nil {

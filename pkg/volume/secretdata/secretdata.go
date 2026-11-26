@@ -593,10 +593,10 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(metaCacheBudget(opts.MetaCacheBytes.Bytes()))),
 	}
 	// 分块规则快照（装配层已编译；nil = 无规则）。用 atomic.Pointer 持有 ⇒ 运行期可整体替换。
+	// 基线只进 basePolicy（**不**写入运行期快照）：运行期快照专指「持久化覆盖」，
+	// effectivePolicy() 在快照为 nil 时回落基线。若把基线也塞进快照，回显会误报
+	// 「来源 = runtime」，且「清空运行期规则」与「用基线」两种状态无法区分。
 	fs.basePolicy = opts.Policy
-	if opts.Policy != nil {
-		fs.policy.Store(opts.Policy)
-	}
 	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
 	attachSpanDiskCache(fs, opts)
 	// 整块 staging 下载器（同开关；SpanCacheDir 非空才启用）。

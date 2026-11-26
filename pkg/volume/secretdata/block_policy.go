@@ -27,9 +27,15 @@ func (s *SecretdataFS) SetPolicy(c *policy.Compiled) {
 	s.policy.Store(c)
 }
 
-// policySnapshot 返回当前规则快照（nil = 无规则）。
+// policySnapshot 返回当前**运行期**规则快照（nil = 无运行期覆盖）。
 func (s *SecretdataFS) policySnapshot() *policy.Compiled {
 	return s.policy.Load()
+}
+
+// PolicyState 返回 (运行期快照, 静态基线)，供设置回显区分「没配」与「回落到基线」。
+// 两者都可能为 nil；Compiled 构造后不可变 ⇒ 无需拷贝。
+func (s *SecretdataFS) PolicyState() (runtime, baseline *policy.Compiled) {
+	return s.policy.Load(), s.basePolicy
 }
 
 // applyRuleToPolicy 把命中的规则应用到块级策略副本上，返回 (新策略, 是否命中)。

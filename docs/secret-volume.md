@@ -182,6 +182,19 @@ volumes:
 约束（fail-closed）：`single` 必须给 `max_size` 且 `max_size ≤ min(64 MiB, block_policy.max)`；
 单卷 ≤ 64 条；正则须可编译。**只影响新写入**：改规则不重写已落盘文件。
 
+**卷级 `block_policy.mode: single` 会被装配期拒绝**（2026-11-27）：卷级形态无法表达「超过 64 MiB
+的文件怎么办」，会让大文件整卷写失败；请一律用上面的 `block_rules` 规则形态（超限文件自动回落
+`random`）。
+
+**回显与排障**：`GET /api/volumes/{name}/detail` 的 `block_policy` 分区除 `rules`/`version` 外还回显
+`baseline_rules`（静态基线）、`effective_source`（`runtime`/`baseline`/`volume_default`）与
+`limits{hard_max, volume_block_max, effective_max}`——「规则为什么没生效」先看 `effective_source`。
+
+**多实例边界**：规则持久化在 `state_store`。默认单机使用**本地兜底 StateStore**（`<存储根>/state/
+volume-settings`），其 CAS 只保证**进程内**互斥 ⇒ 多实例部署必须配 `state_store: mongo`（或集群
+模式）。多实例保存规则后，其它实例用 `POST /api/volumes/refresh?volume=<卷>`（或 `sclient volume
+refresh <卷>`）即可重载规则——refresh 现在会**顺带重载卷设置**。
+
 优先级链：**运行期规则（StateStore，`volume_policy/<卷名>`）> `extra.block_rules` 静态基线
 > 卷默认策略**。运行期规则经 Web UI 卷详情（或 `PUT /api/volumes/{name}/settings/{section}`）维护，
 持久化依赖 `state_store`（未装配时该分区只读）。
