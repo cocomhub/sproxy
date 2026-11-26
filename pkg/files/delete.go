@@ -26,6 +26,11 @@ const errMsgEmptyFilename = "文件名不能为空"
 // BatchDeleteRequest 批量删除请求体。
 type BatchDeleteRequest struct {
 	Files []BatchDeleteFile `json:"files"`
+	// Soft 为 true 时逐条**软删**（移入回收站，可恢复）——与单条 `POST /delete?soft=true` 对齐。
+	// 为什么需要（缺陷修复 2026-11-26）：Web UI 的「删除所选」走批量族，而批量族**没有软删入口**
+	// ⇒ 同一界面「单条删除可恢复、批量删除不可恢复」，违反「删除必须可恢复」的既定语义。
+	// 缺省 false 保持零回归（CLI/旧客户端行为不变）。
+	Soft bool `json:"soft,omitempty"`
 }
 
 // BatchDeleteFile 批量删除中的单条文件。
@@ -63,7 +68,7 @@ func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
 // 语义与错误聚合逐字不变：路径校验、跨卷定位、checksum 门禁、配额/卷池/checksum 台账释放
 // 由 DeleteFile 承担；批量族的两项**历史差异**以入参显式表达——`AllowMissing`（缺文件按幂等
 // 成功）与 `SkipFileLock`（不因并发上传把整批变成 409），本函数只做文案映射与结果聚合。
-func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile) BatchOperationResult {
+func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f BatchDeleteFile, soft bool) BatchOperationResult {
 	result := BatchOperationResult{Filename: f.Filename}
 	res, err := s.DeleteFile(ctx, DeleteFileInput{
 		Owner:            owner,
@@ -71,6 +76,7 @@ func (s *Service) processBatchDeleteItem(ctx context.Context, owner string, f Ba
 		ExpectedChecksum: f.Checksum,
 		AllowMissing:     true,
 		SkipFileLock:     true,
+		SoftDelete:       soft,
 	})
 	if err != nil {
 		result.Message = batchDeleteMessage(err)
@@ -126,7 +132,7 @@ func (s *Service) BatchDelete(w http.ResponseWriter, r *http.Request) {
 	owner := s.rt.actorOf(r)
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f))
+		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f, req.Soft))
 	}
 	s.sendJSON(w, BatchResponse{Results: results}, http.StatusOK)
 }
