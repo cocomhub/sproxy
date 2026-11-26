@@ -248,6 +248,10 @@ func feedChecksumRewindable(src io.Reader, hasher io.Writer) (io.Reader, error) 
 // MakeDir + WriteFile + 流式哈希 + SHA-256 比对（不符删回 400）+ 双账本结算。
 // 无原子写/去重/版本/台账——外部卷是远程后端，这些本地 inode 语义天然不适用。
 func (s *Service) writeExternalSettle(ctx context.Context, logger *slog.Logger, a externalWriteArgs) (WriteFileResult, error) {
+	// 外部卷/secretdata 写面与本地卷对齐：随上传 meta_extra 经 ctx 透传，由卷装饰器
+	// （trusted.Wrap / secretdata）合并进 FileMeta.Extra。普通 multipart 上传走本函数
+	// （不是 writeTargetExternalSettle），两处都必须透传，否则外部卷静默丢失 meta_extra。
+	ctx = syncpkg.WithUploadMetaExtra(ctx, a.input.MetaExtra)
 	// 覆盖写场景先统计旧文件大小 prev（双 Adjust 差分用）。
 	measuredPrev := int64(0)
 	if sz, ok, serr := a.route.Sink.Stat(ctx, a.rel); serr == nil && ok {
