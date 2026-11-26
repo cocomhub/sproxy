@@ -281,3 +281,66 @@ run(api.json('POST', '/mkdir?dirname=' + enc(rel)), ...)   // 无 volume
 ⇒ UI 删目录**不传 volume**（传了也不会变窄，反而暗示"只删一卷"）。加了
 `TestRmdir_LocalVolumeDeletesLogicalDir` 把这个"看起来像 bug 的设计"钉住，防止被
 "优化"成只删一卷。**本轮一度按错误假设改了 UI，靠该测试的红灯发现并回退。**
+
+## 2026-11-27 修 CI 偶发：secretdata 窗口缓存「明文当密文」双重解密
+
+CI 偶发（`Test(ubuntu,+Vault)` 两次：#1238、#1303）：
+
+```
+ReadAll(0): secretdata: 范围读取失败（无 parity 可恢复，不回落整块）:
+  blocklet 段 0 越出合并区间（rel=262 enc=262172 span=262144）
+```
+
+`enc=262172` = 256KiB + GCM 开销，`span=262144` = 256KiB。**是明文被当密文切段**。
+
+### 根因（契约混淆，不是算错）
+
+```go
+// 窗口缓存命中的返回是**已解密明文**
+func (s *SecretdataFS) windowCacheRead(...) ([]byte, bool) {
+    blobs, ok := s.stageDL.readWindowsReadyOnly(...)
+    return decryptWinBlobs(blobs, o, offset, end), true   // ← 明文
+}
+
+// 但 segmentSpanFetch 用**同一个返回位**表达两种语义：
+span, spanOff, ok, err := s.segmentSpanFetch(...)   // 命中时 span = 明文，spanOff = 0
+out, derr := decryptSegmentWindows(o, span, spanOff, offset, end, targets)  // ← 又把明文当密文
+```
+
+`decryptSegmentWindows` 按 `bl.EncSize` 切段 ⇒ `rel(262) + 262172 > len(明文)=262144` ⇒
+「越出合并区间」。
+
+### 为什么是偶发
+
+`stageChunkRead`（整块 staging，**先**调用）用 `readWindows` **有界等待**（10s，超时回源）；
+超时返回 false 后走到 `segmentSpanFetch`，而窗口若在此刻刚就绪 ⇒ `readWindowsReadyOnly` 命中
+⇒ 必炸。⇒ 只在「等待恰好超时 + 窗口随后就绪」的时序下命中，本地 `-count=30` 全绿、CI 高并行偶发。
+
+### 修复：用结构体把两种语义分开（编译期防混用）
+
+```go
+type spanFetchResult struct {
+    hit     bool    // true ⇒ plain 是已解密内容
+    plain   []byte
+    span    []byte  // hit=false ⇒ 密文区间
+    spanOff int64
+}
+```
+
+调用方：`if fr.hit { return fr.plain, true, nil }`，否则才走 `decryptSegmentWindows`。
+顺带：命中但 `decryptWinBlobs` 返回 nil（窗口被篡改/与 meta 不符）⇒ 视为未命中继续回源
+（此前会把 nil 当密文 span 直接报错）。
+
+### 验证与变异
+
+- 复现用例 `TestSegmentSpanFetch_WindowHit_NotFedToCiphertextPath`：**复刻调用方序列**
+  （`segmentSpanFetch` → 按契约消费），红灯时输出与 CI 完全相同的报错；
+- 契约用例 `TestSegmentSpanFetch_WindowHitReturnsPlaintext`：命中必须回明文、长度 = 请求长度；
+- 端到端 `TestReadChunkRange_WindowReadyNotDoubleDecrypted`：窗口就绪后二轮读内容正确；
+- 变异命中：把命中分支改回 `spanFetchResult{span: out}` ⇒ 三个断言全红；
+- `go test ./pkg/volume/secretdata -race -count=2` 全绿；全包非 -race 亦绿。
+
+### 教训
+
+**同一个返回位不要表达两种语义**。"已解密明文" 与 "密文区间" 是两种东西，用 `[]byte` + 一个
+隐含约定就必然有人（包括自己）接错。宁可多一个结构体字段，也不要靠注释约定。

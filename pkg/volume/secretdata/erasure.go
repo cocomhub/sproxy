@@ -372,7 +372,7 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 	if len(targets) == 0 {
 		return nil, true, nil
 	}
-	span, spanOff, ok, err := s.segmentSpanFetch(ctx, rr, segPath, o, offset, end, targets)
+	fr, ok, err := s.segmentSpanFetch(ctx, rr, segPath, o, offset, end, targets)
 	if err != nil {
 		return nil, true, err
 	}
@@ -381,7 +381,11 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 		// 避免下游 `fmt.Errorf("…: %w", nil)` 生成畸形错误（评审 P3 修复，2026-10-21）。
 		return nil, true, syncpkg.ErrUnsupported
 	}
-	out, derr := decryptSegmentWindows(o, span, spanOff, offset, end, targets)
+	// 窗口缓存命中 ⇒ fr.plain 是**已解密明文**，直接返回（**不得**再当密文切段解密）。
+	if fr.hit {
+		return fr.plain, true, nil
+	}
+	out, derr := decryptSegmentWindows(o, fr.span, fr.spanOff, offset, end, targets)
 	if derr != nil {
 		return nil, true, derr
 	}
@@ -395,23 +399,41 @@ func (s *SecretdataFS) readChunkRangeBySegments(ctx context.Context, rr syncpkg.
 // **2026-10-25 统一缓存口**：整流回源前**先查窗口缓存**（windowCacheRead）——命中即
 // 免远端；未命中再走远端并**同时回填窗口缓存 + spanCache**（双写，保证两路径下次命中）。
 // 消除「窗口缓存命中但整流仍拉远端」的双轨浪费（实测纯热 160/268 chunk 仍整流）。
-func (s *SecretdataFS) segmentSpanFetch(ctx context.Context, rr syncpkg.RangeReader, segPath string, o chunkRangeOpts, offset, end int64, targets []shardseal.BlockletInfo) ([]byte, int64, bool, error) {
-	// 先尝试窗口缓存（命中 ⇒ 直接返回窗口内 blocklet 段，不再走远端整流）。
-	if out, ok := s.windowCacheRead(o, offset, end); ok {
-		return out, 0, true, nil
+// spanFetchResult 是 segmentSpanFetch 的返回：**必须区分「已解密明文」与「密文区间」**。
+//
+// 历史缺陷（2026-11-26）：早先该函数用同一个 `[]byte` 返回两种语义——窗口缓存命中时返回
+// **明文**，非命中时返回**密文 span**；调用方一律按密文切段解密 ⇒ 命中即双重解密，
+// 报「blocklet 段 N 越出合并区间」。触发条件是时序（等待超时后窗口恰好就绪）⇒ CI 偶发。
+// 用结构体 + `hit` 标记把两种语义分开，编译期就无法再混用。
+type spanFetchResult struct {
+	// hit 为 true 表示走了窗口缓存，`plain` 是**已解密**的请求区间内容。
+	hit bool
+	// plain 是 hit 时的解密结果（长度 = 请求区间长度）。
+	plain []byte
+	// span 是未命中时的**密文**区间（[spanOff, spanOff+len(span))）。
+	span []byte
+	// spanOff 是 span 在块 blob 中的密文起点。
+	spanOff int64
+}
+
+func (s *SecretdataFS) segmentSpanFetch(ctx context.Context, rr syncpkg.RangeReader, segPath string, o chunkRangeOpts, offset, end int64, targets []shardseal.BlockletInfo) (spanFetchResult, bool, error) {
+	// 先尝试窗口缓存（命中 ⇒ 已解密，调用方**不得**再解密）。
+	// 命中但解密结果为空（窗口内容与 meta 不符 / 被篡改）⇒ 视为未命中，继续回源（fail-open）。
+	if out, ok := s.windowCacheRead(o, offset, end); ok && out != nil {
+		return spanFetchResult{hit: true, plain: out}, true, nil
 	}
 	saltBytes, saltErr := s.readBlockSalt(ctx, rr, segPath, o)
 	if saltErr != nil {
-		return nil, 0, false, saltErr
+		return spanFetchResult{}, false, saltErr
 	}
 	if verr := shardseal.VerifyBlockSalt(saltBytes, o.salt); verr != nil {
-		return nil, 0, false, verr
+		return spanFetchResult{}, false, verr
 	}
 	spanOff := targets[0].EncOffset
 	last := targets[len(targets)-1]
 	spanEnd := last.EncOffset + last.EncSize
 	if spanEnd <= spanOff {
-		return nil, 0, false, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
+		return spanFetchResult{}, false, fmt.Errorf("secretdata: blocklet 段区间非法（off=%d end=%d）", spanOff, spanEnd)
 	}
 	// **跨度对齐（2026-10-23 实测补丁）**：磁盘缓存 key 含 (off,end) 精确区间 ⇒ 相邻窗口
 	// 请求的 span（= blocklet 密文起点 ± 随机间隙）微差 ⇒ 逐窗不命中、重复拉取（实测
@@ -421,7 +443,7 @@ func (s *SecretdataFS) segmentSpanFetch(ctx context.Context, rr syncpkg.RangeRea
 		spanOff, spanEnd = alignSpanToWindow(spanOff, spanEnd, o)
 	}
 	span, ok, err := s.readChunkRangeSpan(ctx, rr, segPath, o, offset, end, spanOff, spanEnd)
-	return span, spanOff, ok, err
+	return spanFetchResult{span: span, spanOff: spanOff}, ok, err
 }
 
 // decryptSegmentWindows 从合并区间 span 内按 meta blocklet 索引切出各段密文并独立解密，
