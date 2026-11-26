@@ -13,7 +13,7 @@ pkg/server/archive.go	1
 pkg/server/backends_api.go	4	
 pkg/server/backup_api.go	1	
 pkg/server/checksum_api.go	1	
-pkg/server/cloudtasks/download.go	4	# 云任务 CRUD 的取消/删除审计（经注入的 cloudtasks.Audit → h.RecordAudit）
+pkg/server/cloudtasks/download.go	6	# 云任务 CRUD 的取消/删除审计 + 细粒度人工处理动作 cloud_task_action（成功/失败各一条；经注入的 cloudtasks.Audit）
 pkg/server/cloudtasks/group.go	3	# 组创建/删除审计（S2b；经注入的 cloudtasks.Audit → h.RecordAudit）
 pkg/server/cloudtasks/transfer.go	1	# 归档转存审计 cloud_archive（P1-c S3c 自 cloud_download_handler.go 迁入；经注入的 cloudtasks.Audit）
 pkg/server/cloudtasks_wiring.go	1	
