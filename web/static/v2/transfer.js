@@ -15,6 +15,13 @@
 
   function el(id) { return document.getElementById(id); }
 
+  /** 广播侧栏徽标（nav-badges.js 监听；未加载时静默）。 */
+  function badge(route, count) {
+    try {
+      document.dispatchEvent(new CustomEvent('v2:badge', { detail: { route: route, count: count } }));
+    } catch (e) { /* 忽略 */ }
+  }
+
   function statusClass(s) {
     if (s === 'completed') { return 'pill-ok'; }
     if (s === 'failed') { return 'pill-bad'; }
@@ -84,6 +91,13 @@
     var set = function (id, v) { var n = el(id); if (n) { n.textContent = String(v); } };
     set('v2-tf-all', s.total); set('v2-tf-running', s.running);
     set('v2-tf-failed', s.failed); set('v2-tf-completed', s.completed);
+    // 侧栏徽标 = 进行中数量（0 也显示，避免"徽标消失=未知"）。
+    badge('transfer', s.running);
+    try {
+      document.dispatchEvent(new CustomEvent('v2:subtitle', {
+        detail: { route: 'transfer', text: '/ ' + s.total + ' 个任务 · ' + s.running + ' 进行中' }
+      }));
+    } catch (e) { /* 忽略 */ }
   }
 
   function taskAction(kind, t) {

@@ -301,6 +301,8 @@ web-test:
 	@node --check web/static/v2/cloud-ops.js
 	@node --check web/static/v2/cloud-ops.test.js
 	@node --check web/static/v2/settings.js
+	@node --check web/static/v2/nav-badges.js
+	@node --check web/static/v2/nav-badges.test.js
 	@node --check web/static/v2/mesh-console.js
 	@node --check web/static/v2/shares-console.js
 	@node --check web/static/v2/shares-console.test.js
@@ -352,6 +354,7 @@ web-test:
 	node --test web/static/v2/chain-download.test.js
 	node --test web/static/v2/shares-console.test.js
 	node --test web/static/v2/shell.test.js
+	node --test web/static/v2/nav-badges.test.js
 	node --test web/static/shared/format.test.js
 	node --test web/static/shared/creds.test.js
 	node --test web/static/v2/auth.test.js

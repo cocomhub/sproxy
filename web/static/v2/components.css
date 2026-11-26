@@ -98,12 +98,14 @@ body {
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
 .card-h {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 6px;
   padding: 12px 14px; border-bottom: 1px solid var(--border);
 }
 .card-h h2, .card-h h3 { margin: 0; font-size: 13px; font-weight: 650; }
 .card-h .hint { font-size: 11.5px; color: var(--text-3); }
 .card-b { padding: 14px; }
+/* 卡片内的独立工具栏行（标题行只放标题与少量动作，避免窄屏把按钮挤成多行）。 */
+.card-tools { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
 
 .banner {
   display: flex; gap: 10px; align-items: flex-start;
@@ -282,9 +284,41 @@ body {
 .panel[hidden] { display: none; }
 .placeholder { display: flex; flex-direction: column; gap: 10px; }
 
+/* ---------- 窄屏 ---------- */
+/* 侧栏在 ≤900px 隐藏，改用横向导航条（此前窄屏**没有任何切页入口**）。 */
+.mobile-nav { display: none; }
+
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }
   .rail { display: none; }
+  .mobile-nav {
+    display: flex; gap: 4px; flex: 0 0 auto; padding: 6px 10px;
+    overflow-x: auto; background: var(--surface); border-bottom: 1px solid var(--border);
+    scrollbar-width: thin;
+  }
+  .mn-item {
+    display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;
+    padding: 6px 11px; border: 1px solid transparent; border-radius: var(--radius-sm);
+    color: var(--text-2); font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .mn-item:hover { background: var(--surface-hover); color: var(--text); }
+  .mn-item[aria-current="page"] {
+    background: var(--accent-soft); color: var(--text); font-weight: 600;
+    border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  .mn-item .count {
+    padding: 1px 6px; border-radius: 999px; background: var(--surface-3);
+    color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  /* 表格在窄屏横向滚动，避免整页被撑宽（此前 contentScrollW 1036 > 390）。 */
+  .table { display: block; overflow-x: auto; }
+  .content { padding: 12px 12px 32px; }
+}
+
+@media (max-width: 760px) {
+  .topbar { gap: 6px; padding: 0 12px; }
+  .topbar .btn, .topbar .icon-btn { padding: 0 8px; }
+  #v2-density-toggle { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -70,6 +70,7 @@
       .then(function () {
         banner('');
         toast('ok', '凭据已保存并通过校验');
+        document.dispatchEvent(new CustomEvent('v2:identity'));
         if (window.v2filesView) { window.v2filesView.load(); }
         loadTunnel();
       })
@@ -99,6 +100,7 @@
     fillCreds();
     banner('已退出（凭据已清除）。');
     toast('ok', '已退出登录');
+    document.dispatchEvent(new CustomEvent('v2:identity'));
     if (window.v2filesView) { window.v2filesView.load(); }
   }
 
@@ -112,6 +114,7 @@
       .then(function (res) {
         banner('');
         toast('ok', '登录成功（会话到期 ' + (res.sessionExpiresAt || '-') + '）');
+        document.dispatchEvent(new CustomEvent('v2:identity'));
         fillCreds();
         loadTunnel();
         if (window.v2filesView) { window.v2filesView.load(); }

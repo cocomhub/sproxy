@@ -28,9 +28,9 @@
   /** 侧栏导航项（单一事实源，测试与 DOM 共用）。 */
   function navItems() {
     return [
-      { group: '工作区', id: 'files', label: '文件', count: 128 },
-      { group: '工作区', id: 'transfer', label: '传输', count: 3 },
-      { group: '工作区', id: 'trash', label: '回收站', count: 4 },
+      { group: '工作区', id: 'files', label: '文件' },
+      { group: '工作区', id: 'transfer', label: '传输' },
+      { group: '工作区', id: 'trash', label: '回收站' },
       { group: '系统', id: 'console', label: '控制台' }
     ];
   }
@@ -41,10 +41,12 @@
     return prefersDark ? 'dark' : 'light';
   }
 
+  // 副标题只放**静态、恒真**的说明；任何计数由视图通过 `v2:subtitle` 事件实时写入
+  // （此前写死「3 个进行中」「保留 30 天」，与实际状态无关，属假数据）。
   var TITLES = {
     files: ['文件', '/ 全部卷'],
-    transfer: ['传输', '/ 3 个进行中'],
-    trash: ['回收站', '/ 保留 30 天'],
+    transfer: ['传输', '/ 云端任务与任务组'],
+    trash: ['回收站', '/ 可恢复已删除文件'],
     console: ['控制台', '/ 概览']
   };
 
@@ -83,7 +85,7 @@
     var title = el('v2-title');
     var sub = el('v2-subtitle');
     if (title) { title.textContent = t[0]; }
-    if (sub) { sub.textContent = t[1]; }
+    if (sub) { sub.textContent = t[1]; sub.dataset.route = route; }
     document.title = t[0] + ' · sproxy v2';
     // 仅当 hash 缺失或首段非法时补默认值；保留 #/files/<subdir> 等子路径。
     var raw = String(window.location.hash || '').replace(/^#\/?/, '');
@@ -112,6 +114,15 @@
         window.location.hash = routeHref(node.getAttribute('data-route'));
         renderRoute(); // 立即渲染，避免 e2e/键盘操作等待 hashchange
       });
+    });
+
+    // 视图拿到真实数据后可覆盖副标题（带 route 校验，避免跨页残留）。
+    document.addEventListener('v2:subtitle', function (ev) {
+      var d = ev && ev.detail;
+      var sub = el('v2-subtitle');
+      if (!d || !sub) { return; }
+      if (sub.dataset.route && d.route && sub.dataset.route !== d.route) { return; }
+      if (d.text) { sub.textContent = d.text; }
     });
 
     window.addEventListener('hashchange', renderRoute);

@@ -54,6 +54,12 @@
     if (hint) { hint.hidden = entries.length > 0; }
     var count = el('v2-trash-count');
     if (count) { count.textContent = entries.length + ' 项'; }
+    try {
+      document.dispatchEvent(new CustomEvent('v2:badge', { detail: { route: 'trash', count: entries.length } }));
+      document.dispatchEvent(new CustomEvent('v2:subtitle', {
+        detail: { route: 'trash', text: '/ ' + entries.length + ' 个可恢复文件' }
+      }));
+    } catch (e) { /* 忽略 */ }
   }
 
   function load() {

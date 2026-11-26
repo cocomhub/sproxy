@@ -14,18 +14,17 @@
     <div class="brand">
       <div class="brand-mark" aria-hidden="true">S</div>
       <div class="brand-name">sproxy</div>
-      <div class="brand-tag">v2 · P0</div>
     </div>
 
     <div class="rail-group" data-i18n="group.workspace">工作区</div>
     <div class="nav" data-route="files" role="link" tabindex="0">
-      <span data-i18n="files">文件</span><span class="count num">128</span>
+      <span data-i18n="files">文件</span><span class="count num" data-badge="files"></span>
     </div>
     <div class="nav" data-route="transfer" role="link" tabindex="0">
-      <span data-i18n="transfer">传输</span><span class="count num">3</span>
+      <span data-i18n="transfer">传输</span><span class="count num" data-badge="transfer"></span>
     </div>
     <div class="nav" data-route="trash" role="link" tabindex="0">
-      <span data-i18n="trash">回收站</span><span class="count num">4</span>
+      <span data-i18n="trash">回收站</span><span class="count num" data-badge="trash"></span>
     </div>
 
     <div class="rail-group" data-i18n="group.system">系统</div>
@@ -34,22 +33,36 @@
     </div>
 
     <div class="rail-foot">
-      <div class="who">
-        <div class="avatar" aria-hidden="true">DM</div>
-        <div><div style="font-size:12.5px;font-weight:600">demo</div>
-          <div class="muted" style="font-size:11px">demo · 示例凭据</div></div>
+      <div class="who" id="v2-account">
+        <div class="avatar" id="v2-account-initial" aria-hidden="true">?</div>
+        <div><div id="v2-account-name" style="font-size:12.5px;font-weight:600">匿名</div>
+          <div class="muted" id="v2-account-sub" style="font-size:11px">只读模式</div></div>
       </div>
     </div>
   </aside>
 
   <div class="main">
+    <nav class="mobile-nav" aria-label="主导航（窄屏）">
+      <div class="mn-item" data-route="files" role="link" tabindex="0">
+        <span data-i18n="files">文件</span><span class="count num" data-badge="files"></span>
+      </div>
+      <div class="mn-item" data-route="transfer" role="link" tabindex="0">
+        <span data-i18n="transfer">传输</span><span class="count num" data-badge="transfer"></span>
+      </div>
+      <div class="mn-item" data-route="trash" role="link" tabindex="0">
+        <span data-i18n="trash">回收站</span><span class="count num" data-badge="trash"></span>
+      </div>
+      <div class="mn-item" data-route="console" role="link" tabindex="0">
+        <span data-i18n="console">控制台</span>
+      </div>
+    </nav>
+    
     <header class="topbar">
       <div>
         <span class="page-title" id="v2-title">文件</span>
         <span class="page-sub" id="v2-subtitle">/ 全部卷</span>
       </div>
       <span class="spacer"></span>
-      <span class="pill pill-info">v2 预览</span>
       <button class="btn btn-ghost" id="v2-density-toggle" type="button" aria-pressed="false"
         title="切换表格密度" data-i18n="density">密度</button>
       <button class="btn btn-ghost" id="v2-cmdk-open" type="button" title="命令面板（⌘K / Ctrl+K）" data-i18n="cmdk">⌘K</button>
@@ -61,12 +74,6 @@
     </header>
 
     <div class="content">
-      <div class="banner banner-warn" role="status">
-        <div><b>v2 预览版（P1a 文件列表）</b>
-          <div class="muted" style="font-size:12px">文件列表已接入 /api/files（凭据复用旧版 SproxySig）；上传/批量/检查器与控制台仍走旧版。</div>
-        </div>
-        <a class="btn" href="/ui/" style="margin-left:auto">回到旧版</a>
-      </div>
 
       <section class="panel" data-panel="files" aria-labelledby="v2-title">
         <div class="card">
@@ -74,19 +81,22 @@
             <div class="crumbs" id="v2-crumbs"></div>
             <span class="hint" id="v2-count"></span>
             <span class="spacer" style="flex:1"></span>
+            <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存" data-i18n="volRefresh">清缓存</button>
+            <button class="btn" id="v2-refresh" type="button" data-i18n="refresh">刷新</button>
+          </div>
+          <div class="toolbar card-tools">
             <select id="v2-volume" aria-label="按卷过滤" style="height:28px"></select>
             <input id="v2-search" type="search" placeholder="搜索文件名（/ 聚焦）" data-i18n-ph="search" aria-label="搜索文件名"
               style="width:190px">
             <button class="btn btn-ghost" id="v2-search-btn" type="button" data-i18n="searchBtn">搜索</button>
             <button class="btn btn-ghost" id="v2-search-clear" type="button" hidden data-i18n="clear">清除</button>
+            <span style="flex:1"></span>
             <label class="btn btn-primary" for="v2-upload-input" data-i18n="upload">上传</label>
             <input id="v2-upload-input" type="file" multiple hidden>
             <button class="btn" id="v2-mkdir" type="button" data-i18n="mkdir">新建目录</button>
             <button class="btn" id="v2-batch-delete" type="button" disabled data-i18n="deleteSel">删除所选</button>
             <button class="btn btn-ghost" id="v2-batch-rename" type="button" disabled data-i18n="renameSel">重命名所选</button>
             <button class="btn btn-ghost" id="v2-batch-archive" type="button" disabled data-i18n="archiveSel">打包下载</button>
-            <button class="btn" id="v2-refresh" type="button" data-i18n="refresh">刷新</button>
-            <button class="btn btn-ghost" id="v2-vol-refresh" type="button" title="清卷状态缓存" data-i18n="volRefresh">清缓存</button>
           </div>
           <div id="v2-files-state" class="banner" hidden role="status"></div>
           <div id="v2-pending" class="banner" hidden role="status">
@@ -146,8 +156,6 @@
           <div class="empty" id="v2-grp-empty" hidden><b>暂无任务组</b>
             <div class="muted">创建组后可整组取消/重试。</div></div>
         </div>
-      </section>
-
         <div class="card" style="margin-top:14px">
           <div class="card-h">
             <h2>同步任务</h2><span class="hint">push / pull / both；冲突与删除策略按任务独立</span>
@@ -815,6 +823,7 @@
 <script src="i18n.js"></script>
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
+<script src="nav-badges.js"></script>
 <script src="settings.js"></script>
 <script src="mesh-console.js"></script>
 <script src="shares-console.js"></script>

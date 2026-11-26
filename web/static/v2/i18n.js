@@ -19,6 +19,8 @@
       'cs.audit': '审计', 'cs.config': '配置', 'cs.notify': '通知', 'cs.verify': '巡检',
       'cs.access': '接入', 'cs.volumes': '卷', 'cs.mesh': 'Mesh', 'cs.hub': 'Hub', 'cs.shares': '分享',
       'title.files': '文件', 'title.transfer': '传输', 'title.trash': '回收站', 'title.console': '控制台',
+      'subtitle.files': '/ 全部卷', 'subtitle.transfer': '/ 云端任务与任务组',
+      'subtitle.trash': '/ 可恢复已删除文件', 'subtitle.console': '/ 概览',
       'dlg.cancel': '取消', 'dlg.ok': '确定', 'dlg.create': '创建', 'dlg.save': '保存', 'dlg.delete': '删除',
       'dlg.mkdir.title': '新建目录', 'dlg.mkdir.msg': '在当前目录下创建；名称不能包含 / \ : * ? " < > |',
       'dlg.rename.title': '重命名', 'dlg.rename.current': '当前：',
@@ -44,6 +46,8 @@
       'cs.audit': 'Audit', 'cs.config': 'Config', 'cs.notify': 'Notify', 'cs.verify': 'Verify',
       'cs.access': 'Access', 'cs.volumes': 'Volumes', 'cs.mesh': 'Mesh', 'cs.hub': 'Hub', 'cs.shares': 'Shares',
       'title.files': 'Files', 'title.transfer': 'Transfer', 'title.trash': 'Trash', 'title.console': 'Console',
+      'subtitle.files': '/ All volumes', 'subtitle.transfer': '/ Cloud tasks and groups',
+      'subtitle.trash': '/ Recoverable deleted files', 'subtitle.console': '/ Overview',
       'dlg.cancel': 'Cancel', 'dlg.ok': 'OK', 'dlg.create': 'Create', 'dlg.save': 'Save', 'dlg.delete': 'Delete',
       'dlg.mkdir.title': 'New folder', 'dlg.mkdir.msg': 'Created under current folder; name must not contain / \ : * ? " < > |',
       'dlg.rename.title': 'Rename', 'dlg.rename.current': 'Current: ',
@@ -162,6 +166,8 @@
     });
     var title = document.getElementById('v2-title');
     if (title) { title.textContent = t('title.' + routeOf()); }
+    var sub = document.getElementById('v2-subtitle');
+    if (sub && d['subtitle.' + routeOf()]) { sub.textContent = d['subtitle.' + routeOf()]; }
     var sel = document.getElementById('v2-set-lang');
     if (sel) { sel.value = lang(); }
     document.documentElement.setAttribute('lang', lang() === 'en' ? 'en' : 'zh-CN');
