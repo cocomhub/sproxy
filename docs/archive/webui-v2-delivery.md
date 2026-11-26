@@ -558,3 +558,43 @@ R60 上线后 CI 立刻抓到同一个 flake 的**另一种形态**（`pkg/serve
   回调进度（早期 grep 范围太窄曾误判"完全忽略"）；
 - `WithChunkProgress` 只有**分块型**下载器（网盘类）会报，内建 HTTP 下载器不报
   ⇒ 进度条对 HTTP 直链只有 `Downloaded`，无分块明细 —— 属既有设计。
+
+### 追加：`registry.Set` 是**第四层**句柄持有者（s3 flake 的真因）
+
+R60 上线后 CI 仍报同一 flake（`TestListObjectsV2_NamedBucket` / `TestBucketRouting`）：
+
+```
+TempDir RemoveAll cleanup: unlinkat ...\002\EXAMPLEACCESSKEY0001:
+  The process cannot access the file because it is being used by another process.
+```
+
+**#1316 的修复（关 `bucketTenant`）并不够** —— 本地 `-count=5` 仍**必现**。
+
+真因：请求处理路径 `Service.TenantFor` → `registry.Set.Tenant(vol, owner, log)`：
+
+```go
+// pkg/volume/registry/set.go
+vs.cacheMu.Lock()
+c, ok := vs.caches[volName]
+if !ok {
+    c = storage.NewTenantCache(vs.roots[volName], ...)  // ← 每个卷一个 TenantCache
+    vs.caches[volName] = c
+}
+vs.cacheMu.Unlock()
+return c.TenantFor(owner)   // ← 懒建租户子根（独立 os.Root）
+```
+
+⇒ **测试为请求路径懒建的租户根没人关**。`Set.Close()` 本就会关这些缓存，只是
+`s3` 的 `testVolumeSet` 从没调用它。
+
+修：`testVolumeSet` 里 `t.Cleanup(func(){ _ = set.Close() })`（`-count=8` 全绿）。
+
+**`os.Root` 的创建入口至此确认有四个**：`OpenRoot` / `OpenTenant` / `TenantCache.TenantFor` /
+`registry.Set.Tenant`。每堵一层 CI 就换下一层露出来。
+
+### 遗留（独立 PR）
+
+全仓还有 **49 处** `registry.NewSet(` 未登记关闭（20 个文件：`cmd/sproxy`、
+`pkg/server`、`pkg/files`、`pkg/volume/{registry,enclosure}`）。属同一 flake 类的第五轮清扫，
+单独 PR 处理（并把 R60 的资源模式扩到 `registry.NewSet(`）。
+本轮只修 `pkg/server/s3`（CI 实际命中处）。

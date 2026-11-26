@@ -36,7 +36,13 @@ func testVolumeSet(t *testing.T, vols []volume.Volume, roots map[string]*storage
 	for _, v := range vols {
 		pools[v.Name] = quota.NewPool(0)
 	}
-	return registry.NewSet(vols, roots, nil, pools, vols[0].Name)
+	set := registry.NewSet(vols, roots, nil, pools, vols[0].Name)
+	// **必须关**：Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root 句柄，
+	// 无 finalizer）。不关时请求路径懒建的租户根会持有 `<卷根>/<owner>/` 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报
+	// `unlinkat ...\<owner>: The process is being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+	return set
 }
 
 // TestHandler_EmptyKeyRouting 空 key：HEAD 200（桶存在性）、GET ListBuckets、其余 400。
