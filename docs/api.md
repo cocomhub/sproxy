@@ -600,6 +600,17 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 - 错误：`400` file 为空；条目不存在/目标已存在等 → `files.HTTPError` 状态直传；其它 `500`
   `{"success": false, "message": "恢复失败"}`（并记服务端 error 日志）
 
+### DELETE /api/trash?file=&volume=
+
+**彻底删除单个**回收站条目（回收站内的删除恒为硬删，不受「默认删除方式」配置影响）。
+
+- `file`（必填）：`GET /api/trash` 返回的 `trash_rel`；缺省 ⇒ `400`
+- `volume`（可选）：缺省 = **跨卷定位**（条目只存在于软删时所在卷）
+- 行为：按原 rel 释放配额 → 删除主文件 → 删除**同代** meta sidecar（同代 = 同一 `__deleted__` 后缀
+  的 nano；多代软删不会误删别代 meta）
+- 响应：`{"success": true, "message": "已彻底删除"}`；审计动作 `trash_purge`
+- 错误：条目不存在 ⇒ `404`；卷无权限/不存在 ⇒ 状态直传；其它 `500`
+
 ### POST /api/trash/empty?volume=&all=1
 
 清空回收站。
@@ -2111,12 +2122,13 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
   "cloud_max_concurrent": 3, "cloud_transfer_concurrency": 3,
   "cloud_sync_threshold": 104857600, "hub_enabled": false,
   "tls_enabled": true, "addr": ":18083", "storage_root": "/var/lib/sproxy",
-  "web_tunnel": true
+  "web_tunnel": true, "trash_retention": "168h0m0s"
 }
 ```
 
 `access_keys_set` = 凭据 Ring 是否非空；`cloud_transfer_concurrency` 是**实际生效值**
-（配置 <1 时按并发上限归一）。不返回任何凭据/密钥。
+（配置 <1 时按并发上限归一）。`trash_retention` 是回收站**实际生效**保留期
+（`trash.ttl` 未配置/<=0 时按 7 天默认；UI 据此显示真实天数，不写死）。不返回任何凭据/密钥。
 
 ### PUT /api/config
 

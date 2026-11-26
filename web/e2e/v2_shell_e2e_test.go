@@ -1242,6 +1242,57 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		fstate, _ := page.Locator("#v2-files-state").TextContent()
 		t.Fatalf("回收站未出现待清空条目: %v (trash_state=%q count=%q files_state=%q)", err, state, count, fstate)
 	}
+	// 回收站保留期提示必须是**真实生效值**（默认 7 天），不得写死「30 天」。
+	if txt, err := page.Evaluate(`() => (document.querySelector('#v2-trash-retention') || {}).textContent || ''`, nil); err == nil {
+		got := fmt.Sprint(txt)
+		if strings.Contains(got, "30 天") {
+			t.Fatalf("回收站提示仍是硬编码 30 天: %q", got)
+		}
+		if !strings.Contains(got, "7 天") {
+			t.Fatalf("回收站提示未显示真实保留期（期望 7 天）: %q", got)
+		}
+	}
+	// 单条「彻底删除」：真删该条目，其它条目保留。
+	seedSoft := func(name string) {
+		t.Helper()
+		if code, body := seedUploadMultipart(t, baseURL, "", name, []byte("purge-"+name)); code != http.StatusOK {
+			t.Fatalf("seed %s => %d %s", name, code, body)
+		}
+	}
+	seedSoft("purge-target.txt")
+	seedSoft("purge-keep.txt")
+	for _, n := range []string{"purge-target.txt", "purge-keep.txt"} {
+		req, _ := http.NewRequest(http.MethodPost, baseURL+"/delete?filename="+n+"&soft=true", nil)
+		req.Header.Set("X-File-Checksum", sha256HexBytes([]byte("purge-"+n)))
+		resp, derr := http.DefaultClient.Do(req)
+		if derr != nil {
+			t.Fatalf("软删 %s: %v", n, derr)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("软删 %s = %d", n, resp.StatusCode)
+		}
+	}
+	if err := page.Locator("#v2-trash-refresh").Click(); err != nil {
+		t.Fatalf("刷新回收站: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-trash-body').textContent.indexOf('purge-target.txt') !== -1", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("回收站未出现 purge-target.txt: %v", err)
+	}
+	if err := page.Locator("#v2-trash-body tr:has-text('purge-target.txt') [data-trash-purge]").Click(); err != nil {
+		t.Fatalf("点彻底删除: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-trash-body').textContent.indexOf('purge-target.txt') === -1", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("彻底删除后条目仍在: %v", err)
+	}
+	if txt, _ := page.Locator("#v2-trash-body").TextContent(); !strings.Contains(txt, "purge-keep.txt") {
+		t.Fatalf("彻底删除误删了其它条目: %q", txt)
+	}
+
 	if err := page.Locator("#v2-trash-empty").Click(); err != nil {
 		t.Fatalf("点击清空: %v", err)
 	}

@@ -332,10 +332,8 @@ func (h *Handlers) trashGCTask(cfg *Config) scheduler.Task {
 		Interval:        cfg.Trash.GCInterval,
 		MaintenanceOnly: true,
 		Run: func(context.Context) {
-			ttl := cfg.Trash.TTL
-			if ttl <= 0 {
-				ttl = 7 * 24 * time.Hour
-			}
+			// 与 GET /api/config 的 trash_retention 同源（config.EffectiveTrashRetention）。
+			ttl := config.EffectiveTrashRetention(cfg.Trash.TTL)
 			for _, owner := range h.SyncTenantList()() {
 				// all=true：**各卷** trash 都要按 TTL 过期（软删落文件所在卷；此前只清默认卷
 				// ⇒ 其它卷的条目永不过期，记档缺陷 2026-10-19 ③）。

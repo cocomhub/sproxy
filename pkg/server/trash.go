@@ -121,6 +121,25 @@ func (h *Handlers) restoreTrashHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, UploadResponse{Success: true, Message: "已恢复"}, http.StatusOK)
 }
 
+// purgeTrashHandler 彻底删除单个回收站条目（回收站内删除恒为硬删）。
+func (h *Handlers) purgeTrashHandler(w http.ResponseWriter, r *http.Request) {
+	file := r.URL.Query().Get("file")
+	if file == "" {
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "file 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	if err := h.fileService().PurgeTrashEntry(r.Context(), ownerFromRequest(r), r.URL.Query().Get("volume"), file); err != nil {
+		if he, ok := err.(*files.HTTPError); ok {
+			sendJSONResponse(w, UploadResponse{Success: false, Message: he.Message}, he.Status)
+			return
+		}
+		h.logger.Error("彻底删除回收站条目失败", "file", file, "volume", r.URL.Query().Get("volume"), "error", err.Error())
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "删除失败"}, http.StatusInternalServerError)
+		return
+	}
+	sendJSONResponse(w, UploadResponse{Success: true, Message: "已彻底删除"}, http.StatusOK)
+}
+
 // emptyTrashHandler 清空回收站。
 func (h *Handlers) emptyTrashHandler(w http.ResponseWriter, r *http.Request) {
 	// volume=<卷> ⇒ 只清该卷；all=1 ⇒ 清全部卷；二者皆无 ⇒ 只清默认卷（既有语义，零回归）。

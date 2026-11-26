@@ -23,6 +23,7 @@ func trashRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *http.Req
 	return []router.Route[func(*Handlers, http.ResponseWriter, *http.Request)]{
 		{Method: "GET", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).listTrashHandler},
 		{Method: "POST", Path: "/restore", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).restoreTrashHandler, Mutating: true},
+		{Method: "DELETE", Path: "", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).purgeTrashHandler, Mutating: true},
 		{Method: "POST", Path: "/empty", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).emptyTrashHandler, Mutating: true},
 	}
 }
