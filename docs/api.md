@@ -628,6 +628,15 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 - 认证：主 mux 经 `authMiddleware`（直连需验签）；隧道内层裸注册（隧道加密即认证）。
 - 订阅者慢消费（chan 满）会被断开，客户端重连可回放。
 
+## 参数与实现一致性（门禁 R57）
+
+本文中出现的每个 **query 参数名**（形如 `?参数=` 或 `&参数=`）都必须能在服务端源码里找到读取点
+（`Query().Get` / `FormValue` / `PathValue` 等），由门禁 **R57** 静态校验。历史教训（2026-11-25）：
+文档写了 `password?` 但服务端从未实现；文档写了分享 `?transform=&watermark=` 但分享面直接
+`io.Copy` 忽略参数；v2 传 `ttl: 7`（天数）而后端只认 duration —— 三处都是「文档有、实现无」，
+且**没有任何测试会红**。若确有正当例外（参数由通用中间件转发等），登记在
+`internal/archcheck/docs_query_params.tsv` 并写理由。
+
 ## 文件分享（share）
 
 ### POST /api/shares
@@ -673,11 +682,11 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 列出指定文件的历史版本（`{versions: [{id, size, mod_time, checksum?}]}`）。
 
-### POST /api/versions/restore?filename=&version=...
+### POST /api/versions/restore?filename=&version_id=...
 
 恢复指定版本为当前文件。
 
-### DELETE /api/versions?filename=&version=...
+### DELETE /api/versions?filename=&version_id=...
 
 删除指定版本。
 
