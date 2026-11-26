@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -133,19 +134,10 @@ func TestListDir_VolumeFilterSeesMkdir(t *testing.T) {
 		}
 		return names
 	}
-	has := func(names []string, want string) bool {
-		for _, n := range names {
-			if n == want {
-				return true
-			}
-		}
-		return false
-	}
-
-	if got := listOn("disk2"); !has(got, "visible-only-on-disk2") {
+	if got := listOn("disk2"); !slices.Contains(got, "visible-only-on-disk2") {
 		t.Fatalf("disk2 看不到新建目录: %v", got)
 	}
-	if got := listOn("main"); has(got, "visible-only-on-disk2") {
+	if got := listOn("main"); slices.Contains(got, "visible-only-on-disk2") {
 		t.Fatalf("main 不该看到 disk2 上的目录: %v", got)
 	}
 }
