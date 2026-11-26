@@ -392,18 +392,24 @@ func (h *Handlers) volumeSettingsRefresh(ctx context.Context, name string) error
 	// 优先走**可返回错误**的显式重载能力：Setter 在装配期失败只告警（不能阻断挂载），
 	// 若 refresh 复用它做重载，收敛失败时仍会回「已重载」成功回执（审查 Important）。
 	if rl, ok := be.(registry.SettingsReloader); ok {
-		if err := rl.ReloadSettings(ctx); err != nil {
+		err := rl.ReloadSettings(ctx)
+		if err == nil {
+			slog.Info("volume settings: refresh 触发规则重载", "volume", name)
+			return nil
+		}
+		// 包装器「恒实现 + ErrUnsupported」= inner 无严格重载语义 ⇒ 回退**装配式注入**（保持
+		// 既有行为，该路径失败不可见）；但**真实失败绝不回退**——否则重载失败会被当成成功
+		// 并掩盖掉（安全审查：「重载失败可见」的关键分支）。
+		if !errors.Is(err, syncpkg.ErrUnsupported) {
 			return fmt.Errorf("重载卷设置失败: %w", err)
 		}
-		slog.Info("volume settings: refresh 触发规则重载", "volume", name)
-		return nil
 	}
-	// 兼容：只实现 Setter 的后端（没有严格重载语义）——保留原行为，但调用方不再据它判定成功。
+	// 兼容：只实现 Setter 的后端（无严格重载语义，失败只能告警）——不据它判定成功。
 	if setter, ok := be.(registry.SettingsStoreSetter); ok {
 		if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
 			return fmt.Errorf("重载卷设置失败: %w", err)
 		}
-		slog.Info("volume settings: refresh 触发规则重载（Setter 兼容路径）", "volume", name)
+		slog.Info("volume settings: refresh 触发规则重载（Setter 兼容路径，失败不可见）", "volume", name)
 	}
 	return nil
 }

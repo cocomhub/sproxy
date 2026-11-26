@@ -622,3 +622,48 @@ type failingReloadBackend struct{ fakeSettingsBackend }
 func (f *failingReloadBackend) ReloadSettings(context.Context) error {
 	return errors.New("state store unavailable")
 }
+
+// TestVolumeSettingsRefresh_UnsupportedMeansNoReload 锁定「包装器转发但 inner 未实现」
+// 的情形：必须视为**无重载语义**（返回 ErrUnsupported 供调用方按「不支持」描述），
+// 绝不能落回吞错的 Setter 兼容路径（安全审查）。
+func TestVolumeSettingsRefresh_UnsupportedMeansNoReload(t *testing.T) {
+	t.Parallel()
+	// 只实现 Provider+Writer+Setter（无 Reloader）：capacity 包装器的 ReloadSettings 返回
+	// ErrUnsupported ⇒ h.volumeSettingsRefresh 应返回 ErrUnsupported（调用方据此判「不支持」）。
+	b := &setterOnlyBackend{}
+	h := newSettingsTestHandlers(t, "no-reload", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+	// inner 无严格重载语义 ⇒ 回退装配式注入（保持既有行为），不报错
+	if err := h.volumeSettingsRefresh(context.Background(), "no-reload"); err != nil {
+		t.Fatalf("无重载语义不应报错（回退兼容注入）: %v", err)
+	}
+	if b.setCalls != 1 {
+		t.Fatalf("应回退一次 Setter 兼容注入，得到 %d", b.setCalls)
+	}
+
+	// **真实失败绝不回退**（核心：否则重载失败被当成成功）
+	f := &failingReloadBackend{}
+	h2 := newSettingsTestHandlers(t, "reload-fail2", f)
+	h2.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+	if err := h2.volumeSettingsRefresh(context.Background(), "reload-fail2"); err == nil {
+		t.Fatal("真实重载失败必须返回错误（不得回退兼容路径掩盖）")
+	}
+}
+
+// setterOnlyBackend 实现 Setter 但不实现 Reloader，并模拟 capacity 包装器的
+// 「恒实现 + ErrUnsupported」形态。
+type setterOnlyBackend struct {
+	fakeSettingsBackend
+	setCalls int
+}
+
+func (b *setterOnlyBackend) SetSettingsStore(registry.SettingsStore) error {
+	b.setCalls++
+	return nil
+}
+
+func (b *setterOnlyBackend) ReloadSettings(context.Context) error {
+	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", syncpkg.ErrUnsupported)
+}
+
+// failingReloadBackend 模拟 inner 的真实重载失败（不得回退兼容路径）。

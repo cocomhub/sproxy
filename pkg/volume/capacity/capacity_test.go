@@ -88,3 +88,70 @@ func TestBackend_SettingsUnsupportedInner(t *testing.T) {
 		t.Fatalf("inner 未实现时应返回 ErrUnsupported，得到 %v", err)
 	}
 }
+
+// reloadableInner 记录 ReloadSettings 调用（能力透传测试用）。
+type reloadableInner struct {
+	plainBackend
+	reloadCalls int
+	reloadErr   error
+}
+
+func (r *reloadableInner) ReloadSettings(context.Context) error {
+	r.reloadCalls++
+	return r.reloadErr
+}
+
+// TestBackend_SettingsReloaderPassthrough 锁定 `SettingsReloader` 也必须透传（安全审查）：
+// 生产装配路径上 `Set.External(卷名)` 拿到的是容量包装器；若包装器不实现该能力，
+// refresh 会落回**吞错的 Setter 兼容路径** ⇒ 「重载失败可见」在生产上等于没修。
+func TestBackend_SettingsReloaderPassthrough(t *testing.T) {
+	t.Parallel()
+	inner := &reloadableInner{}
+	var wrapped registry.ExternalBackend = WrapBackend(inner, nopCounter{})
+	rl, ok := wrapped.(registry.SettingsReloader)
+	if !ok {
+		t.Fatal("容量包装器未透传 SettingsReloader（refresh 会落回吞错路径）")
+	}
+	if err := rl.ReloadSettings(context.Background()); err != nil {
+		t.Fatalf("透传失败: %v", err)
+	}
+	if inner.reloadCalls != 1 {
+		t.Fatalf("应委托 inner 一次，得到 %d", inner.reloadCalls)
+	}
+	// inner 未实现 ⇒ ErrUnsupported（调用方据此判「无重载语义」，而不是当作成功）
+	var wrapped2 registry.ExternalBackend = WrapBackend(plainBackend{}, nopCounter{})
+	rl2, ok2 := wrapped2.(registry.SettingsReloader)
+	if !ok2 {
+		t.Fatal("包装器应恒实现能力接口（用 ErrUnsupported 表达未实现）")
+	}
+	if err := rl2.ReloadSettings(context.Background()); !errors.Is(err, syncpkg.ErrUnsupported) {
+		t.Fatalf("inner 未实现时应返回 ErrUnsupported，得到 %v", err)
+	}
+}
+
+// TestWrapStorageVolume_SettingsReloaderReachable 经**真实装配入口** WrapStorageVolume 断言
+// 能力可达（安全审查建议：裸 fake 测不出包装器遗漏）。
+func TestWrapStorageVolume_SettingsReloaderReachable(t *testing.T) {
+	t.Parallel()
+	inner := &reloadableInner{}
+	wrapped := WrapStorageVolume("v", inner, nil, nil, 1<<20, 0)
+	if wrapped == nil {
+		t.Fatal("WrapStorageVolume 返回 nil")
+	}
+	rl, ok := wrapped.(registry.SettingsReloader)
+	if !ok {
+		t.Fatal("经 WrapStorageVolume 后 SettingsReloader 不可达（refresh 会落回吞错路径）")
+	}
+	if err := rl.ReloadSettings(context.Background()); err != nil {
+		t.Fatalf("重载透传失败: %v", err)
+	}
+	if _, ok := wrapped.(registry.SettingsProvider); !ok {
+		t.Fatal("经 WrapStorageVolume 后 SettingsProvider 不可达")
+	}
+	if _, ok := wrapped.(registry.SettingsWriter); !ok {
+		t.Fatal("经 WrapStorageVolume 后 SettingsWriter 不可达")
+	}
+	if _, ok := wrapped.(registry.SettingsStoreSetter); !ok {
+		t.Fatal("经 WrapStorageVolume 后 SettingsStoreSetter 不可达")
+	}
+}
