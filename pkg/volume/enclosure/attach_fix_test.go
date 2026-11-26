@@ -48,6 +48,11 @@ func TestFix_LedgerOnLocalRootForExternalSource(t *testing.T) {
 		map[string]*storage.Root{"main": rt},
 		map[string]registry.ExternalBackend{"extvol": extBe},
 		pools, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
 	}
@@ -86,6 +91,11 @@ func TestFix_LedgerOnLocalFSForLocalSource(t *testing.T) {
 	}
 	pools := map[string]*quota.Pool{"vault": quota.NewPool(1 << 20)}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, pools, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
 	}

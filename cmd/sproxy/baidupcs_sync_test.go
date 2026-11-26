@@ -102,6 +102,11 @@ func TestSetupBaidupcsFSFactory_NoBaidupcsVolumes(t *testing.T) {
 	t.Parallel()
 	exec := syncexec.NewExecutor(nil, nil)
 	set := registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
@@ -138,7 +143,11 @@ func setupBaidupcsTestSet(t *testing.T, typ string, factory baidupcsStorageFacto
 		external[name] = be
 		volumes = append(volumes, v)
 	}
-	return registry.NewSet(volumes, nil, external, nil, "")
+	set := registry.NewSet(volumes, nil, external, nil, "")
+	// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+	// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+	t.Cleanup(func() { _ = set.Close() })
+	return set
 }
 
 // TestSetupBaidupcsFSFactory_RegistryLookup 装配含 baidupcs 卷（Set.External）→ 注入工厂，
@@ -285,6 +294,9 @@ func TestBaidupcs_OpenURL_ProtocolRegistered(t *testing.T) {
 		t.Fatalf("WriteFile: %v", werr)
 	}
 	set := registry.NewSet(nil, nil, nil, nil, "")
+	// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+	// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+	t.Cleanup(func() { _ = set.Close() })
 	if aerr := set.AddExternalVolume(volume.Volume{Name: "vault", Type: typ}, be); aerr != nil {
 		t.Fatalf("AddExternalVolume: %v", aerr)
 	}
@@ -319,6 +331,11 @@ func TestSetupBaidupcsFSFactory_AllVolumesFailed(t *testing.T) {
 	}
 	// external 空 → 工厂注入，但查卷失败（调用点 fail-closed）。
 	set := registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("应注入工厂（查卷失败在调用点 fail-closed）")
@@ -367,6 +384,11 @@ func TestSetupBaidupcsFSFactory_MultiDisk(t *testing.T) {
 		volumes = append(volumes, v)
 	}
 	set := registry.NewSet(volumes, nil, external, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("多盘装配应注入 BaidupcsFS 工厂")
@@ -428,6 +450,11 @@ func TestSetupBaidupcsFSFactory_PartialFail(t *testing.T) {
 		t.Fatal("盘2 构造应失败")
 	}
 	set := registry.NewSet([]volume.Volume{v1}, nil, map[string]registry.ExternalBackend{"disk1": be1}, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
 	if exec.BaidupcsFS == nil {
 		t.Fatal("部分失败仍应注入工厂（盘1 可用）")

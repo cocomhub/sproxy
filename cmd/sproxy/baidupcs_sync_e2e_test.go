@@ -222,6 +222,9 @@ func newBaidupcsE2EManager(t *testing.T) (*syncmgr.Manager, *fakeBaidupcsE2EStor
 		t.Fatalf("NewBackend(mydisk): %v", err)
 	}
 	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
+	// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+	// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+	t.Cleanup(func() { _ = set.Close() })
 
 	exec := syncexec.NewExecutor(resolver, discardLoggerMain())
 	setupBaidupcsFSFactory(exec, set, discardLoggerMain(), nil)
@@ -381,6 +384,10 @@ func TestBaidupcsE2E_QuotaPerOwner(t *testing.T) {
 		t.Fatalf("NewBackend(mydisk): %v", err)
 	}
 	set := registry.NewSet([]volume.Volume{v}, nil, map[string]registry.ExternalBackend{"mydisk": be}, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
 
 	// quota per-owner：ownerA 小配额（5B）→ 超限拒绝；ownerB 大配额（100B）→ 成功。
 	poolA := quota.NewPool(5)

@@ -101,6 +101,10 @@ func TestAttachAll_BuildsBackendWithPrefixView(t *testing.T) {
 		{Name: "vault", Type: "capture_a", Extra: map[string]any{"source": "main:base"}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
 
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
@@ -137,6 +141,11 @@ func TestAttachAll_Idempotent(t *testing.T) {
 		{Name: "vault", Type: "capture_b", Extra: map[string]any{"source": "main:base"}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
 		t.Fatal(aerr)
 	}
@@ -170,6 +179,11 @@ func TestAttachAll_WrapsCapacityAccounting(t *testing.T) {
 	}
 	pools := map[string]*quota.Pool{"vault": quota.NewPool(4)}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, pools, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if aerr := AttachAll(context.Background(), set, nil); aerr != nil {
 		t.Fatalf("AttachAll: %v", aerr)
 	}

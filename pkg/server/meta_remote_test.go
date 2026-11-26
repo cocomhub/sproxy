@@ -85,6 +85,9 @@ func newExternalEnvWithFS(t *testing.T, volName string, fs syncpkg.FS) *Handlers
 		map[string]*storage.Root{"main": root},
 		nil, nil, "main",
 	)
+	// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+	// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+	t.Cleanup(func() { _ = vs.Close() })
 	if aerr := vs.AddExternalVolume(volume.Volume{Name: volName, Type: "baidupcs"}, &fsBackend{fs: fs}); aerr != nil {
 		t.Fatalf("AddExternalVolume: %v", aerr)
 	}

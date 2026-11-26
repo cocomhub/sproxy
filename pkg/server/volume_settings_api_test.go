@@ -88,6 +88,11 @@ func newSettingsTestHandlers(t *testing.T, name string, be registry.ExternalBack
 	t.Helper()
 	h := &Handlers{}
 	h.volSet = registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = h.volSet.Close() })
+
 	if err := h.volSet.AddExternalVolume(volume.Volume{Name: name, Type: "secretdata"}, be); err != nil {
 		t.Fatalf("AddExternalVolume: %v", err)
 	}
@@ -397,6 +402,11 @@ func TestVolumeSettings_LocalVolumeReturnsEmptySettings(t *testing.T) {
 	t.Cleanup(func() { _ = r.Close() })
 	h := &Handlers{}
 	h.volSet = registry.NewSet([]volume.Volume{{Name: "main", Type: "local"}}, nil, nil, nil, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = h.volSet.Close() })
+
 	if err := h.volSet.RegisterStorageVolume(localVolStub{name: "main", root: r}); err != nil {
 		t.Fatalf("RegisterStorageVolume: %v", err)
 	}
