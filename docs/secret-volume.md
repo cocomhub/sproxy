@@ -107,6 +107,7 @@ sclient sealfile info ./sealed --key ./datakey
 | `secret_url` | 必填 | `secrets://<卷>/<name>`，从 secrets 卷读密钥；引用的 secrets 卷须先装配 |
 | `algorithm` | `shardseal/aes-256-gcm` | **KDF 阶段档位**，见 §3.3 |
 | `block_policy` | `{mode: random, min: 1MiB, max: 200MiB}` | 分块策略（§3.4） |
+| `block_rules` | 空 | **分块规则基线**（§3.4.1）：按「路径正则 + 体积区间」命中 `mode: single`（整文件单块）。运行期规则（Web UI / API）优先于它 |
 | `meta_pad_bytes` | `min_block_size` | meta 加密落盘的 pad 目标基准（§3.4） |
 | `temp_dir` | 系统临时随机目录 | **写路径**临时空间（0700）。读路径自 2026-10-18 起**不落任何临时文件**（按需解密）；启动时会清理该目录内 `decrypt-*` 明文残留（升级前崩溃遗留） |
 | `preserve_mtime` | `false` | 默认 blob mtime 打散；`true` 才透传原始 mtime（§3.5） |
@@ -148,6 +149,42 @@ KDF 派生域**，同 secret+salt 不同档派生 key 不同，**跨档 fail-clo
 `meta_pad_bytes`：文件/目录 meta 明文加密前的 pad 目标基准（默认 = `min_block_size`）。目标 =
 `meta_pad_bytes + rand(meta_pad_bytes)`，受统一格式 R 地板（8B 长度头，196B）约束，使 meta
 blob 与底层分块大小分布**重叠**，底层难以凭文件大小区分 meta 与数据。
+
+#### 3.4.1 block_rules（分块规则，2026-11-26）
+
+按「用户可见相对路径 + 体积区间」把文件路由到 `mode: single`（**整文件 = 1 个块 / 1 个底层 blob**，
+1 次上传），适用于图片/文本/日志/已压缩包这类随机分块无收益的小文件。
+
+```yaml
+volumes:
+  - name: "vault"
+    type: "secretdata"
+    extra:
+      block_policy: {mode: random, min: 1MiB, max: 200MiB}
+      block_rules:                        # 静态基线（可选；运行期规则优先）
+        - path_regex: '^archive/.*\.zip$'
+          max_size: "20MiB"
+          mode: single
+          priority: 100
+        - path_regex: '\.jpg$'            # random 用于压制更宽的 single 规则
+          max_size: "20MiB"
+          mode: random
+          priority: 10
+```
+
+| 字段 | 说明 |
+|---|---|
+| `path_regex` | 对**用户可见相对路径**（`<owner>/user/` 之后）做**子串匹配**（RE2）。要整串语义自行写 `^...$` |
+| `min_size` / `max_size` | 体积**闭区间**；0/缺省 = 该侧不限 |
+| `mode` | `single`（整文件单块）或 `random`（卷默认变长分块） |
+| `priority` | 降序；同值按声明序；**首命中即停** |
+
+约束（fail-closed）：`single` 必须给 `max_size` 且 `max_size ≤ min(64 MiB, block_policy.max)`；
+单卷 ≤ 64 条；正则须可编译。**只影响新写入**：改规则不重写已落盘文件。
+
+优先级链：**运行期规则（StateStore，`volume_policy/<卷名>`）> `extra.block_rules` 静态基线
+> 卷默认策略**。运行期规则经 Web UI 卷详情（或 `PUT /api/volumes/{name}/settings/{section}`）维护，
+持久化依赖 `state_store`（未装配时该分区只读）。
 
 ### 3.5 preserve_mtime
 

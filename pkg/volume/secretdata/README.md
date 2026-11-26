@@ -22,6 +22,12 @@
   正确性不依赖后台 GC。
 - **GC 可选兜底**：`Options.GCInterval` 缺省 0 不启动后台；仅远程卷/多进程共享场景显式启用
   （`fs.GC()` 或配置 >0），作孤儿/墓碑兜底清理。
+- **分块规则（2026-11-26）**：`Options.Policy`（+ `SetPolicy` 热替换）让写路径按「路径正则 + 体积」
+  命中 `mode: single`——小文件整文件只产 **1 个底层 blob**（1 次上传）。规则只覆盖块级，块内
+  blocklet 仍按扩展名/显式配置选型。详见 `docs/secret-volume.md` §3.4.1。
+- **卷设置分区**：后端实现 `registry.SettingsProvider/SettingsWriter/SettingsStoreSetter`，
+  把 `block_policy` 分区暴露给 `GET /api/volumes/{name}/detail` 与
+  `PUT /api/volumes/{name}/settings/{section}`（持久化走 `state_store`，CAS 版本）。
 - **冗余（实验性）**：`Options.Erasure` 启用 XOR parity（k-of-k+1，纯 stdlib），任一分块丢失/损坏
   可由其余分块复原；未生产验证、默认关。
 - **多 target 复制（实验性）**：`Options.Targets` 声明副本**本地路径**（非卷名），写路径复制自包含容器到全部 target、
@@ -43,6 +49,7 @@
 | `Erasure` | false | XOR parity 纠错（**实验性**，默认关） |
 | `Targets` | 空 | 多 target 副本的**本地路径列表**（`extra.targets`，装配层逐个 `NewLocalFS`；**不是卷名**） |
 | `MaxFileBytes` | 0（不限） | 单文件上限（读取全文前按 size 拦截，内存防护） |
+| `Policy` | nil（无规则） | **分块规则快照**（`pkg/cryptox/shardseal/policy.Compiled`）：按「用户可见相对路径 + 体积区间」命中 `mode: single`（整文件单块）。装配层从 `extra.block_rules` 或运行期 StateStore 载入并预编译 |
 
 字节大小字段统一 `pkg/units/sizex.ByteSize`（可读 `"1GiB"`/`"5GB"`/纯数字）。
 
