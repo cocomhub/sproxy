@@ -35,34 +35,59 @@ func encryptContent(data []byte, outDir string, secret []byte, policy shardseal.
 //     命中唯一 video-keyframe → policy.BlockletMode=BlockletModeVideoKeyframe + 注入 Indexer。
 //
 // 返回 policy 副本（不改共享 s.opts.Block），写路径按文件独立选型。
-func (s *SecretdataFS) blockletPolicyFor(name string) (shardseal.BlockPolicy, error) {
-	policy := s.opts.Block
+//
+// **分块规则引擎（2026-11-26）**：进入既有 blocklet 选型之前，先按「用户可见相对路径 + 体积」
+// 解析规则命中（见 block_policy.go）——规则只覆盖**块级**（Mode/Max），blocklet 仍由下面的
+// 扩展名自动选型/显式配置决定。未命中任何规则时返回卷默认策略，行为与产物逐字节不变。
+func (s *SecretdataFS) blockletPolicyFor(name string, size int64) (shardseal.BlockPolicy, error) {
+	p, matched, err := s.resolveBlockletPolicy(name, size)
+	if err == nil {
+		s.reportBlockMode(name, p, matched)
+	}
+	return p, err
+}
+
+// resolveBlockletPolicy 是 blockletPolicyFor 的实现体：解析块级规则 + blocklet 选型，
+// 返回 (策略, 是否规则命中, error)。上报统一由 blockletPolicyFor 在**所有返回路径**上做
+// （含显式配置早退、错误路径），避免「某些路径不上报」造成排障盲区。
+func (s *SecretdataFS) resolveBlockletPolicy(name string, size int64) (shardseal.BlockPolicy, bool, error) {
+	policy, matched := s.ruleForWrite(name, size)
 	// 显式配置的 blocklet_mode（开关）优先。
 	if policy.BlockletMode != "" {
 		if policy.BlockletMode != shardseal.BlockletModeVideoKeyframe {
-			return policy, nil // 显式 "fixed" 或其它：尊重，不自动选型。
+			return policy, matched, nil // 显式 "fixed" 或其它：尊重，不自动选型。
 		}
 		// 显式 video-keyframe：仍需注册表解析 Indexer（blockletPlanner 依赖）。
-		return s.injectKeyframeIndexer(policy, name)
+		p, err := s.injectKeyframeIndexer(policy, name)
+		return p, matched, err
 	}
 	kind := shardseal.MediaKindOf(name)
 	if kind != "" {
 		reg, err := shardseal.ResolveBlockletMode(kind)
 		if err != nil {
-			return policy, err
+			return policy, matched, err
 		}
 		if reg.Mode == shardseal.BlockletModeVideoKeyframe && reg.Indexer != nil {
 			policy.BlockletMode = shardseal.BlockletModeVideoKeyframe
 			policy.Indexer = reg.Indexer
 			policy.Fallback = reg.Fallback // 主解析失败时兜底（go-mp4 → ffprobe）
-			return policy, nil
+			return policy, matched, nil
 		}
 	}
 	// 非视频 / 未命中 → 默认 fixed（归一化空值，meta 记录明确）。
 	if policy.BlockletMode == "" {
 		policy.BlockletMode = shardseal.BlockletModeFixed
 	}
-	return policy, nil
+	return policy, matched, nil
+}
+
+// reportBlockMode 上报写路径最终确定的块级模式（nil 回调 = 不上报，零回归）。
+// 命中规则与未命中都上报——「未命中」本身是排障时最需要的信息。
+func (s *SecretdataFS) reportBlockMode(rel string, p shardseal.BlockPolicy, matched bool) {
+	if s.opts.OnBlockModeResolved == nil {
+		return
+	}
+	s.opts.OnBlockModeResolved(rel, p.Mode, matched)
 }
 
 // injectKeyframeIndexer 为显式 video-keyframe 配置注入 Indexer：按文件名 Kind（或回退

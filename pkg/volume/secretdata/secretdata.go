@@ -48,6 +48,7 @@ import (
 
 	"github.com/cocomhub/sproxy/pkg/audit"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	storagepkg "github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/tempclean"
@@ -221,6 +222,16 @@ type Options struct {
 	// 预热只写磁盘（不常驻内存）、复用既有 `readFileMetaFast`、与正常读共用并发闸，且**限速**
 	// （对远端卷是必需的节流）。装配层可只对外部卷开启。
 	DisableMetaPrewarm bool
+
+	// Policy 是**分块规则快照**（装配层从 extra.block_rules 或运行期 StateStore 载入，经
+	// policy.Compile 预编译；nil = 无规则，写路径零回归）。规则按「用户可见相对路径 + 体积
+	// 区间」命中，只覆盖块级（Mode/Max）；blocklet 仍由既有扩展名/显式配置选型。
+	// 设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md。
+	Policy *policy.Compiled
+
+	// OnBlockModeResolved 在写路径确定块级模式后调用（nil = 不上报）。命中规则与未命中**都**
+	// 调，便于区分「规则没生效」与「规则没命中」——装配层接到 metrics 计数。
+	OnBlockModeResolved func(rel, mode string, matched bool)
 }
 
 // ErrMaxFileBytes 是单文件超上限哨兵错误（writeFile 在读取前拦截）。
@@ -356,7 +367,10 @@ type SecretdataFS struct {
 	// convergent 报告本卷写路径是否用**确定性密文**（AlgoV2GCM）：名字与 meta blob 也走
 	// 确定性构造（见 features.go encryptMetaBlob / createContainerLocked / writeDirMetaLocked）。
 	convergent bool
-	temp       string
+	// policy 是**分块规则快照**（atomic：热更新时整体替换，写路径读快照无锁竞争）。
+	// 见 block_policy.go。
+	policy policyPtr
+	temp   string
 	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
 	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
 	ownedTemp bool
@@ -574,6 +588,10 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		blockCache:   newBlockletCache(opts.BlockletCacheBytes.Bytes()),
 		metaCache:    newMetaEntryCache(metaCacheBudget(opts.MetaCacheBytes.Bytes())),
 		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(metaCacheBudget(opts.MetaCacheBytes.Bytes()))),
+	}
+	// 分块规则快照（装配层已编译；nil = 无规则）。用 atomic.Pointer 持有 ⇒ 运行期可整体替换。
+	if opts.Policy != nil {
+		fs.policy.Store(opts.Policy)
 	}
 	// 本机磁盘缓存（可选；目录非空才装配，失败仅告警不阻断——缓存是尽力而为设施）。
 	attachSpanDiskCache(fs, opts)
@@ -1594,7 +1612,7 @@ func (s *SecretdataFS) writeFileStream(ctx context.Context, wc writeCtx) (retErr
 		encSpan.End("bytes", wc.size, "encrypted", true, "cipher_bytes", cipherBytes,
 			"algorithm", s.auditAlgoName())
 	}()
-	policy, perr := s.blockletPolicyFor(wc.rel)
+	policy, perr := s.blockletPolicyFor(wc.rel, wc.size)
 	if perr != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: blocklet 模式选型失败: %w", perr)
@@ -2089,7 +2107,7 @@ func (s *SecretdataFS) writeFileEncrypted(ctx context.Context, wc writeCtx) (err
 	}
 	defer tmpRelease()
 
-	policy, perr := s.blockletPolicyFor(wc.rel)
+	policy, perr := s.blockletPolicyFor(wc.rel, wc.size)
 	if perr != nil {
 		s.rollbackWrite(ctx, nil, wc.created)
 		return fmt.Errorf("secretdata: blocklet 模式选型失败: %w", perr)
