@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 // markRunningLocked 置 running 标记并创建「已停止」通知通道（调用方必须持 m.mu 写锁）。
@@ -82,7 +84,35 @@ func (m *CloudDownloadManager) waitTaskStopped(taskID string, timeout time.Durat
 // 既有占位（resumeReserved==0 时 ReservedSize 为失败任务保留 .partial 的磁盘占用）不回滚：
 // 磁盘上确有字节占着，回滚会破坏 failTask「账本向磁盘实际收敛」的约定；该占用随 DeleteTask/
 // 过期清理释放（清理后 running 已清 ⇒ 立即释放）。
-func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus, prevError string, prevUpdatedAt, prevExpiresAt time.Time, resumeReserved int64) {
+// resumeState 是 resume 前的完整任务状态快照（回滚用）。
+type resumeState struct {
+	status, errMsg        string
+	updatedAt, expiresAt  time.Time
+	downloadDone          bool
+	downloaded            int64
+	downloadedSize        int64
+	downloadedChecksum    string
+	chunks                []downloader.ChunkState
+	integrityStatus       string
+	integritySames        int
+	integrityLastChecksum string
+}
+
+// captureResumeState 在 resume 改动任务前抓快照（调用方持 m.mu）。
+func captureResumeState(task *CloudTask) resumeState {
+	return resumeState{
+		status: task.Status, errMsg: task.Error,
+		updatedAt: task.UpdatedAt, expiresAt: task.ExpiresAt,
+		downloadDone: task.DownloadDone, downloaded: task.Downloaded,
+		downloadedSize: task.DownloadedSize, downloadedChecksum: task.DownloadedChecksum,
+		chunks:                append([]downloader.ChunkState(nil), task.Chunks...),
+		integrityStatus:       task.IntegrityStatus,
+		integritySames:        task.integritySames,
+		integrityLastChecksum: task.integrityLastChecksum,
+	}
+}
+
+func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prev resumeState, resumeReserved int64) {
 	taskID := task.ID
 	if stored, ok := m.tasks[taskID]; ok {
 		// 占位是否仍归属本次 resume：并发的 CancelTask/DeleteTask 会整体释放并把 ReservedSize
@@ -93,8 +123,17 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 			stored.ReservedSize -= resumeReserved
 		}
 		if stored.Status == "pending" {
-			stored.Status, stored.Error = prevStatus, prevError
-			stored.UpdatedAt, stored.ExpiresAt = prevUpdatedAt, prevExpiresAt
+			// 仅当仍是本次 resume 置的 pending 才回滚（并发 cancel/delete 的终态优先）。
+			stored.Status, stored.Error = prev.status, prev.errMsg
+			stored.UpdatedAt, stored.ExpiresAt = prev.updatedAt, prev.expiresAt
+			stored.DownloadDone = prev.downloadDone
+			stored.Downloaded = prev.downloaded
+			stored.DownloadedSize = prev.downloadedSize
+			stored.DownloadedChecksum = prev.downloadedChecksum
+			stored.Chunks = prev.chunks
+			stored.IntegrityStatus = prev.integrityStatus
+			stored.integritySames = prev.integritySames
+			stored.integrityLastChecksum = prev.integrityLastChecksum
 		}
 	}
 	m.clearRunningLocked(taskID)
@@ -192,8 +231,10 @@ func (m *CloudDownloadManager) resumeTaskWith(taskID string, opts resumeOptions,
 
 	// resume 前的终态快照：租户不可用（下方 taskDir 早退）时据此整体回滚，使内存状态
 	// 与磁盘上已有的终态一致。
-	prevStatus, prevError := task.Status, task.Error
-	prevUpdatedAt, prevExpiresAt := task.UpdatedAt, task.ExpiresAt
+	// 完整快照（2026-11-27 审查）：回滚必须恢复**所有**被 resume 清掉的字段，而不只是状态/时间。
+	// 否则 resume 因配额/租户失败时，`DownloadDone`/`Chunks` 已被清 ⇒ 产物完整却显示"未下载"，
+	// `retry_transfer` 被误禁用、下次 resume 白重下。
+	prev := captureResumeState(task)
 
 	// 状态先切 pending + running 同步置位：并发双 resume 中第二个会因 running 已置
 	// 被上面的检查拦截，避免两个 goroutine 并发写同一 .partial（Critical 修复）。
@@ -241,7 +282,7 @@ func (m *CloudDownloadManager) resumeTaskWith(taskID string, opts resumeOptions,
 		// 旧实现只置 failed/写 Error 并删 running，代价是：① UpdatedAt/ExpiresAt 被改成
 		// resume 尝试的时间（任务多活一个 TTL）；② 窗口内并发取消发布的 cancelled 终态被
 		// 覆写成 failed（用户已成功取消，却读到失败）。存储不足的原因经返回值告知调用方。
-		m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, 0)
+		m.rollbackResumeLocked(task, prev, 0)
 		m.mu.Unlock()
 		return err
 	}
@@ -267,7 +308,7 @@ func (m *CloudDownloadManager) resumeTaskWith(taskID string, opts resumeOptions,
 		// 不回滚：磁盘上确有字节占着，回滚会破坏 failTask「账本向磁盘实际收敛」的约定；
 		// 这类任务的占用随 DeleteTask/过期清理释放（清理后 running 已清 ⇒ 立即释放）。
 		m.mu.Lock()
-		m.rollbackResumeLocked(task, prevStatus, prevError, prevUpdatedAt, prevExpiresAt, resumeReserved)
+		m.rollbackResumeLocked(task, prev, resumeReserved)
 		m.mu.Unlock()
 		return fmt.Errorf("tenant unavailable for task %s", taskID)
 	}
