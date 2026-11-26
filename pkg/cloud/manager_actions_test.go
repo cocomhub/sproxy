@@ -40,8 +40,8 @@ func TestParseTaskAction(t *testing.T) {
 func TestPlanTaskActions_Availability(t *testing.T) {
 	t.Parallel()
 	plan := PlanTaskActions(&CloudTask{Status: "failed"})
-	if len(plan) != 4 {
-		t.Fatalf("失败任务应有 4 个动作，got %d", len(plan))
+	if len(plan) != 6 {
+		t.Fatalf("失败任务应有 6 个动作（续传/仅转存/覆盖转存/换链接/换源/清残留），got %d", len(plan))
 	}
 	byAction := map[TaskAction]TaskActionPlan{}
 	for _, p := range plan {
@@ -56,6 +56,7 @@ func TestPlanTaskActions_Availability(t *testing.T) {
 	withArtifact := PlanTaskActions(&CloudTask{
 		Status: "failed", DownloadDone: true, Transfer: &TransferSpec{Volume: "v", Path: "a/b"},
 		FallbackSources: []string{"u1", "u2"},
+		Diagnostics:     &TaskDiagnostics{LastErrorClass: ErrClassTargetConflict}, // 覆盖转存仅冲突时可用
 	})
 	for _, p := range withArtifact {
 		if p.Disabled {
@@ -70,16 +71,16 @@ func TestPlanTaskActions_Availability(t *testing.T) {
 // TestActionResumeOptions_Preconditions 锁定前置条件（不可行动作必须报错，不得静默降级）。
 func TestActionResumeOptions_Preconditions(t *testing.T) {
 	t.Parallel()
-	if _, err := actionResumeOptions(TaskActionRetryTransfer, &CloudTask{Status: "failed"}); err == nil {
+	if _, err := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryTransfer}, &CloudTask{Status: "failed"}); err == nil {
 		t.Fatal("下载未完成时 retry_transfer 应报错")
 	}
-	if _, err := actionResumeOptions(TaskActionRetryTransfer, &CloudTask{Status: "failed", DownloadDone: true}); err == nil {
+	if _, err := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryTransfer}, &CloudTask{Status: "failed", DownloadDone: true}); err == nil {
 		t.Fatal("无转存目标时 retry_transfer 应报错")
 	}
-	if _, err := actionResumeOptions(TaskActionRotateSource, &CloudTask{Status: "failed", FallbackSources: []string{"u1"}}); err == nil {
+	if _, err := actionResumeOptions(TaskActionRequest{Action: TaskActionRotateSource}, &CloudTask{Status: "failed", FallbackSources: []string{"u1"}}); err == nil {
 		t.Fatal("无备选源时 rotate_source 应报错")
 	}
-	opts, err := actionResumeOptions(TaskActionRetryTransfer, &CloudTask{
+	opts, err := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryTransfer}, &CloudTask{
 		Status: "failed", DownloadDone: true, Transfer: &TransferSpec{Volume: "v", Path: "p"},
 	})
 	if err != nil || !opts.keepDownloadDone {
@@ -332,5 +333,130 @@ func TestCreateTask_RejectsInvalidTransferPath(t *testing.T) {
 	if _, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-PATH-2", "x.bin", 10, "",
 		TaskParams{Save: true, Transfer: &TransferSpec{Volume: "main", Path: "ok/dir/x.bin"}}); err != nil {
 		t.Fatalf("合法路径不应被拒: %v", err)
+	}
+}
+
+// TestActionResumeOptions_OverwriteAndFromURL 锁定两个新动作的前置条件与语义。
+func TestActionResumeOptions_OverwriteAndFromURL(t *testing.T) {
+	t.Parallel()
+	withArtifact := &CloudTask{Status: "failed", DownloadDone: true, Transfer: &TransferSpec{Volume: "v", Path: "p"}}
+	opts, err := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryTransferOverwrite}, withArtifact)
+	if err != nil || !opts.keepDownloadDone {
+		t.Fatalf("覆盖重试应保留产物标记，got %+v, %v", opts, err)
+	}
+	if _, oerr := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryTransferOverwrite},
+		&CloudTask{Status: "failed", DownloadDone: true}); oerr == nil {
+		t.Fatal("无转存目标时应报错")
+	}
+	if _, uerr := actionResumeOptions(TaskActionRequest{Action: TaskActionRetryFromURL},
+		&CloudTask{Status: "failed"}); uerr == nil {
+		t.Fatal("缺 URL 时应报错")
+	}
+	opts, err = actionResumeOptions(TaskActionRequest{Action: TaskActionRetryFromURL, URL: "https://example.com/s/NEW"},
+		&CloudTask{Status: "failed"})
+	if err != nil || opts.keepDownloadDone || opts.force {
+		t.Fatalf("换链接重试应与 retry_download 同语义（保留断点），got %+v, %v", opts, err)
+	}
+}
+
+// TestAdoptURL 锁定「换链接」的源列表语义：新 URL 置顶，旧 URL 保留为备选。
+func TestAdoptURL(t *testing.T) {
+	t.Parallel()
+	task := &CloudTask{URL: "https://a/s/1", FallbackSources: []string{"https://a/s/1", "https://b/s/2"}, SourceIndex: 1,
+		Diagnostics: &TaskDiagnostics{Attempts: 3}}
+	task.adoptURL("https://c/s/3")
+	if task.URL != "https://c/s/3" || task.SourceIndex != 0 {
+		t.Fatalf("新 URL 应置顶且 index=0，got url=%s idx=%d", task.URL, task.SourceIndex)
+	}
+	want := []string{"https://c/s/3", "https://a/s/1", "https://b/s/2"}
+	if len(task.FallbackSources) != len(want) {
+		t.Fatalf("备选源 = %v, want %v", task.FallbackSources, want)
+	}
+	for i := range want {
+		if task.FallbackSources[i] != want[i] {
+			t.Fatalf("备选源 = %v, want %v", task.FallbackSources, want)
+		}
+	}
+	if task.Diagnostics.Attempts != 0 {
+		t.Fatal("新源应重置尝试次数")
+	}
+	// 幂等：同 URL 不改动
+	before := append([]string(nil), task.FallbackSources...)
+	task.adoptURL("https://c/s/3")
+	if len(task.FallbackSources) != len(before) {
+		t.Fatal("同 URL 不应改动源列表")
+	}
+}
+
+// TestApplyTaskAction_RetryTransferOverwriteSetsFlag 锁定「覆盖转存」真的把 Overwrite 打开。
+func TestApplyTaskAction_RetryTransferOverwriteSetsFlag(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	lfs := syncpkg.NewLocalFS(root, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig(),
+		CloudManagerOptions{TransferFSFor: func(string) (syncpkg.FS, string) { return lfs, "local" }})
+	task, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-OW-1", "ow.bin", 1024, "",
+		TaskParams{Save: true, Transfer: &TransferSpec{Volume: "v", Path: "ow/out.bin"}})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	dir := mgr.TaskDirFor(task.Owner, task.ID)
+	if dir == "" {
+		t.Skip("租户目录不可用（测试环境）")
+	}
+	if merr := os.MkdirAll(dir, 0o755); merr != nil {
+		t.Fatalf("mkdir: %v", merr)
+	}
+	if werr := os.WriteFile(filepath.Join(dir, task.Filename), make([]byte, 1024), 0o644); werr != nil {
+		t.Fatalf("write artifact: %v", werr)
+	}
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.DownloadDone = true
+	task.UpdatedAt = time.Now()
+	mgr.mu.Unlock()
+
+	if _, err := mgr.ApplyTaskAction(task.ID, TaskActionRetryTransferOverwrite, ""); err != nil {
+		t.Fatalf("ApplyTaskAction: %v", err)
+	}
+	mgr.mu.RLock()
+	got := mgr.tasks[task.ID]
+	ow := got.Transfer != nil && got.Transfer.Overwrite
+	mgr.mu.RUnlock()
+	if !ow {
+		t.Fatal("覆盖重试必须置 Transfer.Overwrite=true")
+	}
+}
+
+// TestApplyTaskAction_RetryFromURL 锁定「换链接重试」采用新 URL 且保留进度。
+func TestApplyTaskAction_RetryFromURL(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig())
+	const oldURL, newURL = "https://example.com/s/EXAMPLE-URL-1", "https://example.com/s/EXAMPLE-URL-2"
+	task, err := mgr.CreateTask("url", oldURL, "u.bin", 1024, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.Downloaded = 700
+	task.UpdatedAt = time.Now()
+	mgr.mu.Unlock()
+
+	if _, err := mgr.ApplyTaskActionRequest(task.ID, TaskActionRequest{Action: TaskActionRetryFromURL, URL: newURL}, ""); err != nil {
+		t.Fatalf("ApplyTaskActionRequest: %v", err)
+	}
+	mgr.mu.RLock()
+	got := mgr.tasks[task.ID]
+	url, idx, fb := got.URL, got.SourceIndex, append([]string(nil), got.FallbackSources...)
+	mgr.mu.RUnlock()
+	if url != newURL || idx != 0 {
+		t.Fatalf("应采用新 URL 且 index=0，got url=%s idx=%d", url, idx)
+	}
+	if len(fb) != 2 || fb[1] != oldURL {
+		t.Fatalf("旧 URL 应保留为备选源，got %v", fb)
 	}
 }

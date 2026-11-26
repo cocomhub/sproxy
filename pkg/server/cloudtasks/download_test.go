@@ -40,6 +40,7 @@ type stubTasks struct {
 	actionValue string
 	actionOwner string
 	actionErr   error
+	actionURL   string
 	retrySel    cloud.RetrySelector
 	retryIDs    []string
 	retryErrs   map[string]error
@@ -109,6 +110,16 @@ func (s *stubTasks) DeleteTask(id, owner string) error {
 func (s *stubTasks) ResumeTask(id string, force bool, owner string) error {
 	s.resumeID, s.resumeForce, s.resumeOwner = id, force, owner
 	return s.resumeErr
+}
+
+// ApplyTaskActionRequest 记录带参数的动作调用（retry_from_url 的 url）。
+func (s *stubTasks) ApplyTaskActionRequest(id string, req cloud.TaskActionRequest, owner string) (*cloud.CloudTask, error) {
+	s.actionID, s.actionValue, s.actionOwner = id, string(req.Action), owner
+	s.actionURL = req.URL
+	if s.actionErr != nil {
+		return nil, s.actionErr
+	}
+	return &cloud.CloudTask{ID: id, Status: "pending"}, nil
 }
 
 // ApplyTaskAction 记录动作调用（细粒度人工处理）。

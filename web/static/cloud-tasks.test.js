@@ -388,3 +388,30 @@ test('ctActionDisabled 按服务端计划判定（未知动作按禁用处理）
   assert.strictEqual(m.ctActionDisabled(plan, 'no_such_action'), true);
   assert.strictEqual(m.ctActionDisabled(null, 'retry_download'), true);
 });
+
+test('ctActionsFor 含覆盖转存与换链接（needs_url），并随前置条件禁用', () => {
+  const plan = m.ctActionsFor({ status: 'failed', download_done: true, transfer: { volume: 'v' } });
+  const by = {};
+  plan.forEach((p) => { by[p.action] = p; });
+  assert.ok(by.retry_transfer_overwrite, '应含覆盖转存');
+  assert.ok(by.retry_from_url && by.retry_from_url.needs_url === true, '换链接应标记 needs_url');
+  assert.strictEqual(m.ctActionNeedsURL(plan, 'retry_from_url'), true);
+  assert.strictEqual(m.ctActionNeedsURL(plan, 'retry_download'), false);
+  const noArtifact = m.ctActionsFor({ status: 'failed' });
+  const by2 = {};
+  noArtifact.forEach((p) => { by2[p.action] = p; });
+  assert.strictEqual(by2.retry_transfer_overwrite.disabled, true);
+});
+
+test('ctBatchActionOptionsHtml 列出可批量动作（不含换链接）', () => {
+  const html = m.ctBatchActionOptionsHtml();
+  assert.ok(html.includes('retry_download'));
+  assert.ok(html.includes('retry_transfer_overwrite'));
+  assert.ok(!html.includes('retry_from_url'));
+});
+
+test('ctRowHtml/表格含批量动作控件', () => {
+  const table = m.ctTableHtml([{ id: 't9', status: 'failed', filename: 'x.bin', diagnostics: {} }]);
+  assert.ok(table.includes('ct-batch-action'));
+  assert.ok(table.includes('ct-batch-apply'));
+});

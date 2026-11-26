@@ -78,9 +78,14 @@ func (a *cloudTasksAdapter) ResumeTask(id string, force bool, owner string) erro
 	return a.h.cloudMgr.ResumeTask(id, force, owner)
 }
 
-// ApplyTaskAction 执行细粒度人工处理（retry_download/retry_transfer/rotate_source/discard_partial）。
+// ApplyTaskAction 执行细粒度人工处理（续传/仅转存/覆盖转存/换链接/换源/清残留）。
 func (a *cloudTasksAdapter) ApplyTaskAction(id string, action cloud.TaskAction, owner string) (*cloud.CloudTask, error) {
 	return a.h.cloudMgr.ApplyTaskAction(id, action, owner)
+}
+
+// ApplyTaskActionRequest 支持带参数的动作（retry_from_url 的 url）。
+func (a *cloudTasksAdapter) ApplyTaskActionRequest(id string, req cloud.TaskActionRequest, owner string) (*cloud.CloudTask, error) {
+	return a.h.cloudMgr.ApplyTaskActionRequest(id, req, owner)
 }
 
 // SelectRetryable 按条件选出可重试任务（跨失败任务保留期，供 retry 端点与事项执行器共用）。

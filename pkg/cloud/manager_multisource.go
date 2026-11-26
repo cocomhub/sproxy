@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/cocomhub/sproxy/pkg/downloader"
 )
@@ -118,4 +119,33 @@ func (t *CloudTask) forceRotateSourceLocked() bool {
 		t.Diagnostics.Attempts = 0
 	}
 	return true
+}
+
+// adoptURL 采用新的源 URL（人工换链接重试）：新 URL 置为当前源，旧 URL 与既有备选源
+// 依次排到后面，`SourceIndex` 归零（此后 rotate_source 可回到旧源）。
+//
+// 断点保留由调用方（retry_download 语义）保证；内容正确性由下载器的 GCID/期望校验兜底
+// （不一致 ⇒ 现有的 content_mismatch 换源/重置路径处理）。
+func (t *CloudTask) adoptURL(newURL string) {
+	if newURL == "" || newURL == t.URL {
+		return
+	}
+	list := []string{newURL}
+	for _, u := range t.FallbackSources {
+		if u != "" && u != newURL {
+			list = append(list, u)
+		}
+	}
+	if t.URL != "" && t.URL != newURL {
+		found := slices.Contains(list, t.URL)
+		if !found {
+			list = append(list, t.URL)
+		}
+	}
+	t.FallbackSources = list
+	t.SourceIndex = 0
+	t.URL = newURL
+	if t.Diagnostics != nil {
+		t.Diagnostics.Attempts = 0 // 新源重新计数
+	}
 }

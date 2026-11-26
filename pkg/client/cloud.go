@@ -410,6 +410,11 @@ func (c *FileClient) GetCloudTaskProgress(ctx context.Context, taskID string, si
 // retry_download（退回下载阶段续传）/ retry_transfer（仅重做转存）/
 // rotate_source（换备选源重下）/ discard_partial（清残留重下）。
 func (c *FileClient) ApplyCloudTaskAction(ctx context.Context, taskID, action string) (*CloudTask, error) {
+	return c.ApplyCloudTaskActionWithURL(ctx, taskID, action, "")
+}
+
+// ApplyCloudTaskActionWithURL 同 ApplyCloudTaskAction，额外支持 `retry_from_url` 的新源 URL。
+func (c *FileClient) ApplyCloudTaskActionWithURL(ctx context.Context, taskID, action, newURL string) (*CloudTask, error) {
 	if taskID == "" {
 		return nil, fmt.Errorf("云端下载: taskID 不能为空")
 	}
@@ -417,7 +422,11 @@ func (c *FileClient) ApplyCloudTaskAction(ctx context.Context, taskID, action st
 		return nil, fmt.Errorf("云端下载: action 不能为空")
 	}
 	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/actions"
-	body, _ := json.Marshal(map[string]string{"action": action})
+	payload := map[string]string{"action": action}
+	if newURL != "" {
+		payload["url"] = newURL
+	}
+	body, _ := json.Marshal(payload)
 	var out struct {
 		Success bool       `json:"success"`
 		Action  string     `json:"action"`
@@ -757,4 +766,38 @@ func (c *FileClient) CloudResumeGroup(ctx context.Context, groupID string, force
 	body := map[string]bool{"force": force}
 	apiPath := apiCloudGroupsBase + url.PathEscape(groupID) + "/resume"
 	return c.doJSON(ctx, http.MethodPost, apiPath, body, nil)
+}
+
+// CloudTaskActionBatchResult 是批量动作的响应（逐项结果）。
+type CloudTaskActionBatchResult struct {
+	Success   bool   `json:"success"`
+	Action    string `json:"action"`
+	Succeeded int    `json:"succeeded"`
+	Failed    int    `json:"failed"`
+	Results   []struct {
+		TaskID string     `json:"task_id"`
+		OK     bool       `json:"ok"`
+		Task   *CloudTask `json:"task,omitempty"`
+		Error  string     `json:"error,omitempty"`
+	} `json:"results"`
+}
+
+// ApplyCloudTaskActionsBatch 批量执行同一动作（ids ≤ 50，服务端串行执行）。
+func (c *FileClient) ApplyCloudTaskActionsBatch(ctx context.Context, action, newURL string, ids []string) (*CloudTaskActionBatchResult, error) {
+	if action == "" {
+		return nil, fmt.Errorf("云端下载: action 不能为空")
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("云端下载: ids 不能为空")
+	}
+	payload := map[string]any{"action": action, "ids": ids}
+	if newURL != "" {
+		payload["url"] = newURL
+	}
+	body, _ := json.Marshal(payload)
+	var out CloudTaskActionBatchResult
+	if err := c.doJSON(ctx, http.MethodPost, apiCloudTasksBase+"actions/batch", body, &out); err != nil {
+		return nil, fmt.Errorf("批量任务动作: %w", err)
+	}
+	return &out, nil
 }
