@@ -485,6 +485,62 @@ function ctActionNeedsURL(plan, action) {
   return false;
 }
 
+// ctEtaSeconds 估算剩余秒数（2026-11-26）：用最近若干采样速率的**中位数**（抗抖动），
+// 未知总量/无有效速率返回 null（不编造）。
+function ctEtaSeconds(samples, total, done) {
+  const list = Array.isArray(samples) ? samples : [];
+  const tot = Number(total || 0);
+  const cur = Number(done || 0);
+  if (!(tot > 0) || cur >= tot) return null;
+  const rates = [];
+  for (let i = list.length - 1; i >= 0 && rates.length < 5; i--) {
+    const r = Number((list[i] || {}).rate_bps || 0);
+    if (r > 0) rates.push(r);
+  }
+  if (!rates.length) return null;
+  rates.sort(function (a, b) { return a - b; });
+  const med = rates[Math.floor(rates.length / 2)];
+  if (!(med > 0)) return null;
+  return Math.ceil((tot - cur) / med);
+}
+
+// ctEtaText 人类可读 ETA（null ⇒ '-'；始终带"约"，明确是估算）。
+function ctEtaText(sec) {
+  if (sec === null || sec === undefined || !(sec >= 0)) return '-';
+  if (sec < 60) return '约 ' + Math.round(sec) + ' 秒';
+  if (sec < 3600) return '约 ' + Math.round(sec / 60) + ' 分钟';
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  return '约 ' + h + ' 小时' + (m ? ' ' + m + ' 分' : '');
+}
+
+// ctStageTimeline 从采样提取阶段时间轴（每个阶段的首个采样点）。
+function ctStageTimeline(samples) {
+  const list = Array.isArray(samples) ? samples : [];
+  const out = [];
+  let last = null;
+  list.forEach(function (s) {
+    if (!s || !s.stage) return;
+    if (s.stage !== last) {
+      out.push({ stage: s.stage, at: s.at, downloaded: Number(s.downloaded || 0) });
+      last = s.stage;
+    }
+  });
+  return out;
+}
+
+// ctStageTimelineHtml 渲染阶段时间轴（无阶段返回空串）。
+function ctStageTimelineHtml(samples) {
+  const rows = ctStageTimeline(samples);
+  if (!rows.length) return '';
+  let html = '<div class="ct-stage-timeline" style="font-size:11px;color:var(--text-secondary);">';
+  rows.forEach(function (r) {
+    const t = r.at ? String(r.at).replace('T', ' ').replace(/\.\d+Z?$/, '') : '-';
+    html += '<span style="margin-right:10px;">' + ctEsc(ctStageLabel(r.stage)) + ' @ ' + ctEsc(t) + '</span>';
+  });
+  return html + '</div>';
+}
+
 // ctBlockMatrix 把分块状态转成「一行多小块」的矩阵数据（用户 2026-11-26）。
 // 每块按 1MiB 拆小块（上限 64 小块/行，避免一行过宽）；小块状态：done/active/todo。
 function ctBlockMatrix(chunks) {
@@ -549,12 +605,14 @@ function ctDetailHtml(t) {
     ['失败原文', d.last_error || '-'],
     ['部分产物', d.partial_path ? d.partial_path + '（' + Math.round((d.partial_size || 0) / 1048576) + ' MiB）' : '-'],
     ['速率曲线', '<span class="ct-spark-slot" data-id="' + ctEsc(t.id) + '">加载中…</span>'],
+    ['预计剩余', '<span class="ct-eta-slot" data-id="' + ctEsc(t.id) + '">-</span>'],
+    ['阶段时间轴', '<span class="ct-timeline-slot" data-id="' + ctEsc(t.id) + '">-</span>'],
     ['分块进度', '<span class="ct-matrix-slot" data-id="' + ctEsc(t.id) + '">加载中…</span>'],
   ];
   let html = '<tr class="ct-detail" data-detail-for="' + ctEsc(t.id) + '"><td colspan="7" ' +
     'style="background:rgba(127,127,127,.06);padding:10px 12px;"><table style="font-size:12px;">';
   rows.forEach(function (r) {
-    const isHtml = r[0] === '速率曲线' || r[0] === '分块进度'; // 这两行由异步填充（SVG/矩阵）
+    const isHtml = r[0] === '速率曲线' || r[0] === '分块进度' || r[0] === '预计剩余' || r[0] === '阶段时间轴'; // 这两行由异步填充（SVG/矩阵）
     html += '<tr><td style="color:var(--text-muted);padding:2px 12px 2px 0;white-space:nowrap;">' + ctEsc(r[0]) +
       '</td><td style="padding:2px 0;word-break:break-all;">' + (isHtml ? r[1] : ctEsc(r[1])) + '</td></tr>';
   });
@@ -707,6 +765,10 @@ if (typeof module !== 'undefined' && module.exports) {
     ctActionNeedsURL: ctActionNeedsURL,
     ctBatchActionOptionsHtml: ctBatchActionOptionsHtml,
     CT_ACTIONS: CT_ACTIONS,
+    ctEtaSeconds: ctEtaSeconds,
+    ctEtaText: ctEtaText,
+    ctStageTimeline: ctStageTimeline,
+    ctStageTimelineHtml: ctStageTimelineHtml,
     ctBlockMatrix: ctBlockMatrix,
     ctBlockMatrixHtml: ctBlockMatrixHtml,
     ctSummaryHtml: ctSummaryHtml,
@@ -757,8 +819,16 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
       const res = await window.sclientTransport.coreRequest(
         'GET', '/api/cloud/tasks/' + encodeURIComponent(id) + '/progress', {});
       const data = window.sclientUtil.decodeJSON(res.body);
-      const svg = ctSparklineSvg((data && data.samples) || [], 220, 40);
+      const samples = (data && data.samples) || [];
+      const svg = ctSparklineSvg(samples, 220, 40);
       slot.innerHTML = svg || '<span style="color:var(--text-muted);">暂无采样（任务尚未产生进度）</span>';
+      const eta = panel.querySelector('.ct-eta-slot[data-id="' + id + '"]');
+      if (eta) {
+        const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0] || {};
+        eta.textContent = ctEtaText(ctEtaSeconds(samples, t.total_size, t.downloaded));
+      }
+      const tl = panel.querySelector('.ct-timeline-slot[data-id="' + id + '"]');
+      if (tl) tl.innerHTML = ctStageTimelineHtml(samples) || '-';
     } catch (e) {
       slot.innerHTML = '<span style="color:#c0392b;">进度加载失败：' + ctEsc(e.message) + '</span>';
     }

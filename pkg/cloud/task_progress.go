@@ -63,10 +63,28 @@ func recordProgressSample(task *CloudTask, downloaded, total int64, now time.Tim
 		At: now, Downloaded: downloaded, Total: total, RateBps: rate, Stage: stage,
 	})
 	if len(task.Progress) > progressSampleCap {
-		// 环形裁剪：丢弃最旧，保留最近 progressSampleCap 点（切片拷贝避免底层数组泄漏）。
-		task.Progress = append([]ProgressSample(nil), task.Progress[len(task.Progress)-progressSampleCap:]...)
+		// 满窗**降采样**而不是丢最旧（2026-11-26）：真实任务可达数小时（64GiB @3MB/s ≈ 6h），
+		// 只保留最近 240 点（40 分钟）会让整条速率曲线只剩尾巴。改为隔点保留 + **阶段切换点
+		// 必留**（时间轴需要精确起点），窗口随之翻倍（40min→80min→160min…），分辨率逐步变粗
+		// 但历史不丢。
+		task.Progress = decimateProgressSamples(task.Progress)
 	}
 	return true
+}
+
+// decimateProgressSamples 隔点降采样：保留偶数下标 + **阶段切换点**（其前一采样阶段不同）。
+// 返回新切片（不共享底层数组，避免旧数组滞留）。
+func decimateProgressSamples(in []ProgressSample) []ProgressSample {
+	out := make([]ProgressSample, 0, len(in)/2+1)
+	prevStage := ""
+	for i := range in {
+		// 阶段切换点必留（i==0 时 prevStage 为空串，同样保留）。
+		if i%2 == 0 || in[i].Stage != prevStage {
+			out = append(out, in[i])
+		}
+		prevStage = in[i].Stage
+	}
+	return out
 }
 
 // ProgressSince 返回 at 之后的采样点（at 为零值 ⇒ 全部）。供 HTTP 增量接口使用。

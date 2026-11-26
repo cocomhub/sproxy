@@ -415,3 +415,45 @@ test('ctRowHtml/表格含批量动作控件', () => {
   assert.ok(table.includes('ct-batch-action'));
   assert.ok(table.includes('ct-batch-apply'));
 });
+
+test('ctEtaSeconds 用最近速率中位数估算；无速率/已完成返回 null', () => {
+  const samples = [
+    { rate_bps: 1000 }, { rate_bps: 1000 }, { rate_bps: 5000 }, // 中位数 1000
+  ];
+  // 剩 10 MiB @ 1000 B/s ≈ 10486s
+  assert.strictEqual(m.ctEtaSeconds(samples, 10 << 20, 0), Math.ceil((10 << 20) / 1000));
+  assert.strictEqual(m.ctEtaSeconds([], 1000, 0), null);
+  assert.strictEqual(m.ctEtaSeconds(samples, 100, 100), null, '已完成不估');
+  assert.strictEqual(m.ctEtaSeconds(samples, 0, 0), null, '未知总量不估');
+  assert.strictEqual(m.ctEtaSeconds([{ rate_bps: 0 }], 100, 0), null, '无有效速率不编造');
+});
+
+test('ctEtaText 人类可读且标明"约"', () => {
+  assert.strictEqual(m.ctEtaText(null), '-');
+  assert.strictEqual(m.ctEtaText(30), '约 30 秒');
+  assert.strictEqual(m.ctEtaText(600), '约 10 分钟');
+  assert.strictEqual(m.ctEtaText(3600), '约 1 小时');
+  assert.strictEqual(m.ctEtaText(5400), '约 1 小时 30 分');
+});
+
+test('ctStageTimeline 提取阶段首点；HTML 渲染中文阶段', () => {
+  const samples = [
+    { at: '2026-11-26T10:00:00.123Z', stage: 'downloading', downloaded: 0 },
+    { at: '2026-11-26T10:05:00Z', stage: 'downloading', downloaded: 1 },
+    { at: '2026-11-26T10:06:00Z', stage: 'transferring', downloaded: 2 },
+  ];
+  const rows = m.ctStageTimeline(samples);
+  assert.strictEqual(rows.length, 2);
+  assert.strictEqual(rows[0].stage, 'downloading');
+  assert.strictEqual(rows[1].stage, 'transferring');
+  const html = m.ctStageTimelineHtml(samples);
+  assert.ok(html.includes('下载中'));
+  assert.ok(html.includes('转存中'));
+  assert.strictEqual(m.ctStageTimelineHtml([]), '');
+});
+
+test('ctDetailHtml 含 ETA 与阶段时间轴槽', () => {
+  const html = m.ctDetailHtml({ id: 't-eta', status: 'downloading', diagnostics: {} });
+  assert.ok(html.includes('ct-eta-slot'));
+  assert.ok(html.includes('ct-timeline-slot'));
+});
