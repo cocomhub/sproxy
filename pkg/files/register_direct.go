@@ -31,6 +31,10 @@ type DirectUploadInput struct {
 	Size int64
 	// SHA256 是整文件 SHA-256（64 位十六进制，大小写不敏感）。
 	SHA256 string
+	// MTime 是客户端声明的原始 mtime（UnixNano；0=未知，meta 记录登记时刻）。
+	MTime int64
+	// MetaExtra 是随直传登记写入 FileMeta.Extra 的自定义元数据（可选）。
+	MetaExtra map[string]any
 }
 
 // RegisterDirectUpload 登记一个已由客户端直传落盘的对象（见本文件顶部说明）。
@@ -49,6 +53,8 @@ func (s *Service) RegisterDirectUpload(ctx context.Context, in DirectUploadInput
 		Volume:         in.Volume,
 		ClientSize:     in.Size,
 		ContentPresent: &ContentPresentSpec{Size: in.Size, SHA256: sha},
+		MetaExtra:      in.MetaExtra,
+		Mtime:          in.MTime,
 	}, nil)
 }
 

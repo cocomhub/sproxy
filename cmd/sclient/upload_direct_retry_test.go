@@ -63,7 +63,7 @@ func TestDirectUpload_RetryOn5xx(t *testing.T) {
 
 	svc := client.NewFileClient(srv.URL, client.WithSendNoAuth(true))
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	if err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", ios); err != nil {
+	if err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", nil, ios); err != nil {
 		t.Fatalf("directUpload（重试后成功）: %v", err)
 	}
 	if putAttempts.Load() != 3 {
@@ -99,7 +99,7 @@ func TestDirectUpload_RetryExhausted(t *testing.T) {
 
 	svc := client.NewFileClient(srv.URL, client.WithSendNoAuth(true))
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", ios)
+	err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", nil, ios)
 	if err == nil {
 		t.Fatal("重试耗尽应返回错误")
 	}

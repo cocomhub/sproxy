@@ -10,6 +10,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 
@@ -71,6 +72,20 @@ func (s *externalUploadSink) WriteFile(ctx context.Context, path string, r io.Re
 	return s.fs.WriteFile(ctx, syncpkg.LogicalKey{}, key, r, size, mtime)
 }
 
+// RegisterMeta 实现 syncpkg.MetaRegistrar：presign 直传登记时把内容大小/整文件 sha256
+// 交给卷写面生成 sidecar（不重读直传内容）。
+func (s *externalUploadSink) RegisterMeta(ctx context.Context, path string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	key, err := s.ownerKey(path)
+	if err != nil {
+		return err
+	}
+	r, ok := s.fs.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("外部卷未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, key, size, sha256, mtime, extra)
+}
+
 // Stat 实现 files.UploadSink：返回路径大小（覆盖写差分用；不存在 → (0,false,nil)）。
 func (s *externalUploadSink) Stat(ctx context.Context, path string) (int64, bool, error) {
 	key, err := s.ownerKey(path)
@@ -101,3 +116,4 @@ func (s *externalUploadSink) Remove(ctx context.Context, path string) error {
 
 // 编译期断言：externalUploadSink 实现 files.UploadSink。
 var _ files.UploadSink = (*externalUploadSink)(nil)
+var _ syncpkg.MetaRegistrar = (*externalUploadSink)(nil)

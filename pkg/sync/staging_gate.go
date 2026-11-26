@@ -286,6 +286,15 @@ func (g *StagingQuotaGateFS) ChecksumAndSize(ctx context.Context, rel string) (s
 	return "", 0, fmt.Errorf("sync: 底层未实现 ChecksumAndSize: %w", ErrUnsupported)
 }
 
+// RegisterMeta 委托 inner（presign 直传 meta 登记）。
+func (g *StagingQuotaGateFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := g.inner.(MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("sync: 底层未实现 RegisterMeta: %w", ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+}
+
 // UpdateMetaExtra 委托 inner（damaged 源完整性 / transfer_verified 旁路标记）。
 func (g *StagingQuotaGateFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := g.inner.(interface {

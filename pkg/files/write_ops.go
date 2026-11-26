@@ -2520,18 +2520,35 @@ func (s *Service) writeTargetPresentSettle(ctx context.Context, owner, rel, remo
 			s.recordUploadSuccess(root, owner, remotePath, rel, route.VolumeName, checksum, input.Mtime, logger)
 		}
 	} else {
-		if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
-			checksumSet(cs, route.VolumeName, rel, checksum)
-		}
-		if mr := s.rt.metricsRecorder(); mr != nil {
-			mr.RecordUpload(spec.Size)
-		}
-		logger.DebugContext(ctx, "直传对象登记成功（外部卷）", "file_name", remotePath, "size", spec.Size)
+		s.settlePresentExternal(ctx, owner, rel, remotePath, input, route, spec.Size, checksum, logger)
 	}
 	return WriteTargetResult{
 		VolumeName: route.VolumeName, Checksum: checksum, Size: spec.Size,
 		Message: fmt.Sprintf("直传对象登记成功, size: %d", spec.Size),
 	}, nil
+}
+
+// settlePresentExternal 处理外部卷直传登记的成功副作用：checksum 台账、单块 meta
+// 登记与指标。抽独立函数保持主流程认知复杂度可控。
+func (s *Service) settlePresentExternal(ctx context.Context, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, size int64, checksum string, logger *slog.Logger) {
+	if cs := s.rt.checksumStore(owner); cs != nil && checksum != "" {
+		checksumSet(cs, route.VolumeName, rel, checksum)
+	}
+	// 外部卷直传没有服务端读取内容，无法算分块哈希；把客户端声明的 size+整文件
+	// sha256 交给卷写面登记单块 FileMeta（trusted sidecar）。没有该能力（如
+	// secretdata 直传密文）时仅告警，保持登记成功但不伪造 meta。
+	if reg, ok := route.Sink.(syncpkg.MetaRegistrar); ok {
+		if rerr := reg.RegisterMeta(ctx, rel, size, checksum, input.Mtime, input.MetaExtra); rerr != nil {
+			logger.WarnContext(ctx, "外部卷直传 meta 登记失败（保留登记，读侧可能无校验）",
+				"file_name", remotePath, "error", rerr)
+		}
+	} else {
+		logger.DebugContext(ctx, "外部卷未装配 RegisterMeta（直传对象无 sidecar）", "file_name", remotePath)
+	}
+	if mr := s.rt.metricsRecorder(); mr != nil {
+		mr.RecordUpload(size)
+	}
+	logger.DebugContext(ctx, "直传对象登记成功（外部卷）", "file_name", remotePath, "size", size)
 }
 
 // presentObjectSize 取直传对象的物理大小（外部卷经 Sink.Stat，本地卷经租户根 Stat）。

@@ -297,6 +297,14 @@ func (g *MetaBucketGuard) ChecksumAndSize(ctx context.Context, rel string) (stri
 	return "", 0, fmt.Errorf("trusted: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
 }
 
+// RegisterMeta 委托 inner（presign 直传 meta 登记）。
+func (g *MetaBucketGuard) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	if r, ok := g.inner.(syncpkg.MetaRegistrar); ok {
+		return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+	}
+	return fmt.Errorf("trusted: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+}
+
 // UpdateMetaExtra 委托 inner（damaged 源完整性标记写入 meta.Extra）。
 func (g *MetaBucketGuard) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	if err := g.guardPath(rel); err != nil {
@@ -331,6 +339,8 @@ var (
 	_ MetaExtraUpdater        = (*MetaBucketGuard)(nil)
 	// 同一能力的规范化声明（pkg/sync 为能力枚举单一事实源，R21 门禁据此检查）。
 	_ syncpkg.MetaExtraUpdater    = (*TrustedVolumeFS)(nil)
+	_ syncpkg.MetaRegistrar       = (*TrustedVolumeFS)(nil)
+	_ syncpkg.MetaRegistrar       = (*MetaBucketGuard)(nil)
 	_ syncpkg.StagingQuotaCapable = (*MetaBucketGuard)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*MetaBucketGuard)(nil)
 	_ syncpkg.WriteIfAbsent       = (*MetaBucketGuard)(nil)

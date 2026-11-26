@@ -78,6 +78,7 @@ var (
 	_ syncpkg.Mover               = (*FS)(nil)
 	_ syncpkg.Copier              = (*FS)(nil)
 	_ syncpkg.Linker              = (*FS)(nil)
+	_ syncpkg.MetaRegistrar       = (*FS)(nil)
 	_ syncpkg.StagingQuotaCapable = (*FS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*FS)(nil)
 	_ syncpkg.StagedPathReuse     = (*FS)(nil)

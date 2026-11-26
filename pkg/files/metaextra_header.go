@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
@@ -71,4 +72,19 @@ func decodeMetaExtraPayload(raw string) ([]byte, error) {
 		return []byte(raw), nil
 	}
 	return nil, errors.New("既不是合法 base64 也不是 JSON 对象")
+}
+
+// ParseUploadMetaExtra 是 parseMetaExtraHeader 的导出入口（HTTP 处理器/直传 complete 复用）。
+func ParseUploadMetaExtra(raw string) (map[string]any, error) { return parseMetaExtraHeader(raw) }
+
+// ParseUploadMTime 是 X-File-MTime 头的导出入口（UnixNano；缺省/非法=0）。
+func ParseUploadMTime(raw string) int64 {
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }

@@ -34,12 +34,15 @@ func TestDirectUpload_FullFlow(t *testing.T) {
 	defer s3.Close()
 
 	// mock sproxy：presign 返回指向 mock S3 的 URL；complete 返回 ok。
+	var completeMeta, completeMTime string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/backends/s3/presign":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"url": %q}`, s3.URL+"/dir/a.txt")
 		case "/api/backends/s3/presign/complete":
+			completeMeta = r.Header.Get("X-File-Meta-Extra")
+			completeMTime = r.Header.Get("X-File-MTime")
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"ok": "registered"}`)
 		default:
@@ -57,11 +60,14 @@ func TestDirectUpload_FullFlow(t *testing.T) {
 
 	svc := client.NewFileClient(srv.URL, client.WithSendNoAuth(true))
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	if err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", ios); err != nil {
+	if err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", map[string]any{"x_direct": "1"}, ios); err != nil {
 		t.Fatalf("directUpload: %v", err)
 	}
 	if s3Got != "/dir/a.txt" {
 		t.Fatalf("S3 收到 PUT 路径 = %q, want /dir/a.txt", s3Got)
+	}
+	if completeMeta == "" || completeMTime == "" {
+		t.Fatalf("complete 应携带 meta/mtime 头: meta=%q mtime=%q", completeMeta, completeMTime)
 	}
 }
 
@@ -81,7 +87,7 @@ func TestDirectUpload_PresignError(t *testing.T) {
 
 	svc := client.NewFileClient(srv.URL, client.WithSendNoAuth(true))
 	ios := cli.IOStreams{Out: io.Discard, ErrOut: io.Discard}
-	err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", ios)
+	err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", nil, ios)
 	if err == nil {
 		t.Fatal("签发失败应返回错误")
 	}

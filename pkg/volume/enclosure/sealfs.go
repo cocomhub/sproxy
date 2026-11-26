@@ -281,6 +281,18 @@ func (s *SealFS) ReserveSpace(ctx context.Context, relPath string, size int64) e
 	return rs.ReserveSpace(ctx, relPath, size)
 }
 
+// RegisterMeta 属写面 ⇒ 命中封印拒绝；未封印时转发底层。
+func (s *SealFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	if err := s.writeErr(rel); err != nil {
+		return err
+	}
+	r, ok := s.FS.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("SealFS: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+}
+
 // UpdateMetaExtra 旁路 sidecar 更新（MetaExtraUpdater）：属写面 ⇒ 命中封印拒绝。
 func (s *SealFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	if err := s.writeErr(rel); err != nil {
@@ -327,6 +339,7 @@ var (
 	_ syncpkg.StagingQuotaCapable = (*SealFS)(nil)
 	_ syncpkg.StagingQuotaExempt  = (*SealFS)(nil)
 	_ syncpkg.MetaExtraUpdater    = (*SealFS)(nil)
+	_ syncpkg.MetaRegistrar       = (*SealFS)(nil)
 	_ syncpkg.StagedPathReuse     = (*SealFS)(nil)
 	_ meta.Provider               = (*SealFS)(nil)
 )

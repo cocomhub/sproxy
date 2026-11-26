@@ -80,6 +80,40 @@ func (p *providerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, 
 
 var _ meta.Provider = (*providerFS)(nil)
 
+// TestRegisterMeta_SingleChunkAndExtra 验证 presign 直传的已声明 size/sha256 能生成
+// 单块 sidecar（不读取内容），且 extra/mtime 与普通上传口径一致。
+func TestRegisterMeta_SingleChunkAndExtra(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{})
+	data := []byte("presign-direct-content")
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	mtime := time.Now().Add(-time.Hour).Truncate(time.Second).UnixNano()
+	if err := inner.WriteFile(context.Background(), syncpkg.LogicalKey{}, "user/a.bin", bytes.NewReader(data), int64(len(data)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tv.(*TrustedVolumeFS).RegisterMeta(context.Background(), "user/a.bin", int64(len(data)), sha, mtime, map[string]any{"x_direct": "1"}); err != nil {
+		t.Fatalf("RegisterMeta: %v", err)
+	}
+	rc, err := inner.OpenRead(context.Background(), "meta/a.bin.meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatal(uerr)
+	}
+	if fm.TotalSHA256 != sha || fm.Size != int64(len(data)) || len(fm.Chunks) != 1 || fm.Chunks[0].SHA256 != sha {
+		t.Fatalf("unsupported meta: %+v", fm)
+	}
+	if fm.Extra["x_direct"] != "1" || fm.MTime != time.Unix(0, mtime).UTC().Format(time.RFC3339) {
+		t.Fatalf("extra/mtime: %+v %q", fm.Extra, fm.MTime)
+	}
+}
+
 // TestWrite_PersistsUploadExtraAndMTime 外部卷/所有 FS 经装饰器写入时，随上传
 // meta_extra 与 mtime 必须进入 sidecar（与 secretdata/本地卷读出口径一致）。
 func TestWrite_PersistsUploadExtraAndMTime(t *testing.T) {

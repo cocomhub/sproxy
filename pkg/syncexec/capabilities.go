@@ -103,6 +103,14 @@ func (q *quotaLocalFS) ChecksumAndSize(ctx context.Context, rel string) (string,
 	return cp.ChecksumAndSize(ctx, rel)
 }
 
+func (q *quotaLocalFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := q.inner.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("syncexec: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+}
+
 func (q *quotaLocalFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := q.inner.(syncpkg.MetaExtraUpdater)
 	if !ok {
@@ -185,6 +193,7 @@ var (
 	_ syncpkg.StorageInspector = (*quotaLocalFS)(nil)
 	_ syncpkg.TreeInspector    = (*quotaLocalFS)(nil)
 	_ syncpkg.DirMetaCleaner   = (*quotaLocalFS)(nil)
+	_ syncpkg.MetaRegistrar    = (*quotaLocalFS)(nil)
 )
 
 // 编译期契约：本装饰器必须支持 `DecoratorCapabilities` 的**全部**共同可选能力

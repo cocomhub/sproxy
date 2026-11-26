@@ -234,6 +234,11 @@ func (h *Handlers) backendPresignCompleteCore(w http.ResponseWriter, r *http.Req
 		http.Error(w, "登记需携带 size（非负整数）与 sha256（64 位十六进制）", http.StatusBadRequest)
 		return
 	}
+	metaExtra, merr := files.ParseUploadMetaExtra(r.Header.Get("X-File-Meta-Extra"))
+	if merr != nil {
+		http.Error(w, "meta-extra 无效: "+merr.Error(), http.StatusBadRequest)
+		return
+	}
 	vol, matched, verr := h.presignVolumeFor(typ, owner)
 	if verr != nil {
 		h.presignBackendError(w, typ, verr)
@@ -245,6 +250,7 @@ func (h *Handlers) backendPresignCompleteCore(w http.ResponseWriter, r *http.Req
 		rel := presignRemoteRel(owner, path)
 		if _, rerr := h.fileService().RegisterDirectUpload(r.Context(), files.DirectUploadInput{
 			Owner: owner, RemotePath: rel, Volume: vol.Name, Size: size, SHA256: sha,
+			MTime: files.ParseUploadMTime(r.Header.Get("X-File-MTime")), MetaExtra: metaExtra,
 		}); rerr != nil {
 			h.presignRegisterError(w, rerr)
 			return

@@ -35,6 +35,7 @@ var decoratorCapsExcluded = map[string]string{
 	"StagingQuotaTracker":   "配额钩子的**参数**接口，非 FS 能力",
 	"innerFS":               "未导出（透明下探标记）",
 	"BlockAccessor":         "**非共同**能力：并非所有装饰器都转发（实测 PrefixFS/StagingQuotaGateFS 未实现）⇒ 由 R21 按「登记 + 豁免」逐项把关；若将来所有装饰器都支持，应移入聚合接口",
+	"MetaRegistrar":         "**非共同**能力：presign 直传登记专用；仅 trusted/CacheFS/capacity/Prefix/Guard 等需要转发，其余装饰器可按不支持返回 ErrUnsupported ⇒ 由 R21 逐项断言把关",
 	"DecoratorCapabilities": "本聚合接口**自身**（不是待转发的能力）",
 	"RangeVerifier":         "作用于 **ReadSeeker**（读流对象）而非 FS ⇒ 不属于 FS 可选能力，装饰器无转发语义",
 }
