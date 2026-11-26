@@ -56,13 +56,13 @@ func TestListTasks_SnapshotDeepCopyNoRace(t *testing.T) {
 	// 写面：严格按生产锁纪律（m.mu.Lock 内写）。
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for n := range rounds {
 			mgr.mu.Lock()
 			recordChunkState(live, downloader.ChunkState{Index: 0, Phase: "done", Done: 1})
 			// 诊断写：与 recordKeptPartial 同路径（它持 m.mu 写 PartialSize/PartialPath）。
 			d := live.diag()
 			d.PartialPath = "/tmp/partial"
-			d.PartialSize = int64(i)
+			d.PartialSize = int64(n)
 			mgr.mu.Unlock()
 		}
 	}()
@@ -71,7 +71,7 @@ func TestListTasks_SnapshotDeepCopyNoRace(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		var held []*CloudTask
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			list, _ := mgr.ListTasks("", 0, 0, "")
 			held = append(held, list...)
 			if len(held) > 8 {
