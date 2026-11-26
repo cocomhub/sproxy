@@ -15,6 +15,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -463,6 +464,37 @@ type CloudMetrics struct {
 	TransfersFailed      atomic.Int64 // 转存失败次数（重试耗尽终止）
 	TransferTargetErrors atomic.Int64 // 目标卷异常次数（转存层写失败；告警接入点）
 	TransferFileErrors   atomic.Int64 // 文件内容异常次数（两次校验和一致仍转存失败）
+	// TaskActions 是人工处理动作计数（按 action + result 分标签；用户 2026-11-26）。
+	// 用互斥表而非固定字段：动作集合会演进，标签化才能观察"用户最常用哪种处理"。
+	TaskActions TaskActionCounters
+}
+
+// TaskActionCounters 是「动作 → 结果 → 次数」的并发安全计数表。
+type TaskActionCounters struct {
+	mu   sync.Mutex
+	byID map[string]int64
+}
+
+// Inc 记一次动作（action ∈ retry_download/...，result ∈ success/error）。
+func (c *TaskActionCounters) Inc(action, result string) {
+	if action == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.byID == nil {
+		c.byID = map[string]int64{}
+	}
+	c.byID[action+"|"+result]++
+	c.mu.Unlock()
+}
+
+// Snapshot 返回副本（key = "action|result"），供指标渲染。
+func (c *TaskActionCounters) Snapshot() map[string]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]int64, len(c.byID))
+	maps.Copy(out, c.byID)
+	return out
 }
 
 // recoveryGuard 包装一个需要 panic recovery 的 goroutine 循环函数。

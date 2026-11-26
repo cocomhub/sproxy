@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/cloud"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 
 	"github.com/cocomhub/sproxy/pkg/server/metrics"
@@ -300,6 +301,9 @@ func (h *Handlers) MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		metrics.WriteMetric(&b, "sproxy_cloud_tasks_completed", "counter", "Total cloud download tasks completed", cmMetrics.TasksCompleted.Load())
 		metrics.WriteMetric(&b, "sproxy_cloud_tasks_failed", "counter", "Total cloud download tasks failed", cmMetrics.TasksFailed.Load())
 		metrics.WriteMetric(&b, "sproxy_cloud_tasks_cancelled", "counter", "Total cloud download tasks cancelled", cmMetrics.TasksCancelled.Load())
+		// 人工处理动作（按 action + result 分标签）：观察用户最常用哪种处理方式。
+		metrics.WriteLabeledCounter(&b, "sproxy_cloud_task_actions_total",
+			"Cloud task manual actions by action and result", cloudTaskActionSamples(cmMetrics))
 		metrics.WriteMetric(&b, "sproxy_cloud_bytes_downloaded", "counter", "Total bytes downloaded by cloud downloader", cmMetrics.BytesDownloaded.Load())
 		metrics.WriteMetric(&b, "sproxy_cloud_active_downloads", "gauge", "Currently active cloud downloads", cmMetrics.ActiveDownloads.Load())
 		// 转存（transfer）指标（NH-P2：此前计数但零导出，不可观测）
@@ -436,4 +440,21 @@ func (h *Handlers) MetricsAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cloudTaskActionSamples 把动作计数表转成带标签样本（label 顺序固定，便于测试断言）。
+func cloudTaskActionSamples(m *cloud.CloudMetrics) []metrics.LabeledSample {
+	if m == nil {
+		return nil
+	}
+	snap := m.TaskActions.Snapshot()
+	out := make([]metrics.LabeledSample, 0, len(snap))
+	for key, n := range snap {
+		action, result, _ := strings.Cut(key, "|")
+		out = append(out, metrics.LabeledSample{
+			Labels: `action="` + action + `",result="` + result + `"`,
+			Value:  n,
+		})
+	}
+	return out
 }

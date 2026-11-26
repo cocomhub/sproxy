@@ -856,6 +856,13 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
 
 > 动作可用性由服务端判定（`PlanTaskActions`）：产物是否完整、是否有备选源只有服务端知道，
 > 前端不应重复推断。未知动作或前置条件不满足 ⇒ 400；任务不存在/不可见 ⇒ 404。
+>
+> 额外约束（2026-11-26 加固）：`retry_transfer` 执行前会**校验磁盘产物仍存在**——产物已被清理时
+> 明确报错（不会静默回落整份下载）；`completed` + `integrity_status=damaged` 的任务也会下发
+> `retry_download`（label「修复重下」，先做零尾扫描 + 定点补片）。
+>
+> 指标：`sproxy_cloud_task_actions_total{action,result}`（观察人工处理动作分布）。
+> CLI：`sclient cloud-download actions <task-id>` 列出可用动作与不可用原因。
 
 ### POST /api/cloud/tasks/{id}/resume
 

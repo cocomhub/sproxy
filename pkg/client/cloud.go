@@ -25,18 +25,29 @@ type TransferSpec struct {
 }
 
 // CloudTask 表示一个云端下载任务。
+// CloudTaskAction 是服务端判定的可用处理动作（含不可用原因）。
+type CloudTaskAction struct {
+	Action   string `json:"action"`
+	Label    string `json:"label"`
+	Hint     string `json:"hint"`
+	Disabled bool   `json:"disabled,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 type CloudTask struct {
-	ID         string `json:"id"`
-	URL        string `json:"url"`
-	Method     string `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
-	Filename   string `json:"filename"`
-	Status     string `json:"status"`
-	TotalSize  int64  `json:"total_size"`
-	Downloaded int64  `json:"downloaded"`
-	Checksum   string `json:"checksum"`
-	ETag       string `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
-	Error      string `json:"error"`
-	GroupID    string `json:"group_id,omitempty"` // 所属下载组 ID（可选）
+	ID       string `json:"id"`
+	URL      string `json:"url"`
+	Method   string `json:"method,omitempty"` // 下载方法，如 "http"、"scraper" 等，空值表示自动选择
+	Filename string `json:"filename"`
+	Status   string `json:"status"`
+	// Actions 是服务端判定的可用处理动作（failed/cancelled/completed+damaged 才有）。
+	Actions    []CloudTaskAction `json:"actions,omitempty"`
+	TotalSize  int64             `json:"total_size"`
+	Downloaded int64             `json:"downloaded"`
+	Checksum   string            `json:"checksum"`
+	ETag       string            `json:"etag,omitempty"` // 服务端 ETag，用于版本标识与二次校验
+	Error      string            `json:"error"`
+	GroupID    string            `json:"group_id,omitempty"` // 所属下载组 ID（可选）
 	// Diagnostics 是服务端持久化的诊断快照（2026-11-21）：阶段/失败次数/失败归类/部分产物。
 	// 客户端据此显示"为何失败、是否值得重试"。
 	Diagnostics *CloudTaskDiagnostics `json:"diagnostics,omitempty"`

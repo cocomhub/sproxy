@@ -4,6 +4,7 @@
 package cloud
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -106,6 +107,17 @@ func TestApplyTaskAction_RetryTransferKeepsArtifact(t *testing.T) {
 	task.DownloadedChecksum = "abc"
 	task.UpdatedAt = time.Now()
 	mgr.mu.Unlock()
+	// 「仅重做转存」要求磁盘产物仍在（2026-11-26 前置校验）：先造产物。
+	dir := mgr.TaskDirFor(task.Owner, task.ID)
+	if dir == "" {
+		t.Skip("租户目录不可用（测试环境）")
+	}
+	if merr := os.MkdirAll(dir, 0o755); merr != nil {
+		t.Fatalf("mkdir: %v", merr)
+	}
+	if werr := os.WriteFile(filepath.Join(dir, task.Filename), make([]byte, 1024), 0o644); werr != nil {
+		t.Fatalf("write artifact: %v", werr)
+	}
 
 	if _, err := mgr.ApplyTaskAction(task.ID, TaskActionRetryTransfer, ""); err != nil {
 		t.Fatalf("ApplyTaskAction: %v", err)
@@ -201,5 +213,69 @@ func TestApplyTaskAction_RejectsNonResumable(t *testing.T) {
 	}
 	if _, err := mgr.ApplyTaskAction("no-such-task", TaskActionRetryDownload, ""); err == nil {
 		t.Fatal("不存在的任务应报错")
+	}
+}
+
+// TestPlanTaskActions_Damaged 锁定「completed+damaged 有修复入口」（定点修复优先）。
+func TestPlanTaskActions_Damaged(t *testing.T) {
+	t.Parallel()
+	plan := PlanTaskActions(&CloudTask{Status: "completed", IntegrityStatus: "damaged"})
+	if len(plan) == 0 {
+		t.Fatal("damaged 任务应提供修复动作")
+	}
+	if plan[0].Action != TaskActionRetryDownload || plan[0].Label != "修复重下" {
+		t.Fatalf("首个动作应为「修复重下」的 retry_download，got %+v", plan[0])
+	}
+	if got := PlanTaskActions(&CloudTask{Status: "completed"}); len(got) != 0 {
+		t.Fatalf("正常 completed 不应有动作，got %d", len(got))
+	}
+}
+
+// TestVerifyActionPreconditions_RetryTransferRequiresArtifact 锁定「产物缺失时不得静默重下」：
+// 仅重做转存必须先确认磁盘产物存在，否则明确报错（避免 executeDownload 静默回落整份下载）。
+func TestVerifyActionPreconditions_RetryTransferRequiresArtifact(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig())
+	task, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-PRECOND-1", "e.mp4", 1024, "",
+		TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.DownloadDone = true
+	mgr.mu.Unlock()
+	if err := mgr.verifyActionPreconditions(TaskActionRetryTransfer, task); err == nil {
+		t.Fatal("产物不存在时应报错（不能静默重下）")
+	}
+	// 造出产物后应通过。
+	dir := mgr.TaskDirFor(task.Owner, task.ID)
+	if dir == "" {
+		t.Skip("租户目录不可用（测试环境）")
+	}
+	if merr := os.MkdirAll(dir, 0o755); merr != nil {
+		t.Fatalf("mkdir: %v", merr)
+	}
+	if werr := os.WriteFile(filepath.Join(dir, task.Filename), []byte("x"), 0o644); werr != nil {
+		t.Fatalf("write: %v", werr)
+	}
+	if err := mgr.verifyActionPreconditions(TaskActionRetryTransfer, task); err != nil {
+		t.Fatalf("产物存在时应通过: %v", err)
+	}
+}
+
+// TestTaskActionCounters 锁定动作计数（按 action|result 分标签）。
+func TestTaskActionCounters(t *testing.T) {
+	t.Parallel()
+	var c TaskActionCounters
+	c.Inc("retry_download", "success")
+	c.Inc("retry_download", "success")
+	c.Inc("rotate_source", "error")
+	c.Inc("", "success") // 空动作忽略
+	snap := c.Snapshot()
+	if snap["retry_download|success"] != 2 || snap["rotate_source|error"] != 1 || len(snap) != 2 {
+		t.Fatalf("计数异常: %+v", snap)
 	}
 }
