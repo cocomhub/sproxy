@@ -32,8 +32,12 @@ func redactURLForLog(raw string) string {
 	switch {
 	case u.Path == "" || u.Path == "/":
 		// 无路径
+	case len(segs) == 1 && segs[0] != "" && strings.Contains(segs[0], "."):
+		// 单段**且像文件名**（含扩展名）：保留，便于排障。
+		out += "/" + segs[0]
 	case len(segs) == 1 && segs[0] != "":
-		out += "/" + segs[0] // 单段（通常是文件名）：保留，便于排障
+		// 单段无扩展名：多半是分享 token（如 `/AbCdEf1234567890`）⇒ 掩码。
+		out += "/***"
 	default:
 		out += "/" + segs[0] + "/***" // 多段：只留第一段（接口名），其余视为凭据
 	}
