@@ -4,6 +4,8 @@
 package clientfactory_test
 
 import (
+	"context"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -166,5 +168,24 @@ func TestFactory_NewClient_AccessKeyFlagKeepsConfigSecret(t *testing.T) {
 	}
 	if svc.AccessKeySecret() != "6162636465666768696a6b6c6d6e6f707172737475767778797a303132333435" {
 		t.Errorf("secret 应回落配置, got %q", svc.AccessKeySecret())
+	}
+}
+
+// TestFactory_NewClient_APIOnlySkipsTunnel 验证：标记 API-only 的命令即使 server
+// 来自配置（未显式 --server），也不会装配传统隧道；TunnelDo 应直接报「未配置隧道」。
+func TestFactory_NewClient_APIOnlySkipsTunnel(t *testing.T) {
+	t.Parallel()
+	f := clientfactory.NewWithContext("test.yaml", nil, func() *contextcfg.Resolved { return resolveFixture(t) })
+	cmd := contextCmd()
+	cmd.Annotations = map[string]string{clientfactory.AnnotationAPIOnly: "true"}
+	svc, err := f.NewClient(cmd)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.invalid/", nil)
+	if _, terr := svc.TunnelDo(req); terr == nil || !strings.Contains(terr.Error(), "未配置隧道") {
+		t.Fatalf("API-only 不应装配隧道, TunnelDo err=%v", terr)
 	}
 }
