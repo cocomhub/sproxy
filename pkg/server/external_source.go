@@ -57,7 +57,18 @@ func (s *externalDownloadSource) Stat(ctx context.Context) (fs.FileInfo, error) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return externalFileInfo{name: s.rel, size: s.size, modTime: s.modTime}, nil
+	// 与 GetFileMetaInfo/下载校验同源：外部卷文件系统 mtime 往往是上传时刻，
+	// FileMeta.MTime 才是客户端上传时声明的逻辑 mtime。Stat 也必须返回后者，
+	// 否则客户端 stat 与 meta 读出的时间不一致。meta 缺失/损坏时回落 FS 时间。
+	modTime := s.modTime
+	if s.fileMeta != nil {
+		if fm, ferr := s.fileMeta(ctx, s.rel); ferr == nil && fm != nil && fm.MTime != "" {
+			if t, terr := time.Parse(time.RFC3339Nano, fm.MTime); terr == nil {
+				modTime = t
+			}
+		}
+	}
+	return externalFileInfo{name: s.rel, size: s.size, modTime: modTime}, nil
 }
 
 // Open 实现 files.DownloadSource：返回 RangeSeeker（io.ReadSeeker 适配 OpenRangeRead）。
@@ -223,9 +234,6 @@ func (h *Handlers) resolveCandidateVolume(r *http.Request, v volume.Volume, owne
 // 再尝试直连下载（direct_download 阈值内）。返回 nil = 该候选不提供路径（调用方继续下一候选）。
 func (h *Handlers) resolveHitVolume(v volume.Volume, forceForward bool, fsys syncpkg.FS, r *http.Request, ownerKey, filename string, e *syncpkg.Entry) *downloadPath {
 	src := newExternalSource(fsys, ownerKey, e, h.verifySkipped())
-	if resolved := h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src); resolved != nil {
-		return resolved
-	}
 	return h.externalStateFor(v, forceForward, fsys, r, ownerKey, filename, src)
 }
 

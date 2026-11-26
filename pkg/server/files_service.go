@@ -891,6 +891,12 @@ func (o externalVolumeOps) ExternalMetaUpdate(ctx context.Context, owner, volNam
 		return true, files.ErrMetaUnavailable
 	}
 	if uerr := updater.UpdateMetaExtra(ctx, key, extra); uerr != nil {
+		// 能力存在但 sidecar 缺失（无内容基线）与「无能力」对调用方都是 fail-closed；
+		// 统一返回 ErrMetaUnavailable（HTTP 503），避免把 trusted 的 sidecar 不存在
+		// 误报成 500。已有 sidecar 的真错误仍如实包装。
+		if errors.Is(uerr, os.ErrNotExist) {
+			return true, files.ErrMetaUnavailable
+		}
 		return true, fmt.Errorf("外部卷 meta 更新失败: %w", uerr)
 	}
 	return true, nil
