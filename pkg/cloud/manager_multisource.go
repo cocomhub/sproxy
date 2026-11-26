@@ -103,3 +103,19 @@ func sha256FileHex(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// forceRotateSourceLocked 强制轮换到下一个备选源（**人工**动作，不看失败归类）。
+// 与 rotateSourceLocked 的区别：后者只对源类失败自动触发；本函数由用户显式选择「换源重试」。
+// 返回是否发生轮换（调用方持 m.mu）。
+func (t *CloudTask) forceRotateSourceLocked() bool {
+	next := t.SourceIndex + 1
+	if next >= len(t.FallbackSources) {
+		return false
+	}
+	t.SourceIndex = next
+	t.URL = t.FallbackSources[next]
+	if t.Diagnostics != nil {
+		t.Diagnostics.Attempts = 0
+	}
+	return true
+}

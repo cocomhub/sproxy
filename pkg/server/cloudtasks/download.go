@@ -389,6 +389,7 @@ func (s *Service) ListTasks(w http.ResponseWriter, r *http.Request, owner string
 	for i := range tasks {
 		if tasks[i] != nil {
 			tasks[i].Progress = nil
+			tasks[i].Actions = cloud.PlanTaskActions(tasks[i])
 		}
 	}
 	s.writeJSON(w, map[string]any{"tasks": tasks, "total": total}, http.StatusOK)
@@ -402,6 +403,7 @@ func (s *Service) GetTask(w http.ResponseWriter, r *http.Request, owner string) 
 		s.writeJSON(w, map[string]string{"error": "task not found"}, http.StatusNotFound)
 		return
 	}
+	task.Actions = cloud.PlanTaskActions(task)
 	s.writeJSON(w, task, http.StatusOK)
 }
 
@@ -432,6 +434,51 @@ func (s *Service) GetTaskProgress(w http.ResponseWriter, r *http.Request, owner 
 		"now":      time.Now().UTC().Unix(),
 		"capacity": 240,
 	}, http.StatusOK)
+}
+
+// TaskActioner 是**可选能力**（细粒度人工处理）：不扩 Tasks 主接口——
+// 主接口方法数受门禁约束（只减不增），且扩接口会破坏所有测试替身。
+type TaskActioner interface {
+	ApplyTaskAction(id string, action cloud.TaskAction, owner string) (*cloud.CloudTask, error)
+}
+
+// ApplyTaskAction 处理 POST /api/cloud/tasks/{id}/actions（body: {"action": "..."}）。
+//
+// 动作（用户 2026-11-26）：retry_download（退回下载阶段续传）/ retry_transfer（仅重做转存）/
+// rotate_source（换备选源重下）/ discard_partial（清残留重下）。返回动作提交后的任务快照。
+func (s *Service) ApplyTaskAction(w http.ResponseWriter, r *http.Request, owner string) {
+	id := r.PathValue("id")
+	var req struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		s.writeJSON(w, map[string]string{"error": "invalid json: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	action, err := cloud.ParseTaskAction(req.Action)
+	if err != nil {
+		s.writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+		return
+	}
+	// 可选能力（不扩 Tasks 主接口）：方法数门禁只减不增，且扩主接口会破坏所有测试替身。
+	act, ok := s.deps.Tasks.(TaskActioner)
+	if !ok {
+		s.writeJSON(w, map[string]string{"error": "当前装配不支持任务动作"}, http.StatusNotImplemented)
+		return
+	}
+	task, err := act.ApplyTaskAction(id, action, owner)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		}
+		s.deps.Audit.Record(r.Context(), "cloud_task_action", "task", id, auditResultError, err.Error())
+		s.writeJSON(w, map[string]string{"error": err.Error()}, status)
+		return
+	}
+	// 业务审计（R35-b）：动作改变任务执行路径，必须留痕（含动作名）。
+	s.deps.Audit.Record(r.Context(), "cloud_task_action", "task", id, auditResultSuccess, string(action))
+	s.writeJSON(w, map[string]any{"success": true, "action": action, "task": task}, http.StatusOK)
 }
 
 // CancelTask 处理 POST /api/cloud/tasks/{id}/cancel。

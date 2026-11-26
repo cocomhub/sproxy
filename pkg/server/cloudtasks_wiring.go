@@ -78,6 +78,11 @@ func (a *cloudTasksAdapter) ResumeTask(id string, force bool, owner string) erro
 	return a.h.cloudMgr.ResumeTask(id, force, owner)
 }
 
+// ApplyTaskAction 执行细粒度人工处理（retry_download/retry_transfer/rotate_source/discard_partial）。
+func (a *cloudTasksAdapter) ApplyTaskAction(id string, action cloud.TaskAction, owner string) (*cloud.CloudTask, error) {
+	return a.h.cloudMgr.ApplyTaskAction(id, action, owner)
+}
+
 // SelectRetryable 按条件选出可重试任务（跨失败任务保留期，供 retry 端点与事项执行器共用）。
 func (a *cloudTasksAdapter) SelectRetryable(sel cloud.RetrySelector) []string {
 	return a.h.cloudMgr.SelectRetryable(sel)

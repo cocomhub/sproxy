@@ -346,3 +346,37 @@ test('ctDetailHtml 含分块进度槽', () => {
   const html = m.ctDetailHtml({ id: 'cloud-y-1', status: 'downloading', diagnostics: {} });
   assert.ok(html.includes('ct-matrix-slot'));
 });
+
+test('ctActionsFor 优先服务端 actions；无则按判据兜底（下载未完成/无备选源禁用）', () => {
+  const serverPlan = [{ action: 'retry_download', label: '续传下载' }];
+  assert.deepStrictEqual(m.ctActionsFor({ status: 'failed', actions: serverPlan }), serverPlan);
+  assert.deepStrictEqual(m.ctActionsFor({ status: 'completed' }), []);
+  const plan = m.ctActionsFor({ status: 'failed' });
+  const by = {};
+  plan.forEach((p) => { by[p.action] = p; });
+  assert.ok(by.retry_download);
+  assert.strictEqual(by.retry_transfer.disabled, true);
+  assert.strictEqual(by.rotate_source.disabled, true);
+  assert.ok(by.discard_partial);
+  const full = m.ctActionsFor({
+    status: 'failed', download_done: true, transfer: { volume: 'v' },
+    fallback_sources: ['u1', 'u2'],
+  });
+  assert.strictEqual(full.filter((p) => p.disabled).length, 0);
+});
+
+test('ctActionControlsHtml 渲染下拉与执行按钮；禁用项带原因；非失败态为空', () => {
+  const html = m.ctActionControlsHtml({ id: 't1', status: 'failed' });
+  assert.ok(html.includes('ct-action-select'));
+  assert.ok(html.includes('ct-action-apply'));
+  assert.ok(html.includes('retry_download'));
+  assert.ok(html.includes('下载未完成'));
+  assert.strictEqual(m.ctActionControlsHtml({ id: 't2', status: 'completed' }), '');
+  assert.strictEqual(m.ctActionControlsHtml(null), '');
+});
+
+test('ctRowHtml 失败行含动作控件（v2 不只「重试」）', () => {
+  const html = m.ctRowHtml({ id: 't3', status: 'failed', filename: 'a.mp4', diagnostics: {} });
+  assert.ok(html.includes('ct-action-select'));
+  assert.ok(html.includes('ct-retry'));
+});

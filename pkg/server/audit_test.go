@@ -759,6 +759,37 @@ func TestCloudCancelTask_RecordsAuditError(t *testing.T) {
 	}
 }
 
+// TestCloudTaskAction_RecordsAudit 锁定细粒度人工处理动作的业务审计（R35-b）：
+// 任务不存在 ⇒ 404 且记录 error（动作名不得静默丢失）。
+func TestCloudTaskAction_RecordsAudit(t *testing.T) {
+	t.Parallel()
+	url, _, auditBuf := newAuditTestServer(t, nil)
+
+	payload := []byte(`{"action":"retry_download"}`)
+	req, _ := http.NewRequest("POST", url+"/api/cloud/tasks/no-such-id/actions", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	signBodyRequestEntry(req, testAccessKey, testEntryID(testAccessKey), testAccessSecret, payload)
+	resp, err := testHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatalf("cloud task action: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+
+	m := findAudit(t, auditBuf, "cloud_task_action")
+	if m["actor"] != testAccessKey {
+		t.Errorf("actor = %v, want %q", m["actor"], testAccessKey)
+	}
+	if m["object"] != "no-such-id" {
+		t.Errorf("object = %v, want no-such-id", m["object"])
+	}
+	if m["result"] != "error" {
+		t.Errorf("result = %v, want error", m["result"])
+	}
+}
+
 func TestCloudDeleteTask_RecordsAuditError(t *testing.T) {
 	t.Parallel()
 	url, _, auditBuf := newAuditTestServer(t, nil)
