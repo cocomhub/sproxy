@@ -117,7 +117,10 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 		"meta_pad_bytes": "8MiB",
 		"max_file_bytes": float64(4096),
 	}}
-	opts := secretdataOptionsFromVolumeWith(v, nil)
+	opts, err := secretdataOptionsFromVolume(v, nil)
+	if err != nil {
+		t.Fatalf("secretdataOptionsFromVolume: %v", err)
+	}
 	if opts.GCInterval != 30*time.Second {
 		t.Errorf("gc_interval 解析失败: %v（want 30s）", opts.GCInterval)
 	}
@@ -144,7 +147,10 @@ func TestSecretdataOptionsFromVolume_AssemblyKeys(t *testing.T) {
 		t.Errorf("max_file_bytes(数字) = %d，want 4096", got)
 	}
 	// 缺省：GCInterval 0（后台 GC 关闭，默认禁用）、dedup/preserve_mtime false、字节 0。
-	def := secretdataOptionsFromVolumeWith(volume.Volume{Extra: map[string]any{}}, nil)
+	def, derr := secretdataOptionsFromVolume(volume.Volume{Extra: map[string]any{}}, nil)
+	if derr != nil {
+		t.Fatalf("缺省配置不应报错: %v", derr)
+	}
 	if def.GCInterval != 0 || def.Dedup || def.PreserveMTime {
 		t.Errorf("缺省应全关，got GCInterval=%v dedup=%v preserve_mtime=%v", def.GCInterval, def.Dedup, def.PreserveMTime)
 	}
@@ -1702,5 +1708,103 @@ func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
 	//    未生效，目录不存在 ⇒ 本断言必红。
 	if _, err := os.Stat(filepath.Join(localRoot, "meta", "quota", "vault")); err != nil {
 		t.Fatalf("secretdata 卷账本应落节点本地目录（WithLedgerDirIfLocal 未生效）: %v", err)
+	}
+}
+
+// TestSecretdataOptions_BlockRulesParsed 锁定 extra.block_rules → 已编译规则快照
+// （用户面 YAML 形态：[]any 内 map[string]any，max_size 支持 "20MiB" 字符串或数字）。
+func TestSecretdataOptions_BlockRulesParsed(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "random", "min": 4096, "max": 1 << 20},
+		"block_rules": []any{
+			map[string]any{
+				"path_regex": "^archive/", "max_size": "1MiB",
+				"mode": "single", "priority": float64(100), "note": "归档包不分片",
+			},
+			map[string]any{
+				"path_regex": `\.jpg$`, "mode": "random", "priority": 10,
+			},
+		},
+	}}
+	opts, err := secretdataOptionsFromVolume(v, nil)
+	if err != nil {
+		t.Fatalf("secretdataOptionsFromVolume: %v", err)
+	}
+	if opts.Policy == nil {
+		t.Fatal("block_rules 未解析进 Options.Policy")
+	}
+	r, hit := opts.Policy.Resolve("archive/a.bin", 1024)
+	if !hit || r.Mode != "single" {
+		t.Fatalf("应命中 single 规则，得到 %+v hit=%v", r, hit)
+	}
+	if r.Note != "归档包不分片" {
+		t.Fatalf("note 未保留: %q", r.Note)
+	}
+	if _, hit2 := opts.Policy.Resolve("photos/b.jpg", 1024); !hit2 {
+		t.Fatal("第二条规则（\\.jpg$）应命中")
+	}
+	if _, hit3 := opts.Policy.Resolve("photos/b.png", 1024); hit3 {
+		t.Fatal("未匹配任何规则不应命中")
+	}
+}
+
+// TestSecretdataOptions_BlockRulesInvalidFailsClosed 锁定静态规则写错在装配期 fail-closed
+// （错误带规则下标；静默忽略会让运维以为规则生效）。
+func TestSecretdataOptions_BlockRulesInvalidFailsClosed(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{
+		Name: "vault",
+		Type: "secretdata",
+		Extra: map[string]any{
+			"block_rules": []any{
+				map[string]any{"path_regex": "^archive/", "mode": "single"}, // 缺 max_size
+			},
+		},
+	}
+	_, err := secretdataOptionsFromVolume(v, nil)
+	if err == nil {
+		t.Fatal("非法静态规则应装配失败")
+	}
+	if !strings.Contains(err.Error(), "max_size") {
+		t.Fatalf("错误应指出 max_size 缺失: %v", err)
+	}
+}
+
+// TestVcExtraBlockPolicy_ModeWhitelist 锁定 block_policy.mode 白名单：未知取值（拼错）
+// 不能静默变成一个 planner（`legend` 之前会被 blockPlanner 判 nil 而 fail-closed，
+// 但 `single` 现在是合法 planner ⇒ 必须显式告知其受 64 MiB 硬顶约束，见
+// SinglePlanner.Plan）。本用例锁「非空但未知的 mode 一律回落到默认 random 并在装配期报错」。
+func TestVcExtraBlockPolicy_ModeWhitelist(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "vault", Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "legend", "min": 4096, "max": 16384},
+	}}
+	_, err := secretdataOptionsFromVolume(v, nil)
+	if err == nil {
+		t.Fatal("未知 block_policy.mode 应装配期报错（不得静默）")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("错误应指出 mode 非法: %v", err)
+	}
+	// single 合法（受规划器硬顶约束）
+	ok := volume.Volume{Name: "v2", Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "single", "min": 1, "max": 1 << 20},
+	}}
+	if _, oerr := secretdataOptionsFromVolume(ok, nil); oerr != nil {
+		t.Fatalf("single 应合法: %v", oerr)
+	}
+}
+
+// TestBlockModeResolvedCallbackWired 锁定装配层真的接了可观测性回调（设计 §10「静默失效」缓解）：
+// 未命中规则时也要能观察到（否则运维无从判断「规则为什么没生效」）。
+func TestBlockModeResolvedCallbackWired(t *testing.T) {
+	t.Parallel()
+	opts, err := secretdataOptionsFromVolume(volume.Volume{Name: "vault"}, nil)
+	if err != nil {
+		t.Fatalf("secretdataOptionsFromVolume: %v", err)
+	}
+	if opts.OnBlockModeResolved == nil {
+		t.Fatal("装配层必须注入 OnBlockModeResolved（nil ⇒ 命中/未命中全不可观测）")
 	}
 }

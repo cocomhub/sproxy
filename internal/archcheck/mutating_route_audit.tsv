@@ -92,6 +92,7 @@ POST /upload/complete	pending	handler=uploadComplete actions=NONE
 POST /upload/init	pending	handler=uploadInit actions=NONE
 PUT /api/files/meta	action=file_meta_update	
 POST /api/volumes/refresh	action=volume_refresh	
+PUT /api/volumes/{name}/settings/{section}	action=volume_settings_update	
 POST /api/credentials/login	action=credential_login	
 POST /api/credentials/register	action=credential_register	
 POST /api/credentials/nonce	pending	handler=nonceHandler note=TOTP 挑战签发，非业务变更

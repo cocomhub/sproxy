@@ -74,8 +74,13 @@ func countAuditCalls(t *testing.T) map[string]int {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		// 跳过非源码目录（worktree 副本 / 构建产物 / 依赖缓存），否则他人分支的文件会被算进来。
-		slash := "/" + filepath.ToSlash(path)
+		// 相对 root 判跳过：worktree 的**绝对路径**本身含 `/.worktrees/`，用绝对路径判定会把
+		// 整个仓库跳过（门禁在 worktree 内恒假绿，2026-11-26 实测踩到）。
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		slash := "/" + filepath.ToSlash(rel)
 		for _, skip := range []string{"/.worktrees/", "/build/", "/node_modules/", "/.git/"} {
 			if strings.Contains(slash, skip) {
 				return nil

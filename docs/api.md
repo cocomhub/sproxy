@@ -1519,6 +1519,82 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 审计：`action=volume_refresh`（`object` = 卷名，全部卷形态为 `*`）
 - 等价入口：CLI `sclient volume refresh [<卷名>]`、Web UI 工具栏「强制刷新」按钮
 
+## 卷详情与设置分区
+
+通用容器：卷详情列出一个卷的**可调配置分区**，每个分区自带字段 schema 与当前值。首个（也是当前唯一）
+分区是 secretdata 卷的 `block_policy`（分块规则）；后续卷型新增配置只需实现后端能力，**路由与前端
+形态不变**。
+
+### GET /api/volumes/{name}/detail
+
+返回卷基础信息 + 能力列表 + 设置分区（含 schema 与当前值）。
+
+- 可见性：卷必须在请求者可见卷视图内，否则 `404`（不泄露他人私有卷存在性）
+- 本地卷（无外部后端）同样返回 200：`settings` 为 `[]`（「此卷暂无可调配置」），不是 404
+- `capabilities` 含 `settings` 表示该卷支持设置分区；不支持时 `settings` 为 `[]`
+- 后端读取设置失败 ⇒ `500`（不把服务端故障伪装成「没有配置」）
+- 路径为三段（`/{name}/detail`）而非 `/{name}`：卷名可合法取 `export`/`user` 等值，两段通配会与
+  既有字面路由撞名
+
+```jsonc
+{
+  "volume": {"name":"vault","type":"secretdata","mode":"","capacity":0,"usage":123,"state":"healthy"},
+  "capabilities": ["settings"],
+  "settings": [{
+    "key": "block_policy", "label": "分块规则", "read_only": false,
+    "fields": [
+      {"key":"rules","label":"规则（按 priority 降序，首命中生效）","type":"rules","required":false},
+      {"key":"max_size_limit","label":"单条规则块大小上限（字节）","type":"number","required":false}
+    ],
+    "value": {"version": 3, "rules": [
+      {"path_regex":"^archive/.*\.zip$","max_size":20971520,"mode":"single","priority":100}
+    ]}
+  }]
+}
+```
+
+### GET /api/volumes/{name}/settings
+
+只返回 `settings` 数组（卷基础信息不参与，便于大卷型只读配置时减少往返）。可见性同 detail。
+
+```jsonc
+{"settings": [ /* 同 detail 的 settings */ ]}
+```
+
+### PUT /api/volumes/{name}/settings/{section}
+
+写一个设置分区（当前仅 `block_policy`）。
+
+- 权限：**卷所有者（用户卷）或 admin（系统/共享卷）**；他人私有卷 `404`（防枚举），
+  系统卷非 admin `403`
+- 请求体上限 1 MiB；成功返回 `{"success":true,"version":N}`
+- 状态码：校验失败 `400`（错误信息含规则下标）；版本冲突 `409`（并发写，重读后重试）；
+  分区不支持 `405`；卷不存在/不可见 `404`
+- 审计：`action=volume_settings_update`（`result` = `success`/`denied`/`error`，与全仓审计结果
+  取值一致；`detail` 只含条数与载荷摘要，**不含规则全文**）
+
+```bash
+curl -X PUT "https://host/api/volumes/vault/settings/block_policy"   -H 'Content-Type: application/json'   -d '{"rules":[{"path_regex":"^archive/.*\.zip$","max_size":"20MiB","mode":"single","priority":100}]}'
+```
+
+**规则语义**（`block_policy`）：
+
+| 字段 | 说明 |
+|---|---|
+| `path_regex` | 对**用户可见相对路径**（`<owner>/user/` 之后的部分）做**子串匹配**（RE2）。要整串语义自行写 `^...$` |
+| `min_size` / `max_size` | 体积**闭区间**（字节，支持 `"20MiB"` 或纯数字）；`0` = 该侧不限 |
+| `mode` | `single` = 整文件单块（1 个底层 blob）；`random` = 卷默认变长分块（可用于压制更宽的 single 规则） |
+| `priority` | 降序排序键；同值按声明顺序；**首命中即停** |
+
+约束（服务端 fail-closed，错误含规则下标）：
+
+- `mode: single` **必须**给 `max_size`，且 `max_size ≤ min(64 MiB, 卷 block_policy.max)`
+  （单块加密整块入内存 ⇒ 无上限即 OOM 通道；超出卷级上限会让物理配额上界被低估）
+- 单卷最多 64 条规则；`path_regex` 长度 ≤ 512 且必须可编译
+- **只影响新写入的文件**：改规则不重写已落盘文件（文件按自身 meta 读取，永远正确）
+- 持久化：`state_store` 后端（键 `volume_policy/<卷名>`，CAS 版本）；未装配 StateStore 时分区
+  为 `read_only`、写入返回明确错误
+
 ## 卷运维（move / rebalance / copy / export / import / backup）
 
 以下端点均为写/读卷操作，owner 恒取自请求认证；`from_volume` / `to_volume` 必须在 owner 卷视图内

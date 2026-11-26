@@ -266,6 +266,9 @@ web-test:
 	@node --check web/static/console-nav.js
 	@node --check web/static/v2/shell.js
 	@node --check web/static/v2/shell.test.js
+	@node --check web/static/v2/volume-settings.js
+	@node --check web/static/v2/volume-drawer.js
+	@node --check web/static/v2/volume-settings.test.js
 	@node --check web/static/shared/format.js
 	@node --check web/static/shared/format.test.js
 	@node --check web/static/shared/creds.js
@@ -352,6 +355,7 @@ web-test:
 	node --test web/static/v2/keyboard.test.js
 	node --test web/static/v2/trash.test.js
 	node --test web/static/v2/volumes-console.test.js
+	node --test web/static/v2/volume-settings.test.js
 	node --test web/static/v2/cloud-ops.test.js
 	node --test web/static/v2/i18n.test.js
 	node --test web/static/v2/pending-upload.test.js

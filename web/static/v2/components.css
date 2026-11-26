@@ -116,6 +116,8 @@ body {
   padding: 10px 12px; margin-bottom: 12px; border: 1px solid var(--border);
   border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px;
 }
+/* hidden 属性必须压过 .banner 的 display:flex（否则「隐藏的空提示条」仍在布局里占位并可见边框）。 */
+.banner[hidden] { display: none; }
 .banner-warn {
   border-color: color-mix(in srgb, var(--warn) 34%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, transparent);

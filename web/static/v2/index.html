@@ -366,7 +366,7 @@
                 <table class="table">
                   <thead><tr><th>名称</th><th style="width:110px">类型</th><th style="width:100px">模式</th>
                     <th style="width:100px" class="r">容量</th><th style="width:180px">已用</th>
-                    <th style="width:90px">状态</th><th style="width:90px"></th></tr></thead>
+                    <th style="width:90px">状态</th><th style="width:150px"></th></tr></thead>
                   <tbody id="v2-vl-body"></tbody>
                 </table>
                 <div class="empty" id="v2-vl-empty" hidden><b>没有可用卷</b>
@@ -700,6 +700,22 @@
   </div>
 </aside>
 
+<div class="drawer-backdrop" id="v2-vd-backdrop" hidden></div>
+<aside class="drawer" id="v2-vdrawer" role="dialog" aria-labelledby="v2-vd-title" aria-hidden="true"
+  style="width:min(760px,96vw)">
+  <header>
+    <h3 id="v2-vd-title">卷详情</h3>
+    <button class="icon-btn" id="v2-vd-close" type="button" title="关闭">✕</button>
+  </header>
+  <div class="dr-body">
+    <dl class="kv" id="v2-vd-info"></dl>
+    <div id="v2-vd-state" class="banner" hidden role="status"></div>
+    <div id="v2-vd-sections"></div>
+    <div class="empty" id="v2-vd-empty" hidden><b>此卷暂无可调配置</b>
+      <div class="muted">该卷类型未声明设置分区。</div></div>
+  </div>
+</aside>
+
 <div class="preview-backdrop" id="v2-pv-backdrop" hidden></div>
 <div class="preview" id="v2-preview" role="dialog" aria-modal="true" aria-labelledby="v2-pv-title" hidden>
   <header>
@@ -845,6 +861,8 @@
 <script src="notify-console.js"></script>
 <script src="verify-console.js"></script>
 <script src="access-console.js"></script>
+<script src="volume-settings.js"></script>
+<script src="volume-drawer.js"></script>
 <script src="volumes-console.js"></script>
 <script src="transfer.js"></script>
 <script src="console.js"></script>

@@ -217,3 +217,59 @@ var (
 	_ = shardseal.SaltLen
 	_ syncpkg.FS
 )
+
+// TestStageDL_WindowCacheHitIsFinalPlaintext 锁定「窗口缓存命中」的返回契约：
+// 命中时拿到的是**已解密且已裁剪到 [offset,end) 的明文**，调用方不得再当密文跨度二次解密。
+//
+// 为什么需要它（2026-11-26 实测）：`segmentSpanFetch` 命中窗口缓存时返回
+// `(明文, spanOff=0, ok=true)`，而调用方无条件走 `decryptSegmentWindows(span, spanOff, …)` ⇒
+// 把 4 KiB 明文当密文跨度、按 blocklet 的 EncOffset(≈214) 越界的密文长度(262172) 校验 ⇒
+// 「blocklet 段 0 越出合并区间」。触发条件是「第一次读时后台窗口下载已完成」（竞态），
+// 故表现为偶发 flake（整包并发跑必现、单跑常常不现）。
+func TestStageDL_WindowCacheHitIsFinalPlaintext(t *testing.T) {
+	t.Parallel()
+	fs, _, content := newCacheEnv(t, -1) // 关闭内存块缓存，只走窗口缓存
+	stageDir := t.TempDir()
+	fs.stageDL = newStageDL(stageDir, 64<<20, fs)
+
+	// 第一轮：触发后台窗口下载并等它落盘。
+	rc, err := fs.OpenRangeRead(context.Background(), "big.bin", 0, 4096)
+	if err != nil {
+		t.Fatalf("OpenRangeRead #1: %v", err)
+	}
+	if _, rerr := io.ReadAll(rc); rerr != nil {
+		t.Fatalf("ReadAll #1: %v", rerr)
+	}
+	_ = rc.Close()
+	// 等到**窗口就绪**（windowCacheRead 真的命中），而不是只等「有缓存文件」——前者才是
+	// 触发缓存命中分支的充要条件（后者可以早于就绪标记）。用轮询把竞态变成确定性前置。
+	waitWindows(t, func() bool {
+		fs.mu.RLock()
+		e := fs.index["big.bin"]
+		fs.mu.RUnlock()
+		if e == nil || e.meta == nil {
+			return false
+		}
+		key, salt, kerr := fs.fileLevelKey(e)
+		if kerr != nil {
+			return false
+		}
+		o := chunkRangeOpts{e: e, rel: "big.bin", ci: e.meta.Chunks[0], keyBytes: key, salt: salt}
+		_, ok := fs.windowCacheRead(o, 0, 4096)
+		return ok
+	}, "窗口缓存就绪")
+
+	// 第二轮：此时窗口已就绪 ⇒ 走缓存命中路径，必须返回正确明文且不报错。
+	rc2, err := fs.OpenRangeRead(context.Background(), "big.bin", 0, 4096)
+	if err != nil {
+		t.Fatalf("OpenRangeRead #2: %v", err)
+	}
+	defer rc2.Close()
+	got, rerr := io.ReadAll(rc2)
+	if rerr != nil {
+		t.Fatalf("窗口缓存命中后读应成功（不得把明文当密文跨度二次解密）: %v", rerr)
+	}
+	if !bytes.Equal(got, content[:4096]) {
+		t.Fatalf("缓存命中返回内容不符：len=%d want=%d", len(got), 4096)
+	}
+}

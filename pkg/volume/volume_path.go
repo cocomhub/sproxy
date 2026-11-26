@@ -389,17 +389,36 @@ func joinSegsVolume(segs []string) string {
 // 与 files 域 `user/<rel>`（租户根相对）归一结果一致（两者最终都指向卷 user 桶内用户可见
 // 坐标）。pkg/cloud 转存与 pkg/server 转存预检共用本入口，避免复制键算法。
 func UserVisibleRel(key string) string {
+	if rel, ok := UserVisibleRelOK(key); ok {
+		return rel
+	}
+	return strings.TrimPrefix(key, "/")
+}
+
+// UserVisibleRelOK 与 UserVisibleRel 同一判据，但**显式报告形状是否匹配**：把
+// 「`<owner>/user/<rel>` 或 `user/<rel>`」剥离为 `<rel>` 并返回 ok=true；形状不符
+// （内部桶键 `meta/...`、`chunk/...` 等）返回 ("", false)。
+//
+// 为什么需要 ok 区分（而不是像 UserVisibleRel 那样回退原串）：需要「只对用户面写入生效」的
+// 逻辑（如 secretdata 分块规则）必须能区分「这就是用户可见路径」与「这是内部键」——
+// 回退原串会让规则拿内部键去匹配，产生误命中。
+//
+// **单一实现**：两个导出函数共用本函数，避免键剥离规则在两处独立演化（一处跟随、
+// 一处不跟随 ⇒ 规则静默不命中）。
+func UserVisibleRelOK(key string) (string, bool) {
 	if key == "" {
-		return ""
+		return "", false
 	}
 	key = strings.TrimPrefix(key, "/")
-	if after, ok := strings.CutPrefix(key, "user/"); ok {
-		return after
-	}
-	if _, after, ok := strings.Cut(key, "/"); ok {
-		if after2, ok2 := strings.CutPrefix(after, "user/"); ok2 {
-			return after2
+	// **先判三段形态**（`<owner>/user/<rel>`）：owner 本身可以叫 `user`（`user/user/x`），
+	// 若先剥两段形态会把 owner 当桶段、把 `user/x` 当 rel（错）。三段优先则两种情形都对。
+	if owner, after, ok := strings.Cut(key, "/"); ok && owner != "" {
+		if rel, ok2 := strings.CutPrefix(after, "user/"); ok2 && rel != "" {
+			return rel, true
 		}
 	}
-	return key
+	if after, ok := strings.CutPrefix(key, "user/"); ok && after != "" {
+		return after, true
+	}
+	return "", false
 }

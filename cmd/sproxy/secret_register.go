@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,7 @@ import (
 	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -162,12 +164,38 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 // **Dedup 不接线（方案 A 降级）**：去重降级为预留能力，装配层不再解析 extra.dedup 键
 // （该键被忽略，生产 Options.Dedup 恒 false = 不复用）。实验代码保留由测试直接构造
 // Options.Dedup 验证；生产 config 不启用。
-// secretdataOptionsFromVolumeWith 同上，但注入**存储问题上报器**（可选；nil = 不上报，零回归）。
+// secretdataOptionsFromVolume 注入**存储问题上报器**（可选；nil = 不上报，零回归），并解析/编译
+// extra.block_rules（非法即返回错误，装配期 fail-closed）。
 //
+// vcExtraBlockRules 解析 extra.block_rules（有序规则列表）。
+//
+// 兼容形态：YAML/JSON 反序列化后是 `[]any` 内 `map[string]any`；也接受已构造好的
+// `[]policy.Rule` 与 `[]map[string]any`（程序内联/测试友好）。单条字段用 **json 往返**
+// 归一（sizex.ByteSize 自带 UnmarshalJSON：接受 "20MiB" 字符串与纯数字），避免在这里
+// 手写第二套字段解析——那样必然与 policy 的 JSON tag 漂移。
+func vcExtraBlockRules(v volume.Volume) ([]policy.Rule, error) {
+	raw, ok := v.Extra["block_rules"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	if typed, ok := raw.([]policy.Rule); ok {
+		return typed, nil
+	}
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 extra.block_rules 失败: %w", err)
+	}
+	var rules []policy.Rule
+	if uerr := json.Unmarshal(blob, &rules); uerr != nil {
+		return nil, fmt.Errorf("extra.block_rules 形状非法（须为规则对象数组）: %w", uerr)
+	}
+	return rules, nil
+}
+
 // 用户裁定 2026-11-10：改名/移动后旧目录 meta 删除失败等「引擎无法自主决策或需要重试」的问题，
 // 必须能被人工感知并可定期重试 ⇒ 装配根把 `server.IssueCenter` 注入到这里（见 root.go）。
-func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReporter) secretdata.Options {
-	return secretdata.Options{
+func secretdataOptionsFromVolume(v volume.Volume, rep secretdata.IssueReporter) (secretdata.Options, error) {
+	opts := secretdata.Options{
 		IssueReporter:      rep,
 		VolumeName:         v.Name,
 		Algorithm:          vcExtraStr(v, "algorithm"),
@@ -200,6 +228,43 @@ func secretdataOptionsFromVolumeWith(v volume.Volume, rep secretdata.IssueReport
 		// 上游调用开销（含 baidupcs 每块 exec 一次二进制）远大于传输本身。
 		UploadConcurrency: vcExtraInt(v, "upload_concurrency"),
 	}
+	// 静态规则基线（extra.block_rules）：编译失败**装配期 fail-closed**——静默忽略会让运维
+	// 以为规则生效（设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md §7）。
+	// block_policy.mode 白名单：未知取值必须在装配期报错，不能静默落进 planner 判定
+	// （`single` 是合法 planner，但受 SinglePlanner 的 64 MiB 硬顶约束）。
+	if m := opts.Block.Mode; m != "" && m != shardseal.BlockModeRandom && m != shardseal.BlockModeSingle {
+		return opts, fmt.Errorf("卷 %q 的 block_policy.mode %q 非法（须为 %q 或 %q）",
+			v.Name, m, shardseal.BlockModeRandom, shardseal.BlockModeSingle)
+	}
+	rules, rerr := vcExtraBlockRules(v)
+	if rerr != nil {
+		return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, rerr)
+	}
+	if len(rules) > 0 {
+		compiled, cerr := policy.Compile(policy.Policy{Rules: rules}, opts.Block.Max)
+		if cerr != nil {
+			return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, cerr)
+		}
+		opts.Policy = compiled
+		// 规则里出现 single 而卷开了 erasure ⇒ 该文件没有冗余（单块无 parity）。不是错误
+		// （用户可能正要这个效果），但必须在装配期可见，避免事后才发现「以为有冗余」。
+		if opts.Erasure {
+			for _, r := range rules {
+				if r.Mode == shardseal.BlockModeSingle {
+					slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
+						"volume", v.Name, "path_regex", r.PathRegex)
+					break
+				}
+			}
+		}
+	}
+	// 可观测性（设计 §10「静默失效」缓解）：命中与未命中都上报，装配层接日志/指标。
+	// nil 回调 = 不上报，但**装配层恒注入**——否则「规则为什么没生效」无从排查。
+	opts.OnBlockModeResolved = func(rel, mode string, matched bool) {
+		slog.Debug("secretdata: 块级分块模式已确定",
+			"volume", v.Name, "rel", rel, "mode", mode, "rule_matched", matched)
+	}
+	return opts, nil
 }
 
 // registerSecretdataBackendWithFS 注册 secretdata backend 类型构造器（生产/测试）。
@@ -220,7 +285,10 @@ func registerSecretdataBackendWithFS(typ string, resolveSecret func(ctx context.
 		if err != nil {
 			return nil, err
 		}
-		opts := secretdataOptionsFromVolumeWith(v, rep)
+		opts, oerr := secretdataOptionsFromVolume(v, rep)
+		if oerr != nil {
+			return nil, oerr
+		}
 		opts.Secret = secret
 		// 本地 target（LocalFS）→ 关闭快照/meta 缓存：本地列举与读取是微秒级，缓存无收益，
 		// 只会多占磁盘（快照曾达 401MB）并引入失效管理成本。外部卷才需要。
@@ -549,7 +617,10 @@ func (w secretdataWrapper) Build(ctx context.Context, v volume.Volume, src syncp
 		return nil, err
 	}
 	// 封装卷路径同样注入上报器（改名/移动发生在封装卷语义下时也要能感知）。
-	opts := secretdataOptionsFromVolumeWith(v, w.issueReporter)
+	opts, oerr := secretdataOptionsFromVolume(v, w.issueReporter)
+	if oerr != nil {
+		return nil, oerr
+	}
 	opts.Secret = secret
 	// 多副本（extra.targets：多本地根）与 `type: secretdata` 同语义：主底层 = 封装卷源视图，
 	// 副本为独立本地根（写复制、读主失败回退副本）。

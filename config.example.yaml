@@ -122,6 +122,12 @@ storage_root: "./storage"
 #   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
 #   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；
 #   #                              #   "video-keyframe" = 强制开启（需 ffmpeg 或 go-mp4 提供者装配）
+#   #       block_rules:           # 分块规则基线（可选）：按「用户可见相对路径 + 体积」命中模式
+#   #         - path_regex: '^archive/.*\.zip$'   # RE2 子串匹配（要整串自行写 ^...$）
+#   #           max_size: "20MiB"                 # single 必须给上限，且 ≤ min(64MiB, block_policy.max)
+#   #           mode: single                      #   single = 整文件 1 块；random = 卷默认变长分块
+#   #           priority: 100                     #   降序，同值按声明序，首命中生效
+#   #         # 运行期规则（Web UI 卷详情 / PUT /api/volumes/{name}/settings/block_policy）优先于本基线
 #   #   # 默认 secrets 是 **per-owner** 的（每个 owner 各自的 <storage_root>/<owner>/meta/secrets/，免声明、
 #   #   # 首次使用时自动派生）：/api/secrets 恒作用于请求者自己的桶。**服务级声明（此处 config）没有
 #   #   # owner 上下文** ⇒ secret_url 必须指向显式命名的 secrets 卷（如 secrets://mykeys/datakey）；

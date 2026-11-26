@@ -21,6 +21,25 @@ func cryptoRandN(n int64) int64 {
 	return bi.Int64()
 }
 
+// 块级分块模式名（**单一事实源**：BlockPolicy.Mode / 规则引擎 policy 包 / secretdata 选型共用，
+// 避免字符串字面量散落——与 BlockletMode 常量的收敛理由相同）。
+const (
+	// BlockModeRandom 是可变长随机分块（默认；RandomPlanner，1MB-200MB）。
+	BlockModeRandom = "random"
+	// BlockModeSingle 是整文件单块（SinglePlanner）：整文件 = 1 个密文 blob、1 次上传。
+	// 适用于小文件（图片/文本/日志/已压缩包），随机分块对其无收益。
+	BlockModeSingle = "single"
+
+	// MaxSingleBlockBytes 是 single 模式的**硬上限**（64 MiB）——单一事实源
+	// （`shardseal/policy.HardMaxSingleBytes` 直接引用本常量，不复制数值）。
+	//
+	// 为什么规划器自己也要兜底：单块加密会把整块明文载入内存（encryptWriteChunksAt 的
+	// `make([]byte, b.Size)`）⇒「无上限的整文件单块」就是 OOM 通道。`policy.Compile` 校验
+	// 只覆盖「经规则引擎」的入口；`extra.block_policy.mode: single` 这条**配置入口**不经过它
+	// （审查 Critical），故约束必须落在规划器上，才能对所有构造点生效。
+	MaxSingleBlockBytes int64 = 64 << 20
+)
+
 // BlockPlanner 是可插拔分块规划接口：把原始文件大小切成不定长的分块序列。
 // 默认实现是 RandomPlanner（1MB-200MB 随机）；可扩展 video-keyframe 等
 // 按内容语义分片（plugin，见设计 §7）。
@@ -123,7 +142,7 @@ type Blocklet struct {
 }
 
 // FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成
-// 宽度 ≤BloffsetMax 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
+// 宽度 ≤Max 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
 // Min/Max 可继承 BlockPolicy 默认（64KB-4MB）；对小块测试可缩小。fixed 模式忽略 data。
 type FixedBlockletPlanner struct {
 	Min int64
@@ -155,4 +174,32 @@ func (p *FixedBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOf
 		off += size
 	}
 	return out, nil
+}
+
+// SinglePlanner 是整文件单块规划器（BlockMode "single"）：把整个文件规划为**一个块**。
+//
+// 为什么需要：小文件（图片/文本/日志/已压缩包）走随机分块会切成多个底层 blob ⇒ 多次上传/
+// 校验往返，而随机块边界对小文件没有任何安全收益。
+//
+// 确定性：本规划器是**纯函数**（不查 SizeAt、不引用任何随机源），故收敛档（AlgoV2GCM）下
+// 「同内容 + 同策略」两次加密产出逐字节相同的 blob 与名（single_planner_test.go 锁定）。
+// 它也天然不参与 injectConvBlockSizes（该函数只对 *RandomPlanner 生效）。
+type SinglePlanner struct{}
+
+// Plan 实现 BlockPlanner：size>0 且 ≤ MaxSingleBlockBytes 时返回单个覆盖 [0,size) 的块。
+//
+// 空文件（size ≤ 0）与 RandomPlanner 同族 fail-closed：分块存储至少需要 1 个数据分块承载
+// meta 引用与整文件哈希锚定，空文件无内容可分块（既有语义，不因本模式改变）。
+//
+// 超硬顶同样 fail-closed（**不是**静默回落 random）：回落会让「以为配了 single」与「实际多块」
+// 不可区分，而 fail-closed 的错误会明确指出该改为 random 或调小文件。
+func (SinglePlanner) Plan(origSize int64) ([]Block, error) {
+	if origSize <= 0 {
+		return nil, fmt.Errorf("shardseal: 空文件不可分块（size=%d）", origSize)
+	}
+	if origSize > MaxSingleBlockBytes {
+		return nil, fmt.Errorf("shardseal: single 模式文件大小 %d 超过硬上限 %d（整块加密需整块入内存；"+
+			"请改用 random 模式或减小文件）", origSize, MaxSingleBlockBytes)
+	}
+	return []Block{{Offset: 0, Size: origSize}}, nil
 }

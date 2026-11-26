@@ -863,7 +863,8 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("卷列表为空: %v", err)
 	}
-	if err := page.Locator("#v2-vl-body tr").First().Locator("button").Click(); err != nil {
+	// 用 `data-action` 定位（不再假设行内只有一个按钮：2026-11-26 起每行还有「详情」）。
+	if err := page.Locator("#v2-vl-body tr").First().Locator("button[data-action=refresh]").Click(); err != nil {
 		t.Fatalf("单卷刷新: %v", err)
 	}
 	if _, err := page.WaitForFunction(

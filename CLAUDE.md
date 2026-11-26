@@ -70,6 +70,7 @@
 | 通知中心（规则路由/去抖/重试/渠道/feed 渲染） | `pkg/server/notify` | `NotifyCenter.Dispatch` / `NewFromConfig` / `History` | **server 作用域**；只接受 `notify.Event`（装配层在 RecordAudit 做字段映射） |
 | 真实存储审查（逻辑 ↔ 物理落点） | `pkg/volume` + 各卷实现 | `StorageInspector`（`Trace` / `Explain`）+ `TreeInspector`（`TraceTree` 递归树）+ `AssertStorageInspector` | **布局事实只由卷提供**；只解 meta 不读内容、只读不修复；未实现 ⇒ 501/明确报错（**禁止空结果**） |
 | 服务端配置 schema / 校验 / 默认值 | `pkg/server/config` | `Config` / `Default` / `SetDefaults` / `Validate` / `LoadFromProvider` | **server 作用域**（仅 sproxy 服务端）；`pkg/server/config_alias.go` 是迁移期兼容层（新代码直接 import 本包） |
+| 分块规则引擎（路径正则 + 体积 → 整文件单块） | `pkg/cryptox/shardseal/policy` | `Rule`/`Policy`/`Compiled`、`Compile`、`Resolve`、`HardMaxSingleBytes` | **服务端+客户端通用**；`Compile` 是校验与预编译**唯一实现**（静态配置/运行期写入/装配载入共用），写路径只做 `MatchString`。卷维度接入在 `pkg/volume/secretdata`（`blockletPolicyFor` 前缀规则选型）；HTTP 面经 `registry.SettingsProvider/Writer`（通用「卷设置分区」容器，后续卷型新增配置不改路由/前端） |
 | 凭据存储与主密钥解析 | `pkg/server/credentials` | `BootstrapServerCredentials` / `ResolveCredentialMasterKey` / `BestCredential` / `BestFirstCredential` | **server 作用域**；边界＝**快照 store（StateStore 后端/双读单写/静态加密包装）+ 主密钥与 Vault token 来源解析 + Ring 凭据选取**。启动编排（`bootstrapCredentials`/`SelfCredential`/凭据轮换循环）仍留装配层；不反向依赖 `pkg/server`（R6） |
 
 ### 收敛原则（必须遵守）
