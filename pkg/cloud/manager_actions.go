@@ -13,7 +13,11 @@
 //	discard_partial  清残留（产物 + .partial）后从零重下
 package cloud
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
 
 // TaskAction 是失败任务的人工处理动作。
 type TaskAction string
@@ -49,12 +53,18 @@ func (m *CloudDownloadManager) ApplyTaskAction(taskID string, action TaskAction,
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 	opts, err := actionResumeOptions(action, snap)
+	if err == nil {
+		err = m.verifyActionPreconditions(action, snap)
+	}
 	if err != nil {
+		m.metrics.TaskActions.Inc(string(action), "error")
 		return nil, err
 	}
-	if err := m.resumeTaskWith(taskID, opts, owner); err != nil {
-		return nil, err
+	if rerr := m.resumeTaskWith(taskID, opts, owner); rerr != nil {
+		m.metrics.TaskActions.Inc(string(action), "error")
+		return nil, rerr
 	}
+	m.metrics.TaskActions.Inc(string(action), "success")
 	if cur, ok := m.SnapshotTask(taskID, owner); ok {
 		return cur, nil
 	}
@@ -89,6 +99,26 @@ func actionResumeOptions(action TaskAction, t *CloudTask) (resumeOptions, error)
 	}
 }
 
+// verifyActionPreconditions 做**执行前**的物理校验（只有服务端知道的事实）。
+//
+// retry_transfer 的前提是「产物仍在磁盘」：DownloadDone 只表示下载曾成功，产物可能已被
+// disk_full 清理或人工删除。缺失时必须明确报错——否则 executeDownload 会静默回落整份下载，
+// 与用户「只重做转存」的意图不符（且慢源代价高）。
+func (m *CloudDownloadManager) verifyActionPreconditions(action TaskAction, t *CloudTask) error {
+	if action != TaskActionRetryTransfer {
+		return nil
+	}
+	dir := m.TaskDirFor(t.Owner, t.ID)
+	if dir == "" {
+		return fmt.Errorf("租户不可用，无法校验下载产物")
+	}
+	dest := filepath.Join(dir, t.Filename)
+	if st, err := os.Stat(dest); err != nil || st.IsDir() {
+		return fmt.Errorf("下载产物已不存在（%s），无法只重做转存；请用 retry_download 重新下载", dest)
+	}
+	return nil
+}
+
 // TaskActionPlan 描述某任务**当前可用**的动作（供 v2 页面渲染操作菜单）。
 type TaskActionPlan struct {
 	Action   TaskAction `json:"action"`
@@ -103,12 +133,21 @@ type TaskActionPlan struct {
 // 为什么放在服务端：可用性判据（产物是否完整/是否有备选源）只有服务端知道，
 // 前端不应重复推断——否则会渲染出必然失败（或语义被吞掉）的按钮。
 func PlanTaskActions(t *CloudTask) []TaskActionPlan {
-	if t == nil || (t.Status != "failed" && t.Status != "cancelled") {
+	if t == nil {
 		return nil
 	}
-	plan := []TaskActionPlan{
-		{Action: TaskActionRetryDownload, Label: "续传下载", Hint: "保留已下载部分，从断点继续（不重下已完成块）"},
+	// completed+damaged 走「定点修复优先」的续传动作（2026-11-26）：damaged 是"警告继续"
+	// 放行后的完成态，用户需要一键修复入口。
+	damaged := t.Status == "completed" && t.IntegrityStatus == "damaged"
+	if !damaged && t.Status != "failed" && t.Status != "cancelled" {
+		return nil
 	}
+	download := TaskActionPlan{Action: TaskActionRetryDownload, Label: "续传下载", Hint: "保留已下载部分，从断点继续（不重下已完成块）"}
+	if damaged {
+		download.Label = "修复重下"
+		download.Hint = "先做零尾扫描 + 定点补片；修不好再整份重下"
+	}
+	plan := []TaskActionPlan{download}
 	transfer := TaskActionPlan{Action: TaskActionRetryTransfer, Label: "仅重做转存", Hint: "产物已完整，只重跑转存阶段"}
 	if !t.DownloadDone {
 		transfer.Disabled = true
