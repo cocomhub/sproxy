@@ -8,6 +8,10 @@
 (function () {
   if (typeof document === 'undefined') { return; }
   var auth = window.v2auth, f = window.v2files, ops = window.v2ops;
+  /** 当前「页面默认删除方式」：soft（缺省）/ hard，来自 /api/ui/prefs（设置页写入）。 */
+  var deleteModeCache = 'soft';
+  /** 「跳过删除二次确认」：true 时危险操作直接执行（用户显式开启；缺省 false = 弹确认）。 */
+  var skipConfirmCache = false;
   var util = window.sclientUtil, cryptoLib = window.sclientCrypto, sig = window.sclientSig;
   if (!auth || !f || !ops || !util || !cryptoLib || !sig) { return; }
 
@@ -85,6 +89,19 @@
     cb(value);
   }
 
+  /**
+   * 危险操作确认入口：`skip_confirm` 开启时**直接执行**（用户显式一次性授权），
+   * 否则照常弹确认框并展示 `${cfg.message}`（实际破坏范围）。
+   * 只对 `danger: true` 生效；普通输入框（新建目录/重命名）**始终**需要交互。
+   */
+  function confirmDanger(cfg) {
+    if (cfg && cfg.danger && skipConfirmCache && typeof cfg.onOk === 'function') {
+      cfg.onOk(cfg.value || '');
+      return;
+    }
+    openDialog(cfg);
+  }
+
   function openDialog(cfg) {
     buildDialog();
     dlg.cfg = cfg;
@@ -112,6 +129,13 @@
 
   var chunked = window.v2chunked;
 
+  /**
+   * 建一行上传进度。
+   *
+   * 状态机（此前缺失）：
+   *   排队中（queued）→ 上传中（running）→ 完成（移除）/ 暂停（paused，可继续）/ 失败（failed，可重试/关闭）。
+   * **失败不再直接删行**：以前失败只弹 toast 并移除行，用户看不出**哪个**文件失败、也无法原地重试。
+   */
   function uploadItem(file) {
     var box = el('v2-uploads');
     if (!box) { return null; }
@@ -136,9 +160,17 @@
     cancel.type = 'button'; cancel.className = 'btn btn-sm btn-ghost'; cancel.textContent = '取消';
     acts.appendChild(pause); acts.appendChild(cancel);
     row.appendChild(name); row.appendChild(bar); row.appendChild(info); row.appendChild(acts);
+    row.setAttribute('data-state', 'queued');
+    row.setAttribute('data-file', file.name);
     box.hidden = false;
     box.appendChild(row);
-    return { row: row, fill: fill, info: info, pause: pause, cancel: cancel, cancelled: false, started: Date.now() };
+    var item = {
+      row: row, fill: fill, info: info, pause: pause, cancel: cancel,
+      cancelled: false, started: Date.now(), state: 'queued'
+    };
+    item.info.textContent = '排队中…';
+    pause.hidden = true;   // 排队中不可暂停，进入上传后再显示
+    return item;
   }
 
   function fmtSpeed(bytes, ms) {
@@ -160,8 +192,9 @@
     };
   }
 
-  function uploadChunkedFile(file, sub, vol) {
-    var item = uploadItem(file);
+  function uploadChunkedFile(file, sub, vol, preItem) {
+    // preItem：调用方（多文件串行队列）已建好「排队中」行；单文件/续传路径自建。
+    var item = preItem || uploadItem(file);
     if (!item) { return Promise.resolve(); }
     var total = file.size;
     item.pause.addEventListener('click', function () {
@@ -172,11 +205,16 @@
     item.cancel.addEventListener('click', function () {
       item.cancelled = true;
       item.row.remove();
-      if (!el('v2-uploads').children.length) { el('v2-uploads').hidden = true; }
+      pruneUploadsBox();
+      sumUploads();
     });
     var run = function () {
       item.cancelled = false;
-      item.pause.textContent = T('dlg.cancel') === 'Cancel' ? 'Pause' : '暂停';
+      item.state = 'running';
+      item.row.setAttribute('data-state', 'running');
+      item.pause.hidden = false;
+      item.pause.textContent = '暂停';
+      item.cancel.textContent = '取消';
       item.started = Date.now();
       return chunked.uploadChunked(file, {
         api: api, util: util, cryptoLib: cryptoLib, shaCtor: window.sclientSha256, join: f.joinSubdir
@@ -186,19 +224,42 @@
         onProgress: progressHandler(item, total),
         isCancelled: function () { return item.cancelled; }
       }).then(function (res) {
+        item.state = 'done';
         item.row.remove();
-        if (!el('v2-uploads').children.length) { el('v2-uploads').hidden = true; }
+        pruneUploadsBox();
+        sumUploads();
         toast('ok', res && res.skipped ? (T('toast.exists') + file.name) : (T('toast.uploaded') + file.name));
         if (view()) { view().load(); }
       }).catch(function (err) {
         if (err && err.code === 'E_CANCELLED') {
-          item.pause.textContent = T('toast.resume');
+          item.state = 'paused';
+          item.row.setAttribute('data-state', 'paused');
+          item.pause.textContent = '继续';
           item.info.textContent = '已暂停 · ' + (item.info.textContent.split(' · ')[0] || '');
+          sumUploads();
           return;
         }
-        item.row.remove();
-        if (!el('v2-uploads').children.length) { el('v2-uploads').hidden = true; }
-        toast('bad', T('toast.uploadFailed') + (err && err.message ? err.message : T('toast.network')));
+        // **失败保留行**：说明是哪个文件、失败原因，并给「重试 / 关闭」。
+        item.state = 'failed';
+        item.row.setAttribute('data-state', 'failed');
+        item.info.textContent = '失败：' + ((err && err.message) || T('toast.network'));
+        item.pause.hidden = true;
+        item.cancel.textContent = '关闭';
+        if (!item.retry) {
+          item.retry = document.createElement('button');
+          item.retry.type = 'button';
+          item.retry.className = 'btn btn-sm';
+          item.retry.textContent = '重试';
+          item.retry.addEventListener('click', function () {
+            item.retry.remove(); item.retry = null;
+            item.fill.style.width = '0%';
+            run();
+            sumUploads();
+          });
+          item.cancel.parentNode.insertBefore(item.retry, item.cancel);
+        }
+        sumUploads();
+        toast('bad', T('toast.uploadFailed') + file.name);
       });
     };
     return run();
@@ -283,6 +344,36 @@
     });
   }
 
+  /** 队列为空时隐藏容器（多点复用，避免各处重复判断）。 */
+  function pruneUploadsBox() {
+    var box = el('v2-uploads');
+    // 按 `.up-row` 计数而非 children.length：容器里还有常驻的汇总节点（#v2-uploads-sum），
+    // 用 children.length 会导致「没有上传行但容器永不隐藏」（实测）。
+    if (box && !box.querySelectorAll('.up-row').length) {
+      box.hidden = true;
+      var sum = el('v2-uploads-sum');
+      if (sum) { sum.textContent = ''; }
+    }
+  }
+
+  /**
+   * 顶部汇总：`已完成 x/y · 失败 z`。此前只有逐行进度，多文件时看不出整体还剩多少。
+   * 只在容器有 `#v2-uploads-sum` 时渲染（向后兼容）。
+   */
+  function sumUploads() {
+    var box = el('v2-uploads');
+    var sum = el('v2-uploads-sum');
+    if (!box || !sum) { return; }
+    var rows = Array.prototype.slice.call(box.querySelectorAll('.up-row'));
+    if (!rows.length) { sum.textContent = ''; return; }
+    var done = rows.filter(function (r) { return r.getAttribute('data-state') === 'done'; }).length;
+    var failed = rows.filter(function (r) { return r.getAttribute('data-state') === 'failed'; }).length;
+    var paused = rows.filter(function (r) { return r.getAttribute('data-state') === 'paused'; }).length;
+    var parts = ['上传中 ' + rows.length + ' 项', '失败 ' + failed];
+    if (paused) { parts.push('暂停 ' + paused); }
+    sum.textContent = parts.join(' · ');
+  }
+
   function uploadFiles(files) {
     var sub = view() ? view().subdir() : '';
     // 兜底：必须有**具体卷**（「全部卷」是多卷聚合视图，上传目标不可预期）。
@@ -294,11 +385,19 @@
     }
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) { return; }
+    // 串行上传（避免并发抢带宽）：先全部建行显示「排队中」，轮到谁谁才开始。
+    var items = list.map(function (file) {
+      return { file: file, item: uploadItem(file) };
+    });
+    sumUploads();
     var chain = Promise.resolve();
-    list.forEach(function (file) {
+    items.forEach(function (pair) {
+      var file = pair.file;
       chain = chain.then(function () {
-        if (chunked && file.size > chunked.SIMPLE_LIMIT) { return uploadChunkedFile(file, sub, vol); }
-        return uploadSimpleFile(file, sub, vol);
+        if (chunked && file.size > chunked.SIMPLE_LIMIT) { return uploadChunkedFile(file, sub, vol, pair.item); }
+        return uploadSimpleFile(file, sub, vol).then(function () {
+          if (pair.item) { pair.item.state = 'done'; pair.item.row.remove(); pruneUploadsBox(); sumUploads(); }
+        });
       });
     });
     chain.then(function () { if (view()) { view().load(); } })
@@ -330,7 +429,7 @@
     var sub = view() ? view().subdir() : '';
     var rel = relOf(name);
 
-    openDialog({
+    confirmDanger({
       title: isDir ? T('dlg.delDir.title') : T('dlg.delFile.title'),
       message: (isDir ? T('dlg.delDir.msg') : T('dlg.delFile.msg')) + rel,
       danger: true, okText: T('dlg.delete'),
@@ -366,8 +465,6 @@
   }
 
   /** 行名 → 相对路径（搜索态 name 已是完整路径，见 v2files.resolveRel）。 */
-  /** 当前「页面默认删除方式」：soft（缺省）/ hard，来自 /api/ui/prefs（设置页写入）。 */
-  var deleteModeCache = 'soft';
   function deleteMode() { return deleteModeCache === 'hard' ? 'hard' : 'soft'; }
 
   /** 读取页面配置（失败 = soft 安全默认）。 */
@@ -377,10 +474,16 @@
       .then(function (body) {
         var d = body && body.prefs && body.prefs['delete'];
         deleteModeCache = (d && d.default_mode === 'hard') ? 'hard' : 'soft';
+        skipConfirmCache = !!(d && d.skip_confirm);
       })
-      .catch(function () { deleteModeCache = 'soft'; });
+      .catch(function () { deleteModeCache = 'soft'; skipConfirmCache = false; });
   }
-  window.v2deleteMode = { mode: deleteMode, reload: loadDeleteMode };
+  window.v2deleteMode = {
+    mode: deleteMode,
+    reload: loadDeleteMode,
+    /** 是否跳过删除二次确认（设置页开关；缺省 false）。 */
+    skipConfirm: function () { return skipConfirmCache; }
+  };
 
   function relOf(name) {
     var sub = view() ? view().subdir() : '';
@@ -497,7 +600,7 @@
       batch.addEventListener('click', function () {
         var names = view() ? view().selected() : [];
         if (!names.length) { return; }
-        openDialog({
+        confirmDanger({
           title: T('dlg.delSel.title'),
           message: T('dlg.delSel.msg'),
           danger: true, okText: T('dlg.delete'),

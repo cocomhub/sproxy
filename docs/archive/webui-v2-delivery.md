@@ -655,3 +655,77 @@ return c.TenantFor(owner)   // ← 懒建租户子根（独立 os.Root）
 
 **教训**：从第一次发现就该把所有持有 `os.Root` 的入口列全（`grep -rn "os.OpenRoot"`），
 而不是每被 CI 打一次才补一层。
+
+## 2026-11-27 第八轮：上传队列 / 窄屏卡片 / 页面配置第二类别
+
+三件事一并交付（同一 PR 的三条 commit）。
+
+### ① 上传体验：状态机 + 失败可重试 + 汇总
+
+此前：串行上传时**后面的文件没有任何显示**；失败就删行 + 弹 toast（用户看不出哪个文件失败、
+无法原地重试）；多文件时没有整体进度。
+
+改为显式状态机（`data-state` 驱动样式）：
+
+| 状态 | 显示 | 动作 |
+| --- | --- | --- |
+| `queued` 排队中 | 「排队中…」 | 不可暂停（还没开始） |
+| `running` 上传中 | `% · 速度 · 剩余` | 暂停 / 取消 |
+| `paused` 已暂停 | 「已暂停 · %」 | 继续 / 取消 |
+| `failed` 失败 | 「失败：<原因>」+ 左侧红边 | **重试** / 关闭（行保留） |
+| `done` | 行移除 | —— |
+
+顶部汇总 `上传中 N 项 · 失败 M[ · 暂停 K]`。
+
+**踩到的坑**：`pruneUploadsBox()` 原先用 `children.length` 判断空队列 —— 加了常驻的汇总节点后
+容器**永不隐藏**（e2e 卡在「上传队列未清空」发现）。改为按 `.up-row` 计数。
+
+### ② 窄屏文件表转卡片（≤760px）
+
+用 **CSS 层转换**而不是另写一套卡片渲染（同一份 DOM 维护两套视图必然漂移）：
+
+```css
+@media (max-width: 760px) {
+  .table.cards-narrow thead { display: none; }
+  .table.cards-narrow tr { display: grid; grid-template-columns: auto 1fr auto; border: 1px solid …; }
+  .table.cards-narrow td[data-label]::before { content: attr(data-label) ' '; }
+}
+```
+
+`tbody` 的 `td` 加 `data-label`（大小/修改/校验/卷）→ 卡片里每个值前带列名；
+勾选框左上、名称占主区、操作按钮整行横排。900–760px 区间仍用表格横滑（平板空间够）。
+
+### ③ 页面配置第二类别：`delete.skip_confirm`
+
+用户此前否决了「默认排序」「默认上传卷」（那些是上下文已决定的），本类别是**真策略**：
+**危险操作是否二次确认**。
+
+```json
+{"delete": {"default_mode": "soft", "skip_confirm": false}}
+```
+
+- 默认 **false = 确认框开启**；字段名表达「关闭安全能力」（`skip_confirm` 而非 `confirm`），
+  符合 AGENTS 7c「bool 配置默认 false」且不混淆「未配置 / 显式开启」；
+- 生效面：文件页单条/批量删除 **+ 回收站里的「彻底删除」**（它就是删除确认的一部分，
+  单独给例外只会让规则难记）；
+- 新建目录/重命名这类**需要输入**的交互**始终**要交互（`confirmDanger` 只对 `danger:true` 生效）；
+- PUT 改为**真部分更新**：`delete` 里一个字段都没有 ⇒ 400（此前只认 `default_mode`）。
+
+### 验证与变异
+
+| 变异 | 结果 |
+| --- | --- |
+| `confirmDanger` 恒走 `openDialog` | e2e「skip_confirm=true 时不应弹确认框（实际弹出）」红 ✅ |
+| `.cards-narrow thead` 改回 `table-header-group` | e2e「窄屏 thead 应隐藏（卡片化）」红 ✅ |
+| （上传汇总）`pruneUploadsBox` 用 children.length | e2e「上传队列未清空」红（真实踩到） |
+
+Go：`TestUIPrefs_DeleteSkipConfirm`（默认 false / 开 / 关 / 两字段一次改 / 空 delete 400 且不落盘 /
+审计 detail）+ `TestUIPrefs_SkipConfirmNormalize`（零值 false、显式 true 保留）。
+
+e2e 新增：上传队列（排队中 + 汇总 + 清空）、窄屏卡片（thead 隐藏 + 行 grid）、
+skip_confirm **行为级**（true 不弹框且直接删；false 必弹框且取消后文件仍在）。
+
+### 注意（e2e 状态污染）
+
+skip_confirm 的行为用例会**软删**一个文件 ⇒ 条目进回收站，影响后续「恢复后回收站未清空」
+断言（实测红灯）。用例末尾显式清空回收站并删除遗留文件。

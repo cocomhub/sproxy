@@ -107,7 +107,7 @@
               <button class="btn btn-ghost btn-sm" id="v2-pending-ignore" type="button">忽略</button>
             </div>
           </div>
-          <table class="table">
+          <table class="table cards-narrow">
             <thead>
               <tr><th style="width:34px"><input class="cb" id="v2-select-all" type="checkbox" aria-label="全选"></th>
                 <th class="sortable" data-sort="name" role="button" tabindex="0" aria-label="按名称排序">名称<span class="sort-mark" id="v2-sort-name"></span></th>
@@ -737,7 +737,9 @@
   <button class="pv-float-close" id="v2-pv-float-close" type="button" title="关闭（Esc）" aria-label="关闭预览">✕</button>
 </div>
 
-<div class="uploads" id="v2-uploads" hidden aria-live="polite"></div>
+<div class="uploads" id="v2-uploads" hidden aria-live="polite">
+  <div class="up-sum" id="v2-uploads-sum"></div>
+</div>
 
 <div class="toasts" id="v2-toasts" role="status" aria-live="polite"></div>
 <div class="sr-only" id="v2-live" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -796,6 +798,9 @@
         <option value="soft">软删（进回收站，可恢复）</option>
         <option value="hard">直接删除（不可恢复）</option>
       </select>
+      <label class="dr-check" style="margin-left:6px">
+        <input type="checkbox" id="v2-set-skip-confirm"> 删除前跳过二次确认
+      </label>
       <button class="btn btn-ghost" id="v2-set-delete-save" type="button">保存</button>
     </div>
   </div>
