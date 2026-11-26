@@ -26,6 +26,9 @@ func TestClassifyCloudError(t *testing.T) {
 		{"integrity verify failed", ErrClassContentMismatch},
 		{"target file already exists", ErrClassTargetConflict},
 		{"no space left on device", ErrClassDiskFull},
+		// 配额类（2026-11-26 实测：超 owner_quotas 的真实错误文案）
+		{"create quota sink: storage quota exceeded", ErrClassDiskFull},
+		{"配额不足：owner 配额已满", ErrClassDiskFull},
 		{"转存失败: 目标卷 \"baidu\" 未装配", ErrClassTargetUnavailable},
 		{"volume not found: v", ErrClassTargetUnavailable},
 		{"HTTP 401 unauthorized", ErrClassAuth},
