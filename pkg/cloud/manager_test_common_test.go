@@ -68,7 +68,7 @@ func newCloudTestEnv(t *testing.T, storageRoot string) *cloudTestEnv {
 	// LIFO：本清理晚于 root.Close 注册 ⇒ 先关各租户子根，再关存储根
 	// （Windows 上遗留打开的目录句柄会让 TempDir 清理失败）。
 	t.Cleanup(func() { _ = tenants.Close() })
-	return &cloudTestEnv{
+	env := &cloudTestEnv{
 		root:           storageRoot,
 		tenants:        tenants,
 		globalPool:     quota.NewPool(0),
@@ -77,6 +77,17 @@ func newCloudTestEnv(t *testing.T, storageRoot string) *cloudTestEnv {
 		quotaBuckets:   map[string]map[string]*quota.Scope{},
 		ownerQuotas:    map[string]int64{},
 	}
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	// LIFO：本清理**晚于** tenants.Close 注册 ⇒ 先停协程，再关租户/根句柄。
+	t.Cleanup(func() {
+		for _, cs := range env.checksumStores {
+			if cs != nil {
+				_ = cs.Close()
+			}
+		}
+	})
+	return env
 }
 
 // tenantFor 实现 TenantResolver（空 owner 归一为 anonymous，与领域约定一致）。

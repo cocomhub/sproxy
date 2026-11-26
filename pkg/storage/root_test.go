@@ -45,10 +45,7 @@ func TestRoot_SymlinkEscape(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	r, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := openTestRoot(t, dir)
 	defer r.Close()
 
 	outside := t.TempDir()
@@ -91,7 +88,9 @@ func TestOpenRoot_LayoutVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "LAYOUT_VERSION"), []byte("999\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenRoot(dir); err == nil {
+	if bad, oerr := OpenRoot(dir); oerr == nil {
+		// 不应走到这里（版本不匹配必须 fail-closed）；仍关闭句柄再失败，避免泄漏。
+		_ = bad.Close()
 		t.Fatalf("LAYOUT_VERSION 不匹配应报错")
 	}
 }
@@ -143,10 +142,7 @@ func TestRoot_MkdirAll_NonDir(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	r, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := openTestRoot(t, dir)
 	defer r.Close()
 
 	f, err := r.OpenFile("block", os.O_CREATE|os.O_WRONLY, 0o644)
@@ -164,10 +160,7 @@ func TestRoot_Abs(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	r, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := openTestRoot(t, dir)
 	defer r.Close()
 
 	abs, ok := r.Abs("user/f.txt")

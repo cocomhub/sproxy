@@ -19,10 +19,7 @@ func TestAtomicRename_MissingSourceKeepsDestination(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	dstAbs := filepath.Join(dir, "dst.txt")
@@ -49,10 +46,7 @@ func TestAtomicRename_SuccessStillReplaces(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	if werr := os.WriteFile(filepath.Join(dir, "dst.txt"), []byte("old"), 0o644); werr != nil {

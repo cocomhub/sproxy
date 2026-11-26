@@ -132,6 +132,24 @@ func newDirsEnv(t *testing.T) *dirsEnv {
 	}
 	e.rebuild()
 	t.Cleanup(func() {
+		// checksum 台账带 **debounce 落盘协程**（savemerger）：不 Close 会在测试结束后仍写一次，
+		// 与 t.TempDir() 的 RemoveAll 撞车 —— Windows 实测
+		// `TempDir RemoveAll cleanup: ... The directory is not empty.`
+		// 顺序也有讲究：先停协程，再关 root 句柄。
+		for _, cs := range e.checksum {
+			if cs != nil {
+				_ = cs.Close()
+			}
+		}
+		// checksum 台账带 **debounce 落盘协程**（savemerger）：不 Close 会在测试结束后仍写一次，
+		// 与 t.TempDir() 的 RemoveAll 撞车 —— Windows 实测
+		// `TempDir RemoveAll cleanup: ... The directory is not empty.`
+		// LIFO 顺序：先停协程，再关 root 句柄。
+		for _, cs := range e.checksum {
+			if cs != nil {
+				_ = cs.Close()
+			}
+		}
 		for _, tnt := range e.tenants {
 			if tnt != nil && tnt.Root() != nil {
 				_ = tnt.Root().Close()

@@ -89,6 +89,9 @@ func TestChecksumStore_SaveError(t *testing.T) {
 	// 卷句柄开在**只读目录的父目录**（OpenRoot 需要可写：它要写卷级 LAYOUT_VERSION），
 	// 台账 rel 落在只读子目录内 ⇒ 写入必然失败（保持「save 失败不得 panic」的用例意图）。
 	cs := checksum.NewChecksumStore(testRootAt(t, filepath.Dir(roDir)), filepath.Base(roDir)+"/checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
 
 	// Set 应该不 panic，save() 会失败但 Set 返回前已释放锁
 	cs.Set("k1", "v1")

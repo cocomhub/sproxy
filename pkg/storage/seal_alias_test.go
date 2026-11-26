@@ -75,10 +75,7 @@ func TestSealAliases_ExpandsShortName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "user", "vault"), 0o755); err != nil {
 		t.Fatalf("建目录: %v", err)
 	}
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	longAbs := filepath.Join(dir, "user", "vault")
@@ -131,10 +128,7 @@ func TestSealAliases_ExpandsShortName(t *testing.T) {
 func TestSealAliases_NoShortNameNoExpansion(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	if serr := rt.SetSeals([]SealRule{{Path: "user/vault", Mode: SealReadable}}); serr != nil {
 		t.Fatalf("SetSeals: %v", serr)

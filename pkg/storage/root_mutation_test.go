@@ -34,10 +34,7 @@ func (c *collectMutations) list() []Mutation {
 func TestRootMutationObserver_StructuralOps(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	col := &collectMutations{}
 	rt.SetMutationObserver("vol1", col.fn)
@@ -105,10 +102,7 @@ func TestRootMutationObserver_StructuralOps(t *testing.T) {
 func TestRootMutationObserver_FailedOpDoesNotNotify(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	col := &collectMutations{}
 	rt.SetMutationObserver("vol1", col.fn)
@@ -128,10 +122,7 @@ func TestRootMutationObserver_FailedOpDoesNotNotify(t *testing.T) {
 func TestRootMutationObserver_NilObserverNoop(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.MkdirAll("a/b", 0o755); err != nil {
 		t.Fatalf("MkdirAll（无观察者）: %v", err)
@@ -146,10 +137,7 @@ func TestRootMutationObserver_NilObserverNoop(t *testing.T) {
 func TestRootMutationObserver_TenantInheritsPrefix(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	parent, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	parent := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = parent.Close() })
 	col := &collectMutations{}
 	parent.SetMutationObserver("vol1", col.fn)
@@ -183,10 +171,7 @@ func TestRootMutationObserver_TenantInheritsPrefix(t *testing.T) {
 func TestRootMutationObserver_AtomicRename(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	col := &collectMutations{}
 	rt.SetMutationObserver("vol1", col.fn)
@@ -225,10 +210,7 @@ func TestRootMutationObserver_AtomicRename(t *testing.T) {
 func TestRootMutationObserver_MarkWritten(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	col := &collectMutations{}
 	rt.SetMutationObserver("vol1", col.fn)
@@ -251,10 +233,7 @@ func TestRootMutationObserver_MarkWritten(t *testing.T) {
 func TestRootMutationObserver_MarkWrittenWithoutObserver(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 	rt.MarkWritten("owner/user/a.txt") // 不 panic 即为通过
 }

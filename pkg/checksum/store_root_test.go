@@ -36,6 +36,10 @@ func TestChecksumStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 	const rel = "meta/checksums.json"
 	const marker = "user/confidential-name.txt"
 	cs := NewChecksumStore(root, rel, stateTestLogger())
+	// debounce 落盘协程（savemerger）必须停：否则测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.Set(marker, "deadbeef")
 	if err := cs.Flush(); err != nil {
 		t.Fatalf("Flush: %v", err)
@@ -55,6 +59,9 @@ func TestChecksumStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 
 	// 重载（同卷句柄）：经 Root 解密读回。
 	cs2 := NewChecksumStore(root, rel, stateTestLogger())
+	// debounce 落盘协程（savemerger）必须停：否则测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs2.Close() })
 	if got, ok := cs2.Get(marker); !ok || got != "deadbeef" {
 		t.Fatalf("重载 Get=%q,%v want deadbeef,true", got, ok)
 	}
@@ -64,6 +71,9 @@ func TestChecksumStore_EncryptedVolumeCiphertextAndReload(t *testing.T) {
 		t.Fatalf("Flush after delete: %v", err)
 	}
 	cs3 := NewChecksumStore(root, rel, stateTestLogger())
+	// debounce 落盘协程（savemerger）必须停：否则测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs3.Close() })
 	if _, ok := cs3.Get(marker); ok {
 		t.Fatal("Delete 后重载不应命中")
 	}
@@ -76,6 +86,10 @@ func TestChecksumStore_SealedPathSaveRejected(t *testing.T) {
 		t.Fatalf("SetSeals: %v", err)
 	}
 	cs := NewChecksumStore(root, "meta/checksums.json", stateTestLogger())
+	// debounce 落盘协程（savemerger）必须停：否则测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.Set("user/a.txt", "v") // 不得 panic（Set 只记日志）
 	if err := cs.save(); !errors.Is(err, storage.ErrSealed) {
 		t.Fatalf("封印区间写台账应被拒（ErrSealed）, got %v", err)

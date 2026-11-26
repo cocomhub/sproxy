@@ -9,6 +9,10 @@ import "testing"
 func TestRenamePrefixInVolume(t *testing.T) {
 	t.Parallel()
 	cs := NewChecksumStore(testRootAt(t, t.TempDir()), "meta/checksums.json", stateTestLogger())
+	// debounce 落盘协程（savemerger）必须停：否则测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.SetInVolume("v1", "user/d1/a.txt", "aa")
 	cs.SetInVolume("v1", "user/d1/sub/b.txt", "bb")
 	cs.SetInVolume("v1", "user/keep.txt", "cc")

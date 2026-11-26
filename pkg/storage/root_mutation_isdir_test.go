@@ -16,10 +16,7 @@ import (
 func TestRootMutation_IsDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	rt := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = rt.Close() })
 
 	var got []Mutation

@@ -12,17 +12,6 @@ import (
 	"testing"
 )
 
-// openTestRoot 打开一个临时目录作为存储根（测试基座）。
-func openTestRoot(t *testing.T) *Root {
-	t.Helper()
-	rt, err := OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatalf("OpenRoot 失败: %v", err)
-	}
-	t.Cleanup(func() { _ = rt.Close() })
-	return rt
-}
-
 func TestNormalizeOwner(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
@@ -40,7 +29,7 @@ func TestNormalizeOwner(t *testing.T) {
 func TestOpenTenant_Success(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	tn, err := OpenTenant(parent, "alice")
 	if err != nil {
 		t.Fatalf("OpenTenant 失败: %v", err)
@@ -65,7 +54,7 @@ func TestOpenTenant_Success(t *testing.T) {
 func TestOpenTenant_MetaBucketOption(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	tn, err := OpenTenant(parent, "alice", WithMetaBucket())
 	if err != nil {
 		t.Fatalf("OpenTenant 失败: %v", err)
@@ -80,7 +69,7 @@ func TestOpenTenant_MetaBucketOption(t *testing.T) {
 func TestOpenTenant_FailClosed(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	for _, owner := range []string{"", ".", "..", "a/b", `a\b`, ".__x", "CON", "name.", "name "} {
 		tn, err := OpenTenant(parent, owner)
 		if err == nil || tn != nil {
@@ -103,10 +92,7 @@ func TestOpenTenant_NoHandleLeak(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	dir := t.TempDir()
-	parent, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot 失败: %v", err)
-	}
+	parent := openTestRoot(t, dir)
 	defer func() { _ = parent.Close() }()
 
 	tn, err := OpenTenant(parent, "alice", WithMetaBucket())
@@ -127,7 +113,7 @@ func TestOpenTenant_NoHandleLeak(t *testing.T) {
 func TestListOwners(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	for _, name := range []string{"bob", "alice"} {
 		tn, err := OpenTenant(parent, name)
 		if err != nil {
@@ -162,7 +148,7 @@ func TestListOwners(t *testing.T) {
 func TestTenantCache_SuccessAndReuse(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	c := NewTenantCache(parent, WithMetaBucket())
 	t.Cleanup(func() { _ = c.Close() })
 	first := c.TenantFor("alice")
@@ -191,7 +177,7 @@ func TestTenantCache_SuccessAndReuse(t *testing.T) {
 func TestTenantCache_Concurrent(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	c := NewTenantCache(parent, WithMetaBucket())
 	t.Cleanup(func() { _ = c.Close() })
 	var wg sync.WaitGroup
@@ -217,7 +203,7 @@ func TestTenantCache_Concurrent(t *testing.T) {
 func TestTenantCache_CloseKeepsParentUsable(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	c := NewTenantCache(parent, WithMetaBucket())
 	defer func() { _ = c.Close() }()
 	if c.TenantFor("alice") == nil {

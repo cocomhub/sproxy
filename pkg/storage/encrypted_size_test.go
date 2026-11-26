@@ -49,10 +49,7 @@ func TestEncryptedPhysicalSize_Formula(t *testing.T) {
 func TestEncryptedPhysicalSize_MatchesDiskTruth(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = root.Close() })
 	if serr := root.SetEncryption(make([]byte, 32)); serr != nil {
 		t.Fatalf("SetEncryption: %v", serr)
@@ -112,10 +109,7 @@ func TestEncryptedPhysicalSize_MatchesDiskTruth(t *testing.T) {
 func TestEncryptedPhysicalSize_UnencryptedIdentityNote(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = root.Close() })
 	if root.IsEncrypted() {
 		t.Fatal("默认根不应加密")

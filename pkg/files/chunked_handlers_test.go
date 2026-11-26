@@ -88,9 +88,13 @@ func newChunkedTestEnv(t *testing.T) *chunkedTestEnv {
 		t.Fatalf("建 UploadStore 失败: %v", err)
 	}
 	t.Cleanup(us.Stop)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", nil)
+	t.Cleanup(func() { _ = cs.Close() })
 	return &chunkedTestEnv{
 		dir: dir, root: root, tnt: tnt,
-		cs:     checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", nil),
+		cs:     cs,
 		us:     us,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

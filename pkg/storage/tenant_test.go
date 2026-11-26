@@ -10,10 +10,7 @@ import (
 // newTestTenant 创建临时目录 + Root + Tenant 的测试辅助。
 func newTestTenant(t *testing.T, owner string) *Tenant {
 	t.Helper()
-	r, err := OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := openTestRoot(t, t.TempDir())
 	t.Cleanup(func() { _ = r.Close() })
 	tnt, err := NewTenant(owner, r)
 	if err != nil {
@@ -90,10 +87,7 @@ func TestTenant_UserRel_Extra(t *testing.T) {
 func TestTenant_NewTenant(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
-	r, err := OpenRoot(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := openTestRoot(t, t.TempDir())
 	t.Cleanup(func() { _ = r.Close() })
 
 	tnt, err := NewTenant("alice", r)

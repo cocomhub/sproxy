@@ -399,9 +399,29 @@ func (rt *Root) Abs(rel string) (string, bool) {
 // 组件，如限流协调计数文件目录）。base 在 OpenRoot 时固定为 path 的绝对形式。
 func (rt *Root) AbsPath() string { return rt.base }
 
-// Close 关闭 root 句柄。
+// Close 释放底层目录句柄（`os.Root` 持有一个打开的目录 fd，且**没有 finalizer**）。
+//
+// 为什么必须显式关闭（2026-11-27 CI 实测 flake）：不关就持有到进程退出。
+// Windows 上这会让 `t.TempDir()` 的 `RemoveAll` 直接失败：
+//
+//	TempDir RemoveAll cleanup: unlinkat ...: The process cannot access the file
+//	because it is being used by another process.
+//
+// 测试侧统一走 `openTestRoot(t, dir)`（自动 `t.Cleanup(Close)`），避免逐个漏写。
+//
+// 幂等（重复调用返回 nil）且 nil 接收者安全：测试/装配里常同时写 `t.Cleanup` 与显式 Close。
 func (rt *Root) Close() error {
-	return rt.r.Close()
+	if rt == nil || rt.r == nil {
+		return nil
+	}
+	err := rt.r.Close()
+	// **不置空 rt.r**：置空会把「关闭后再用」从 `os.ErrClosed`（干净错误）变成 nil 指针
+	// panic（`os.doInRoot(0x0, …)`）——后台 goroutine（如 checksum 的 savemerger）在测试
+	// 清理后仍可能写一次，实测会 panic 整个包。
+	if err != nil && !errors.Is(err, os.ErrClosed) {
+		return fmt.Errorf("storage: Root.Close: %w", err)
+	}
+	return nil
 }
 
 // encReadCloser 解密流 + 底层文件关闭。
