@@ -92,6 +92,11 @@ func TestRestoreUserVolumes_PartialFail(t *testing.T) {
 	}
 
 	set := registry.NewSet([]volume.Volume{}, nil, map[string]registry.ExternalBackend{}, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
 		t.Fatalf("restoreUserVolumes: %v", err)
 	}
@@ -118,6 +123,11 @@ func TestRestoreUserVolumes(t *testing.T) {
 	}
 
 	set := registry.NewSet([]volume.Volume{}, nil, map[string]registry.ExternalBackend{}, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if err := restoreUserVolumes(set, store, discardLoggerMain()); err != nil {
 		t.Fatalf("restoreUserVolumes: %v", err)
 	}

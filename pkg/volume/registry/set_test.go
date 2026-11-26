@@ -356,6 +356,10 @@ func (fakeURLBackendAny) OpenURL(_ context.Context, u string) (io.ReadCloser, er
 func TestDefaultExternal_FirstRegisteredWins(t *testing.T) {
 	t.Parallel()
 	set := NewSet(nil, nil, nil, nil, "default")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
 
 	// 首登记：实现 URLResolver（如默认 secrets 卷）——必须恒为默认。
 	first := &fakeURLBackend{}
@@ -463,6 +467,11 @@ func TestResolveURL(t *testing.T) {
 func TestRemoveExternalVolume_RecomputeFirstExternal(t *testing.T) {
 	t.Parallel()
 	set := NewSet(nil, nil, nil, nil, "default")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	a, b := &fakeURLBackend{}, &fakeURLBackend{}
 	if err := set.AddExternalVolume(volume.Volume{Name: "first-ext", Type: "secrets"}, a); err != nil {
 		t.Fatalf("AddExternalVolume(first-ext): %v", err)
@@ -525,6 +534,11 @@ func TestNewSet_DefaultExternalDeclarationOrder(t *testing.T) {
 		"a": &fakeURLBackend{},
 	}
 	vs := NewSet([]volume.Volume{{Name: "a"}, {Name: "b"}}, nil, ext, nil, "a")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = vs.Close() })
+
 	first := vs.DefaultExternal()
 	if first == nil || first != ext["a"] {
 		t.Fatalf("NewSet 应把 firstExternal 初始化为声明序首个外部卷 a, got %v", first)

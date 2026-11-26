@@ -56,6 +56,11 @@ func TestClusterEgress_CredentialEndToEnd(t *testing.T) {
 
 	// 出口侧 Handlers：volSet 装配 egress 卷（AddExternalVolume）。
 	vs := registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = vs.Close() })
+
 	if aerr := vs.AddExternalVolume(egVol, be); aerr != nil {
 		t.Fatalf("AddExternalVolume: %v", aerr)
 	}
@@ -134,6 +139,11 @@ func TestClusterEgress_DirectURL_302NoLoop(t *testing.T) {
 	}
 	defer be.Close()
 	vs := registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = vs.Close() })
+
 	if aerr := vs.AddExternalVolume(egVol, be); aerr != nil {
 		t.Fatal(aerr)
 	}
@@ -178,6 +188,11 @@ func TestClusterEgress_StatSize(t *testing.T) {
 	}
 	defer be.Close()
 	vs := registry.NewSet(nil, nil, nil, nil, "")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = vs.Close() })
+
 	if aerr := vs.AddExternalVolume(egVol, be); aerr != nil {
 		t.Fatal(aerr)
 	}

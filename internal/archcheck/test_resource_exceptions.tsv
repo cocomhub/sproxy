@@ -1,11 +1,21 @@
-# R60 例外清单（**只减不增**）：测试夹具的资源构造点，但关闭归属在别处（需写明为什么）。
-# 格式：<rel>:<line>	<理由>
-pkg/files/dirs_test.go:487	OpenRoot：volRoots 由 dirsEnv 的 t.Cleanup 遍历统一 Close（此处再登记会重复）
-pkg/files/dirs_test.go:516	checksum store 由 dirsEnv 的 t.Cleanup 遍历统一 Close
-pkg/files/dirs_test.go:465	OpenTenant：租户根由 dirsEnv 的 t.Cleanup 遍历 e.tenants 统一 Close
-pkg/cloud/manager_test_common_test.go:113	checksum store 由 newCloudTestEnv 的 t.Cleanup 遍历统一 Close
-internal/archcheck/test_resource_release_gate_test.go:0	门禁自身的匹配字符串不是真实调用（整文件跳过）
-pkg/storage/tenant_resolve_test.go:74	OpenTenant 调用**必然失败**（断言 nil,err，非法 owner）⇒ 不产生资源
-pkg/storage/tenant_resolve_test.go:80	同上（parent==nil fail-closed）
-pkg/server/s3/object_test.go:185	误匹配 t.Fatalf 文案（真实调用点 183 已登记 Cleanup）
-pkg/server/s3/object_test.go:426	误匹配 t.Fatalf 文案（真实调用点 424 已登记 Cleanup）
+# R60 例外清单（**只减不增**）：测试夹具的资源构造点，但关闭归属在别处 / 无资源可关。
+# 格式：<rel>:<代码行文本>	<理由>（按代码行文本而非行号匹配 —— 行号会随编辑漂移）
+#
+# ---- 容器统一关闭（资源确实存在，但由 env 的 t.Cleanup 遍历关闭）----
+pkg/files/dirs_test.go:r, err := storage.OpenRoot(e.root)	volRoots 由 dirsEnv 的 t.Cleanup 遍历统一 Close
+pkg/files/dirs_test.go:tnt, err := storage.OpenTenant(parent, owner, storage.WithMetaBucket())	租户根由 dirsEnv 的 t.Cleanup 遍历 e.tenants 统一 Close
+pkg/files/dirs_test.go:cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", e.logger)	checksum store 由 dirsEnv 的 t.Cleanup 遍历统一 Close
+pkg/cloud/manager_test_common_test.go:cs := checksum.NewChecksumStore(tnt.Root(), "meta/checksums.json", testLogger())	由 newCloudTestEnv 的 t.Cleanup 遍历统一 Close
+#
+# ---- 无资源可关（roots=nil 且 external=nil ⇒ Set.Close() 关不到任何句柄/协程）----
+pkg/server/audit_volume_dimension_test.go:return registry.NewSet(vols, nil, nil, nil, names[0])	roots/external 均 nil ⇒ 无句柄可关
+pkg/server/quota_trueusage_reconcile_test.go:vs := registry.NewSet(	roots 为空 map ⇒ 无租户子根可关（external 由调用方管理）
+pkg/server/volume_pool_wait_test.go:return registry.NewSet(	roots/external 均 nil ⇒ 无句柄可关
+pkg/server/cloud_download_handler_test.go:vs := registry.NewSet(nil, nil, nil, nil, name)	roots/external 均 nil ⇒ 无句柄可关
+pkg/server/backends_presign_volumewrite_test.go:return registry.NewSet(	roots/external 均 nil ⇒ 无句柄可关
+#
+# ---- 门禁/断言自身的文本匹配（非真实调用）----
+internal/archcheck/test_resource_release_gate_test.go:if !testResourcePattern.MatchString(ln) {	门禁自身
+pkg/checksum/store_close_gate_test.go:if !strings.Contains(ln, "NewChecksumStore(") || strings.HasPrefix(trimmed, "//") {	门禁自身
+pkg/storage/tenant_resolve_test.go:tn, err := OpenTenant(parent, owner)	调用**必然失败**（断言 nil,err）⇒ 不产生资源
+pkg/storage/tenant_resolve_test.go:if tn, err := OpenTenant(nil, "alice"); err == nil || tn != nil {	同上（parent==nil fail-closed）

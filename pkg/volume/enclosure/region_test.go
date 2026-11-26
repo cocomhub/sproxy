@@ -38,6 +38,11 @@ func newRegionTestSet(t *testing.T, srcPath string) (*registry.Set, string) {
 		{Name: "vault", Type: regionTestWrapper, Extra: map[string]any{"source": "main:" + srcPath}},
 	}
 	set := registry.NewSet(vols, map[string]*storage.Root{"main": rt}, nil, nil, "main")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	return set, dir
 }
 

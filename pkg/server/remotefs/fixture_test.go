@@ -114,6 +114,10 @@ func newFixture(t *testing.T, cfg *config.Config) *fixture {
 	roots[volCfg.Name] = root
 	pools[volCfg.Name] = quota.NewPool(0)
 	set := registry.NewSet(vols, roots, nil, pools, volCfg.Name)
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
 
 	router := fixtureRouter{Set: set, tenants: tenants}
 	svc, err := files.New(tenants, files.WithVolumes(router), files.WithLogger(slog.Default))

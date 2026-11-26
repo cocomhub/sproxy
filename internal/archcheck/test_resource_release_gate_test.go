@@ -34,15 +34,17 @@ const (
 	testResourceWindow = 10
 	// 下限护栏：低于此值说明扫描面/正则失效（会假绿）。
 	testResourceMinFiles = 900
-	testResourceMinSites = 145
+	testResourceMinSites = 190
 )
 
-// testResourcePattern 是「需要显式释放的资源构造函数」清单。
+// testResourcePattern 是「需要显式释放的资源构造函数」清单（含 registry.NewSet：它内部
+// 为每卷懒建 TenantCache，缓存着租户子根 = 独立 os.Root）。
 //
 // 新增条目时同时确认：该构造函数确实持有进程级资源（fd / goroutine / listener），
 // 且**没有** finalizer 兜底。
 var testResourcePattern = regexp.MustCompile(
-	`(?:storage\.)?OpenRoot\(|(?:storage\.)?OpenTenant\(|checksum\.NewChecksumStore\(|(?:^|[^.\w])NewChecksumStore\(`)
+	`(?:storage\.)?OpenRoot\(|(?:storage\.)?OpenTenant\(|checksum\.NewChecksumStore\(|` +
+		`(?:^|[^.\w])NewChecksumStore\(|(?:registry\.)?NewSet\(`)
 
 // openTestRootHelper 是本仓统一的「打开即登记关闭」助手名（命中即视为已登记）。
 var openTestRootHelper = regexp.MustCompile(`openTestRoot\(|openRootForTest\(|testRootAt\(`)
@@ -111,11 +113,13 @@ func TestR60_TestFixturesReleaseSystemResources(t *testing.T) {
 			if closeOwnership.MatchString(window) {
 				continue
 			}
-			key := rel + ":" + strconv.Itoa(i+1)
+			// 例外键用「文件:代码行文本」而非行号：行号随每次编辑漂移，会让清单变成噪声
+			// （实测：加了 2 行注释后 3 条例外全部失配）。行文本变化则例外失效（fail-closed）。
+			key := rel + ":" + strings.TrimSpace(ln)
 			if _, ok := exceptions[key]; ok {
 				continue
 			}
-			violations = append(violations, key+"  "+trimmed)
+			violations = append(violations, rel+":"+strconv.Itoa(i+1)+"  "+trimmed)
 		}
 		return nil
 	})

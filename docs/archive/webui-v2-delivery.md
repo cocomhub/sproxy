@@ -598,3 +598,60 @@ return c.TenantFor(owner)   // ← 懒建租户子根（独立 os.Root）
 `pkg/server`、`pkg/files`、`pkg/volume/{registry,enclosure}`）。属同一 flake 类的第五轮清扫，
 单独 PR 处理（并把 R60 的资源模式扩到 `registry.NewSet(`）。
 本轮只修 `pkg/server/s3`（CI 实际命中处）。
+
+## 2026-11-27 R60 扩到 `registry.NewSet`（第五轮，也是这一类的收尾）
+
+上一轮把 `registry.Set` 认定为第四层句柄持有者，但只在 s3 修了 CI 命中处。本轮补完全仓。
+
+### 清理
+
+`registry.NewSet(` 的调用点分三类处理：
+
+| 类别 | 处理 |
+| --- | --- |
+| 持有本地卷根 且 作用域内有 `t` | 加 `t.Cleanup(func(){ _ = set.Close() })`（**35 处**，18 个文件） |
+| `roots=nil` / 空 map（`Set.Close()` 关不到任何东西） | 登记例外清单 + 写明「无句柄可关」 |
+| 助手函数**没有 `t`** 参数（`volumeDimSet` / `presignVolWriteSet` / `poolWaitSet` / …） | 同上（它们都 `roots=nil`，改签名只是噪声） |
+
+`secret_register_test.go` 的 `newSet` 闭包、`meta_remote_test.go`、`baidupcs_sync*.go`
+等真实持有的站点逐个补齐。
+
+### 门禁 R60 扩展
+
+- 资源模式加 `registry.NewSet(`（`Set` 内部为每卷懒建 `TenantCache`，缓存着租户子根）；
+- 下限护栏调用点 **145 → 190**（实测 200+）；
+- **例外清单键从「行号」改为「代码行文本」**：
+  ```diff
+  - pkg/files/dirs_test.go:487	理由
+  + pkg/files/dirs_test.go:r, err := storage.OpenRoot(e.root)	理由
+  ```
+  行号随每次编辑漂移 —— 实测加 2 行注释就让 3 条例外**全部失配**、门禁无故变红。
+  行文本变化时例外失效，属 fail-closed 的正确方向。
+
+### `-count>1` 的两处既有噪声（与本次无关，未改）
+
+`pkg/volume/registry` 的 `TestLocalBackendRegistration_AllowedButNotUserCreatable` 与
+`pkg/volume/enclosure` 的 `TestAttachAll_*` 在 `-count>1` 下失败：前者断言「全局 registry
+不应预注册 local」，后者全局 wrapper 重复注册 panic —— 都属**全局状态 + 重复执行**的既有
+限制，CI 用 `-count=1` 不受影响。
+
+### 验证
+
+`cmd/sproxy` / `pkg/files` / `pkg/server`（含 `s3`、`remotefs`）/ `pkg/volume/registry` /
+`pkg/volume/enclosure` / `pkg/cloud` / `internal/archcheck` 全绿；`go build ./...`；
+`golangci-lint ./...` 0 issues。
+
+变异命中：删掉 s3 `testVolumeSet` 的 `set.Close()` ⇒ R60 报 `pkg/server/s3/object_test.go:39`。
+
+### 这一类的完整入口清单（四次 CI 才收敛）
+
+| 轮次 | 入口 | 症状 |
+| --- | --- | --- |
+| 1 | `ChecksumStore`（debounce 协程） | `The directory is not empty` |
+| 2 | `storage.OpenRoot` | `being used by another process` |
+| 3 | `storage.OpenTenant`（租户子根） | 同上 |
+| 4 | `registry.Set` → `TenantCache` → `TenantFor` | 同上 |
+| 5 | 全仓 `registry.NewSet(` 收口（本轮） | —— 已由 R60 钉住 |
+
+**教训**：从第一次发现就该把所有持有 `os.Root` 的入口列全（`grep -rn "os.OpenRoot"`），
+而不是每被 CI 打一次才补一层。

@@ -1185,13 +1185,17 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 		}},
 	}
 	newSet := func() *registry.Set {
-		return registry.NewSet(
+		set := registry.NewSet(
 			append([]volume.Volume(nil), vols...),
 			map[string]*storage.Root{"default": rt},
 			map[string]registry.ExternalBackend{},
 			map[string]*quota.Pool{"default": quota.NewPool(0), "vault": quota.NewPool(4 << 20)},
 			"default",
 		)
+		// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+		// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+		t.Cleanup(func() { _ = set.Close() })
+		return set
 	}
 	// 装配步骤与生产 boot 顺序一致：源卷封印（assembleVolumes 内做）→ 封装后端补装。
 	attach := func(set *registry.Set) {

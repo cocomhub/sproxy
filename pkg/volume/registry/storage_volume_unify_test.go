@@ -31,6 +31,11 @@ func TestSet_StorageVolume_LocalReturnsBackend(t *testing.T) {
 	t.Parallel()
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}},
 		nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: &stubFS{}}); err != nil {
 		t.Fatalf("RegisterStorageVolume: %v", err)
 	}
@@ -48,6 +53,11 @@ func TestSet_StorageVolume_LocalReturnsBackend(t *testing.T) {
 func TestSet_StorageVolume_UnknownReturnsFalse(t *testing.T) {
 	t.Parallel()
 	set := NewSet(nil, nil, nil, nil, "default")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if sv, ok := set.StorageVolume("nope"); ok || sv != nil {
 		t.Fatalf("未知卷名应 (nil,false)，got %v %v", sv, ok)
 	}
@@ -68,6 +78,11 @@ func TestSet_VolumeView_UserViewDecorated(t *testing.T) {
 	raw := &stubFS{}
 	called := 0
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	set.SetVolumeViewDecorator(func(name string, use ViewUse, f syncpkg.FS) syncpkg.FS {
 		called++
 		return &decoratedFS{stubFS: stubFS{}, use: use}
@@ -107,6 +122,11 @@ func TestSet_VolumeView_UserViewDecorated(t *testing.T) {
 func TestSet_VolumeView_MetaViewUse(t *testing.T) {
 	t.Parallel()
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	set.SetVolumeViewDecorator(func(name string, use ViewUse, f syncpkg.FS) syncpkg.FS {
 		return &decoratedFS{use: use}
 	})
@@ -129,6 +149,11 @@ func TestSet_VolumeView_DefaultDecoratorIsTrusted(t *testing.T) {
 	t.Parallel()
 	raw := &stubFS{}
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: raw}); err != nil {
 		t.Fatalf("RegisterStorageVolume: %v", err)
 	}
@@ -151,6 +176,9 @@ func TestSet_VolumeView_DefaultDecoratorIsTrusted(t *testing.T) {
 func TestSet_ResolveURL_LocalScheme(t *testing.T) {
 	t.Parallel()
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	// Set 懒建 TenantCache（缓存租户子根 = 独立 os.Root，无 finalizer）：不关会让请求路径
+	// 懒建的租户根持有 <卷根>/<owner>/ 句柄，Windows 上 t.TempDir() 清理失败。
+	t.Cleanup(func() { _ = set.Close() })
 	if err := set.RegisterStorageVolume(fakeStorageVolume{
 		name: "v1", fs: &stubFS{content: map[string]string{"anonymous/user/a.txt": "hello"}},
 	}); err != nil {
@@ -176,6 +204,11 @@ func TestSet_ResolveURL_LocalScheme(t *testing.T) {
 func TestSet_ResolveURL_LocalScheme_TraversalRejected(t *testing.T) {
 	t.Parallel()
 	set := NewSet([]volume.Volume{{Name: "v1", Type: volume.TypeLocal}}, nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	if err := set.RegisterStorageVolume(fakeStorageVolume{name: "v1", fs: &stubFS{}}); err != nil {
 		t.Fatalf("RegisterStorageVolume: %v", err)
 	}
@@ -189,6 +222,11 @@ func TestSet_ResolveURL_LocalScheme_TraversalRejected(t *testing.T) {
 func TestSet_ResolveURL_LocalScheme_UnknownVolume(t *testing.T) {
 	t.Parallel()
 	set := NewSet(nil, nil, nil, nil, "v1")
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = set.Close() })
+
 	registerLocalTestScheme()
 	if _, err := set.ResolveURL(context.Background(), "local://nope/a.txt"); err == nil {
 		t.Fatal("未知卷应报错（fail-closed）")

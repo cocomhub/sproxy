@@ -77,6 +77,11 @@ func newStateCacheTestSet(t *testing.T, extFS syncpkg.FS) (*registry.Set, *stora
 		map[string]registry.ExternalBackend{"ext1": fakeBE{fs: extFS}},
 		nil, "local1",
 	)
+	// registry.Set 内部为每个卷懒建 TenantCache，缓存着**租户子根**（独立 os.Root，无
+	// finalizer）：不关时请求路径懒建的租户根会持有 <卷根>/<owner>/ 目录句柄，
+	// Windows 上 t.TempDir() 的 RemoveAll 报 `being used by another process`。
+	t.Cleanup(func() { _ = vs.Close() })
+
 	// NewSet 已把 external 句柄登记进统一存储卷表（#872）⇒ VolumeView 可直接取到。
 	return vs, root
 }
