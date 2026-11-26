@@ -17,6 +17,13 @@
 
   function el(id) { return document.getElementById(id); }
 
+  /** 广播侧栏徽标（nav-badges.js 监听；未加载时静默）。 */
+  function badge(route, count) {
+    try {
+      document.dispatchEvent(new CustomEvent('v2:badge', { detail: { route: route, count: count } }));
+    } catch (e) { /* 忽略 */ }
+  }
+
   function subdirFromHash() {
     var raw = String(window.location.hash || '').replace(/^#\/?/, '');
     var parts = raw.split('/');
@@ -152,6 +159,7 @@
     if (all) { all.checked = n > 0 && n === state.files.length; }
     var count = el('v2-count');
     if (count) { count.textContent = state.files.length + ' 项' + (n ? ' · 已选 ' + n : ''); }
+    badge('files', state.files.length);
   }
 
   function listPath() {
@@ -206,6 +214,7 @@
       })
       .catch(function (err) {
         if (count) { count.textContent = '—'; }
+        badge('files', null);
         state.files = [];
         setState('error', '加载失败：' + (err && err.message ? err.message : '网络错误') + '（可在旧版确认登录状态）');
       });

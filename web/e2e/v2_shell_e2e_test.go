@@ -6,6 +6,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,20 @@ import (
 	serverconfig "github.com/cocomhub/sproxy/pkg/server/config"
 	"github.com/mxschmitt/playwright-go"
 )
+
+// toNum 把 Playwright Evaluate 返回的数值（float64/int）统一成 int64。
+func toNum(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	default:
+		return -1
+	}
+}
 
 // TestV2Shell_RouteThemeAndEntry 验证 /ui/v2/ 可用且不破坏旧版入口。
 func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
@@ -99,6 +114,90 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 	if n, _ := page.Locator(".nav[data-route]").Count(); n != 4 {
 		t.Fatalf("侧栏入口数 = %d，期望 4", n)
+	}
+	// 面板归属：卡片必须留在自己的 panel 内（曾有一条「同步任务」card 逃出 transfer 面板，
+	// 在回收站/控制台页面上也会显示出来）。
+	if stray, err := page.Evaluate(`() => Array.from(document.querySelectorAll('.content > .card'))
+		.map(c => (c.querySelector('h2, b, .card-title') || {}).textContent || '(无标题)')`, nil); err != nil {
+		t.Fatalf("检查面板归属: %v", err)
+	} else if list, ok := stray.([]any); ok && len(list) > 0 {
+		t.Fatalf("有卡片逃出面板（.content 直接子级）: %v", list)
+	}
+
+	// 侧栏徽标必须是**真实数据**（曾硬编码 128/3/4）：文件数 = 实际条目数。
+	if err := waitLoc(page, "#v2-file-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("文件列表未渲染: %v", err)
+	}
+	badge, _ := page.Evaluate(`() => {
+		const b = document.querySelector('[data-badge=files]');
+		const rows = document.querySelectorAll('#v2-file-body tr').length;
+		return {text: b ? b.textContent : 'MISSING', hidden: b ? b.hidden : null, rows: rows};
+	}`, nil)
+	if m, ok := badge.(map[string]any); ok {
+		rows := fmt.Sprint(m["rows"])
+		if got := fmt.Sprint(m["text"]); got != rows {
+			t.Fatalf("文件徽标 = %v（hidden=%v），期望等于列表行数 %v（不得硬编码）", got, m["hidden"], rows)
+		}
+	} else {
+		t.Fatalf("读取文件徽标失败: %v", badge)
+	}
+	// 账户卡：无凭据（loopback 匿名）时必须显示「匿名」，不得是 demo 占位。
+	acc, _ := page.Evaluate(`() => ({
+		ini: (document.querySelector('#v2-account-initial') || {}).textContent,
+		name: (document.querySelector('#v2-account-name') || {}).textContent,
+		sub: (document.querySelector('#v2-account-sub') || {}).textContent})`, nil)
+	if m, ok := acc.(map[string]any); ok {
+		if m["name"] == "demo" || strings.Contains(fmt.Sprint(m["sub"]), "示例凭据") {
+			t.Fatalf("账户卡仍是占位假数据: %v", m)
+		}
+		if m["name"] != "匿名" {
+			t.Fatalf("无凭据时账户名 = %v，期望 匿名", m["name"])
+		}
+	}
+	// 过期文案：不得再出现 P0/banner 里「仍走旧版」这类早已不成立的描述。
+	stale, _ := page.Evaluate(`() => {
+		const t = document.querySelector('.content').textContent + ' ' + document.querySelector('.rail').textContent;
+		return ['v2 · P0', '示例凭据', '仍走旧版', '（P1a 文件列表）'].filter(s => t.indexOf(s) !== -1);
+	}`, nil)
+	if list, ok := stale.([]any); ok && len(list) > 0 {
+		t.Fatalf("页面仍含过期/占位文案: %v", list)
+	}
+
+	// 窄屏（≤900px）此前**没有任何切页入口**（侧栏 display:none）：必须有替代导航，
+	// 且不得横向撑破（表格需在容器内滚动）。
+	if err := page.SetViewportSize(390, 844); err != nil {
+		t.Fatalf("设置窄屏视口: %v", err)
+	}
+	if err := waitLoc(page, ".mobile-nav .mn-item[data-route=trash]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("窄屏导航缺失: %v", err)
+	}
+	if err := page.Locator(".mobile-nav .mn-item[data-route=trash]").Click(); err != nil {
+		t.Fatalf("窄屏导航点击失败: %v", err)
+	}
+	if err := waitLoc(page, "[data-panel=trash]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("窄屏导航未切到回收站: %v", err)
+	}
+	if ov, err := page.Evaluate(`() => ({doc: document.documentElement.scrollWidth, win: window.innerWidth})`, nil); err != nil {
+		t.Fatalf("读取窄屏溢出: %v", err)
+	} else if m, ok := ov.(map[string]any); ok {
+		if d, w := toNum(m["doc"]), toNum(m["win"]); d > w+1 {
+			t.Fatalf("窄屏横向溢出: scrollWidth=%v window=%v（表格应在容器内滚动）", d, w)
+		}
+	}
+	// 副标题必须反映真实状态（曾写死「/ 3 个进行中」「/ 保留 30 天」）。
+	if sub, err := page.Evaluate(`() => (document.querySelector('#v2-subtitle') || {}).textContent || ''`, nil); err == nil {
+		if txt := fmt.Sprint(sub); strings.Contains(txt, "3 个进行中") || strings.Contains(txt, "保留 30 天") {
+			t.Fatalf("副标题仍是硬编码假数据: %q", txt)
+		}
+	} else {
+		t.Fatalf("读取副标题: %v", err)
+	}
+	if err := page.SetViewportSize(1440, 900); err != nil {
+		t.Fatalf("恢复视口: %v", err)
+	}
+	// 复位到默认路由，避免影响后续断言。
+	if err := page.Locator(".nav[data-route=files]").Click(); err != nil {
+		t.Fatalf("复位到文件页: %v", err)
 	}
 	if txt, _ := page.Locator("#v2-title").TextContent(); txt != "文件" {
 		t.Fatalf("默认路由标题 = %q，期望 文件", txt)
@@ -1288,7 +1387,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 
 	// 链式下载：两个不可达 URL 建组 → 组行失败 → 「打包全部」被 409 拒绝（全有语义）。
-	if err := page.Locator("[data-route=transfer]").Click(); err != nil {
+	if err := page.Locator(".nav[data-route=transfer]").Click(); err != nil {
 		t.Fatalf("回到传输页: %v", err)
 	}
 	if err := page.Locator("#v2-chain-open").Click(); err != nil {

@@ -53,3 +53,24 @@
 
 链式下载（需产品定义）、Hub 踢节点（管理写操作）、旧页下线（等发布周期）、
 建卷类型探测（后端无「已注册类型」端点，下拉为静态列表）。
+
+## 2026-11-26 UI 体验修复（PR 见 git 历史）
+
+真机三视口（1440/768/390）+ DOM 探针实测发现并修复 5 类问题：
+
+| # | 问题 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | 「同步任务」卡片在**回收站/控制台**页面上也显示 | 该 `<div class="card">` 被写成 `</section>` 之外的**游离节点**（早期 PR 结构笔误），`data-panel` 切换只隐藏 panel 本身 | 挪回 transfer 面板内；新增 e2e 断言 `.content > .card` 必须为空 |
+| 2 | ≤900px **完全无法切页** | `.rail{display:none}` 后没有替代导航 | 新增 `.mobile-nav`（横向 tab + 同一 `[data-route]`/`[data-badge]` 契约） |
+| 3 | 窄屏横向撑破（contentScrollW 1036 > 390） | `.card-h` 无 `flex-wrap`；表格 551px 直接撑宽文档 | `.card-h` 加 `flex-wrap`；文件页工具栏独立成 `.card-tools` 行；≤900px `.table{display:block;overflow-x:auto}` |
+| 4 | 侧栏徽标 `128 / 3 / 4` 是**假数据** | HTML 里硬编码，永不更新 | 新增 `web/static/v2/nav-badges.js`（纯函数 `badgeText`/`accountModel` + `v2:badge` 事件）；files/transfer/trash 视图广播真实计数；`>99` 折叠为 `99+`，未知隐藏、`0` 显示 |
+| 5 | 过期文案与占位身份 | `v2 · P0`、`v2 预览` pill、「仍走旧版」banner（内容早已不成立）、账户卡写死 `demo · 示例凭据` | 删除 P0/预览 banner；账户卡由 `shared/creds.js` 读 sessionStorage 渲染（AK 只显示前 6 位 + `…`，匿名显示「匿名」） |
+
+补充：
+- 副标题 `TITLES` 去数字化（曾写死「/ 3 个进行中」「/ 保留 30 天」），改由视图经 `v2:subtitle` 实时写入；
+  `node --test` 增加「副标题不得含数字」回归守卫。
+- 命令面板 `goRoute` 改为只点**可见**的 `[data-route]`（侧栏+窄屏导航同名，`click` 到隐藏节点无意义）。
+- 设置面板改为 `max-height:80vh; overflow:auto`——内容变长后此前**下方按钮点不到**（e2e 超时暴露）。
+
+验证：`make web-test`、`go test ./web/e2e -run TestV2Shell -count=2`、`go test ./internal/archcheck`；
+5 处修复各配**变异验证**（挪回游离卡片 / 删除窄屏导航 / 徽标写死 128 / 副标题写回「保留 30 天」均红）。

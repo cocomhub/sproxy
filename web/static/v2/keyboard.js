@@ -144,8 +144,12 @@
 
   function goRoute(route) {
     window.location.hash = '#/' + route;
-    var node = document.querySelector('[data-route="' + route + '"]');
-    if (node) { node.click(); }
+    // 侧栏与窄屏导航都可能存在同名 [data-route]；只点**可见**的那个
+    // （对隐藏元素 click 在部分浏览器不派发，且语义上拿不准点到了谁）。
+    var nodes = document.querySelectorAll('[data-route="' + route + '"]');
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (nodes[i].getClientRects().length > 0) { nodes[i].click(); break; }
+    }
     announce('已切换到 ' + route);
   }
 
