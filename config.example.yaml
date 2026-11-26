@@ -349,6 +349,9 @@ tls:
 # cloud_downloader: "http"                  # 云端下载器名称（默认 http；pikpak 可选用 PikPak 完整下载，见下 pikpak: 段）
 # cloud_task_ttl: "24h"                     # 完成任务保留时间，过期自动清理
 # cloud_failed_task_ttl: "1h"               # 失败/取消任务保留时间
+# cloud_discard_partial_on_transient_failure: false  # 瞬态失败（源不可达/限流/认证）时是否**删除**
+#                                           # 已下载断点。默认 false = 保留（「退回下载阶段续传」才能真正续传）；
+#                                           # true = 失败即删（空间优先，重试从零开始）
 # cloud_download_timeout: "30m"             # 单次下载尝试整体超时（超时后自动重试续传）
 # cloud_download_idle_timeout: "1m"         # 响应体读取空闲超时：超过该时长未收到数据即中断本次尝试
 # cloud_max_retries: 10                     # 瞬时失败（网络/5xx/超时）最大重试次数

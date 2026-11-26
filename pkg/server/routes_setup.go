@@ -596,19 +596,20 @@ func (h *Handlers) initStorageManagers(vs *registry.Set, cfg *Config, log *slog.
 	})
 	_ = sm.ScanAndRecalculate() // 装配后重扫：校准 per-tenant Scope + 逐卷容量池（启动对账）
 	cloudCfg := &cloud.CloudDownloadConfig{
-		SyncThreshold:       cfg.CloudSyncThreshold,
-		MaxConcurrent:       cfg.CloudMaxConcurrent,
-		TransferConcurrency: cfg.CloudTransferConcurrency,
-		MaxBatchURLs:        cfg.CloudMaxBatchURLs,
-		TaskTTL:             cfg.CloudTaskTTL,
-		FailedTaskTTL:       cfg.CloudFailedTaskTTL,
-		AllowPrivate:        cfg.CloudDownloadAllowPrivate,
-		DownloadTimeout:     cfg.CloudDownloadTimeout,
-		IdleTimeout:         cfg.CloudDownloadIdleTimeout,
-		MaxRetries:          cfg.CloudMaxRetries,
-		RetryDelay:          cfg.CloudRetryDelay,
-		Downloader:          cfg.CloudDownloader,
-		MaxCheckMemBytes:    cfg.CloudCheckMemBytes,
+		SyncThreshold:                    cfg.CloudSyncThreshold,
+		MaxConcurrent:                    cfg.CloudMaxConcurrent,
+		TransferConcurrency:              cfg.CloudTransferConcurrency,
+		MaxBatchURLs:                     cfg.CloudMaxBatchURLs,
+		TaskTTL:                          cfg.CloudTaskTTL,
+		FailedTaskTTL:                    cfg.CloudFailedTaskTTL,
+		DiscardPartialOnTransientFailure: cfg.CloudDiscardPartialOnTransientFailure,
+		AllowPrivate:                     cfg.CloudDownloadAllowPrivate,
+		DownloadTimeout:                  cfg.CloudDownloadTimeout,
+		IdleTimeout:                      cfg.CloudDownloadIdleTimeout,
+		MaxRetries:                       cfg.CloudMaxRetries,
+		RetryDelay:                       cfg.CloudRetryDelay,
+		Downloader:                       cfg.CloudDownloader,
+		MaxCheckMemBytes:                 cfg.CloudCheckMemBytes,
 		// P2-7 修复：trusted_volume.skip_verify 接线到转存读侧校验（此前 cloudCfg 缺该
 		// 字段，transfer.go 的 m.config.SkipVerify 恒 false——配置项与文档不符）。
 		SkipVerify: cfg.TrustedVolume.SkipVerify,

@@ -223,8 +223,12 @@ type CloudDownloadConfig struct {
 	DownloadTimeout time.Duration // 单次下载尝试整体超时，默认 30m；0 表示不限制
 	IdleTimeout     time.Duration // 响应体读取空闲超时，默认 60s；0 表示不限制
 	MaxRetries      int           // **总尝试次数**（含首次），默认 10；重试 = MaxRetries−1（runRetryLoop 为 `for attempt := range maxRetries`）
-	RetryDelay      time.Duration // 重试间隔，默认 10s
-	Downloader      string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
+	// DiscardPartialOnTransientFailure 关闭「瞬态失败保留断点」（默认 false = 保留）。
+	// 语义反转（bool 默认 false 规则）：瞬态失败（源不可达/限流/认证）**保留已下字节**，
+	// 使 retry_download 真能续传；显式 true 才恢复"失败即删"的旧行为（空间优先）。
+	DiscardPartialOnTransientFailure bool
+	RetryDelay                       time.Duration // 重试间隔，默认 10s
+	Downloader                       string        // 下载器名称，默认 "http"（配置 cloud_downloader 后生效）
 	// MaxCheckMemBytes 完整性校验内存配额（ByteSize 语义；**<=0（含 0/负值/缺省）一律按
 	// 默认 512 MiB**——用户裁定 2026-10-07：0 处理成默认大小，配额治理默认生效）。
 	// 校验器按 Check 前估算占用排队（不足等待释放）；单文件估算超配额 → 跳过校验

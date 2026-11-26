@@ -143,6 +143,10 @@ func PlanTaskActions(t *CloudTask) []TaskActionPlan {
 		return nil
 	}
 	download := TaskActionPlan{Action: TaskActionRetryDownload, Label: "续传下载", Hint: "保留已下载部分，从断点继续（不重下已完成块）"}
+	if t.Downloaded <= 0 {
+		// 实测（2026-11-26）：取消/删除后断点已被清理时，提示必须诚实——否则用户以为能续传。
+		download.Hint = "从零重新下载（无可续断点：上次结束时已清理残留）"
+	}
 	if damaged {
 		download.Label = "修复重下"
 		download.Hint = "先做零尾扫描 + 定点补片；修不好再整份重下"
