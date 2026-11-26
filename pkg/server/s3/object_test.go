@@ -184,6 +184,8 @@ func TestListObjectsV2_NamedBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTenant(bucket): %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：租户根是**独立**句柄，不关会让 TempDir 清理在 Windows 上失败。
+	t.Cleanup(func() { _ = bucketTenant.Close() })
 	if err := RootWriteFile(bucketTenant.Root(), "user/EXAMPLE-bucket.txt", []byte("xyz")); err != nil {
 		t.Fatalf("写桶内对象: %v", err)
 	}
@@ -425,6 +427,8 @@ func TestBucketRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenTenant(bucket): %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：租户根是**独立**句柄，不关会让 TempDir 清理在 Windows 上失败。
+	t.Cleanup(func() { _ = bucketTenant.Close() })
 	if err := RootWriteFile(bucketTenant.Root(), "user/sub/EXAMPLE-k.txt", []byte("xyz")); err != nil {
 		t.Fatalf("写桶内对象: %v", err)
 	}

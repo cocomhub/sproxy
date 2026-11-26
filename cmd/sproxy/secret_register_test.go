@@ -469,6 +469,8 @@ func TestSetupSecretBackends_ConfigSecretdata_Assembled(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
 		Capacity: 4 << 20,
 		Extra: map[string]any{
@@ -1094,6 +1096,8 @@ func TestSetupSecretBackends_ConfigSecretdata_BackfillFail_BootFail(t *testing.T
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot,
 		Extra: map[string]any{
 			"target":     "local",
@@ -1172,6 +1176,8 @@ func TestEnclosureVolume_RestartReattach(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "default", Type: volume.TypeLocal, RootDir: root},
 		{Name: "vault", Type: reattachWrapType, Capacity: 4 << 20, Extra: map[string]any{
@@ -1291,6 +1297,8 @@ func TestEnclosureWrapper_Secretdata_ProductionAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: root},
 		{Name: "vault", Type: volume.TypeSecretdata, Extra: map[string]any{
@@ -1424,6 +1432,8 @@ func TestSecretsVolume_EncryptedRoot_StoresCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	if serr := rt.SetEncryption(bytes.Repeat([]byte{5}, 32)); serr != nil {
 		t.Fatalf("SetEncryption: %v", serr)
 	}
@@ -1487,6 +1497,8 @@ func TestSecretsDirFSFor_SubdirLayoutAndRootSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	set := registry.NewSet(
 		[]volume.Volume{{Name: "main", Type: volume.TypeLocal, RootDir: dir}},
 		map[string]*storage.Root{"main": rt},
@@ -1552,6 +1564,8 @@ func TestEnclosureWrapper_Secrets_ProductionAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{Name: "main", Type: volume.TypeLocal, RootDir: root},
 		{Name: "keys", Type: "secrets", Extra: map[string]any{
@@ -1648,6 +1662,8 @@ func TestSecretdataVolume_QuotaAtFSLayer(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("OpenRoot: %v", rerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vault := volume.Volume{Name: "vault", Type: "secretdata", RootDir: dataRoot, Capacity: 4 << 20,
 		Extra: map[string]any{"target": "local", "root": dataRoot, "secret_url": "secrets://keys/datakey"}}
 	set := registry.NewSet(

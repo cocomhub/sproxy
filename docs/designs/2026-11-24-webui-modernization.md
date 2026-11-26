@@ -564,7 +564,9 @@
     `m.mu.Unlock()` 之后写 `task.Diagnostics`，而后台 `flushDirty → saveTask` 在 RLock 下
     `json.Marshal(task)` ⇒ 数据竞争（RLock 保护不了不持锁的写方）。判据可执行：
     `...Dir(taskDir string)` 比 `(task *CloudTask)` 更能一眼看出"锁外安全"。
-20. **测试夹具必须显式关闭**持有系统资源的**全部**形态：句柄（`os.Root` 目录 fd，无 finalizer）、
+20. **测试夹具必须显式关闭**持有系统资源的**全部**形态与**全部创建入口**：句柄（`os.Root`
+    目录 fd，无 finalizer —— 入口有 `OpenRoot` / `OpenTenant` / `TenantCache` 三个，只堵一个
+    会换个形态再露出来）、
     后台协程（`checksum` 的 debounce savemerger）、监听器。修一个类时**同一类必须一次清干净** ——
     否则修完一个 flake 只是让下一个浮出水面（实测：关掉 `os.Root` 后立刻露出
     「debounce 协程写盘 ⇒ TempDir not empty」，31 处未关）。做法：统一测试助手

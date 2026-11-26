@@ -30,10 +30,14 @@ func newTestSet(t *testing.T, defaultCap, disk2Cap int64) *Set {
 	if err != nil {
 		t.Fatalf("OpenRoot(默认卷根) 失败: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = defRoot.Close() })
 	d2Root, err := storage.OpenRoot(d2Dir)
 	if err != nil {
 		t.Fatalf("OpenRoot(disk2 根) 失败: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = d2Root.Close() })
 	set := NewSet(
 		[]volume.Volume{
 			{Name: "default", RootDir: defDir, Capacity: defaultCap},

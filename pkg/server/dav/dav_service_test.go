@@ -34,6 +34,8 @@ func newTestRoot(t *testing.T) (*storage.Root, string) {
 	if err != nil {
 		t.Fatalf("OpenRoot(%s): %v", dir, err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = root.Close() })
 	t.Cleanup(func() { _ = root.Close() })
 	return root, dir
 }
@@ -293,6 +295,8 @@ func TestHandler_ExplicitVolume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = root.Close() })
 	set := registry.NewSet(
 		[]volume.Volume{
 			{Name: "vdef"},

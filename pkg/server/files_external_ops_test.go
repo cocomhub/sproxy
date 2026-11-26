@@ -270,6 +270,8 @@ func newExternalTestEnvFS(t *testing.T, v volume.Volume, fs syncpkg.FS) *Handler
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = root.Close() })
 	vs := registry.NewSet(
 		[]volume.Volume{{Name: "main"}},
 		map[string]*storage.Root{"main": root},

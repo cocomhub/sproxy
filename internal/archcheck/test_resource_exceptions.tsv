@@ -1,0 +1,11 @@
+# R60 例外清单（**只减不增**）：测试夹具的资源构造点，但关闭归属在别处（需写明为什么）。
+# 格式：<rel>:<line>	<理由>
+pkg/files/dirs_test.go:487	OpenRoot：volRoots 由 dirsEnv 的 t.Cleanup 遍历统一 Close（此处再登记会重复）
+pkg/files/dirs_test.go:516	checksum store 由 dirsEnv 的 t.Cleanup 遍历统一 Close
+pkg/files/dirs_test.go:465	OpenTenant：租户根由 dirsEnv 的 t.Cleanup 遍历 e.tenants 统一 Close
+pkg/cloud/manager_test_common_test.go:113	checksum store 由 newCloudTestEnv 的 t.Cleanup 遍历统一 Close
+internal/archcheck/test_resource_release_gate_test.go:0	门禁自身的匹配字符串不是真实调用（整文件跳过）
+pkg/storage/tenant_resolve_test.go:74	OpenTenant 调用**必然失败**（断言 nil,err，非法 owner）⇒ 不产生资源
+pkg/storage/tenant_resolve_test.go:80	同上（parent==nil fail-closed）
+pkg/server/s3/object_test.go:185	误匹配 t.Fatalf 文案（真实调用点 183 已登记 Cleanup）
+pkg/server/s3/object_test.go:426	误匹配 t.Fatalf 文案（真实调用点 424 已登记 Cleanup）
