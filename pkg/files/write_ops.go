@@ -35,6 +35,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/pathguard"
 	"github.com/cocomhub/sproxy/pkg/quota"
 	"github.com/cocomhub/sproxy/pkg/storage"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
@@ -54,7 +55,8 @@ type WriteFileInput struct {
 	// Mtime 是写入后要设置的文件修改时间（UnixNano；0 = 不设置）。
 	Mtime int64
 	// MetaExtra 是随上传一并写入 .meta sidecar 的自定义元数据（A/B/C 档字段，
-	// 见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。仅本地卷 sidecar 生效。
+	// 见 pkg/files/meta 的 Extra 白名单；nil = 不写，零回归）。本地卷、外部卷
+	// （trusted.Wrap sidecar）与 secretdata（卷内加密 meta）统一生效。
 	MetaExtra map[string]any
 }
 
@@ -2676,6 +2678,10 @@ func writeTargetError(logger *slog.Logger, ctx context.Context, remotePath strin
 // writeTargetExternalSettle 是 WriteTarget 的外部卷写（对照 writeExternalSettle：保留整流写 +
 // 流式哈希 + Verify 校验 + 双账本结算，去掉去重/版本/台账——统一内核只管写）。
 func (s *Service) writeTargetExternalSettle(ctx context.Context, logger *slog.Logger, owner, rel, remotePath string, input WriteTargetInput, route UploadRoute, src io.Reader) (WriteTargetResult, error) {
+	// 外部卷/secretdata 写面与本地卷对齐：随上传 meta_extra 经 ctx 透传，由卷装饰器
+	// （trusted.Wrap / secretdata）合并进 FileMeta.Extra。此前只在分块上传路径设置，
+	// 普通 multipart 上传到外部卷会静默丢失 meta_extra。
+	ctx = syncpkg.WithUploadMetaExtra(ctx, input.MetaExtra)
 	prev := int64(0)
 	if sz, ok, serr := route.Sink.Stat(ctx, rel); serr == nil && ok {
 		prev = sz

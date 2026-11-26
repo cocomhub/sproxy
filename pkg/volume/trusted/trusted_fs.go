@@ -256,14 +256,14 @@ func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.R
 		if err != nil || !written {
 			return written, err
 		}
-		t.writeMetaAfter(ctx, path, size)
+		t.writeMetaAfter(ctx, path, size, mtime)
 		return written, nil
 	}
 	written, err := pia.WriteIfAbsent(ctx, path, io.TeeReader(r, calc), size, mtime)
 	if err != nil || !written {
 		return written, err
 	}
-	t.persistCalcMeta(ctx, path, calc)
+	t.persistCalcMeta(ctx, path, calc, mtime)
 	return written, nil
 }
 
@@ -271,7 +271,7 @@ func (t *TrustedVolumeFS) WriteIfAbsent(ctx context.Context, path string, r io.R
 // 已内嵌流式计算）。从已落盘文件读回计算（与 filesMetaPolicy.computeMeta 同语义）。
 // 失败静默（与 WriteFile meta 落盘失败吞错同语义——meta 缺失则读侧不校验）。
 // meta 恒生成（用户裁定：只关校验不关 meta——sidecar 是完整性证据，写入路径必落）。
-func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size int64) {
+func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size, mtime int64) {
 	// C2 修复：与 WriteFile 共用 chunkSizeFor（含 minMetaChunkSize 钳制）——原实现只用
 	// <=0 默认，配置 ChunkSize=1B + 大文件 → 10 亿 ChunkMeta OOM/爆配额。
 	chunkSize := t.chunkSizeFor(size)
@@ -287,12 +287,12 @@ func (t *TrustedVolumeFS) writeMetaAfter(ctx context.Context, rel string, size i
 	if _, rerr := calc.ReadFrom(rc); rerr != nil {
 		return
 	}
-	t.persistCalcMeta(ctx, rel, calc)
+	t.persistCalcMeta(ctx, rel, calc, mtime)
 }
 
 // persistCalcMeta 由已完成的 Calculator 落 meta sidecar（WriteFile/WriteIfAbsent 共用）。
 // 失败仅影响校验能力（读侧不校验），不阻断主写。
-func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc *meta.Calculator) {
+func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc *meta.Calculator, mtime int64) {
 	fm := calc.Finish()
 	// size 声明失真的实写自愈（有分块才可能失真）；零字节文件无分块直接 Validate。
 	if len(fm.Chunks) > 0 {
@@ -313,6 +313,7 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 	fm.Extra = cloneExtra(t.opts.Extra)
 	// 片 3（2026-10-26）：随上传 ctx 携带的 extra 合并进 meta（UploadSink 链路透传）。
 	applyUploadCtxExtra(ctx, fm)
+	fm.MTime, fm.CTime = metaTimes(mtime)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		t.invalidateMeta(ctx, rel) // 同上：不得留陈旧 sidecar（主文件已是新内容）
@@ -324,6 +325,16 @@ func (t *TrustedVolumeFS) persistCalcMeta(ctx context.Context, rel string, calc 
 		t.invalidateMeta(ctx, rel)
 		t.logMetaWarn("persistCalcMeta", rel, werr)
 	}
+}
+
+// metaTimes 返回 FileMeta 的 mtime/ctime（RFC3339 UTC）。mtime<=0（调用方未声明）
+// 用当前时刻，保证所有存储卷的客户端 meta 读取口径一致（secretdata/本地卷也恒有值）。
+func metaTimes(mtime int64) (string, string) {
+	mt := time.Now().UTC()
+	if mtime > 0 {
+		mt = time.Unix(0, mtime).UTC()
+	}
+	return mt.Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)
 }
 
 // logMetaWarn 记 meta 落盘/校验失败的可观测日志（C-MAJOR-7：Options.Logger 注入时
@@ -690,6 +701,8 @@ func (t *TrustedVolumeFS) WriteFile(ctx context.Context, key syncpkg.LogicalKey,
 	// 深拷贝：所有文件的 meta 不得共享同一 map 实例（对比 secretdata 已深拷贝）——
 	// 未来任何就地改 Extra 的调用方会污染全部文件的 meta。
 	fm.Extra = cloneExtra(t.opts.Extra)
+	applyUploadCtxExtra(ctx, fm)
+	fm.MTime, fm.CTime = metaTimes(mtime)
 	data, merr := meta.Marshal(fm)
 	if merr != nil {
 		// C1 修复：Marshal 失败同样删旧 sidecar（主文件已写成功）——残留描述旧内容的
