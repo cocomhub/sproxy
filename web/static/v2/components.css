@@ -92,6 +92,10 @@ body {
   background: transparent; color: var(--text-2); cursor: pointer;
 }
 .icon-btn:hover { background: var(--surface-hover); border-color: var(--border); color: var(--text); }
+/* 禁用态（如「全部卷」时的上传入口）：视觉变灰 + 不响应指针，但**保留在 tab 顺序**以便读屏播报原因。 */
+.btn.is-disabled, label.btn.is-disabled {
+  opacity: 0.45; cursor: not-allowed; pointer-events: none;
+}
 .btn:focus-visible, .icon-btn:focus-visible, .nav:focus-visible, .chip:focus-visible {
   outline: none; box-shadow: var(--ring);
 }
