@@ -84,6 +84,11 @@
       var st = document.createElement('td'); st.appendChild(statePill(v.state));
       tr.appendChild(st);
       var act = document.createElement('td'); act.className = 'r actions';
+      var det = document.createElement('button');
+      det.type = 'button'; det.className = 'btn btn-ghost btn-sm'; det.textContent = '详情';
+      det.setAttribute('data-volume', v.name);
+      det.addEventListener('click', function () { openDetail(v.name); });
+      act.appendChild(det);
       var btn = document.createElement('button');
       btn.type = 'button'; btn.className = 'btn btn-ghost btn-sm'; btn.textContent = '刷新';
       btn.addEventListener('click', function () { refresh(v.name); });
@@ -114,6 +119,11 @@
       usage.textContent = fmt.formatSize(v.usage);
       tr.appendChild(usage);
       var act = document.createElement('td'); act.className = 'r actions';
+      var detU = document.createElement('button');
+      detU.type = 'button'; detU.className = 'btn btn-ghost btn-sm'; detU.textContent = '详情';
+      detU.setAttribute('data-volume', v.name);
+      detU.addEventListener('click', function () { openDetail(v.name); });
+      act.appendChild(detU);
       var del = document.createElement('button');
       del.type = 'button'; del.className = 'btn btn-ghost btn-sm'; del.textContent = '删除';
       del.addEventListener('click', function () { deleteUserVolume(v.name); });
@@ -123,6 +133,12 @@
     });
     var hint = el('v2-vl-user-empty');
     if (hint) { hint.hidden = vols.length > 0; }
+  }
+
+  /** 打开卷详情抽屉（实现见 volume-drawer.js：分区由后端 settings[] 驱动）。 */
+  function openDetail(name) {
+    if (window.v2volumeDrawer) { return window.v2volumeDrawer.open(name); }
+    return Promise.resolve();
   }
 
   function load() {
@@ -299,7 +315,7 @@
     if (el('v2-vl-body')) { load(); loadUser(); loadSecrets(); }
   }
 
-  if (typeof window !== 'undefined') { window.v2volumes = { init: init, load: load, loadUser: loadUser, normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes }; }
+  if (typeof window !== 'undefined') { window.v2volumes = { init: init, load: load, loadUser: loadUser, openDetail: openDetail, normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes }; }
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { normalizeVolumes: normalizeVolumes, normalizeUserVolumes: normalizeUserVolumes, normalizeSecrets: normalizeSecrets, parseKV: parseKV };
   }

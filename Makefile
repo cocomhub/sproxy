@@ -267,6 +267,7 @@ web-test:
 	@node --check web/static/v2/shell.js
 	@node --check web/static/v2/shell.test.js
 	@node --check web/static/v2/volume-settings.js
+	@node --check web/static/v2/volume-drawer.js
 	@node --check web/static/v2/volume-settings.test.js
 	@node --check web/static/shared/format.js
 	@node --check web/static/shared/format.test.js
