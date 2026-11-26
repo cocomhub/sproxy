@@ -144,3 +144,27 @@ func TestResolvedToClientConfig_ZeroDefaults(t *testing.T) {
 		t.Errorf("chunk_size 零值应回落默认 4MiB, got %d", cfg.ChunkSize)
 	}
 }
+
+// TestFactory_NewClient_AccessKeyFlagKeepsConfigSecret 验证：只给 --access-key 时，
+// secret 回落配置（不应被空 flag 覆盖成空串，否则签名必然失败）。
+func TestFactory_NewClient_AccessKeyFlagKeepsConfigSecret(t *testing.T) {
+	t.Parallel()
+	f := clientfactory.NewWithContext("test.yaml", nil, func() *contextcfg.Resolved { return resolveFixture(t) })
+	cmd := contextCmd()
+	if err := cmd.Flags().Set("server", "https://override:9999"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("access-key", "ak-flag"); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := f.NewClient(cmd)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if svc.AccessKey() != "ak-flag" {
+		t.Errorf("ak = %q, want ak-flag", svc.AccessKey())
+	}
+	if svc.AccessKeySecret() != "6162636465666768696a6b6c6d6e6f707172737475767778797a303132333435" {
+		t.Errorf("secret 应回落配置, got %q", svc.AccessKeySecret())
+	}
+}

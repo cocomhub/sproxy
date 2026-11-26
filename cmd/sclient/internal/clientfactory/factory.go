@@ -338,6 +338,10 @@ func accessKeyOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) 
 	}
 	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" && !xferEnabled {
 		sk, _ := cmd.Flags().GetString("access-key-secret")
+		if sk == "" {
+			// 只给 --access-key 时 secret 回落配置：空串覆盖会使签名必然失败。
+			sk = cfg.AccessKeySecret
+		}
 		if serverFlagNotSet(cmd) {
 			opts = append(opts, client.WithTunnel(ak, sk))
 		} else {
