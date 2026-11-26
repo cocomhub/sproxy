@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -277,5 +278,34 @@ func TestTaskActionCounters(t *testing.T) {
 	snap := c.Snapshot()
 	if snap["retry_download|success"] != 2 || snap["rotate_source|error"] != 1 || len(snap) != 2 {
 		t.Fatalf("计数异常: %+v", snap)
+	}
+}
+
+// TestApplyTaskAction_ClearsChunkMatrixOnRedownload 锁定「重下清空旧块矩阵」：
+// 否则 UI 会把上一轮已完成的块显示成当前进度（生产加固 2026-11-26）。
+func TestApplyTaskAction_ClearsChunkMatrixOnRedownload(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig())
+	task, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-CHUNKS-1", "f.mp4", 1024, "",
+		TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.Chunks = []downloader.ChunkState{{Index: 0, Phase: "done", Length: 1024, Done: 1024}}
+	task.UpdatedAt = time.Now()
+	mgr.mu.Unlock()
+
+	if _, err := mgr.ApplyTaskAction(task.ID, TaskActionRetryDownload, ""); err != nil {
+		t.Fatalf("ApplyTaskAction: %v", err)
+	}
+	mgr.mu.RLock()
+	got := len(mgr.tasks[task.ID].Chunks)
+	mgr.mu.RUnlock()
+	if got != 0 {
+		t.Fatalf("重下应清空旧块矩阵，got %d 块", got)
 	}
 }

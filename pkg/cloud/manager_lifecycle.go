@@ -219,6 +219,9 @@ func (m *CloudDownloadManager) resumeTaskWith(taskID string, opts resumeOptions,
 		task.DownloadDone = false
 		task.DownloadedSize = 0
 		task.DownloadedChecksum = ""
+		// 分块状态属于**上一轮会话**：重新下载会按新几何重新上报，旧块矩阵必须清掉，
+		// 否则 UI 会显示"已完成"的块而实际正在重下（用户 2026-11-26 生产加固）。
+		task.Chunks = nil
 	}
 	// 进度不得凭空归零（用户 2026-11-25：点击重试后进度 20% → 0%）：
 	// 磁盘上仍可能有 `.partial`/hybrid 工作文件（续传基础），把 Downloaded 初始化为**实际残留字节**，
