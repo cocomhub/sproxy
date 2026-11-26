@@ -638,8 +638,14 @@ func (m *CloudDownloadManager) expiredCloudTaskTTL(t *CloudTask) (time.Duration,
 	switch t.Status {
 	case "completed":
 		return m.config.TaskTTL, true
-	case "failed", "cancelled":
+	case "failed":
+		// 失败需要人工排查/换源，保留长窗口（默认 7d）。
 		return m.config.FailedTaskTTL, true
+	case "cancelled":
+		// 取消 = 中断（2026-11-26）：断点与配额**保留**以便续传，但只保留 `TaskTTL`（默认 24h）——
+		// 取消是用户主动动作，通常当天就会续传/删除；沿用 7d 会让几十 GiB 断点长期占住配额，
+		// 反而把后续任务挤成 507。要立刻回收空间用 DELETE。
+		return m.config.TaskTTL, true
 	case "pending":
 		// 安全网：pending 正常情况下没有 TTL——它要么被 SubmitAndStart 启动（转
 		// downloading），要么在恢复期被判定为孤儿并转终态。这里兜住将来新增的
