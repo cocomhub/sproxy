@@ -30,9 +30,10 @@ func TestMetaConsistencyRealVolumes(t *testing.T) {
 	t.Parallel()
 	base := strings.TrimRight(os.Getenv("SPROXY_META_E2E_URL"), "/")
 	ak, sk, skid := os.Getenv("SPROXY_META_E2E_AK"), os.Getenv("SPROXY_META_E2E_SK"), os.Getenv("SPROXY_META_E2E_SKID")
+	bearer := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_BEARER"))
 	volsRaw := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_VOLUMES"))
-	if base == "" || ak == "" || sk == "" || skid == "" || volsRaw == "" {
-		t.Skip("需要 SPROXY_META_E2E_URL/AK/SK/SKID/VOLUMES")
+	if base == "" || volsRaw == "" || (bearer == "" && (ak == "" || sk == "" || skid == "")) {
+		t.Skip("需要 SPROXY_META_E2E_URL/VOLUMES 以及 AK/SK/SKID 或 BEARER")
 	}
 	vols := strings.Split(volsRaw, ",")
 	payload := []byte("meta-consistency-cross-storage")
@@ -50,12 +51,16 @@ func TestMetaConsistencyRealVolumes(t *testing.T) {
 			continue
 		}
 		t.Run(vol, func(t *testing.T) {
-			fc := client.NewFileClient(base,
+			opts := []client.Option{
 				client.WithVolume(vol),
-				client.WithAccessKey(ak, sk),
-				client.WithAccessKeyID(skid),
-				client.WithTimeout(60*time.Second),
-			)
+				client.WithTimeout(60 * time.Second),
+			}
+			if bearer != "" {
+				opts = append(opts, client.WithBearerToken(bearer))
+			} else {
+				opts = append(opts, client.WithAccessKey(ak, sk), client.WithAccessKeyID(skid))
+			}
+			fc := client.NewFileClient(base, opts...)
 			ctx := context.Background()
 			remote := fmt.Sprintf("meta-e2e-%d.bin", time.Now().UnixNano())
 			extra := map[string]any{"x_meta_e2e": vol}
