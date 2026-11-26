@@ -264,3 +264,27 @@ func TestWriteTargetExternalSettle_PassesUploadMetaExtra(t *testing.T) {
 		t.Fatalf("meta_extra 未透传: extra=%+v data=%q", sink.extra, sink.data)
 	}
 }
+
+// TestWriteExternalSettle_PassesUploadMetaExtra 普通 HTTP 上传走 writeExternalSettle，
+// 不能只在 writeTargetExternalSettle 透传 meta_extra（两处写路径必须一致）。
+func TestWriteExternalSettle_PassesUploadMetaExtra(t *testing.T) {
+	t.Parallel()
+	e := writeTargetEnv(t)
+	sink := &metaCaptureSink{}
+	payload := []byte("external-http-meta")
+	sum := sha256.Sum256(payload)
+	want := hex.EncodeToString(sum[:])
+	extra := map[string]any{"x_dm_file": map[string]any{"sha256": want}}
+	route := UploadRoute{VolumeName: "ext", Sink: sink}
+	res, err := e.svc.writeExternalSettle(context.Background(), e.logger, externalWriteArgs{
+		owner: "alice", rel: "user/a.bin", remotePath: "a.bin",
+		input: WriteFileInput{Owner: "alice", RemotePath: "a.bin", ClientSize: int64(len(payload)), ExpectedChecksum: want, MetaExtra: extra},
+		route: route, src: bytes.NewReader(payload),
+	})
+	if err != nil {
+		t.Fatalf("writeExternalSettle: %v", err)
+	}
+	if res.Checksum != want || sink.extra["x_dm_file"] == nil || string(sink.data) != string(payload) {
+		t.Fatalf("res=%+v extra=%+v data=%q", res, sink.extra, sink.data)
+	}
+}
