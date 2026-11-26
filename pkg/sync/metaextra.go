@@ -20,13 +20,16 @@ type MetaExtraUpdater interface {
 	UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
 }
 
-// AssertMetaExtraUpdater 取装饰器链上的旁路 Extra 能力（沿 Inner() 下探到最内层后断言；
-// 未实现返回 ok=false——调用方自行决定降级/告警，不得静默忽略）。
+// AssertMetaExtraUpdater 取装饰器链**最外层**的旁路 Extra 能力。
+//
+// 不能下探到 Innermost：trusted.Wrap 等装饰器本身就是能力提供者（为裸外部卷生成
+// sidecar），下探到裸卷会恒判定无能力（WebDAV/百度/S3 的 meta set 因此 503）。
+// 透明装饰器都已实现该能力并委托 inner；外层未实现时返回 ok=false。
 func AssertMetaExtraUpdater(fs FS) (MetaExtraUpdater, bool) {
 	if fs == nil {
 		return nil, false
 	}
-	u, ok := Innermost(fs).(MetaExtraUpdater)
+	u, ok := fs.(MetaExtraUpdater)
 	return u, ok
 }
 

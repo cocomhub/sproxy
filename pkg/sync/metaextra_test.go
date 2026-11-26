@@ -56,15 +56,19 @@ func TestPrefixFS_UpdateMetaExtra_UnsupportedIsDistinct(t *testing.T) {
 	}
 }
 
-// TestAssertMetaExtraUpdater_Unwraps 能力探测须穿过装饰器链（否则上游恒判定「无能力」→
-// 静默丢失标记）。
+// TestAssertMetaExtraUpdater_OuterProvider 能力探测必须认外层提供者（trusted.Wrap
+// 为裸外部卷提供 sidecar）；下沉到 Innermost 会把 WebDAV/百度/S3 误判为无能力。
 func TestAssertMetaExtraUpdater_Unwraps(t *testing.T) {
 	t.Parallel()
 	rec := &recordingMetaFS{}
 	p := NewPrefixFS(NewPrefixFS(rec, "a/"), "b/")
 	u, ok := AssertMetaExtraUpdater(p)
 	if !ok || u == nil {
-		t.Fatalf("应穿过装饰器链找到旁路 Extra 能力: ok=%v", ok)
+		t.Fatalf("应找到外层旁路 Extra 能力: ok=%v", ok)
+	}
+	outer := &recordingMetaFS{FS: &bareFS{}}
+	if _, ok := AssertMetaExtraUpdater(outer); !ok {
+		t.Fatal("外层提供者（裸卷经 trusted/metadata 装饰）必须被识别")
 	}
 	if _, ok := AssertMetaExtraUpdater(&bareFS{}); ok {
 		t.Fatal("未实现时应返回 ok=false")
