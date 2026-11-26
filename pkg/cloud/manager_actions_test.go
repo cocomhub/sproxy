@@ -502,3 +502,46 @@ func TestPlanTaskActions_HintWired(t *testing.T) {
 		t.Fatalf("无断点时应明确提示从零重下，got %q", plan[0].Hint)
 	}
 }
+
+// TestResumeRollback_RestoresArtifactState 锁定「resume 失败回滚必须恢复产物标记与分块状态」：
+// 否则产物完整却显示"未下载"，`retry_transfer` 被误禁用、下次 resume 白重下（2026-11-27 审查）。
+func TestResumeRollback_RestoresArtifactState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig())
+	task, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-ROLLBACK-1", "rb.bin", 1024, "",
+		TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	mgr.mu.Lock()
+	task.Status = "failed"
+	task.DownloadDone = true
+	task.DownloadedSize = 1024
+	task.DownloadedChecksum = "abc"
+	task.Downloaded = 1024
+	task.Chunks = []downloader.ChunkState{{Index: 0, Phase: "done", Length: 1024, Done: 1024}}
+	task.IntegrityStatus = "damaged"
+	task.UpdatedAt = time.Now()
+	prev := captureResumeState(task)
+	// 模拟 resume 已经清掉这些字段（真实路径在 rollback 之前就清了）
+	task.Status = "pending"
+	task.DownloadDone = false
+	task.DownloadedSize = 0
+	task.DownloadedChecksum = ""
+	task.Downloaded = 0
+	task.Chunks = nil
+	task.IntegrityStatus = ""
+	mgr.rollbackResumeLocked(task, prev, 0)
+	mgr.mu.Unlock()
+
+	mgr.mu.RLock()
+	got := *mgr.tasks[task.ID]
+	mgr.mu.RUnlock()
+	if got.Status != "failed" || !got.DownloadDone || got.DownloadedSize != 1024 ||
+		got.DownloadedChecksum != "abc" || len(got.Chunks) != 1 || got.IntegrityStatus != "damaged" {
+		t.Fatalf("回滚未恢复完整状态: status=%s done=%v size=%d ck=%q chunks=%d integrity=%q",
+			got.Status, got.DownloadDone, got.DownloadedSize, got.DownloadedChecksum, len(got.Chunks), got.IntegrityStatus)
+	}
+}
