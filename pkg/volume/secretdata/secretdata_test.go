@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/mockkdf"
@@ -66,6 +67,31 @@ func data(n int) []byte {
 		b[i] = byte(i % 251)
 	}
 	return b
+}
+
+// TestWriteFile_MetaExtraAndMTime 验证 secretdata 与外部 trusted 卷口径一致：
+// 随上传 extra 与 mtime 均进入卷内 FileMeta，客户端 GetFileMetaInfo 可读。
+func TestWriteFile_MetaExtraAndMTime(t *testing.T) {
+	t.Parallel()
+	fs := newFS(t)
+	content := data(256)
+	mtime := time.Now().Add(-time.Hour).UnixNano()
+	extra := map[string]any{"x_dm_file": map[string]any{"sha256": "abc"}}
+	ctx := syncpkg.WithUploadMetaExtra(context.Background(), extra)
+	if err := fs.WriteFile(ctx, syncpkg.LogicalKey{}, "meta.bin", bytes.NewReader(content), int64(len(content)), mtime); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	fm, err := fs.FileMeta(context.Background(), "meta.bin")
+	if err != nil {
+		t.Fatalf("FileMeta: %v", err)
+	}
+	if fm.Extra["x_dm_file"] == nil {
+		t.Fatalf("meta_extra 未写入: %+v", fm.Extra)
+	}
+	gotMTime, perr := time.Parse(time.RFC3339Nano, fm.MTime)
+	if perr != nil || gotMTime.UnixNano() != mtime {
+		t.Fatalf("MTime=%q err=%v", fm.MTime, perr)
+	}
 }
 
 func TestWriteReadRoundtrip(t *testing.T) {
