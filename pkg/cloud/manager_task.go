@@ -34,7 +34,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		return nil, fmt.Errorf("cloud download: 语义空洞（download_local=false + 无 transfer + save=false 无任何产出）")
 	}
 	// 前置判断（避免浪费资源下载）：转存目标卷须在创建时已可解析（装配 + 协议声明）。
-	if err := m.checkTransferVolumePreflight(params.Transfer); err != nil {
+	if err := m.checkTransferVolumePreflight(params.Transfer, owner); err != nil {
 		return nil, err
 	}
 	// URL 去重：仅对请求者可见的任务去重（跨 owner 的同 URL 任务不吸收，各自独立下载）。
@@ -1809,7 +1809,7 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 // checkTransferVolumePreflight 转存目标卷前置校验（创建即拒，避免白下载）：
 // 卷须已装配（transferFS 可解析）——**不再要求协议非空**（U3 统一卷模型：本地卷无后端协议
 // scheme，但已是合法转存目标；scheme 空按 "local" 归一生成 `local://<卷>/<rel>`）。
-func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSpec) error {
+func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSpec, owner string) error {
 	if transfer == nil {
 		return nil
 	}
@@ -1821,6 +1821,18 @@ func (m *CloudDownloadManager) checkTransferVolumePreflight(transfer *TransferSp
 	// 转存 rel 恒含 /，secrets:// 无法解析且写路径绕过 Secrets Manager 校验 → 拒绝。
 	if scheme == "secrets" {
 		return fmt.Errorf("cloud download: 转存目标卷 %q 是 secrets 密钥卷（非转存目标，请用 secretdata/普通卷）", transfer.Volume)
+	}
+	// 转存路径**创建期**校验（2026-11-26 实测：`../escape.bin` 创建返回 200，直到转存阶段才失败）：
+	// 路径穿越/绝对路径/非法段在创建时就应 400，避免用户等到下载完成后才发现目标非法（白跑）。
+	// volumeFor 未装配（极简测试装配）⇒ 跳过路径预检（转存阶段仍会 fail-closed 校验）。
+	if transfer.Path != "" && m.volumeFor != nil {
+		vol, vok := m.volumeFor(transfer.Volume)
+		if !vok {
+			return fmt.Errorf("cloud download: 转存目标卷 %q 元信息不可解析", transfer.Volume)
+		}
+		if _, rerr := vol.ResolveLocation(owner, "user", transfer.Path); rerr != nil {
+			return fmt.Errorf("cloud download: 转存路径 %q 非法: %w", transfer.Path, rerr)
+		}
 	}
 	return nil
 }

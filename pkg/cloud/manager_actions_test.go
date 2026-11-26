@@ -12,6 +12,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 func actionsTestConfig() *CloudDownloadConfig {
@@ -307,5 +308,29 @@ func TestApplyTaskAction_ClearsChunkMatrixOnRedownload(t *testing.T) {
 	mgr.mu.RUnlock()
 	if got != 0 {
 		t.Fatalf("重下应清空旧块矩阵，got %d 块", got)
+	}
+}
+
+// TestCreateTask_RejectsInvalidTransferPath 锁定「转存路径创建期校验」：
+// `../escape` 这类非法路径必须 400（2026-11-26 实测：此前返回 200，直到转存阶段才失败）。
+func TestCreateTask_RejectsInvalidTransferPath(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	vol := volume.Volume{Name: "main", Type: "local",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"": {}}}}
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig(), CloudManagerOptions{
+		TransferFSFor: func(string) (syncpkg.FS, string) { return syncpkg.NewLocalFS(root, testLogger()), "local" },
+		VolumeFor:     func(string) (volume.Volume, bool) { return vol, true },
+	})
+	for _, bad := range []string{"../escape.bin", "/abs.bin", "a/../../b.bin"} {
+		if _, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-PATH-1", "x.bin", 10, "",
+			TaskParams{Save: true, Transfer: &TransferSpec{Volume: "main", Path: bad}}); err == nil {
+			t.Fatalf("非法转存路径 %q 应在创建期被拒", bad)
+		}
+	}
+	if _, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-PATH-2", "x.bin", 10, "",
+		TaskParams{Save: true, Transfer: &TransferSpec{Volume: "main", Path: "ok/dir/x.bin"}}); err != nil {
+		t.Fatalf("合法路径不应被拒: %v", err)
 	}
 }
