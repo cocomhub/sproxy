@@ -545,6 +545,157 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("拖拽上传后未出现 dropped.txt: %v", err)
 	}
 
+	// ① 上传队列：多文件串行时，未轮到的行显示「排队中」，且顶部有汇总。
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{
+		{Name: "q1.txt", MimeType: "text/plain", Buffer: []byte("q1")},
+		{Name: "q2.txt", MimeType: "text/plain", Buffer: []byte("q2")},
+	}); err != nil {
+		t.Fatalf("批量选择上传: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-uploads'); return b && !b.hidden && document.querySelectorAll('#v2-uploads .up-row').length >= 1; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("上传队列行未出现: %v", err)
+	}
+	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "上传中") {
+		t.Fatalf("上传汇总缺失: %q", sum)
+	}
+	// 队列跑完后容器应隐藏、文件出现。
+	if _, err := page.WaitForFunction(
+		"() => { const b = document.querySelector('#v2-uploads'); return !b || b.hidden; }", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("上传队列未清空: %v", err)
+	}
+
+	// ② 窄屏卡片化：≤760px 时文件表转卡片（thead 隐藏、行有边框）。
+	if err := page.SetViewportSize(390, 844); err != nil {
+		t.Fatalf("设置窄屏: %v", err)
+	}
+	if card, err := page.Evaluate(`() => {
+		const t = document.querySelector('table.cards-narrow');
+		if (!t) { return null; }
+		const head = t.querySelector('thead');
+		const tr = t.querySelector('tbody tr');
+		const cs = tr ? getComputedStyle(tr) : null;
+		return { theadDisplay: head ? getComputedStyle(head).display : 'missing',
+			rowDisplay: cs ? cs.display : 'missing',
+			border: cs ? cs.borderTopWidth : 'missing' };
+	}`, nil); err != nil {
+		t.Fatalf("读取卡片布局: %v", err)
+	} else if m, ok := card.(map[string]any); ok {
+		if m["theadDisplay"] != "none" {
+			t.Fatalf("窄屏 thead 应隐藏（卡片化），got %v", m["theadDisplay"])
+		}
+		if m["rowDisplay"] != "grid" {
+			t.Fatalf("窄屏行应为 grid 卡片，got %v", m["rowDisplay"])
+		}
+	}
+	if err := page.SetViewportSize(1440, 900); err != nil {
+		t.Fatalf("恢复视口: %v", err)
+	}
+
+	// ③ 页面配置第二类别：删除前跳过二次确认（默认关闭）。
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("打开设置: %v", err)
+	}
+	if err := waitLoc(page, "#v2-set-skip-confirm", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("跳过确认开关缺失: %v", err)
+	}
+	if checked, _ := page.Evaluate(`() => (document.querySelector('#v2-set-skip-confirm') || {}).checked`, nil); checked != false {
+		t.Fatalf("跳过确认默认应为 false（确认框开启），got %v", checked)
+	}
+	if err := page.Locator("#v2-set-skip-confirm").Check(); err != nil {
+		t.Fatalf("勾选跳过确认: %v", err)
+	}
+	if err := page.Locator("#v2-set-delete-save").Click(); err != nil {
+		t.Fatalf("保存页面配置: %v", err)
+	}
+	if _, err := page.WaitForFunction(`async () => {
+		const g = await window.v2api.json('GET','/api/ui/prefs');
+		return g.prefs['delete'].skip_confirm === true;
+	}`, nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("skip_confirm 未落盘: %v", err)
+	}
+	if err := page.Locator("#v2-settings-close").Click(); err != nil {
+		t.Fatalf("关闭设置: %v", err)
+	}
+	// 行为验证：skip_confirm=true 时删除**不弹确认框**，直接执行。
+	// 先让前端重新读一次配置（设置保存后已 reload，但确保状态一致）。
+	if _, err := page.Evaluate("() => window.v2deleteMode.reload()", nil); err != nil {
+		t.Fatalf("重载删除配置: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "noskipdlg.txt", MimeType: "text/plain", Buffer: []byte("x"),
+	}}); err != nil {
+		t.Fatalf("上传待删文件: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"noskipdlg.txt\"] [data-action=delete]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("待删文件未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"noskipdlg.txt\"] [data-action=delete]").Click(); err != nil {
+		t.Fatalf("点删除（应跳过确认）: %v", err)
+	}
+	// 对话框是**惰性创建**的（首次用到才有 DOM）⇒ 用「可见性」而不是「元素存在」断言。
+	if state, err := page.Evaluate(`() => {
+		const t = document.querySelector('#v2-dlg-title');
+		if (!t) { return 'no-dialog'; }
+		const back = t.closest('.modal-backdrop');
+		return back && back.hidden === false ? 'open' : 'closed';
+	}`, nil); err != nil {
+		t.Fatalf("读取对话框状态: %v", err)
+	} else if fmt.Sprint(state) == "open" {
+		t.Fatalf("skip_confirm=true 时不应弹确认框（实际弹出）")
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('noskipdlg.txt') === -1", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("删除未执行（skip_confirm=true 应直接删）: %v", err)
+	}
+
+	// 复位为 false：确认框必须重新出现（默认安全行为）。
+	if _, err := page.Evaluate(`() => window.v2api.json('PUT','/api/ui/prefs', {
+		contentType: 'application/json',
+		body: new TextEncoder().encode(JSON.stringify({delete:{skip_confirm:false}}))
+	}).then(() => window.v2deleteMode.reload())`, nil); err != nil {
+		t.Fatalf("复位 skip_confirm: %v", err)
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "yeskipdlg.txt", MimeType: "text/plain", Buffer: []byte("y"),
+	}}); err != nil {
+		t.Fatalf("上传待删文件（确认框）: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"yeskipdlg.txt\"] [data-action=delete]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("待删文件未出现（确认框）: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name=\"yeskipdlg.txt\"] [data-action=delete]").Click(); err != nil {
+		t.Fatalf("点删除（应弹确认）: %v", err)
+	}
+	if _, err := page.WaitForFunction(`() => {
+		const t = document.querySelector('#v2-dlg-title');
+		if (!t) { return false; }
+		const back = t.closest('.modal-backdrop');
+		return !!back && back.hidden === false;
+	}`, nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("skip_confirm=false 时必须弹确认框: %v", err)
+	}
+	if err := page.Locator("[data-dlg=cancel]").Click(); err != nil {
+		t.Fatalf("取消删除对话框: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('yeskipdlg.txt') !== -1", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
+		t.Fatalf("取消后文件不应被删除: %v", err)
+	}
+	// 清场：上面那次"跳过确认的删除"是**软删**，条目进了回收站；不清理会影响后续回收站用例
+	// （"恢复后回收站未清空"）。同时删掉遗留的 yeskipdlg.txt，保持列表干净。
+	if _, err := page.Evaluate(`async () => {
+		await window.v2api.json('POST','/api/trash/empty?all=1', {});
+		const st = await window.v2api.request('HEAD','/api/files/stat?filename=yeskipdlg.txt').catch(() => null);
+		return !!st;
+	}`, nil); err != nil {
+		t.Fatalf("清理回收站: %v", err)
+	}
+
 	// Meta extra 编辑（merge）：真实 PUT /api/files/meta → 回读含新键。
 	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
 		t.Fatalf("回到 v2demo: %v", err)

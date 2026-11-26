@@ -71,10 +71,12 @@
     });
   }
 
-  function cell(text, cls) {
+  function cell(text, cls, label) {
     var td = document.createElement('td');
     td.textContent = text;
     if (cls) { td.className = cls; }
+    // 窄屏卡片化（CSS ≤760px）用 data-label 把列名贴到值前；桌面端不影响视觉。
+    if (label) { td.setAttribute('data-label', label); }
     return td;
   }
 
@@ -147,11 +149,12 @@
         volTd.textContent = '—';
         volTd.className = 'muted';
       }
+      volTd.setAttribute('data-label', '卷');
       tr.appendChild(volTd);
 
-      tr.appendChild(cell(file.isDir ? '—' : f.formatSize(file.size), 'r num'));
-      tr.appendChild(cell(f.formatTime(file.modTime), 'num muted'));
-      tr.appendChild(cell(file.checksum ? '有' : '—', file.checksum ? '' : 'muted'));
+      tr.appendChild(cell(file.isDir ? '—' : f.formatSize(file.size), 'r num', '大小'));
+      tr.appendChild(cell(f.formatTime(file.modTime), 'num muted', '修改'));
+      tr.appendChild(cell(file.checksum ? '有' : '—', file.checksum ? '' : 'muted', '校验'));
 
       var actTd = document.createElement('td');
       actTd.className = 'r actions';

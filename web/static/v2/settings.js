@@ -198,10 +198,17 @@
     api.json('GET', '/api/ui/prefs')
       .then(function (body) {
         if (prefsDirty) { return; }
-        var mode = body && body.prefs && body.prefs['delete'] ? body.prefs['delete'].default_mode : 'soft';
-        sel.value = mode === 'hard' ? 'hard' : 'soft';
+        var del = body && body.prefs && body.prefs['delete'];
+        sel.value = (del && del.default_mode === 'hard') ? 'hard' : 'soft';
+        var skip = el('v2-set-skip-confirm');
+        if (skip) { skip.checked = !!(del && del.skip_confirm); }
       })
-      .catch(function () { if (!prefsDirty) { sel.value = 'soft'; } });
+      .catch(function () {
+        if (prefsDirty) { return; }
+        sel.value = 'soft';
+        var skip = el('v2-set-skip-confirm');
+        if (skip) { skip.checked = false; }
+      });
   }
 
   /** 保存默认删除方式（破坏性语义：hard 需二次确认）。 */
@@ -213,14 +220,21 @@
       sel.value = 'soft';
       return;
     }
+    var skipEl = el('v2-set-skip-confirm');
+    var skipConfirm = !!(skipEl && skipEl.checked);
     api.json('PUT', '/api/ui/prefs', {
-      body: new TextEncoder().encode(JSON.stringify({ delete: { default_mode: mode } })),
+      body: new TextEncoder().encode(JSON.stringify({
+        'delete': { default_mode: mode, skip_confirm: skipConfirm }
+      })),
       contentType: 'application/json'
     }).then(function () {
       prefsDirty = false;
       // 让文件页的删除默认值立即跟上（避免刷新才生效）。
       if (window.v2deleteMode && window.v2deleteMode.reload) { void window.v2deleteMode.reload(); }
-      if (window.v2toast) { window.v2toast('ok', '删除默认方式已保存：' + (mode === 'hard' ? '直接删除' : '软删进回收站')); }
+      if (window.v2toast) {
+        window.v2toast('ok', '删除默认方式已保存：' + (mode === 'hard' ? '直接删除' : '软删进回收站') +
+          (skipConfirm ? '（已跳过二次确认）' : ''));
+      }
     }).catch(function (e) { banner('保存失败：' + (e.message || e), 'warn'); });
   }
 

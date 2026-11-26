@@ -2202,8 +2202,8 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 返回请求者 owner 的**用户维度页面配置**（按功能类别分组）。未配置时返回**安全默认**。
 
 ```json
-{"prefs": {"delete": {"default_mode": "soft"}},
- "defaults": {"delete": {"default_mode": "soft"}}}
+{"prefs": {"delete": {"default_mode": "soft", "skip_confirm": false}},
+ "defaults": {"delete": {"default_mode": "soft", "skip_confirm": false}}}
 ```
 
 - `delete.default_mode`：`soft`（缺省，删除进回收站可恢复）/ `hard`（默认直接硬删）。
@@ -2213,7 +2213,7 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 
 ### PUT /api/ui/prefs
 
-设置用户维度页面配置（当前仅支持「默认删除方式」）。
+设置用户维度页面配置（**部分更新**：只改请求体里出现的字段；`delete` 里一个字段都没有 ⇒ 400）。
 
 ```json
 {"delete": {"default_mode": "hard"}}

@@ -172,7 +172,9 @@
 
   /** 单条彻底删除（回收站内删除恒为硬删，不受「默认删除方式」影响）。 */
   function purge(entry) {
-    if (!window.confirm('彻底删除 ' + entry.name + '？此操作不可恢复。')) { return; }
+    // 与文件页删除共用「跳过二次确认」开关（它就是删除确认的一部分）。
+    var skip = window.v2deleteMode && window.v2deleteMode.skipConfirm && window.v2deleteMode.skipConfirm();
+    if (!skip && !window.confirm('彻底删除 ' + entry.name + '？此操作不可恢复。')) { return; }
     var q = '?file=' + encodeURIComponent(entry.rel);
     if (entry.volume) { q += '&volume=' + encodeURIComponent(entry.volume); }
     api.json('DELETE', '/api/trash' + q)
