@@ -228,8 +228,7 @@ func (m *CloudDownloadManager) GetGroup(id, owner string) (*CloudTaskGroup, bool
 	if !ok || !ownerVisible(g.Owner, owner) {
 		return nil, false
 	}
-	c := *g
-	return &c, true
+	return deepCopyGroup(g), true
 }
 
 // ListGroups 列出组，支持按 status 过滤与 offset/limit 分页。
@@ -244,8 +243,7 @@ func (m *CloudDownloadManager) ListGroups(status string, offset, limit int, owne
 	var all []*CloudTaskGroup
 	for _, g := range m.groups {
 		if (status == "" || g.Status == status) && ownerVisible(g.Owner, owner) {
-			c := *g
-			all = append(all, &c)
+			all = append(all, deepCopyGroup(g))
 		}
 	}
 	// CreatedAt 降序，ID 降序 tie-break（保持稳定排序）
@@ -321,4 +319,19 @@ func (m *CloudDownloadManager) DeleteGroup(groupID, owner string) error {
 	m.removeGroupFile(groupID, group.Owner)
 
 	return errors.Join(errs...)
+}
+
+// deepCopyGroup 返回组的深拷贝快照（调用方持 m.groupMu 读锁）。
+//
+// 为什么需要（2026-11-27 审查）：`TaskIDs` 是切片，与组共享底层数组；HTTP 层在**解锁后**序列化
+// 快照，而组状态变更（创建/删除子任务）会在锁内改写 `TaskIDs` ⇒ 读 marshal 与写无同步（DATA RACE）。
+func deepCopyGroup(g *CloudTaskGroup) *CloudTaskGroup {
+	if g == nil {
+		return nil
+	}
+	c := *g
+	if g.TaskIDs != nil {
+		c.TaskIDs = append([]string(nil), g.TaskIDs...)
+	}
+	return &c
 }
