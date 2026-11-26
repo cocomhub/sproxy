@@ -143,6 +143,7 @@ ARCHCHECK_WRITE_BASELINE=1 go test ./internal/archcheck/ -run '<门禁测试名>
 | `xfer_send_atomicity_test.go` | — | 传输层 `Send` 必须经 `iostream.WriteFull` 写足（防半帧），新增传输实现绕过即红。 |
 | `gate_index_gate_test.go` | R56 | `docs/gates.md` 索引必须覆盖全部门禁文件（`internal/archcheck/*_test.go`，除公共辅助 `arch_test.go`）；扫描面下限 60 防假绿。手工回填过的索引没有机制约束必然腐化（与 R55 同模式），本门禁把「加门禁必须登记索引」变成判据。 |
 | `docs_query_param_gate_test.go` | R57 | **文档声明的 query 参数必须真的被读取**（2026-11-25）：`docs/api.md` 里出现的 `?k=`/`&k=` 参数名必须能在非测试 Go 源码中匹配到读取形态（`Query().Get` / `FormValue` / `PathValue` / `q.Get` 等），否则红；正当例外登记在 `docs_query_params.tsv`（`<参数名>TAB<说明>`，已可匹配的条目必须删除，清单只减不增）；两侧下限护栏（文档 ≥30 参数 / 源码 ≥50 读取点）防解析器失效假绿。背景（实测三处同型缺陷）：分享 `password?` 从未实现、分享 `?transform=&watermark=` 被完全忽略、v2 传 `ttl: 7` 被后端按 duration 拒——R55 只看「文档路径是否存在于路由表」，参数是否被读取完全没有护栏。 |
+| `docs_json_field_gate_test.go` | R58 | **文档 JSON 示例里的字段名必须真的存在于源码**（2026-11-26）：`docs/api.md` 里每个 ```json 代码块的键名必须能在非测试 Go 源码匹配到 `json:"k"` tag 或字符串字面量 `"k"`；正当例外登记 `docs_json_fields.tsv`（`<字段名>TAB<说明>`，只减不增）；两侧下限（文档 ≥80 字段 / 源码 ≥300 tag）防解析器失效假绿。背景：R55 只看路径、R57 只看 query 参数，**请求/响应体字段没有护栏** —— `POST /api/shares` 的 `password` 字段就是「文档有、结构体无」（JSON 解码静默忽略，功能不生效也不报错）。 |
 
 ## 5. 棘轮削减路线图（2026-11-11）
 
