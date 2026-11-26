@@ -393,7 +393,15 @@ func (m *CloudDownloadManager) SetGroupArchiveFile(groupID, archiveFile string) 
 
 // markDirty 将任务标记为"脏"（进度已更新），由 flushLoop 批量持久化。
 func (m *CloudDownloadManager) markDirty(id string) {
+	if m == nil || id == "" {
+		return
+	}
 	m.dirtyMu.Lock()
+	// 零值管理器（未装配持久化，如单元测试）不得 panic：脏表未初始化时视为"无持久化"。
+	if m.dirtyTasks == nil {
+		m.dirtyMu.Unlock()
+		return
+	}
 	m.dirtyTasks[id] = struct{}{}
 	m.dirtyMu.Unlock()
 }
