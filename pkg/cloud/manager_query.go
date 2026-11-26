@@ -9,10 +9,14 @@ package cloud
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/downloader"
 )
 
 func (m *CloudDownloadManager) GetTask(id, owner string) (*CloudTask, bool) {
@@ -28,10 +32,7 @@ func (m *CloudDownloadManager) SnapshotTask(id, owner string) (*CloudTask, bool)
 	if !ok || !ownerVisible(t.Owner, owner) {
 		return nil, false
 	}
-	c := *t
-	// 快照对外不暴露运行时配额句柄（QW 由下载 goroutine 独占使用；读者无需也不应触碰）。
-	c.account = nil
-	return &c, true
+	return deepCopyTask(t), true
 }
 
 // ListTasks 列出任务，支持按 status 过滤与 offset/limit 分页。
@@ -54,9 +55,7 @@ func (m *CloudDownloadManager) SnapshotTasks(ids []string, owner string) []*Clou
 		if !ok || !ownerVisible(t.Owner, owner) {
 			continue
 		}
-		c := *t
-		c.account = nil
-		out = append(out, &c)
+		out = append(out, deepCopyTask(t))
 	}
 	return out
 }
@@ -264,4 +263,46 @@ func (m *CloudDownloadManager) deleteTaskFiles(t *CloudTask, taskID string) {
 	}
 	// 清理审计 sink 文件（R1：任务删除即清，防 <用户缓存目录>/sproxy/audit/ 无限累积）。
 	m.removeTaskAuditFile(taskID)
+}
+
+// deepCopyTask 返回任务的**深拷贝**快照（调用方持 m.mu 读锁）。
+//
+// 为什么必须深拷贝（2026-11-27 审查）：快照会被 HTTP 层在**解锁后**序列化，而任务的可变字段
+// （Diagnostics 指针、Chunks/Progress 切片、Transfer 指针、FallbackSources、MetaExtra、Audit）
+// 在锁内被下载 goroutine 持续改写 ⇒ 浅拷贝会让"读 marshal"与"写字段"无同步（DATA RACE）。
+// 深拷贝后快照与任务完全隔离，代价是每任务最多 ~240 采样 + ~128 块 + 小 map 的复制。
+func deepCopyTask(t *CloudTask) *CloudTask {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	c.account = nil // 快照不暴露运行时配额句柄（QW 由下载 goroutine 独占使用）
+	if t.Diagnostics != nil {
+		d := *t.Diagnostics
+		c.Diagnostics = &d
+	}
+	if t.Transfer != nil {
+		tr := *t.Transfer
+		c.Transfer = &tr
+	}
+	if t.DownloadStats != nil {
+		ds := *t.DownloadStats
+		c.DownloadStats = &ds
+	}
+	if t.Progress != nil {
+		c.Progress = append([]ProgressSample(nil), t.Progress...)
+	}
+	if t.Chunks != nil {
+		c.Chunks = append([]downloader.ChunkState(nil), t.Chunks...)
+	}
+	if t.FallbackSources != nil {
+		c.FallbackSources = append([]string(nil), t.FallbackSources...)
+	}
+	if t.Audit != nil {
+		c.Audit = append([]audit.Entry(nil), t.Audit...)
+	}
+	if t.MetaExtra != nil {
+		c.MetaExtra = maps.Clone(t.MetaExtra)
+	}
+	return &c
 }
