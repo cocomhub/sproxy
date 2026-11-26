@@ -74,3 +74,24 @@
 
 验证：`make web-test`、`go test ./web/e2e -run TestV2Shell -count=2`、`go test ./internal/archcheck`；
 5 处修复各配**变异验证**（挪回游离卡片 / 删除窄屏导航 / 徽标写死 128 / 副标题写回「保留 30 天」均红）。
+
+## 2026-11-26 第二轮：交互能力补齐
+
+上一轮修完「假数据/窄屏/结构」后，本轮补齐**旧页有、v2 缺**的交互能力，并修掉两个
+「看起来能用、实际不生效」的缺陷。
+
+| # | 能力/缺陷 | 说明 |
+| --- | --- | --- |
+| 1 | **列表分页**（缺陷） | 前端固定 `limit=200` 且**忽略响应 total** ⇒ 目录 >200 项被静默截断，用户以为文件丢了。改为读 `total/offset/limit` + 「加载更多」+ 计数「已加载 X / 共 Y」；无 total 的旧搜索契约按 `count == limit` 推断。 |
+| 2 | **列头排序**（缺失） | 服务端早已支持 `sort=name|size|time` + `order=asc|desc`，前端从未传。改：可排序表头（点击/Enter/Space）、同列翻转、换列重置、`aria-sort`、箭头指示。 |
+| 3 | **拖拽上传**（缺失） | 旧页有 `initDragAndDrop`，v2 无。改：新增 `web/static/v2/drop-upload.js`（纯函数 `acceptsDrag`/`bump`/`hintText` + DOM 接线），提示层显示目标目录与卷；`dragenter/dragleave` 用计数抵消子元素抖动且**不得为负**。 |
+| 4 | **预览相邻切换**（缺失） | 看图/看视频必须退出再点下一个。改：`←`/`→` 与头部按钮切换**同目录相邻文件**（跳过目录），显示 `i / n`，边界禁用；文本输入框聚焦时不拦截方向键。 |
+| 5 | **i18n 抹掉表头子元素**（缺陷） | `applyTexts()` 直接 `n.textContent = ...` ⇒ 把 `<span class="sort-mark">` / 复选框**整个删除**，切一次语言排序箭头永久消失。改为**只改文本节点**（`textOf`/`setText`），子元素由各自逻辑维护。 |
+
+### 测试与变异
+
+- node：`files.test.js` 增 `parseListMeta`/`nextSort`/`sortMark`/`neighborFile`/`listURL`；
+  新增 `drop-upload.test.js`（3 例）。均登记进 `make web-test`（含 `node --test`，R10 门禁）。
+- e2e（`TestV2Shell`，新增播种 210 文件目录）：分页首屏 200 + 提示 + 追加到 210 + 提示消失；
+  排序真实请求带 `sort=size&order=asc` 且二次点击翻 `desc`；`DragEvent` 真实拖拽后文件出现；
+  `←/→` 切换预览标题。5 处变异全部命中（跳过追加 / 不传 sort / drop 不处理 / ←→ 失效 / i18n 覆写）。

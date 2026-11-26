@@ -228,6 +228,51 @@
     });
   }
 
+  /**
+   * 拖拽上传接线（旧页有，v2 此前缺失）。
+   *
+   * dragenter/dragleave 会因**子元素**反复触发 ⇒ 用计数抵消；只接受带 Files 的拖拽
+   * （拖选文字/链接不应触发上传）。drop 后按 `uploadFiles` 同一条路径上传。
+   */
+  function initDropUpload() {
+    var du = window.v2dropUpload;
+    var zone = el('v2-drop-zone');
+    var hint = el('v2-drop-hint');
+    if (!du || !zone) { return; }
+    var depth = 0;
+    var show = function (on) {
+      zone.hidden = !on;
+      if (on && hint) {
+        hint.textContent = du.hintText(view() ? view().subdir() : '', view() ? view().volume() : '');
+      }
+    };
+    var stop = function (e) { e.preventDefault(); e.stopPropagation(); };
+    document.addEventListener('dragenter', function (e) {
+      if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
+      stop(e);
+      depth = du.bump(depth, 1);
+      if (depth === 1) { show(true); }
+    });
+    document.addEventListener('dragover', function (e) {
+      if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
+      stop(e);
+    });
+    document.addEventListener('dragleave', function (e) {
+      if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
+      stop(e);
+      depth = du.bump(depth, -1);
+      if (depth === 0) { show(false); }
+    });
+    document.addEventListener('drop', function (e) {
+      if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
+      stop(e);
+      depth = 0;
+      show(false);
+      var files = (e.dataTransfer && e.dataTransfer.files) || [];
+      if (files.length) { uploadFiles(files); }
+    });
+  }
+
   function uploadFiles(files) {
     var sub = view() ? view().subdir() : '';
     var vol = view() && view().volume ? view().volume() : '';
@@ -405,6 +450,7 @@
   }
 
   function init() {
+    initDropUpload();
     var input = el('v2-upload-input');
     if (input) {
       input.addEventListener('change', function () {

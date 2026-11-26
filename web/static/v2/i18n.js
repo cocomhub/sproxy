@@ -125,16 +125,44 @@
     "没有用户卷": "No user volumes",
   };
 
-  /** 静态表头/卡片标题/空态标题的中英替换（原始中文存 dataset.zh，可无损切回）。 */
+  /**
+   * 静态表头/卡片标题/空态标题的中英替换（原始中文存 dataset.zh，可无损切回）。
+   *
+   * **必须只改文本节点**：早先直接写 `n.textContent = ...`，会把节点里的**子元素整体删掉**
+   * —— 表头里的排序箭头 `<span class="sort-mark">` 就这样被抹掉（切一次语言排序指示就永久消失）。
+   * 子元素（label/checkbox/箭头）由各自逻辑维护，翻译只负责文字。
+   */
   function applyTexts() {
     var en = lang() === 'en';
     Array.prototype.forEach.call(document.querySelectorAll('th, .card-title, .empty b'), function (n) {
       if (n.hasAttribute('data-i18n')) { return; }
-      if (!n.dataset.zh) { n.dataset.zh = n.textContent; }
+      if (!n.dataset.zh) { n.dataset.zh = textOf(n); }
       var zh = n.dataset.zh.trim();
       var tr = ZH2EN[zh];
-      if (tr) { n.textContent = en ? tr : n.dataset.zh; }
+      if (!tr) { return; }
+      setText(n, en ? tr : n.dataset.zh);
     });
+  }
+
+  /** 节点自身的文本（不含子元素文本）。 */
+  function textOf(n) {
+    var out = '';
+    Array.prototype.forEach.call(n.childNodes, function (c) {
+      if (c.nodeType === 3) { out += c.nodeValue; }
+    });
+    return out || n.textContent;
+  }
+
+  /** 只改文本节点：保留所有子元素（箭头、复选框、pill）。 */
+  function setText(n, text) {
+    var done = false;
+    Array.prototype.forEach.call(n.childNodes, function (c) {
+      if (done || c.nodeType !== 3) { return; }
+      if (!String(c.nodeValue).trim()) { return; }
+      c.nodeValue = text;
+      done = true;
+    });
+    if (!done) { n.insertBefore(document.createTextNode(text), n.firstChild); }
   }
 
   function lang() {

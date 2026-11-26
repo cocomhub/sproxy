@@ -13,7 +13,11 @@
 
   var VOL_KEY = 'sproxy_v2_volume';
   var SUBDIR_KEY = 'sproxy_v2_subdir_by_vol';
-  var state = { subdir: '', volume: '', query: '', files: [], selected: Object.create(null) };
+  var PAGE = 200;
+  var state = {
+    subdir: '', volume: '', query: '', files: [], selected: Object.create(null),
+    sort: 'name', order: 'asc', limit: PAGE, offset: 0, total: -1, hasMore: false, loading: false
+  };
 
   function el(id) { return document.getElementById(id); }
 
@@ -86,7 +90,23 @@
     body.textContent = '';
     state.selected = Object.create(null);
     files.forEach(function (file) {
-      var tr = document.createElement('tr');
+      body.appendChild(buildRow(subdir, file));
+    });
+  }
+
+  /** 追加一页（「加载更多」），不重建已有行（保留滚动位置与勾选）。 */
+  function appendRows(subdir, files) {
+    var body = el('v2-file-body');
+    if (!body) { return; }
+    files.forEach(function (file) {
+      body.appendChild(buildRow(subdir, file));
+    });
+  }
+
+  /** 构建单行。 */
+  function buildRow(subdir, file) {
+    var tr = document.createElement('tr');
+    (function () {
       if (file.isDir) { tr.className = 'is-dir'; }
 
       var pickTd = document.createElement('td');
@@ -145,8 +165,8 @@
       tr.setAttribute('data-name', file.name);
       tr.setAttribute('data-dir', file.isDir ? '1' : '');
       tr.setAttribute('data-checksum', file.checksum || '');
-      body.appendChild(tr);
-    });
+    })();
+    return tr;
   }
 
   function syncSelection() {
@@ -158,17 +178,47 @@
     var all = el('v2-select-all');
     if (all) { all.checked = n > 0 && n === state.files.length; }
     var count = el('v2-count');
-    if (count) { count.textContent = state.files.length + ' 项' + (n ? ' · 已选 ' + n : ''); }
+    if (count) { count.textContent = countText(n); }
     badge('files', state.files.length);
+    renderSortMarks();
+  }
+
+  /** 计数文案：有 total 时「已加载 X / 共 Y」，否则只有已加载数（不编造总数）。 */
+  function countText(selected) {
+    var loaded = state.files.length;
+    var base = state.total >= 0 ? (loaded + ' / ' + state.total + ' 项') : (loaded + ' 项');
+    return base + (selected ? ' · 已选 ' + selected : '');
+  }
+
+  function renderSortMarks() {
+    ['name', 'size', 'time'].forEach(function (fld) {
+      var n = el('v2-sort-' + fld);
+      if (n) { n.textContent = f.sortMark({ sort: state.sort, order: state.order }, fld); }
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('th.sortable'), function (th) {
+      var active = th.getAttribute('data-sort') === state.sort;
+      th.setAttribute('aria-sort', active ? (state.order === 'desc' ? 'descending' : 'ascending') : 'none');
+    });
+  }
+
+  /** 「加载更多」区：仅当服务端还有更多时显示，并说明已加载/总数。 */
+  function renderLoadMore() {
+    var wrap = el('v2-load-more-wrap');
+    var hint = el('v2-load-more-hint');
+    if (!wrap) { return; }
+    wrap.hidden = !state.hasMore;
+    if (hint) {
+      hint.textContent = state.hasMore
+        ? ('已加载 ' + state.files.length + (state.total >= 0 ? ' / ' + state.total : '') + ' 项')
+        : '';
+    }
   }
 
   function listPath() {
-    if (state.query) {
-      return '/api/files/search?q=' + encodeURIComponent(state.query) + '&limit=200';
-    }
-    var path = '/api/files?subdir=' + encodeURIComponent(state.subdir) + '&limit=200';
-    if (state.volume) { path += '&volume=' + encodeURIComponent(state.volume); }
-    return path;
+    return f.listURL({
+      subdir: state.subdir, volume: state.volume, query: state.query,
+      sort: state.sort, order: state.order, limit: state.limit, offset: state.offset
+    });
   }
 
   /** 按卷记忆子目录（切换卷时回到该卷上次目录；无记录则根）。 */
@@ -186,7 +236,13 @@
     return subdirMap()[vol || ''] || '';
   }
 
-  function load() {
+  /**
+   * 加载列表。
+   * @param {boolean} [reset] 默认 true：重置分页到第一页（切换目录/排序/卷/搜索时）；
+   *   「加载更多」传 false（沿用已递增的 offset 追加）。
+   */
+  function load(reset) {
+    if (reset !== false) { state.offset = 0; }
     var subdir = subdirFromHash();
     if (state.volume && subdir === '' && !window.__v2volSwitch) {
       subdir = subdirForVolume(state.volume);
@@ -196,26 +252,36 @@
     state.subdir = subdir;
     renderCrumbs(subdir);
     setState('', '');
+    var append = state.offset > 0;
     var body = el('v2-file-body');
-    if (body) { body.textContent = ''; }
+    if (body && !append) { body.textContent = ''; }
     var count = el('v2-count');
-    if (count) { count.textContent = '加载中…'; }
+    if (count && !append) { count.textContent = '加载中…'; }
 
     var path = listPath();
     var api = window.v2api;
+    state.loading = true;
     (api ? api.json('GET', path) : Promise.reject(new Error('api 未装配')))
       .then(function (payload) {
-        state.files = f.normalizeFiles(payload);
-        renderRows(subdir, state.files);
+        var meta = f.parseListMeta(payload);
+        var page = f.normalizeFiles(payload);
+        state.total = meta.total;
+        state.hasMore = meta.hasMore;
+        state.files = append ? state.files.concat(page) : page;
+        state.loading = false;
+        if (append) { appendRows(subdir, page); } else { renderRows(subdir, state.files); }
         syncSelection();
+        renderLoadMore();
         if (!state.files.length) {
           setState('empty', state.query ? ('没有匹配「' + state.query + '」的文件。') : '此目录为空，可上传文件或新建目录。');
         }
       })
       .catch(function (err) {
+        state.loading = false;
         if (count) { count.textContent = '—'; }
         badge('files', null);
-        state.files = [];
+        if (!append) { state.files = []; }
+        renderLoadMore();
         setState('error', '加载失败：' + (err && err.message ? err.message : '网络错误') + '（可在旧版确认登录状态）');
       });
   }
@@ -254,7 +320,30 @@
     }).catch(function () { /* 列表仍可用，仅无卷过滤 */ });
   }
 
+  function applySort(field) {
+    var next = f.nextSort({ sort: state.sort, order: state.order }, field);
+    state.sort = next.sort;
+    state.order = next.order;
+    load();
+  }
+
   function init() {
+    Array.prototype.forEach.call(document.querySelectorAll('th.sortable'), function (th) {
+      var field = th.getAttribute('data-sort');
+      th.addEventListener('click', function () { applySort(field); });
+      th.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); applySort(field); }
+      });
+    });
+    var more = el('v2-load-more');
+    if (more) {
+      more.addEventListener('click', function () {
+        if (state.loading) { return; }
+        state.offset += state.limit;
+        load(false);
+      });
+    }
+
     var refresh = el('v2-refresh');
     if (refresh) { refresh.addEventListener('click', function () { load(); }); }
     var volRefresh = el('v2-vol-refresh');

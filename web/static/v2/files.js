@@ -74,6 +74,91 @@
     return segs.join('/');
   }
 
+  /**
+   * 解析列表响应里的分页元信息。
+   *
+   * 背景：前端曾固定 `limit=200` 且**忽略**响应里的 total —— 目录超过 200 项时静默截断，
+   * 用户以为文件丢了。这里把 total/offset/limit 归一为「是否还有更多」。
+   * 服务端不返回 total（搜索旧路径）时按「返回条数 == limit」推断。
+   */
+  function parseListMeta(payload) {
+    var files = payload && Array.isArray(payload.files) ? payload.files : [];
+    var limit = Number(payload && payload.limit) || 0;
+    var offset = Number(payload && payload.offset) || 0;
+    // 注意 Number(null) === 0：必须先判「字段是否存在」，否则「未返回 total」会被当成 total=0。
+    var hasTotalField = payload && payload.total !== null && payload.total !== undefined;
+    var total = hasTotalField ? Number(payload.total) : NaN;
+    if (!isFinite(total) || total < 0) { total = -1; }
+    var hasTotal = total >= 0;
+    var hasMore;
+    if (hasTotal) {
+      hasMore = offset + files.length < total;
+    } else if (limit > 0) {
+      hasMore = files.length >= limit;
+    } else {
+      hasMore = false;
+    }
+    return { count: files.length, offset: offset, limit: limit, total: total, hasTotal: hasTotal, hasMore: hasMore };
+  }
+
+  /**
+   * 列头排序切换：点同一列翻转方向，换列从 asc 开始。
+   * @param {{sort:string, order:string}} cur
+   * @param {string} field
+   * @returns {{sort:string, order:string}}
+   */
+  function nextSort(cur, field) {
+    var c = cur || {};
+    var f = ['name', 'size', 'time'].indexOf(field) === -1 ? 'name' : field;
+    if (c.sort === f && c.order === 'asc') { return { sort: f, order: 'desc' }; }
+    return { sort: f, order: 'asc' };
+  }
+
+  /** 排序箭头符号（列头展示用）。 */
+  function sortMark(cur, field) {
+    var c = cur || {};
+    if (c.sort !== field) { return ''; }
+    return c.order === 'desc' ? '↓' : '↑';
+  }
+
+  /**
+   * 预览里的上一个/下一个**可预览文件**（跳过目录），按当前列表顺序。
+   * 到边界返回 ''（调用方据此禁用按钮 / 不响应按键）。
+   */
+  function neighborFile(files, currentName, delta) {
+    var list = Array.isArray(files) ? files : [];
+    var idx = -1;
+    for (var i = 0; i < list.length; i += 1) {
+      if (list[i] && list[i].name === currentName) { idx = i; break; }
+    }
+    if (idx < 0) { return ''; }
+    var step = delta < 0 ? -1 : 1;
+    for (var j = idx + step; j >= 0 && j < list.length; j += step) {
+      if (list[j] && !list[j].isDir) { return list[j].name; }
+    }
+    return '';
+  }
+
+  /** 拼接列表请求路径（分页 + 排序 + 卷过滤 + 搜索）。 */
+  function listURL(q) {
+    var o = q || {};
+    var params = [];
+    var push = function (k, v) { if (v !== '' && v !== undefined && v !== null) { params.push(k + '=' + encodeURIComponent(v)); } };
+    if (o.query) {
+      push('q', o.query);
+      push('limit', o.limit);
+      push('offset', o.offset);
+      return '/api/files/search?' + params.join('&');
+    }
+    push('subdir', o.subdir || '');
+    push('volume', o.volume || '');
+    push('sort', o.sort || '');
+    push('order', o.sort ? (o.order || 'asc') : '');
+    push('limit', o.limit);
+    push('offset', o.offset);
+    return '/api/files' + (params.length ? '?' + params.join('&') : '');
+  }
+
   return {
     formatSize: formatSize,
     formatTime: formatTime,
@@ -81,6 +166,11 @@
     crumbsFor: crumbsFor,
     joinSubdir: joinSubdir,
     resolveRel: resolveRel,
-    parentSubdir: parentSubdir
+    parentSubdir: parentSubdir,
+    parseListMeta: parseListMeta,
+    nextSort: nextSort,
+    sortMark: sortMark,
+    neighborFile: neighborFile,
+    listURL: listURL
   };
 });
