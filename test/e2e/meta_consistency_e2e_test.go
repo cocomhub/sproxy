@@ -27,6 +27,7 @@ import (
 )
 
 func TestMetaConsistencyRealVolumes(t *testing.T) {
+	t.Parallel()
 	base := strings.TrimRight(os.Getenv("SPROXY_META_E2E_URL"), "/")
 	ak, sk, skid := os.Getenv("SPROXY_META_E2E_AK"), os.Getenv("SPROXY_META_E2E_SK"), os.Getenv("SPROXY_META_E2E_SKID")
 	volsRaw := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_VOLUMES"))
