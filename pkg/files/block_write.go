@@ -150,13 +150,14 @@ func (s *Service) CloseBlockWrite(ctx context.Context, id string) error {
 		_ = sess.root.Remove(sess.tmpRel)
 		return fmt.Errorf("块写关闭: %w", err)
 	}
-	// mtime 由调用方（引擎）在完成时显式处理；此处不设置（保持 write_ops 单实现门禁）。
-	_ = sess.mtime // 保留字段（未来 WriteFile 语义扩展）
 	// 原子 rename 覆盖目标（storage.Root.AtomicRename 保持替换语义）。
 	if err := sess.root.AtomicRename(sess.tmpRel, sess.dstRel); err != nil {
 		_ = sess.root.Remove(sess.tmpRel)
 		return fmt.Errorf("块写原子落位: %w", err)
 	}
+	// 先应用客户端声明 mtime，再生成 sidecar：sidecar 的 MTime 取自文件当前时间，
+	// 顺序反了会记录完成时刻而不是源文件时间。
+	s.applyUploadMTime(sess.root, sess.dstRel, sess.dstRel, sess.mtime, s.rt.logger())
 	// P1-7 修复：块级覆盖写也须重建 meta sidecar——否则旧 sidecar 描述旧内容，
 	// 读路径按旧分块校验新内容恒失配 → 文件固化不可下载（直到再次成功覆盖写）。
 	// meta 计算失败时删旧 sidecar 退化为 missing（读侧不校验；下次写自愈）。
