@@ -168,6 +168,23 @@ type TaskActionPlan struct {
 	NeedsURL bool `json:"needs_url,omitempty"`
 }
 
+// retryDownloadHint 给出「续传下载」的**诚实**提示（2026-11-26 实测驱动）。
+//
+// 判据必须反映**磁盘上是否真有可续断点**，而不是只看计数：
+//   - 产物已完整（DownloadDone）⇒ 再点续传等于重下整份，应引导用「仅重做转存」；
+//   - 有保留的断点（Diagnostics.PartialSize>0，由瞬态失败保留策略写入）⇒ 真能续传；
+//   - 其余（取消已清理 / 完整性失败删除 / 从未下载）⇒ 明确告知从零重下。
+func retryDownloadHint(t *CloudTask) string {
+	switch {
+	case t.DownloadDone:
+		return "重新下载整个文件（产物已完整时请改用「仅重做转存」，避免重复下载）"
+	case t.Diagnostics != nil && t.Diagnostics.PartialSize > 0:
+		return "保留已下载部分，从断点继续（不重下已完成块）"
+	default:
+		return "从零重新下载（无可续断点：上次结束时残留已清理）"
+	}
+}
+
 // PlanTaskActions 返回任务的可用动作清单（failed/cancelled 才有动作；其他状态返回空）。
 //
 // 为什么放在服务端：可用性判据（产物是否完整/是否有备选源）只有服务端知道，
@@ -182,7 +199,7 @@ func PlanTaskActions(t *CloudTask) []TaskActionPlan {
 	if !damaged && t.Status != "failed" && t.Status != "cancelled" {
 		return nil
 	}
-	download := TaskActionPlan{Action: TaskActionRetryDownload, Label: "续传下载", Hint: "保留已下载部分，从断点继续（不重下已完成块）"}
+	download := TaskActionPlan{Action: TaskActionRetryDownload, Label: "续传下载", Hint: retryDownloadHint(t)}
 	if t.Downloaded <= 0 {
 		// 实测（2026-11-26）：取消/删除后断点已被清理时，提示必须诚实——否则用户以为能续传。
 		download.Hint = "从零重新下载（无可续断点：上次结束时已清理残留）"

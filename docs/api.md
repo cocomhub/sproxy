@@ -914,9 +914,10 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
 > 动作可用性由服务端判定（`PlanTaskActions`）：产物是否完整、是否有备选源只有服务端知道，
 > 前端不应重复推断。未知动作或前置条件不满足 ⇒ 400；任务不存在/不可见 ⇒ 404。
 >
-> `retry_download` 的实际效果取决于断点是否还在：瞬态失败（源不可达/限流/认证）默认**保留**断点
-> （`cloud_discard_partial_on_transient_failure: true` 可改回"失败即删"）；完整性不符/磁盘满/取消
-> 会清理残留，此时 `actions[].hint` 会明确写「从零重新下载（无可续断点）」，不误导用户。
+> `retry_download` 的实际效果取决于断点是否还在：**只有**完整性不符（字节已坏）与磁盘满（留不下）会
+> 删除断点并清零诊断；源不可达/限流/认证/**未知错误**一律保留（未知多为瞬态，删掉会白丢可续进度）。
+> `cloud_discard_partial_on_transient_failure: true` 可改回"失败即删"（空间优先）。取消会保留断点；
+> 无断点时 `actions[].hint` 明确写「从零重新下载（无可续断点）」，不误导用户。
 >
 > 额外约束（2026-11-26 加固）：`retry_transfer` 执行前会**校验磁盘产物仍存在**——产物已被清理时
 > 明确报错（不会静默回落整份下载）；`completed` + `integrity_status=damaged` 的任务也会下发
