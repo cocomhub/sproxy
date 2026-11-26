@@ -31,10 +31,6 @@ func TestConsoleLayout_FullscreenNavAndDeepLink(t *testing.T) {
 	defer stop()
 	page.Goto(baseURL + "/ui/")
 	openStatsModal(t, page)
-	// 并发触发重放（2026-11-27）：连点两次统计按钮会让首次渲染在飞时再次触发；旧的
-	// 「inFlight 直接丢弃」实现会让卡片区永不渲染（CI 实测 20s 空白）。这里主动制造该
-	// 并发窗口，卡片必须仍然出现。
-	openStatsModal(t, page)
 
 	// ① 尺寸：读取 shell 的 boundingBox，必须远大于旧 500×80vh。
 	box, err := page.Locator("#console-shell").BoundingBox()
@@ -353,6 +349,13 @@ func TestConsoleCardJumpWritesDeepLink(t *testing.T) {
 	defer stop()
 	page.Goto(baseURL + "/ui/")
 	openStatsModal(t, page)
+	// 并发触发重放（2026-11-27）：首屏渲染在飞时再次触发统计面板；旧的「inFlight 直接丢弃」
+	// 实现会让卡片区**永不渲染**（CI 实测服务端已 failed 但 20s 无卡片）。这里主动制造该
+	// 并发窗口，卡片必须仍然出现。注意：**不能**再点一次 #stats-btn（modal 已打开会拦截点击），
+	// 改为直接调用渲染入口模拟并发触发。
+	if _, err := page.Evaluate("() => { void renderOverviewCards(); void renderOverviewCards(); }", nil); err != nil {
+		t.Fatalf("并发触发概览渲染: %v", err)
+	}
 	// 超时口径（2026-11-27 实测 CI 偶发）：概览卡片需要 modal 打开后再串行拉
 	// /api/cloud/tasks → /api/issues/stats → /api/volumes 三份数据才插入 DOM；CI 容器比其他
 	// job 慢，8s 偶发不足（本地稳定通过）。按仓库既有「-race/慢机超时翻倍」纪律放宽到 20s，
