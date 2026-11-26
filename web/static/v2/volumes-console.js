@@ -87,10 +87,12 @@
       var det = document.createElement('button');
       det.type = 'button'; det.className = 'btn btn-ghost btn-sm'; det.textContent = '详情';
       det.setAttribute('data-volume', v.name);
+      det.setAttribute('data-action', 'detail');
       det.addEventListener('click', function () { openDetail(v.name); });
       act.appendChild(det);
       var btn = document.createElement('button');
       btn.type = 'button'; btn.className = 'btn btn-ghost btn-sm'; btn.textContent = '刷新';
+      btn.setAttribute('data-action', 'refresh');
       btn.addEventListener('click', function () { refresh(v.name); });
       act.appendChild(btn);
       tr.appendChild(act);
@@ -122,6 +124,7 @@
       var detU = document.createElement('button');
       detU.type = 'button'; detU.className = 'btn btn-ghost btn-sm'; detU.textContent = '详情';
       detU.setAttribute('data-volume', v.name);
+      detU.setAttribute('data-action', 'detail');
       detU.addEventListener('click', function () { openDetail(v.name); });
       act.appendChild(detU);
       var del = document.createElement('button');

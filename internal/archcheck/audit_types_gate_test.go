@@ -37,15 +37,15 @@ func TestAuditTypes_OnlyInAuditPackage(t *testing.T) {
 			return nil
 		}
 		// 跳过 worktree 副本 / 构建产物 / 依赖缓存（与其它全仓门禁同口径）。
-		slash := "/" + filepath.ToSlash(path)
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		slash := "/" + filepath.ToSlash(rel)
 		for _, skip := range []string{"/.worktrees/", "/build/", "/node_modules/", "/.git/"} {
 			if strings.Contains(slash, skip) {
 				return nil
 			}
-		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			return nil
 		}
 		rel = filepath.ToSlash(rel)
 		if strings.HasPrefix(rel, "pkg/audit/") || allow[rel] {
