@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"testing"
+
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
 // write_target_test.go —— 统一写内核 WriteTarget 的域级测试（dirsEnv 最小装配）：
@@ -220,4 +222,45 @@ func TestWriteTarget_ConflictWhenLocked(t *testing.T) {
 func sha256hexForTest(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// metaCaptureSink 捕获外部卷写面 ctx 中的随上传 meta_extra。
+type metaCaptureSink struct {
+	extra map[string]any
+	data  []byte
+}
+
+func (s *metaCaptureSink) MakeDir(context.Context, string) error { return nil }
+func (s *metaCaptureSink) WriteFile(ctx context.Context, _ string, r io.Reader, _ int64, _ int64) error {
+	s.extra = syncpkg.UploadMetaExtraFrom(ctx)
+	b, err := io.ReadAll(r)
+	s.data = b
+	return err
+}
+func (s *metaCaptureSink) Stat(context.Context, string) (int64, bool, error) { return 0, false, nil }
+func (s *metaCaptureSink) Remove(context.Context, string) error              { return nil }
+
+// TestWriteTargetExternalSettle_PassesUploadMetaExtra 外部卷普通上传必须把 meta_extra
+// 经 ctx 透传到 trusted/secretdata 写面；否则客户端上传 meta 在外部卷静默丢失。
+func TestWriteTargetExternalSettle_PassesUploadMetaExtra(t *testing.T) {
+	t.Parallel()
+	e := writeTargetEnv(t)
+	sink := &metaCaptureSink{}
+	payload := []byte("external-meta")
+	sum := sha256.Sum256(payload)
+	want := hex.EncodeToString(sum[:])
+	extra := map[string]any{"x_dm_file": map[string]any{"sha256": want}}
+	route := UploadRoute{VolumeName: "ext", Sink: sink}
+	res, err := e.svc.writeTargetExternalSettle(context.Background(), e.logger, "alice", "user/a.bin", "a.bin", WriteTargetInput{
+		Owner: "alice", RemotePath: "a.bin", ClientSize: int64(len(payload)), MetaExtra: extra,
+	}, route, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("writeTargetExternalSettle: %v", err)
+	}
+	if res.Checksum != want {
+		t.Fatalf("checksum=%s", res.Checksum)
+	}
+	if sink.extra["x_dm_file"] == nil || string(sink.data) != string(payload) {
+		t.Fatalf("meta_extra 未透传: extra=%+v data=%q", sink.extra, sink.data)
+	}
 }

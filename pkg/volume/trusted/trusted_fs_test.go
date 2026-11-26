@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cocomhub/sproxy/pkg/files/meta"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -78,6 +79,40 @@ func (p *providerFS) FileMeta(ctx context.Context, rel string) (*meta.FileMeta, 
 }
 
 var _ meta.Provider = (*providerFS)(nil)
+
+// TestWrite_PersistsUploadExtraAndMTime 外部卷/所有 FS 经装饰器写入时，随上传
+// meta_extra 与 mtime 必须进入 sidecar（与 secretdata/本地卷读出口径一致）。
+func TestWrite_PersistsUploadExtraAndMTime(t *testing.T) {
+	t.Parallel()
+	inner := newInner(t)
+	tv := Wrap(inner, Options{})
+	data := []byte("meta-extra-content")
+	mtime := time.Now().Add(-2 * time.Hour).UnixNano()
+	ctx := syncpkg.WithUploadMetaExtra(context.Background(), map[string]any{"x_dm_file": map[string]any{"sha256": refSHA(data)}})
+	if err := tv.WriteFile(ctx, syncpkg.LogicalKey{}, "user/dir/a.bin", bytes.NewReader(data), int64(len(data)), mtime); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rc, err := inner.OpenRead(context.Background(), "meta/dir/a.bin.meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	fm, uerr := meta.Unmarshal(raw)
+	if uerr != nil {
+		t.Fatal(uerr)
+	}
+	if fm.Extra["x_dm_file"] == nil {
+		t.Fatalf("meta_extra 未进入 sidecar: %+v", fm.Extra)
+	}
+	want := time.Unix(0, mtime).UTC().Format(time.RFC3339)
+	if fm.MTime != want {
+		t.Fatalf("MTime=%q want %q", fm.MTime, want)
+	}
+	if fm.CTime == "" {
+		t.Fatal("CTime 为空")
+	}
+}
 
 // TestWrite_GeneratesMeta 写文件 → .meta 生成（隐藏、占配额、可反序列化校验）。
 func TestWrite_GeneratesMeta(t *testing.T) {
