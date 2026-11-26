@@ -406,6 +406,50 @@ function ctRateText(bps) {
   return Math.round(n) + ' B/s';
 }
 
+// CT_ACTIONS 是失败任务的处理动作（与服务端 cloud.TaskAction 对齐）。
+const CT_ACTIONS = {
+  retry_download: { label: '续传下载', hint: '保留已下载部分，从断点继续' },
+  retry_transfer: { label: '仅重做转存', hint: '产物已完整，只重跑转存' },
+  rotate_source: { label: '换源重试', hint: '切换到下一个备选源' },
+  discard_partial: { label: '清残留重下', hint: '删除产物与断点，从零重下' },
+};
+
+// ctActionsFor 返回任务可用动作（优先服务端下发的 actions；否则按本地判据兜底）。
+function ctActionsFor(t) {
+  if (!t) return [];
+  if (Array.isArray(t.actions) && t.actions.length) return t.actions;
+  if (t.status !== 'failed' && t.status !== 'cancelled') return [];
+  const plan = [{ action: 'retry_download', label: CT_ACTIONS.retry_download.label, hint: CT_ACTIONS.retry_download.hint }];
+  const transfer = { action: 'retry_transfer', label: CT_ACTIONS.retry_transfer.label, hint: CT_ACTIONS.retry_transfer.hint };
+  if (!t.download_done) { transfer.disabled = true; transfer.reason = '下载未完成'; }
+  else if (!t.transfer) { transfer.disabled = true; transfer.reason = '无转存目标'; }
+  plan.push(transfer);
+  const rotate = { action: 'rotate_source', label: CT_ACTIONS.rotate_source.label, hint: CT_ACTIONS.rotate_source.hint };
+  if (!Array.isArray(t.fallback_sources) || t.fallback_sources.length < 2) {
+    rotate.disabled = true; rotate.reason = '未提供备选源';
+  }
+  plan.push(rotate);
+  plan.push({ action: 'discard_partial', label: CT_ACTIONS.discard_partial.label, hint: CT_ACTIONS.discard_partial.hint });
+  return plan;
+}
+
+// ctActionControlsHtml 渲染「动作下拉 + 执行」控件（仅失败/取消行；无可用动作返回空串）。
+function ctActionControlsHtml(t) {
+  const plan = ctActionsFor(t);
+  if (!plan.length) return '';
+  let opts = '';
+  plan.forEach(function (p) {
+    const dis = p.disabled ? ' disabled' : '';
+    const reason = p.disabled && p.reason ? '（' + p.reason + '）' : '';
+    opts += '<option value="' + ctEsc(p.action) + '"' + dis + '>' + ctEsc(p.label + reason) + '</option>';
+  });
+  const firstEnabled = plan.filter(function (p) { return !p.disabled; }).length > 0;
+  return '<span class="ct-action-wrap" style="margin-left:6px;white-space:nowrap;">' +
+    '<select class="ct-action-select" data-id="' + ctEsc(t.id) + '" style="font-size:12px;">' + opts + '</select>' +
+    '<button class="ct-action-apply" data-id="' + ctEsc(t.id) + '" style="margin-left:4px;"' +
+    (firstEnabled ? '' : ' disabled') + '>执行</button></span>';
+}
+
 // ctBlockMatrix 把分块状态转成「一行多小块」的矩阵数据（用户 2026-11-26）。
 // 每块按 1MiB 拆小块（上限 64 小块/行，避免一行过宽）；小块状态：done/active/todo。
 function ctBlockMatrix(chunks) {
@@ -544,6 +588,7 @@ function ctRowHtml(t) {
     '<td>' + failure + '</td>' +
     '<td>' + ctEsc(d.partial_size ? (Math.round(d.partial_size / 1048576) + ' MiB') : '-') + '</td>' +
     '<td>' + retryBtn + cancelBtn +
+      ctActionControlsHtml(t) +
       '<button class="ct-detail-btn" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">详情</button>' +
       '<button class="ct-copy" data-id="' + ctEsc(t.id) + '" style="margin-left:6px;">复制ID</button></td>' +
     '</tr>';
@@ -619,6 +664,9 @@ if (typeof module !== 'undefined' && module.exports) {
     ctSparklinePath: ctSparklinePath,
     ctSparklineSvg: ctSparklineSvg,
     ctRateText: ctRateText,
+    ctActionControlsHtml: ctActionControlsHtml,
+    ctActionsFor: ctActionsFor,
+    CT_ACTIONS: CT_ACTIONS,
     ctBlockMatrix: ctBlockMatrix,
     ctBlockMatrixHtml: ctBlockMatrixHtml,
     ctSummaryHtml: ctSummaryHtml,
@@ -867,6 +915,29 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
     const fOnly = document.getElementById('ct-failed-only');
     if (fOnly) fOnly.addEventListener('change', function () {
       st.failedOnly = !!fOnly.checked; window.__ctOffset = 0; syncHash(); void window.showCloudTasks();
+    });
+
+    // 失败任务动作：下拉选动作 → 执行 → POST /api/cloud/tasks/{id}/actions → 刷新面板。
+    panel.querySelectorAll('.ct-action-apply').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        const id = btn.getAttribute('data-id');
+        const sel = panel.querySelector('.ct-action-select[data-id="' + id + '"]');
+        const action = sel ? sel.value : '';
+        if (!action) { setCtMsg('请选择动作'); return; }
+        btn.disabled = true;
+        try {
+          await window.sclientTransport.coreRequest('POST',
+            '/api/cloud/tasks/' + encodeURIComponent(id) + '/actions',
+            { bodyBytes: new TextEncoder().encode(JSON.stringify({ action: action })) });
+          ctRecord('动作:' + action, id, 'ok', '');
+          setCtMsg('已提交动作：' + action);
+          await window.showCloudTasks();
+        } catch (e) {
+          ctRecord('动作:' + action, id, 'failed', e.message);
+          setCtMsg('动作失败：' + e.message);
+          btn.disabled = false;
+        }
+      });
     });
 
     // 详情展开/收起（行内插入 ct-detail 行；再次点击移除）。

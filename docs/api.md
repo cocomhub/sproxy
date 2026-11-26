@@ -840,6 +840,20 @@ CLI 对应 `--expect-checksum`、`--fallback-url`（可重复）、`--transfer-o
 响应：`{"success":bool,"retried":["task-id"...],"errors":{"task-id":"原因"}}`；
 `retried` 为空且 `errors` 非空 ⇒ `409`（例如任务仍在运行）。审计动作 `cloud_task_retry`。
 
+### POST /api/cloud/tasks/{id}/actions
+
+对**失败/取消**任务执行细粒度人工处理（body：`{"action": "..."}`），返回 `{success, action, task}`。
+
+| action | 语义 | 前置条件 |
+| --- | --- | --- |
+| `retry_download` | **退回下载阶段续传**：保留 `.partial` / hybrid manifest，从断点继续（不重下已完成块） | 状态 failed/cancelled（或 completed+damaged） |
+| `retry_transfer` | **仅重做转存**：产物已完整，跳过下载只重跑转存 | `download_done=true` 且配置了 `transfer` |
+| `rotate_source` | **换源重下**：切到下一个 `fallback_urls` 并重新下载 | 至少 2 个备选源 |
+| `discard_partial` | **清残留重下**：删除产物与断点，从零开始 | 状态 failed/cancelled |
+
+> 动作可用性由服务端判定（`PlanTaskActions`）：产物是否完整、是否有备选源只有服务端知道，
+> 前端不应重复推断。未知动作或前置条件不满足 ⇒ 400；任务不存在/不可见 ⇒ 404。
+
 ### POST /api/cloud/tasks/{id}/resume
 
 恢复/重新启动任务（支持续传）。

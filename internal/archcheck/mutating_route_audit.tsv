@@ -64,6 +64,7 @@ POST /api/cloud/groups/{id}/cancel	pending	handler=cloudCancelGroup actions=NONE
 POST /api/cloud/groups/{id}/resume	pending	handler=cloudResumeGroup actions=NONE
 POST /api/cloud/tasks/{id}/archive	action=cloud_archive	
 POST /api/cloud/tasks/{id}/resume	pending	handler=cloudResumeTask actions=NONE
+POST /api/cloud/tasks/{id}/actions	action=cloud_task_action	
 POST /api/credentials	pending	handler=akAddHandler actions=NONE
 POST /api/credentials/{ak}/renew	pending	handler=renewCredentialHandler actions=NONE
 POST /api/credentials/{ak}/sk/{skID}/expire	pending	handler=skExpireHandler actions=NONE

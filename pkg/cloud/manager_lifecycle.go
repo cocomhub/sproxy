@@ -124,11 +124,29 @@ func (m *CloudDownloadManager) rollbackResumeLocked(task *CloudTask, prevStatus,
 // 思路：生产路径不替换，仅测试替换（替换者须自行恢复）。
 var resumeWindowHook func(m *CloudDownloadManager, taskID string)
 
+// resumeOptions 是恢复动作的**细粒度语义**（用户 2026-11-26：失败任务需丰富处理方式）。
+//
+// 与 force 的关系：force 是「删产物重下」的粗粒度开关；本结构把它拆成可组合的意图——
+// 「退回下载阶段续传」「仅重做转存」「换源重下」「清残留重下」。
+type resumeOptions struct {
+	// force 删除结果文件 + .partial + .partial.etag 后重下（清残留）。
+	force bool
+	// keepDownloadDone 保留「产物完整」标记 ⇒ 跳过下载、只重做转存（转存阶段失败的人工修复）。
+	keepDownloadDone bool
+	// rotateSource 强制轮换到下一个备选源（人工决定换源，不依赖失败归类）。
+	rotateSource bool
+}
+
 // ResumeTask 恢复失败的下载任务。
 // force=true 时删除已有部分文件重新下载；force=false 时保留 .partial 由下载器
 // 通过 Range 续传（不再改名成 destPath，避免续传退化为全量下载）。
 // 按请求者 owner 过滤：跨 owner 任务返回 not found（404 防枚举）。
 func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner string) error {
+	return m.resumeTaskWith(taskID, resumeOptions{force: force}, owner)
+}
+
+// resumeTaskWith 是 ResumeTask 的内核（带细粒度选项；供 ApplyTaskAction 复用）。
+func (m *CloudDownloadManager) resumeTaskWith(taskID string, opts resumeOptions, owner string) error {
 	m.mu.Lock()
 	_, err := m.resumeTaskLookupLocked(taskID, owner, false)
 	if err != nil {
@@ -160,6 +178,11 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// D-CRITICAL 修复：每次 resume **先清再按当前状态置**——否则 completed+damaged→
 	// resume(置 true)→failed→再 resume（不再置位但旧标记仍 true）→ 转存盲覆他人同 rel。
 	task.resumeSelfOverwrite = false
+	// 人工换源（用户 2026-11-26）：失败归类不一定属于源类（也可能 unknown），人工决定换源时
+	// 直接前移到下一个备选源；无备选源则在 ApplyTaskAction 里已拒绝，这里静默跳过。
+	if opts.rotateSource {
+		task.forceRotateSourceLocked()
+	}
 	if task.Status == "completed" && task.IntegrityStatus == "damaged" {
 		task.resumeSelfOverwrite = true
 		// 定点修复优先（用户 2026-11-26 收敛）：damaged 先走「零尾扫描 + 定点补片」，
@@ -190,9 +213,13 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 	// C2 边界：**显式 resume 一律重下**（含 completed+damaged 自愈修复）⇒ 清掉「产物完整」
 	// 标记，否则恢复复用分支会把用户要修的坏产物当成好产物直接转存。
 	// 进程重启的自动恢复**不走本函数**，故 C2 的「跳过重复下载」仍生效。
-	task.DownloadDone = false
-	task.DownloadedSize = 0
-	task.DownloadedChecksum = ""
+	// 仅重做转存（keepDownloadDone）：保留产物完整标记 ⇒ executeDownload 走
+	// reuseDownloadedArtifact 分支，跳过下载直接转存。
+	if !opts.keepDownloadDone {
+		task.DownloadDone = false
+		task.DownloadedSize = 0
+		task.DownloadedChecksum = ""
+	}
 	// 进度不得凭空归零（用户 2026-11-25：点击重试后进度 20% → 0%）：
 	// 磁盘上仍可能有 `.partial`/hybrid 工作文件（续传基础），把 Downloaded 初始化为**实际残留字节**，
 	// 让 UI/进度与磁盘一致；真正的续传判定仍由下载器/manifest 负责（本字段只表达"已落盘多少"）。
@@ -242,7 +269,7 @@ func (m *CloudDownloadManager) ResumeTask(taskID string, force bool, owner strin
 		return fmt.Errorf("tenant unavailable for task %s", taskID)
 	}
 	destPath := filepath.Join(taskDir, task.Filename)
-	if force {
+	if opts.force {
 		// force 丢弃产物（结果文件 + .partial + .partial.etag）后必须回拨其 Scope 占用：下载器
 		// 看不到旧 partial，无法走它自己的 discardedSize 回拨路径，新会话会在旧占用基础上再记
 		// 一遍全量，而成功路径的绝对值记账（QuotaCommitted = result.Size）使差额再也无法由

@@ -185,6 +185,75 @@ func TestCloudTasksPanel_DetailAndBatchRetry(t *testing.T) {
 	}
 }
 
+// TestCloudTasksPanel_FailedRowHasRichActions 锁定「失败行有丰富处理动作，不只是重试」
+// （用户 2026-11-26）：下拉可选「续传下载」，执行后必须发出 POST /api/cloud/tasks/{id}/actions。
+func TestCloudTasksPanel_FailedRowHasRichActions(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	body := []byte(`{"url":"http://127.0.0.1:1/nope4.bin","filename":"nope4.bin","download_local":true,"save":true}`)
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+		t.Fatalf("创建任务失败: %d %s", code, resp)
+	}
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("点击云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#cloud-tasks-panel .ct-action-select", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("失败行缺少动作下拉: %v", err)
+	}
+	// 动作清单必须包含四种处理方式（丰富度断言，不是只有「重试」）。
+	opts, err := page.Locator("#cloud-tasks-panel .ct-action-select").First().Locator("option").AllInnerTexts()
+	if err != nil {
+		t.Fatalf("读取动作选项: %v", err)
+	}
+	joined := strings.Join(opts, "|")
+	for _, want := range []string{"续传下载", "仅重做转存", "换源重试", "清残留重下"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("动作清单缺少 %q（实际 %q）", want, joined)
+		}
+	}
+	// 选择「续传下载」并执行 → 必须发出 POST /actions。
+	reqCh := make(chan playwright.Request, 4)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/actions") {
+			select {
+			case reqCh <- r:
+			default:
+			}
+		}
+	})
+	if _, serr := page.Locator("#cloud-tasks-panel .ct-action-select").First().SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"retry_download"}}); serr != nil {
+		t.Fatalf("选择动作: %v", serr)
+	}
+	if err := page.Locator("#cloud-tasks-panel .ct-action-apply").First().Click(); err != nil {
+		t.Fatalf("执行动作: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		var payload struct {
+			Action string `json:"action"`
+		}
+		requestJSON(t, req, &payload)
+		if payload.Action != "retry_download" {
+			t.Fatalf("动作请求体 = %q，want retry_download", payload.Action)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("执行动作未发出 POST /api/cloud/tasks/{id}/actions")
+	}
+}
+
 // TestCloudTasksPanel_DetailLoadsProgress 锁定「详情展开会拉进度并渲染速率曲线/占位」
 // （用户 2026-11-26：v2 页面每任务可见历史速率）。
 func TestCloudTasksPanel_DetailLoadsProgress(t *testing.T) {

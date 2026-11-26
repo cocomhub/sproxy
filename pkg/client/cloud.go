@@ -5,6 +5,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -392,6 +393,32 @@ func (c *FileClient) GetCloudTaskProgress(ctx context.Context, taskID string, si
 		return nil, fmt.Errorf("获取任务进度: %w", err)
 	}
 	return &out, nil
+}
+
+// ApplyCloudTaskAction 对失败任务执行细粒度处理动作（2026-11-26）：
+// retry_download（退回下载阶段续传）/ retry_transfer（仅重做转存）/
+// rotate_source（换备选源重下）/ discard_partial（清残留重下）。
+func (c *FileClient) ApplyCloudTaskAction(ctx context.Context, taskID, action string) (*CloudTask, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("云端下载: taskID 不能为空")
+	}
+	if action == "" {
+		return nil, fmt.Errorf("云端下载: action 不能为空")
+	}
+	apiPath := apiCloudTasksBase + url.PathEscape(taskID) + "/actions"
+	body, _ := json.Marshal(map[string]string{"action": action})
+	var out struct {
+		Success bool       `json:"success"`
+		Action  string     `json:"action"`
+		Task    *CloudTask `json:"task"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, apiPath, body, &out); err != nil {
+		return nil, fmt.Errorf("任务动作 %s: %w", action, err)
+	}
+	if out.Task == nil {
+		return nil, fmt.Errorf("任务动作 %s: 响应缺少 task", action)
+	}
+	return out.Task, nil
 }
 
 // CancelCloudTask 取消云端下载任务。

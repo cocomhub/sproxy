@@ -32,14 +32,18 @@ type stubTasks struct {
 	submitResult *cloud.CloudTask
 	submitErr    error
 	// submitHook 按 URL 决定逐条结果（批量「部分失败」场景）；非 nil 时优先于 submitErr。
-	submitHook func(url string) (*cloud.CloudTask, error)
-	cancelErr  error
-	deleteErr  error
-	resumeErr  error
-	retrySel   cloud.RetrySelector
-	retryIDs   []string
-	retryErrs  map[string]error
-	retryForce bool
+	submitHook  func(url string) (*cloud.CloudTask, error)
+	cancelErr   error
+	deleteErr   error
+	resumeErr   error
+	actionID    string
+	actionValue string
+	actionOwner string
+	actionErr   error
+	retrySel    cloud.RetrySelector
+	retryIDs    []string
+	retryErrs   map[string]error
+	retryForce  bool
 
 	// 入参取证
 	listOwner       string
@@ -105,6 +109,15 @@ func (s *stubTasks) DeleteTask(id, owner string) error {
 func (s *stubTasks) ResumeTask(id string, force bool, owner string) error {
 	s.resumeID, s.resumeForce, s.resumeOwner = id, force, owner
 	return s.resumeErr
+}
+
+// ApplyTaskAction 记录动作调用（细粒度人工处理）。
+func (s *stubTasks) ApplyTaskAction(id string, action cloud.TaskAction, owner string) (*cloud.CloudTask, error) {
+	s.actionID, s.actionValue, s.actionOwner = id, string(action), owner
+	if s.actionErr != nil {
+		return nil, s.actionErr
+	}
+	return &cloud.CloudTask{ID: id, Status: "pending"}, nil
 }
 
 // SelectRetryable 记录选择器并返回预设的可重试任务 ID（测试用）。

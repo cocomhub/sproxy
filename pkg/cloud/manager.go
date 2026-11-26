@@ -143,6 +143,9 @@ type CloudTask struct {
 	FallbackSources  []string `json:"fallback_sources,omitempty"`
 	SourceIndex      int      `json:"source_index,omitempty"`
 
+	// Actions 是**当前可用的处理动作**（服务端计算，随列表/详情返回；不持久化）。
+	// 判据（产物是否完整/是否有备选源）只有服务端知道 ⇒ 前端直接渲染，不重复推断。
+	Actions []TaskActionPlan `json:"actions,omitempty"`
 	// Chunks 是**分块状态**（phase/done/length），供 v2 块矩阵（一行一个 chunk、行内多小块）。
 	Chunks []downloader.ChunkState `json:"chunks,omitempty"`
 	// rebuildFirst 是**运行时**标记：本次执行先尝试「零尾扫描 + 定点补片」（damaged 恢复），
