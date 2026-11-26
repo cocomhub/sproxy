@@ -308,21 +308,32 @@
   }
 
   /**
-   * 上传入口门禁：**必须有具体卷**才允许上传。
+   * **写操作入口门禁**：必须有具体卷才允许上传 / 新建目录。
    *
-   * 「全部卷」是多卷聚合视图（同目录下多卷条目混排）⇒ 服务端按 placement 自动选卷，用户看到
-   * 的是聚合结果、切卷后文件"消失"，属"上传目标不可见"。因此聚合视图禁用上传并给出理由。
+   * 「全部卷」是多卷聚合视图（同一目录下多卷条目混排）⇒ 服务端按 placement 选卷：
+   *   - 上传：`routeUploadAuto` 依序双预留，落哪张卷不可预期；
+   *   - 建目录：不带 `?volume=` 时按 prefer-default 选首个视图卷
+   *     （`TestMkdir_NoVolumeLandsOnFirstViewVolume` 锁定该既有语义）。
+   * 用户看到的是聚合结果 ⇒ 切卷过滤后新建的东西就"消失"了。故聚合视图禁用这两个写入口并说明理由。
    */
   function syncUploadGate() {
     var ok = f.canUploadTo(state.volume);
+    var reason = '请先在右上角选择具体卷（「全部卷」是多卷聚合视图，无法确定目标卷）';
     var label = document.querySelector('label[for="v2-upload-input"]');
     var input = el('v2-upload-input');
     if (label) {
       label.setAttribute('aria-disabled', ok ? 'false' : 'true');
       label.classList.toggle('is-disabled', !ok);
-      label.title = ok ? '' : '请先在右上角选择具体卷（「全部卷」是多卷聚合视图，上传目标不明确）';
+      label.title = ok ? '' : reason;
     }
     if (input) { input.disabled = !ok; }
+    // 新建目录同一条纪律（不带 volume 会落默认卷）。
+    var mk = el('v2-mkdir');
+    if (mk) {
+      mk.setAttribute('aria-disabled', ok ? 'false' : 'true');
+      mk.classList.toggle('is-disabled', !ok);
+      mk.title = ok ? '' : reason;
+    }
   }
 
   function loadVolumes() {
@@ -481,7 +492,11 @@
     rowInfo: function (name) {
       var tr = document.querySelector('#v2-file-body tr[data-name="' + String(name).replace(/"/g, '\\"') + '"]');
       if (!tr) { return null; }
-      return { name: name, isDir: tr.getAttribute('data-dir') === '1', checksum: tr.getAttribute('data-checksum') || '' };
+      return {
+        name: name,
+        isDir: tr.getAttribute('data-dir') === '1',
+        checksum: tr.getAttribute('data-checksum') || ''
+      };
     }
   };
 

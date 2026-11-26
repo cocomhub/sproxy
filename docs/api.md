@@ -544,7 +544,13 @@ JSON body 批量形态（body 存在且 `files` 非空时优先）：
 
 ### POST /mkdir?dirname=...
 
-创建子目录（递归，类似 `mkdir -p`）。
+创建目录（递归，等价 `mkdir -p`）。
+
+- `dirname`（必填）：相对 user 桶的路径。
+- `volume`（可选）：**显式目标卷**。指定时目录建在该卷；不传时按 placement 选
+  **首个视图卷（默认卷优先）**——多卷环境下「落哪张卷」对调用方不可预期，
+  故 Web UI 在聚合视图（全部卷）禁用建目录并要求先选卷。
+- 未知卷 / owner 不在该卷视图（ACL）⇒ fail-closed 报错（**不静默改道默认卷**）。
 
 ### POST /rmdir?dirname=&force=true
 
