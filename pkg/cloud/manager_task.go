@@ -2056,6 +2056,10 @@ func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg str
 			return
 		}
 		m.cleanupTaskDirOnFail(task)
+		// 非瞬态失败（完整性不符/磁盘满/未知）：断点**不可信或没空间** ⇒ 连同 .partial 一起删，
+		// 并把账本收敛到删除后的实际占用（否则磁盘已空、账本仍占 ⇒ 长期虚占配额）。
+		// 2026-11-26 修正：此前注释声称"删除"，实际 `cleanupTaskDirOnFail` 会保留 .partial。
+		m.discardPartialOnFail(task)
 		return
 	}
 	m.cleanupTaskTempsOnFail(task)
@@ -2127,14 +2131,22 @@ func (m *CloudDownloadManager) setStage(task *CloudTask, stage string) {
 //   - 确实下载过字节（Downloaded > 0）——否则没有可续内容；
 //   - 失败归类属**瞬态**（源不可达/限流/认证）——完整性不符/磁盘满/未知错误删除（坏字节或没空间）。
 func (m *CloudDownloadManager) keepPartialOnFail(task *CloudTask, errMsg string) bool {
-	if task == nil || m.config.DiscardPartialOnTransientFailure || task.Downloaded <= 0 {
+	if task == nil || m.config.DiscardPartialOnTransientFailure {
 		return false
 	}
-	switch classifyCloudError(errMsg) {
-	case ErrClassSourceUnreachable, ErrClassThrottled, ErrClassAuth:
-		return true
-	default:
+	// 判据用**磁盘实际占用**而不是 Downloaded 计数：崩溃/手动落盘/续传场景下计数可能为 0，
+	// 但 .partial 确实存在（删掉就白丢可续进度）。
+	if m.diskUsageOfTask(task.Owner, task.ID) <= 0 {
 		return false
+	}
+	// 只有**确定断点不可信/没空间**才删：完整性不符（字节已坏）、磁盘满（留不下）。
+	// 其余（源不可达/限流/认证/未知）一律保留——未知错误更可能是瞬态，删掉会白白丢掉可续进度，
+	// 与"提高完成成功率"的目标相悖；空间由失败任务 TTL 兜底回收。
+	switch classifyCloudError(errMsg) {
+	case ErrClassContentMismatch, ErrClassDiskFull:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -2153,4 +2165,52 @@ func (m *CloudDownloadManager) recordKeptPartial(task *CloudTask) {
 	if task.Downloaded > d.PartialSize {
 		d.PartialSize = task.Downloaded
 	}
+}
+
+// clearPartialDiagnostics 清零「部分产物」诊断（产物被删除后调用；必须持 m.mu）。
+//
+// 为什么需要：`noteFailure` 在删除**之前**记录 PartialSize/PartialPath；删除后不清零会让
+// `PlanTaskActions` 误判"有断点可续"，提示与实际不符。
+func (m *CloudDownloadManager) clearPartialDiagnostics(task *CloudTask) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d := task.Diagnostics; d != nil {
+		d.PartialSize = 0
+		d.PartialPath = ""
+	}
+}
+
+// discardPartialOnFail 删除失败任务的断点残留并把账本收敛到磁盘实际（调用方已持锁外上下文）。
+//
+// 与 `cleanupTaskDirOnFail` 的区别：后者**保留** .partial（供续传）；本函数用于"断点不可信/没空间"
+// 的场景（完整性不符、磁盘满、未知错误），连 .partial 一起删。
+func (m *CloudDownloadManager) discardPartialOnFail(task *CloudTask) {
+	dir := m.TaskDirFor(task.Owner, task.ID)
+	if dir == "" {
+		return
+	}
+	dest := filepath.Join(dir, task.Filename)
+	_ = removeDiscardedTaskFiles(dest, m.removeFileOrDefault())
+	if err := os.RemoveAll(dir); err != nil {
+		m.logger.Warn("discard partial on fail: remove task dir failed", "task_id", task.ID, "error", err)
+	}
+	// 账本收敛：租户 Scope 侧释放本任务已提交字节；全局账本释放预留差额。
+	if task.account != nil {
+		if released := task.account.ReleaseAllCommitted(); released > 0 {
+			m.logger.Debug("discard partial on fail: released committed", "task_id", task.ID, "bytes", released)
+		}
+	}
+	after := m.diskUsageOfTask(task.Owner, task.ID)
+	m.mu.Lock()
+	before := task.ReservedSize
+	if after < before {
+		task.ReservedSize = after
+	} else {
+		after = before // 无差额可释放
+	}
+	m.mu.Unlock()
+	if before > after {
+		m.storage.ReleaseCloud(before - after)
+	}
+	m.clearPartialDiagnostics(task)
 }
