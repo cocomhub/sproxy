@@ -344,3 +344,67 @@ type spanFetchResult struct {
 
 **同一个返回位不要表达两种语义**。"已解密明文" 与 "密文区间" 是两种东西，用 `[]byte` + 一个
 隐含约定就必然有人（包括自己）接错。宁可多一个结构体字段，也不要靠注释约定。
+
+## 2026-11-27 修 Windows 句柄泄漏（`os.Root` 无 finalizer ⇒ TempDir 清理失败）
+
+CI `Test(windows)` 偶发（#1306）：
+
+```
+--- FAIL: TestEncReadCloserSeek_UsesBlockSkip
+    testing.go:1619: TempDir RemoveAll cleanup: unlinkat
+      C:\Users\RUNNER~1\AppData\Local\Temp\TestEncReadCloserSeek_UsesBlockSkip\001:
+      The process cannot access the file because it is being used by another process.
+```
+
+### 根因：`os.Root` 持有目录句柄且**没有 finalizer**
+
+`storage.OpenRoot` 包的是 `os.OpenRoot(path)`——它持有一个**打开的目录 fd**。
+`pkg/storage.Root` 早有 `Close()`，但**测试里 30+ 个调用点大多没调**：
+不关就一直持有到进程退出 ⇒ Windows 上 `t.TempDir()` 的 `RemoveAll` 删除该目录时被占用。
+
+（Linux 上删除"被打开的文件/目录"通常仍成功，所以只在 Windows 暴露。）
+
+### 修复
+
+1. **测试助手 `openTestRoot(t, dir)`**（`pkg/storage/testroot_helpers_test.go`）：
+   打开 + `t.Cleanup(Close)`。把 31 处同构调用点批量改为走它；
+   顺手把 `root_test.go` 里一处「打开成功才 Fatal」的泄漏点补上 Close。
+2. **合并已有两个同名助手**（`pkg/storage` 的无参 `openTestRoot(t)` 与
+   `pkg/storage/capacity` 的参数版实为两份实现），`pkg/storage` 只留参数版一个真身；
+   capacity 包因跨包（`*storage.Root`）保留自己的薄封装。
+3. **`Root.Close()` 幂等 + nil 安全**（重复 Close 返回 nil，`errors.Is(os.ErrClosed)` 吸收）。
+
+### 一个必须记录的坑：不要置空内部指针
+
+我最初写了 `rt.r = nil` 以求幂等，结果 `pkg/files` 整包 **panic**：
+
+```
+panic: runtime error: invalid memory address or nil pointer dereference
+os.doInRoot(0x0, ...) <- os.(*Root).MkdirAll <- checksum.(*ChecksumStore).save
+  <- savemerger.flushOnce <- time.goFunc
+```
+
+—— 后台 debounce goroutine 在测试清理**之后**仍会写一次；把 `rt.r` 置空把
+「关闭后再用」从 `os.ErrClosed`（干净错误）变成 **nil 指针 panic**。
+⇒ 只吸收 `ErrClosed`，**不动指针**。
+
+### 门禁：`TestOpenRoot_CallSitesRegisterClose`
+
+源码级扫描 `pkg/storage/*_test.go` 的每个 `OpenRoot(` 调用点：要么走 `openTestRoot(...)`，
+要么其后 8 行内出现 `.Close()` / `t.Cleanup(...Close...)`。含**下限护栏**（扫到 0 个即失败，
+防解析器失效导致假绿）。
+
+上线即抓到一处真实漏洞（`root_test.go:91` 的 `if _, err := OpenRoot(dir); err == nil`）。
+
+### 验证与变异
+
+- `go test ./pkg/storage/... -race -count=1`、`./pkg/storage -race -count=2` 全绿；
+- `go test ./pkg/files ./pkg/server ./internal/archcheck` 全绿（确认没把 panic 带出去）；
+- 变异命中：把某处 `openTestRoot(t, dir)` 换成裸 `OpenRoot` ⇒ 门禁报
+  「未登记关闭（os.Root 无 finalizer…）」。
+
+### 边界
+
+`pkg/storage` **之外**的测试（`pkg/files` / `pkg/server` / `pkg/checksum` …）同样有
+`OpenRoot` 调用点，理论上也会泄漏句柄。本轮只修 `pkg/storage`（CI 实际命中处）+
+提供助手与门禁范式；其余包可按同一模式逐步迁移（需要时把门禁扩到全仓）。

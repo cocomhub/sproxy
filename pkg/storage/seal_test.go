@@ -19,10 +19,7 @@ import (
 func newSealRoot(t *testing.T, rules ...SealRule) *Root {
 	t.Helper()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = root.Close() })
 	if err := os.MkdirAll(filepath.Join(dir, "private", "vault"), 0o755); err != nil {
 		t.Fatal(err)

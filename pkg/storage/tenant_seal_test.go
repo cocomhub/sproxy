@@ -17,10 +17,7 @@ import (
 func TestOpenTenant_PropagatesSeals(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	parent, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	parent := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = parent.Close() })
 	if serr := parent.SetSeals([]SealRule{{Path: "private/vault", Wrapper: "vault"}}); serr != nil {
 		t.Fatalf("SetSeals: %v", serr)
@@ -59,10 +56,7 @@ func TestOpenTenant_PropagatesSeals(t *testing.T) {
 func TestOpenTenant_TranslatesOwnerScopedSeal(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	parent, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	parent := openTestRoot(t, dir)
 	t.Cleanup(func() { _ = parent.Close() })
 	if serr := parent.SetSeals([]SealRule{{Path: "alice/user/vault", Wrapper: "vault"}}); serr != nil {
 		t.Fatalf("SetSeals: %v", serr)

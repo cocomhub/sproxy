@@ -57,10 +57,7 @@ func (c *countingReadSeeker) Seek(off int64, whence int) (int64, error) {
 func TestEncSeekPlain_SkipsCiphertextBlocks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 1)
@@ -108,10 +105,7 @@ func TestEncSeekPlain_SkipsCiphertextBlocks(t *testing.T) {
 func TestEncSeekPlain_MatchesSequentialRead(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(255 - i)
@@ -158,10 +152,7 @@ func (nopCloser) Close() error { return nil }
 func TestEncReadCloserSeek_UsesBlockSkip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	root, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
+	root := openTestRoot(t, dir)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 7)

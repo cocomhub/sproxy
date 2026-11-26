@@ -20,10 +20,7 @@ import (
 func TestEncryptedRoot_RoundTrip(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	base, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := openTestRoot(t, dir)
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i)
@@ -50,10 +47,7 @@ func TestEncryptedRoot_RoundTrip(t *testing.T) {
 func TestEncryptedRoot_CiphertextOnDisk(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	base, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	base := openTestRoot(t, dir)
 	key := make([]byte, 32)
 	er, err := NewEncryptedRoot(base, key)
 	if err != nil {
@@ -77,11 +71,7 @@ func TestEncryptedRoot_CiphertextOnDisk(t *testing.T) {
 func TestEncryptedRoot_BadKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	base, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer base.Close()
+	base := openTestRoot(t, dir)
 	if _, err := NewEncryptedRoot(base, make([]byte, 16)); err == nil {
 		t.Fatalf("16B key 应报错")
 	}

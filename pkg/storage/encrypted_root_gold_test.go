@@ -54,11 +54,7 @@ func TestEncRootGoldFixture_FormatFrozen(t *testing.T) {
 	if werr := os.WriteFile(filepath.Join(dir, "gold.bin"), raw, 0o644); werr != nil {
 		t.Fatalf("落地夹具: %v", werr)
 	}
-	rt, err := OpenRoot(dir)
-	if err != nil {
-		t.Fatalf("OpenRoot: %v", err)
-	}
-	defer rt.Close()
+	rt := openTestRoot(t, dir)
 	if serr := rt.SetEncryption(goldKey); serr != nil {
 		t.Fatalf("SetEncryption: %v", serr)
 	}

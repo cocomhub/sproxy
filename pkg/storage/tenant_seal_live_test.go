@@ -27,7 +27,7 @@ func parentDirOf(rel string) string { return path.Dir(rel) }
 // 变异（把 deriveSealsFromParent 换回「创建时 SetSeals 快照」）⇒ 第 3 步写成功 ⇒ 本测红。
 func TestTenantRoot_SealsFollowParentRuntimeChange(t *testing.T) {
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	tn, err := OpenTenant(parent, "alice", WithMetaBucket())
 	if err != nil {
 		t.Fatalf("OpenTenant 失败: %v", err)
@@ -79,7 +79,7 @@ func TestTenantRoot_SealsFollowParentRuntimeChange(t *testing.T) {
 // （直接 `tnt.Root().SetSeals(...)` 的语义必须保留，不得被派生来源静默覆盖）。
 func TestTenantRoot_SealsUnionOfDerivedAndLocal(t *testing.T) {
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	if serr := parent.SetSeals([]SealRule{{Path: "alice/user/docs", Wrapper: "vault"}}); serr != nil {
 		t.Fatalf("parent.SetSeals: %v", serr)
 	}
@@ -118,7 +118,7 @@ func TestTenantRoot_SealsUnionOfDerivedAndLocal(t *testing.T) {
 // 变异（把 seals 换回普通切片字段 + 赋值）⇒ `-race` 报 data race ⇒ 本测红。
 func TestTenantRoot_SealsConcurrentParentSwap(t *testing.T) {
 	t.Parallel()
-	parent := openTestRoot(t)
+	parent := openTestRoot(t, t.TempDir())
 	tn, err := OpenTenant(parent, "alice")
 	if err != nil {
 		t.Fatalf("OpenTenant 失败: %v", err)
