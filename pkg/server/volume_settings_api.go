@@ -107,16 +107,16 @@ func roleOfRequest(r *http.Request) string {
 }
 
 // auditSettings 记录设置面审计（成功与拒绝都记；Detail 只含分区/条数/摘要，**不含规则全文**）。
+// 分区名并入 Object（`<卷名>/<分区>`），避免为它单开一个不存在的审计字段。
 func (h *Handlers) auditSettings(ctx context.Context, name, section, result, detail string) {
 	h.RecordAudit(ctx, AuditEvent{
 		Action:     auditActionVolumeSettingsUpdate,
 		ObjectType: "volume",
-		Object:     name,
+		Object:     name + "/" + section,
 		Result:     result,
 		Detail:     detail,
 		Volume:     name,
 	})
-	_ = section
 }
 
 // settingsSummary 生成规则载荷的**摘要**（条数 + 前 8 位 sha256），审计用。
