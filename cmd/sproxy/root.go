@@ -1328,6 +1328,9 @@ func (rt *runServerRuntime) setupStateStore(h *server.Handlers) error {
 		h.SetStateStore(st)
 		logger.Info("分享/索引后端切换 StateStore", "type", cfg.StateStore.Type, "dir", stateDir)
 	}
+	// 卷设置分区的持久化后端注入（**必须在 SetStateStore 之后**：StateStore 晚于卷装配才可用）。
+	// 未装配 StateStore 时传 nil ⇒ 后端把设置分区标记为只读（不静默只改内存）。
+	server.AttachVolumeSettingsStores(h)
 	return nil
 }
 

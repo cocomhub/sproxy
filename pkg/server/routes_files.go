@@ -72,6 +72,16 @@ func fileDomainRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *htt
 		{Method: "GET", Path: "/api/volumes/{name}/meta-audit", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).metaAuditHandler},
 		{Method: "GET", Path: "/api/volumes/{name}/orphans", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).orphansHandler},
 		{Method: "GET", Path: "/api/volumes/{name}/trace", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeTraceHandler},
+		// 卷详情与设置分区（设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md §8）：
+		// 通用容器——分区由后端 SettingsProvider/SettingsWriter 能力驱动，后续卷型新增配置
+		// 无需改路由。详情用 /{name}/detail（三段）而非 /{name}：卷名可合法取 export/user 等，
+		// 两段通配会与既有字面路由撞名。写权限在 handler 内按「所有者或 admin」判定。
+		{Method: "GET", Path: "/api/volumes/{name}/detail", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeDetailHandler},
+		{Method: "GET", Path: "/api/volumes/{name}/settings", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeSettingsGetHandler},
+		// 分类取 ClassUser（= requireRole(user)：放行 user/admin、拒绝 reader/node）——文件域只允许
+		// ClassUser/ClassReader（routes_file_face_test 锁定）。「所有者或 admin」的细粒度判定在
+		// handler 内完成：ClassUser 已排除 reader/node，剩余区分（普通 user 写系统卷）由 handler 403。
+		{Method: "PUT", Path: "/api/volumes/{name}/settings/{section}", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).volumeSettingsPutHandler, Mutating: true},
 		{Method: "GET", Path: "/api/volumes/{name}/explain", Server: router.ClassReader, Local: router.ClassTunnel, H: (*Handlers).volumeExplainHandler},
 		{Method: "POST", Path: "/api/volumes/import", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).importVolumeHandler},
 		{Method: "POST", Path: "/api/volumes/user", Server: router.ClassUser, Local: router.ClassTunnel, H: (*Handlers).createUserVolumeHandler},
