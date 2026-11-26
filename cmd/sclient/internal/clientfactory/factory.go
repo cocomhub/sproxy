@@ -140,6 +140,16 @@ type Factory interface { // NOSONAR: S8196 — 「Factory」是规范工厂模�
 	NewClient(cmd *cobra.Command) (*client.FileClient, error)
 }
 
+// AnnotationAPIOnly 标记命令只走直连 HTTP API（不启用传统加密隧道）。
+// 典型：upload-direct/presign 等需要显式拿到 API 签名 URL 的命令；即使 server/凭据
+// 来自配置（未显式 --server），也不能被静默切到 tunnel。
+const AnnotationAPIOnly = "sproxy.api-only"
+
+// apiOnlyCommand 报告命令是否标记为 API-only。
+func apiOnlyCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Annotations[AnnotationAPIOnly] == "true"
+}
+
 // CfgBinder 抽象配置提供者能力，避免直接依赖 sclientcfg.ViperProvider 类型。
 type CfgBinder interface {
 	BindPFlag(key string, flag *pflag.Flag)
@@ -325,7 +335,8 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 // 传统隧道（按直连 API 面发送），避免 upload-direct/presign 等 API-only 命令被静默切隧道。
 func accessKeyOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) []client.Option {
 	var opts []client.Option
-	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
+	useTunnel := serverFlagNotSet(cmd) && !xferEnabled && !apiOnlyCommand(cmd)
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && useTunnel {
 		opts = append(opts, client.WithTunnel(cfg.AccessKey, cfg.AccessKeySecret))
 	}
 	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
@@ -342,7 +353,7 @@ func accessKeyOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) 
 			// 只给 --access-key 时 secret 回落配置：空串覆盖会使签名必然失败。
 			sk = cfg.AccessKeySecret
 		}
-		if serverFlagNotSet(cmd) {
+		if useTunnel {
 			opts = append(opts, client.WithTunnel(ak, sk))
 		} else {
 			opts = append(opts, client.WithAccessKey(ak, sk))

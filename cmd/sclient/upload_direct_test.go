@@ -14,6 +14,7 @@ import (
 
 	"io"
 
+	"github.com/cocomhub/sproxy/cmd/sclient/internal/clientfactory"
 	"github.com/cocomhub/sproxy/pkg/cli"
 	"github.com/cocomhub/sproxy/pkg/client"
 )
@@ -90,5 +91,15 @@ func TestDirectUpload_PresignError(t *testing.T) {
 	err := directUpload(context.Background(), svc, "s3", local, "dir/a.txt", nil, ios)
 	if err == nil {
 		t.Fatal("签发失败应返回错误")
+	}
+}
+
+// TestUploadDirectCommandIsAPIOnly 验证命令带 API-only 标记：即使 server/凭据来自
+// 配置（未显式 --server），factory 也不会切到传统加密隧道。
+func TestUploadDirectCommandIsAPIOnly(t *testing.T) {
+	t.Parallel()
+	cmd := NewCmdUploadDirect(nil, cli.IOStreams{}, nil)
+	if got := cmd.Annotations[clientfactory.AnnotationAPIOnly]; got != "true" {
+		t.Fatalf("upload-direct 必须标记 %s=true，got %q", clientfactory.AnnotationAPIOnly, got)
 	}
 }
