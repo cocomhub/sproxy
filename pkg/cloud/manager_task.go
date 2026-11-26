@@ -2048,18 +2048,14 @@ func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg str
 		// 未知错误仍删除（坏字节或没空间，留着无意义）。
 		if m.keepPartialOnFail(task, errMsg) {
 			m.cleanupTaskTempsOnFail(task)
-			d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
-			d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
-			d.PartialSize = task.Downloaded
+			m.recordKeptPartial(task)
 			return
 		}
 		m.cleanupTaskDirOnFail(task)
 		return
 	}
 	m.cleanupTaskTempsOnFail(task)
-	if d := task.Diagnostics; d != nil && d.PartialPath == "" {
-		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
-	}
+	m.recordKeptPartial(task)
 }
 
 // takeRebuildFirst 取出并清除「先尝试定点修复」标记（每次 resume 只尝试一次）。
@@ -2135,5 +2131,22 @@ func (m *CloudDownloadManager) keepPartialOnFail(task *CloudTask, errMsg string)
 		return true
 	default:
 		return false
+	}
+}
+
+// recordKeptPartial 记录保留下来的断点信息（**必须持 m.mu**）。
+//
+// 2026-11-26 CI 实测：此前在锁外写 `Diagnostics.PartialPath/PartialSize`，与 flushDirty→saveTask
+// 的 JSON 序列化并发 ⇒ `-race` 报 DATA RACE（Read at ... by flushLoop / Previous write ... by
+// settleArtifactsOnFail）。诊断字段是任务 JSON 的一部分，写入必须与持久化同锁。
+func (m *CloudDownloadManager) recordKeptPartial(task *CloudTask) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
+	if d.PartialPath == "" {
+		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
+	}
+	if task.Downloaded > d.PartialSize {
+		d.PartialSize = task.Downloaded
 	}
 }

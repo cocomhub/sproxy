@@ -12,6 +12,7 @@ package e2e
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -251,6 +252,71 @@ func TestCloudTasksPanel_FailedRowHasRichActions(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("执行动作未发出 POST /api/cloud/tasks/{id}/actions")
+	}
+}
+
+// TestCloudTasksPanel_BatchAction 锁定「批量动作」真交互（用户 2026-11-26）：
+// 勾选多个失败任务 → 选择批量动作 → 执行必须发出 POST /api/cloud/tasks/actions/batch，
+// 且 body 的 action 与 ids 数量正确。
+func TestCloudTasksPanel_BatchAction(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	for i := 0; i < 2; i++ {
+		body := []byte(`{"url":"http://127.0.0.1:1/batch-` + strconv.Itoa(i) +
+			`.bin","filename":"batch-` + strconv.Itoa(i) + `.bin","download_local":true,"save":true}`)
+		if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+			t.Fatalf("创建任务 %d 失败: %d %s", i, code, resp)
+		}
+	}
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	reqCh := make(chan playwright.Request, 4)
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/api/cloud/tasks/actions/batch") {
+			select {
+			case reqCh <- r:
+			default:
+			}
+		}
+	})
+	page.Goto(baseURL + "/ui/")
+	openStatsModal(t, page)
+	if err := page.Locator("#cloud-tasks-tab").Click(); err != nil {
+		t.Fatalf("点击云端任务: %v", err)
+	}
+	if err := waitLoc(page, "#ct-batch-action", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("批量动作下拉未渲染: %v", err)
+	}
+	if err := page.Locator("#ct-pick-all").Check(); err != nil {
+		t.Fatalf("全选失败任务: %v", err)
+	}
+	if _, serr := page.Locator("#ct-batch-action").SelectOption(
+		playwright.SelectOptionValues{Values: &[]string{"retry_download"}}); serr != nil {
+		t.Fatalf("选择批量动作: %v", serr)
+	}
+	if err := page.Locator("#ct-batch-apply").Click(); err != nil {
+		t.Fatalf("点击批量执行: %v", err)
+	}
+	select {
+	case req := <-reqCh:
+		var payload struct {
+			Action string   `json:"action"`
+			IDs    []string `json:"ids"`
+		}
+		requestJSON(t, req, &payload)
+		if payload.Action != "retry_download" || len(payload.IDs) == 0 {
+			t.Fatalf("批量请求体异常: action=%q ids=%v", payload.Action, payload.IDs)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("批量执行未发出 POST /api/cloud/tasks/actions/batch")
 	}
 }
 
