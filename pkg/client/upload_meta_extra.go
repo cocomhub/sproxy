@@ -51,6 +51,9 @@ func encodeMetaExtraHeader(extra map[string]any) (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
+// EncodeMetaExtraHeader 导出上传头编码（直传 complete 等复用同一编码）。
+func EncodeMetaExtraHeader(extra map[string]any) (string, error) { return encodeMetaExtraHeader(extra) }
+
 // MetaUpdateMode 是 meta extra 更新模式（用户裁定 2026-10-26：默认**新增而非覆盖**）。
 type MetaUpdateMode string
 

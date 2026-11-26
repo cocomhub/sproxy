@@ -765,6 +765,15 @@ func (f *CapacityFS) ChecksumAndSize(ctx context.Context, rel string) (string, i
 	return "", 0, fmt.Errorf("capacity: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
 }
 
+// RegisterMeta 委托 inner（presign 直传 meta 登记）。
+func (f *CapacityFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := f.inner.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("capacity: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+}
+
 // UpdateMetaExtra 委托 inner（damaged/transfer_verified 旁路标记）。
 func (f *CapacityFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := f.inner.(interface {
@@ -987,6 +996,7 @@ var (
 	_ syncpkg.StorageInspector = (*CapacityFS)(nil)
 	_ syncpkg.TreeInspector    = (*CapacityFS)(nil)
 	_ syncpkg.DirMetaCleaner   = (*CapacityFS)(nil)
+	_ syncpkg.MetaRegistrar    = (*CapacityFS)(nil)
 )
 
 // 编译期契约：本装饰器必须支持 `DecoratorCapabilities` 的**全部**共同可选能力

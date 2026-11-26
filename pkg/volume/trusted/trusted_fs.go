@@ -805,6 +805,36 @@ func (t *TrustedVolumeFS) metaContentMatches(ctx context.Context, rel string, fm
 	return nil
 }
 
+// RegisterMeta 按调用方声明的 size+整文件 sha256 直接登记 meta（presign 直传）。
+// 内容由客户端直写对象存储，服务端不重读；分块退化为单块（见 meta.NewSingleChunk）。
+func (t *TrustedVolumeFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	if size < 0 || len(strings.TrimSpace(sha256)) != 64 {
+		return fmt.Errorf("trusted: RegisterMeta 参数非法（size=%d sha256=%q）", size, sha256)
+	}
+	fm := meta.NewSingleChunk(size, strings.ToLower(sha256), "", "", nil)
+	fm.Name = path.Base(filepath.ToSlash(rel))
+	fm.Extra = cloneExtra(t.opts.Extra)
+	if len(extra) > 0 {
+		if fm.Extra == nil {
+			fm.Extra = make(map[string]any, len(extra))
+		}
+		maps.Copy(fm.Extra, extra)
+	}
+	fm.MTime, fm.CTime = metaTimes(mtime)
+	if err := meta.Validate(fm); err != nil {
+		return fmt.Errorf("trusted: RegisterMeta 校验失败: %w", err)
+	}
+	data, err := meta.Marshal(fm)
+	if err != nil {
+		return err
+	}
+	t.ensureMetaDir(ctx, meta.MetaPath(rel))
+	if werr := t.inner.WriteFile(ctx, syncpkg.LogicalKey{}, meta.MetaPath(rel), bytesReader(data), int64(len(data)), 0); werr != nil {
+		return fmt.Errorf("trusted: RegisterMeta 写 sidecar: %w", werr)
+	}
+	return nil
+}
+
 // WriteFromStagedPath 转发 staging 路径复用能力（透传契约：能力探测不得因装饰层而恒 false）。
 func (t *TrustedVolumeFS) WriteFromStagedPath(ctx context.Context, relPath, stagedPath string, size, mtime int64) error {
 	sp, ok := t.inner.(syncpkg.StagedPathReuse)

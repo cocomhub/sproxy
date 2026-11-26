@@ -1895,6 +1895,10 @@ query 参数：`path`（卷内相对路径，必填）、`method`（`PUT`/`GET`�
 
 ### POST /api/backends/{type}/presign/complete
 
+可选请求头：`X-File-Meta-Extra`（随登记写入 FileMeta.Extra）、`X-File-MTime`
+（UnixNano，写入 FileMeta.MTime）。外部卷按客户端声明的 size+整文件 sha256 生成单块
+FileMeta；secretdata 等无法用明文 hash 生成卷内 meta 的后端不支持直传登记。
+
 预签名直传完成后的登记（服务端校验对象存在 + 记账）。
 
 > **登记是义务，不是可选**：complete 经**统一写内核**（`ContentPresent` 模式）完成存在性/size

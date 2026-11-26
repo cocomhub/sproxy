@@ -29,6 +29,7 @@ import (
 // 大文件绕过服务端带宽（roadmap 3.3 签名 v4 直传闭环）。
 func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *state.State) *cobra.Command {
 	var remotePath string
+	var metaExtraRaw string
 	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
 		Use:   "upload-direct <backend> <file1> [file2...]",
 		Short: "直传文件到外部后端（S3 预签名，绕过服务端）",
@@ -43,6 +44,11 @@ func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *st
 				ios.WriteErrLine(errFmtInitClientPrint, err)
 				return fmt.Errorf(errFmtInitClient, err)
 			}
+			metaExtra, merr := parseMetaExtraFlag(metaExtraRaw)
+			if merr != nil {
+				ios.WriteErrLine("--meta-extra 无效: %v", merr)
+				return merr
+			}
 			backend := args[0]
 			ctx := cmd.Context()
 			for _, filePath := range args[1:] {
@@ -53,7 +59,7 @@ func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *st
 				if resolved, err := st.ResolveRemotePathOrErr(rel); err == nil {
 					rel = resolved
 				}
-				if err := directUpload(ctx, svc, backend, filePath, rel, ios); err != nil {
+				if err := directUpload(ctx, svc, backend, filePath, rel, metaExtra, ios); err != nil {
 					return err
 				}
 			}
@@ -61,6 +67,7 @@ func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *st
 		},
 	}
 	cmd.Flags().StringVar(&remotePath, "remote-path", "", "服务端卷内目标路径（默认 = 本地相对路径）")
+	cmd.Flags().StringVar(&metaExtraRaw, "meta-extra", "", "随直传登记写入的元数据（JSON 或 @file.json）")
 	return cmd
 }
 
@@ -76,7 +83,7 @@ var directUploadRetryDelay = func(attempt int) time.Duration {
 
 // directUpload 单个文件：签发 → 直传 → 登记。PUT 5xx/网络失败自动重试
 // （指数退避 + 每次重试前重新签发——presigned URL 有有效期，过期需新签名）。
-func directUpload(ctx context.Context, svc *client.FileClient, backend, localPath, rel string, ios cli.IOStreams) error {
+func directUpload(ctx context.Context, svc *client.FileClient, backend, localPath, rel string, metaExtra map[string]any, ios cli.IOStreams) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf("打开文件: %w", err)
@@ -122,13 +129,28 @@ func directUpload(ctx context.Context, svc *client.FileClient, backend, localPat
 	}
 
 	// 3. complete 登记（服务端校验存在性/size + 双账本记账 + 元数据/checksum 台账）。
-	var completeResp map[string]string
-	completeURL := "/api/backends/" + backend + "/presign/complete?path=" + rel +
-		"&size=" + strconv.FormatInt(fileSize, 10) + "&sha256=" + sha
-	if err := svc.DoJSON(ctx, "POST", completeURL, nil, &completeResp); err != nil {
-		return fmt.Errorf("直传登记: %w", err)
+	if err := completeDirectUpload(ctx, svc, backend, rel, fileSize, sha, st.ModTime(), metaExtra); err != nil {
+		return err
 	}
 	fmt.Fprintf(ios.Out, "直传完成: %s → %s/%s\\n", localPath, backend, rel)
+	return nil
+}
+
+// completeDirectUpload 只做 presign complete 登记（含 mtime/meta-extra 头）。
+func completeDirectUpload(ctx context.Context, svc *client.FileClient, backend, rel string, fileSize int64, sha string, mtime time.Time, metaExtra map[string]any) error {
+	completeURL := "/api/backends/" + backend + "/presign/complete?path=" + rel +
+		"&size=" + strconv.FormatInt(fileSize, 10) + "&sha256=" + sha
+	headers := make(http.Header)
+	headers.Set("X-File-MTime", strconv.FormatInt(mtime.UnixNano(), 10))
+	if encoded, encErr := client.EncodeMetaExtraHeader(metaExtra); encErr != nil {
+		return fmt.Errorf("meta-extra 编码: %w", encErr)
+	} else if encoded != "" {
+		headers.Set("X-File-Meta-Extra", encoded)
+	}
+	var completeResp map[string]string
+	if err := svc.DoJSONWithHeaders(ctx, "POST", completeURL, headers, nil, &completeResp); err != nil {
+		return fmt.Errorf("直传登记: %w", err)
+	}
 	return nil
 }
 

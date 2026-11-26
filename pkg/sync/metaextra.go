@@ -20,6 +20,15 @@ type MetaExtraUpdater interface {
 	UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error
 }
 
+// MetaRegistrar 是「内容已在位、按声明 size+sha256 登记 meta」的能力（presign 直传用）。
+//
+// 直传内容由客户端写入对象存储，服务端不重新读取内容；调用方已提供权威整文件 SHA-256。
+// 实现方可生成一个覆盖整文件的校验块（不做分块细化），至少保证 TotalSHA256/Size 可校验。
+// 非直传写路径不应使用该能力（普通上传应流式计算分块 meta）。
+type MetaRegistrar interface { // NOSONAR: S8196 — 能力接口，设计保留
+	RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error
+}
+
 // AssertMetaExtraUpdater 取装饰器链**最外层**的旁路 Extra 能力。
 //
 // 不能下探到 Innermost：trusted.Wrap 等装饰器本身就是能力提供者（为裸外部卷生成
@@ -99,4 +108,15 @@ func (p *PrefixFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[st
 var (
 	_ MetaExtraUpdater = (*PrefixFS)(nil)
 	_ MetaExtraUpdater = (*StagingQuotaGateFS)(nil)
+	_ MetaRegistrar    = (*PrefixFS)(nil)
+	_ MetaRegistrar    = (*StagingQuotaGateFS)(nil)
 )
+
+// RegisterMeta 把调用方键空间映射到桶键空间后委托底层（presign 直传 meta 登记）。
+func (p *PrefixFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := p.FS.(MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("sync: PrefixFS 底层未实现 RegisterMeta: %w", ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, p.Key(rel), size, sha256, mtime, extra)
+}

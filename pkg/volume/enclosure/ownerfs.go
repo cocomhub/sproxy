@@ -375,6 +375,18 @@ func (o *ownerFS) ReserveSpace(ctx context.Context, relPath string, size int64) 
 	return rs.ReserveSpace(ctx, src, size)
 }
 
+func (o *ownerFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	src, err := o.key(rel)
+	if err != nil {
+		return err
+	}
+	r, ok := o.FS.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("ownerFS: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, src, size, sha256, mtime, extra)
+}
+
 func (o *ownerFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	src, err := o.key(rel)
 	if err != nil {
@@ -478,6 +490,7 @@ var (
 	_ syncpkg.MetaExtraUpdater    = (*ownerFS)(nil)
 	_ syncpkg.StagedPathReuse     = (*ownerFS)(nil)
 	_ meta.Provider               = (*ownerFS)(nil)
+	_ syncpkg.MetaRegistrar       = (*ownerFS)(nil)
 	_ capacity.TrueUsageReporter  = (*ownerFS)(nil)
 )
 

@@ -226,8 +226,13 @@ func sha256hexForTest(b []byte) string {
 
 // metaCaptureSink 捕获外部卷写面 ctx 中的随上传 meta_extra。
 type metaCaptureSink struct {
-	extra map[string]any
-	data  []byte
+	extra    map[string]any
+	data     []byte
+	statSize int64
+	metaSize int64
+	metaSHA  string
+	metaTime int64
+	metaX    map[string]any
 }
 
 func (s *metaCaptureSink) MakeDir(context.Context, string) error { return nil }
@@ -237,8 +242,14 @@ func (s *metaCaptureSink) WriteFile(ctx context.Context, _ string, r io.Reader, 
 	s.data = b
 	return err
 }
-func (s *metaCaptureSink) Stat(context.Context, string) (int64, bool, error) { return 0, false, nil }
-func (s *metaCaptureSink) Remove(context.Context, string) error              { return nil }
+func (s *metaCaptureSink) Stat(context.Context, string) (int64, bool, error) {
+	return s.statSize, s.statSize > 0, nil
+}
+func (s *metaCaptureSink) Remove(context.Context, string) error { return nil }
+func (s *metaCaptureSink) RegisterMeta(_ context.Context, _ string, size int64, sha string, mtime int64, extra map[string]any) error {
+	s.metaSize, s.metaSHA, s.metaTime, s.metaX = size, sha, mtime, extra
+	return nil
+}
 
 // TestWriteTargetExternalSettle_PassesUploadMetaExtra 外部卷普通上传必须把 meta_extra
 // 经 ctx 透传到 trusted/secretdata 写面；否则客户端上传 meta 在外部卷静默丢失。
@@ -286,5 +297,28 @@ func TestWriteExternalSettle_PassesUploadMetaExtra(t *testing.T) {
 	}
 	if res.Checksum != want || sink.extra["x_dm_file"] == nil || string(sink.data) != string(payload) {
 		t.Fatalf("res=%+v extra=%+v data=%q", res, sink.extra, sink.data)
+	}
+}
+
+// TestWriteTargetPresentSettle_ExternalRegistersDeclaredMeta presign 直传登记时，
+// 外部卷必须用客户端声明的 size+sha256 生成单块 meta（服务端不重读内容）。
+func TestWriteTargetPresentSettle_ExternalRegistersDeclaredMeta(t *testing.T) {
+	t.Parallel()
+	e := writeTargetEnv(t)
+	sink := &metaCaptureSink{statSize: 4}
+	payload := []byte("data")
+	sum := sha256.Sum256(payload)
+	want := hex.EncodeToString(sum[:])
+	extra := map[string]any{"x_direct": "1"}
+	route := UploadRoute{VolumeName: "ext", Sink: sink, Release: func() {}}
+	res, err := e.svc.writeTargetPresentSettle(context.Background(), "alice", "user/a.bin", "a.bin", WriteTargetInput{
+		Owner: "alice", RemotePath: "a.bin", ClientSize: 4, Mtime: 123,
+		MetaExtra: extra, ContentPresent: &ContentPresentSpec{Size: 4, SHA256: want},
+	}, route, e.logger)
+	if err != nil {
+		t.Fatalf("present settle: %v", err)
+	}
+	if res.Checksum != want || sink.metaSize != 4 || sink.metaSHA != want || sink.metaX["x_direct"] != "1" {
+		t.Fatalf("res=%+v sink=%+v", res, sink)
 	}
 }

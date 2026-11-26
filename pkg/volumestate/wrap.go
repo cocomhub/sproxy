@@ -383,6 +383,15 @@ func (f *CacheFS) ChecksumAndSize(ctx context.Context, rel string) (string, int6
 	return "", 0, fmt.Errorf("volumestate: 底层未实现 ChecksumAndSize: %w", syncpkg.ErrUnsupported)
 }
 
+// RegisterMeta 委托 inner（presign 直传 meta 登记；内容已在位，不改列表视图）。
+func (f *CacheFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := f.inner.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("volumestate: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, rel, size, sha256, mtime, extra)
+}
+
 // UpdateMetaExtra 委托 inner（旁路标记；**不失效内容视图**——extra 不改变结构/内容）。
 func (f *CacheFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	ue, ok := f.inner.(syncpkg.MetaExtraUpdater)
@@ -423,6 +432,7 @@ var (
 	_ syncpkg.StagingQuotaExempt  = (*CacheFS)(nil)
 	_ meta.Provider               = (*CacheFS)(nil)
 	_ syncpkg.MetaExtraUpdater    = (*CacheFS)(nil)
+	_ syncpkg.MetaRegistrar       = (*CacheFS)(nil)
 	// 同卷对象级复制（secretdata blob 直拷）：转发 + 失效目标，见 CopyFile 注释。
 	_ interface {
 		CopyFile(ctx context.Context, from, to string) error

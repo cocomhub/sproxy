@@ -360,3 +360,19 @@ func MaxMetaSidecarBytes() int64 { return maxMetaSidecarBytes }
 
 // MaxMetaChunks 是 FileMeta 分块数上限（供写侧 ResolveChunkSize 保证「写出即可读」）。
 func MaxMetaChunks() int { return maxMetaChunks }
+
+// NewSingleChunk 构造「内容已在位、只有整文件 SHA-256」的 FileMeta（presign 直传用）。
+// 分块退化为一个覆盖 [0,Size) 的块；读侧仍可做整文件流式校验，但不提供细粒度分块
+// 定位（直传服务端未读取内容，无法产出每块哈希）。size==0 时无分块（合法空文件）。
+func NewSingleChunk(size int64, totalSHA256, mtime, ctime string, extra map[string]any) *FileMeta {
+	chunkSize := int64(1)
+	fm := &FileMeta{
+		Version: metaVersion, Size: size, TotalSHA256: totalSHA256,
+		ChunkSize: chunkSize, MTime: mtime, CTime: ctime, Extra: extra,
+	}
+	if size > 0 {
+		fm.ChunkSize = size
+		fm.Chunks = []ChunkMeta{{Index: 0, Offset: 0, Size: size, SHA256: totalSHA256}}
+	}
+	return fm
+}

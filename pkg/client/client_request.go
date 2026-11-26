@@ -485,6 +485,24 @@ func (c *FileClient) DoJSON(ctx context.Context, method, urlPath string, reqBody
 }
 
 func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody, respBody any) error {
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	return c.doJSONWithHeaders(ctx, method, urlPath, headers, reqBody, respBody)
+}
+
+// DoJSONWithHeaders 同 DoJSON，但允许调用方附加请求头（presign complete 的
+// X-File-Meta-Extra / X-File-MTime 等）。
+func (c *FileClient) DoJSONWithHeaders(ctx context.Context, method, urlPath string, headers http.Header, reqBody, respBody any) error {
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	if headers.Get("Content-Type") == "" {
+		headers.Set("Content-Type", "application/json")
+	}
+	return c.doJSONWithHeaders(ctx, method, urlPath, headers, reqBody, respBody)
+}
+
+func (c *FileClient) doJSONWithHeaders(ctx context.Context, method, urlPath string, headers http.Header, reqBody, respBody any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {
 		data, err := json.Marshal(reqBody)
@@ -494,8 +512,6 @@ func (c *FileClient) doJSON(ctx context.Context, method, urlPath string, reqBody
 		bodyReader = bytes.NewReader(data)
 	}
 
-	headers := make(http.Header)
-	headers.Set("Content-Type", "application/json")
 	resp, err := c.doRequest(ctx, method, urlPath, bodyReader, headers)
 	if err != nil {
 		return fmt.Errorf("请求失败: %w", err)

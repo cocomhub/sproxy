@@ -330,6 +330,15 @@ func (d *davMetaFS) DirectURL(ctx context.Context, relPath string) (string, bool
 }
 
 // UpdateMetaExtra 转发旁路 Extra 更新能力（R21 透明装饰器契约）。
+// RegisterMeta 转发 presign 直传 meta 登记（DAV 包装层不改变内容坐标）。
+func (d *davMetaFS) RegisterMeta(ctx context.Context, rel string, size int64, sha256 string, mtime int64, extra map[string]any) error {
+	r, ok := d.FS.(syncpkg.MetaRegistrar)
+	if !ok {
+		return fmt.Errorf("dav: 底层未实现 RegisterMeta: %w", syncpkg.ErrUnsupported)
+	}
+	return r.RegisterMeta(ctx, d.bucketRel(rel), size, sha256, mtime, extra)
+}
+
 func (d *davMetaFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[string]any) error {
 	u, ok := d.FS.(syncpkg.MetaExtraUpdater)
 	if !ok {
@@ -341,6 +350,7 @@ func (d *davMetaFS) UpdateMetaExtra(ctx context.Context, rel string, extra map[s
 // 编译期能力断言（R21；须位于 var 块内——门禁按行首 `_ <Cap> = (*Type)(nil)` 匹配）。
 var (
 	_ syncpkg.MetaExtraUpdater = (*davMetaFS)(nil)
+	_ syncpkg.MetaRegistrar    = (*davMetaFS)(nil)
 )
 
 // FileMeta 透传 sidecar 读取（内层未实现 → ErrUnsupported；本装饰器只做**写面重链**，

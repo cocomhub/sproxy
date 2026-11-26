@@ -40,9 +40,11 @@
 
 - **presign 直传**（内容由客户端直传对象存储，服务端只登记）：
   - local 卷在登记时仍写 sidecar；
-  - 外部卷不重新读取对象内容，因此当前**不生成**分块 FileMeta；`GetMetaInfo` 可能为空。
-  - 需要强 meta 的场景请走服务端上传/分块上传；后续若要补齐，需要新增「客户端提供
-    分块证据」或「登记后异步计算 meta」协议，不能静默假成功。
+  - 外部卷（trusted.Wrap）在 complete 时按客户端声明的 size+整文件 sha256 写
+    **单块 FileMeta**（不重读内容）；`X-File-Meta-Extra` / `X-File-MTime` 随 complete
+    请求写入 sidecar。单块 meta 提供整文件校验，不提供细粒度分块定位；
+  - secretdata 等无法凭明文 hash 生成卷内加密 meta 的后端不支持直传登记，需走普通上传；
+  - `sclient upload-direct --meta-extra` 已支持该登记。
 - `direct_link: true` 的外部卷下载可能绕过服务端转发；这是显式的直链语义，不承诺
   服务端 meta 校验，保持现有安全边界。
 
