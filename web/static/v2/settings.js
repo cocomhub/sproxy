@@ -185,6 +185,42 @@
       });
   }
 
+  // prefsDirty：用户已在本次打开里改过选择 ⇒ 异步回填**不得**覆盖（否则会静默把 hard 改回 soft）。
+  var prefsDirty = false;
+
+  /** 读取用户维度页面配置（默认删除方式）。 */
+  function loadPrefs() {
+    var sel = el('v2-set-delete-mode');
+    if (!sel) { return; }
+    api.json('GET', '/api/ui/prefs')
+      .then(function (body) {
+        if (prefsDirty) { return; }
+        var mode = body && body.prefs && body.prefs['delete'] ? body.prefs['delete'].default_mode : 'soft';
+        sel.value = mode === 'hard' ? 'hard' : 'soft';
+      })
+      .catch(function () { if (!prefsDirty) { sel.value = 'soft'; } });
+  }
+
+  /** 保存默认删除方式（破坏性语义：hard 需二次确认）。 */
+  function savePrefs() {
+    var sel = el('v2-set-delete-mode');
+    if (!sel) { return; }
+    var mode = sel.value === 'hard' ? 'hard' : 'soft';
+    if (mode === 'hard' && !window.confirm('把默认删除改成「直接删除」？页面上的删除将不再进回收站，无法恢复。')) {
+      sel.value = 'soft';
+      return;
+    }
+    api.json('PUT', '/api/ui/prefs', {
+      body: new TextEncoder().encode(JSON.stringify({ delete: { default_mode: mode } })),
+      contentType: 'application/json'
+    }).then(function () {
+      prefsDirty = false;
+      // 让文件页的删除默认值立即跟上（避免刷新才生效）。
+      if (window.v2deleteMode && window.v2deleteMode.reload) { void window.v2deleteMode.reload(); }
+      if (window.v2toast) { window.v2toast('ok', '删除默认方式已保存：' + (mode === 'hard' ? '直接删除' : '软删进回收站')); }
+    }).catch(function (e) { banner('保存失败：' + (e.message || e), 'warn'); });
+  }
+
   function loadTunnel() {
     var cb = el('v2-set-tunnel');
     if (!cb) { return; }
@@ -208,8 +244,10 @@
     if (!box) { return; }
     box.hidden = false;
     banner('');
+    prefsDirty = false;
     fillCreds();
     loadTunnel();
+    loadPrefs();
     var ak = el('v2-set-ak');
     if (ak) { ak.focus(); }
   }
@@ -233,6 +271,9 @@
     var tSave = el('v2-set-tunnel-save'); if (tSave) { tSave.addEventListener('click', saveTunnel); }
     var rt = el('v2-set-register-toggle'); if (rt) { rt.addEventListener('click', function () { toggleRegister(); }); }
     var rs = el('v2-reg-submit'); if (rs) { rs.addEventListener('click', register); }
+    var dmSave = el('v2-set-delete-save'); if (dmSave) { dmSave.addEventListener('click', savePrefs); }
+    var dmSel = el('v2-set-delete-mode');
+    if (dmSel) { dmSel.addEventListener('change', function () { prefsDirty = true; }); }
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
   }
 

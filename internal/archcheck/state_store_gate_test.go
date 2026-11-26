@@ -67,6 +67,10 @@ var stateWriteExemptFiles = []string{
 	"pkg/files/tags.go",
 	// 派生缓存（P1）：<meta>/transform/<key>。
 	"pkg/files/transform_cache.go",
+	// 用户维度页面配置（2026-11-26）：<meta>/ui/prefs.json。与 tags/share 同类——
+	// **用户可见配置**（非集群 KV、非可丢弃缓存）：必须跟随租户卷（含加密/封印），
+	// 不属 StateStore 管辖。
+	"pkg/server/uiprefs.go",
 	// 分享链接（P1）：<meta>/share/<token>.json。
 	// 混沌测试基建（11.10-⑧）：写临时 config/凭据 store（临时目录非 meta/state）。
 	"test/chaos/node.go",

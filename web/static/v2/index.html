@@ -745,6 +745,16 @@
     <div class="muted" style="font-size:11.5px;margin-top:8px">
       凭据写入与旧版相同的 sessionStorage 键；刷新/关闭浏览器后需重新登录。
     </div>
+    <div class="card-title">删除默认方式</div>
+    <label class="muted" style="font-size:12.5px">页面删除（单条/批量）默认怎么做；显式传 soft 的调用不受影响，
+      回收站内的删除恒为彻底删除。</label>
+    <div class="toolbar" style="margin:8px 0">
+      <select id="v2-set-delete-mode" aria-label="默认删除方式">
+        <option value="soft">软删（进回收站，可恢复）</option>
+        <option value="hard">直接删除（不可恢复）</option>
+      </select>
+      <button class="btn btn-ghost" id="v2-set-delete-save" type="button">保存</button>
+    </div>
   </div>
 </div>
 

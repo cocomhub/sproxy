@@ -43,6 +43,7 @@ var userIOCallAllowlist = map[string]string{
 	"pkg/rootfs/visible_io.go":      "用户内容读写唯一入口（OpenDecrypted/OpenFileEncrypted 分派）",
 	"pkg/files/write_ops.go":        "统一写内核（WriteTarget 的 writeUserVisibleOpenExcl 是 O_EXCL 用户可见入口变体；其余 root.Open/OpenFile 均为内部 meta/删除）",
 	"pkg/server/files_service.go":   "meta sidecar 读写（mrel/meta 桶；不读用户内容本身）",
+	"pkg/server/uiprefs.go":         "用户维度页面配置读写（<meta>/ui/prefs.json；meta 桶，不读用户内容本身）",
 	"pkg/server/meta_remote.go":     "跨节点 meta 面：读持有侧 sidecar 原始字节（meta 桶；不读用户内容本身，见评审 P2-10）",
 	"pkg/server/s3/multipart.go":    "s3 part/会话与在途 meta（chunk 桶明文暂存是刻意取舍，见设计文档）",
 	"pkg/files/block_write.go":      "块写临时文件（块写已显式拒绝加密卷，非加密卷 temp 暂存）",

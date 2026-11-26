@@ -576,6 +576,57 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("建卷对话框未关闭: %v", err)
 	}
 
+	// 用户维度页面配置：设置里切「直接删除」→ PUT /api/ui/prefs 生效 → 再删文件不进回收站。
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("打开设置: %v", err)
+	}
+	if err := waitLoc(page, "#v2-set-delete-mode", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("删除默认方式选择器缺失: %v", err)
+	}
+	// 页面级 dialog 处理器只装一次，按消息分派（重复 OnDialog 会让后面的 prompt 拿到空值）。
+	respondDialogs(page, func(d playwright.Dialog) {
+		if strings.Contains(d.Message(), "Secret 名称") {
+			_ = d.Accept("e2esecret")
+			return
+		}
+		_ = d.Accept()
+	})
+	if _, err := page.Locator("#v2-set-delete-mode").SelectOption(playwright.SelectOptionValues{Values: &[]string{"hard"}}); err != nil {
+		t.Fatalf("选择 hard: %v", err)
+	}
+	if err := page.Locator("#v2-set-delete-save").Click(); err != nil {
+		t.Fatalf("保存删除默认方式: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('删除默认方式已保存'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("删除默认方式未保存: %v", err)
+	}
+	// 服务端已生效。
+	// 用页面自己的签名客户端读（裸 fetch 无 SproxySig 凭据 ⇒ 401）。
+	if _, err := page.Evaluate(`() => window.v2api.json('GET','/api/ui/prefs')
+		.then(j => { window.__dm = j.prefs.delete.default_mode; })
+		.catch(e => { window.__dm = 'ERR:' + (e && e.message); })`, nil); err != nil {
+		t.Fatalf("读取页面配置: %v", err)
+	}
+	if _, err := page.WaitForFunction("() => typeof window.__dm === 'string'", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("读取页面配置超时: %v", err)
+	}
+	if dm, _ := page.Evaluate("() => window.__dm", nil); dm != "hard" {
+		t.Fatalf("服务端未生效 hard: %v", dm)
+	}
+	if err := page.Locator("#v2-settings-close").Click(); err != nil {
+		t.Fatalf("关闭设置: %v", err)
+	}
+	// 复位为软删，避免影响后续用例。
+	if _, err := page.Evaluate(`() => window.v2api.json('PUT','/api/ui/prefs', {
+		contentType: 'application/json',
+		body: new TextEncoder().encode(JSON.stringify({delete:{default_mode:'soft'}}))
+	})`, nil); err != nil {
+		t.Fatalf("复位为 soft: %v", err)
+	}
+
 	// 未完成上传续传提示：写入 pending 记录 → 刷新 → 提示可见 → 忽略后清除。
 	if _, err := page.Evaluate(`() => { localStorage.setItem('sproxy_v2_pending_upload', JSON.stringify({
 		name: 'v2demo/big.bin', base: 'big.bin', size: 1048576, mtime: 1700000000000,
@@ -646,18 +697,13 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	unavailable, _ := page.Evaluate("() => { const b = document.querySelector('#v2-sec-state'); return !!(b && !b.hidden); }", nil)
 	t.Logf("secret 卷可用性：unavailable=%v（false = 已走真实创建/删除分支）", unavailable)
 	if unavailable != true {
-		respondDialogs(page, func(d playwright.Dialog) {
-			if strings.Contains(d.Message(), "Secret 名称") {
-				_ = d.Accept("e2esecret")
-				return
-			}
-			_ = d.Accept("")
-		})
+		// dialog 处理器已在上面统一安装（按消息分派），此处不再重复 OnDialog。
 		if err := page.Locator("#v2-sec-create").Click(); err != nil {
 			t.Fatalf("创建 secret: %v", err)
 		}
 		if err := waitLoc(page, "#v2-sec-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-			t.Fatalf("secret 创建后未列出: %v", err)
+			st, _ := page.Locator("#v2-sec-state").TextContent()
+			t.Fatalf("secret 创建后未列出（state=%q）: %v", st, err)
 		}
 		if _, err := page.WaitForFunction(
 			"() => document.querySelector('#v2-sec-body').textContent.includes('e2esecret')",

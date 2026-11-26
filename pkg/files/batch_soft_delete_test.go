@@ -45,8 +45,9 @@ func TestBatchDelete_SupportsSoft(t *testing.T) {
 	sumB := testutil.SHA256Hex([]byte("bbb"))
 
 	// 必须带 actor（X-Test-Actor）：否则 owner 归一为 anonymous ⇒ 看不到 alice 的文件（幂等缺失）。
+	softTrue := true
 	req := postJSONReq(t, "alice", "/api/batch/delete", BatchDeleteRequest{
-		Soft: true,
+		Soft: &softTrue,
 		Files: []BatchDeleteFile{
 			{Filename: "a.txt", Checksum: sumA},
 			{Filename: "b.txt", Checksum: sumB},

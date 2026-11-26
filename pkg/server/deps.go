@@ -190,6 +190,9 @@ type filesDeps struct {
 	// bwCoordOnce / bwCoord 是带宽跨实例协调器（coord_backend=file）单例缓存。
 	bwCoordOnce sync.Once
 	bwCoord     *byteFileCoordinator
+	// uiPrefs 是用户维度页面配置存储（懒构造，见 uiprefs.go）。
+	uiPrefs     *uiPrefsStore
+	uiPrefsOnce sync.Once
 }
 
 // volumeDeps 是卷域（卷集合/配额/容量/镜像/分层/保留/轮转）域依赖。

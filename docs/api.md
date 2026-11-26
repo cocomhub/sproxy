@@ -2064,6 +2064,34 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 
 ## 运行时配置（config）
 
+### GET /api/ui/prefs
+
+返回请求者 owner 的**用户维度页面配置**（按功能类别分组）。未配置时返回**安全默认**。
+
+```json
+{"prefs": {"delete": {"default_mode": "soft"}},
+ "defaults": {"delete": {"default_mode": "soft"}}}
+```
+
+- `delete.default_mode`：`soft`（缺省，删除进回收站可恢复）/ `hard`（默认直接硬删）。
+- `defaults` 回显服务端安全默认，前端据此标注「未设置」。
+- 认证：主 mux `auth` / 隧道内层 `tunnel`（owner 取请求身份）。
+- 存储：`<租户根>/meta/ui/prefs.json`（随租户卷加密/封印）；文件缺失或损坏 ⇒ 回落 `soft`。
+
+### PUT /api/ui/prefs
+
+设置用户维度页面配置（当前仅支持「默认删除方式」）。
+
+```json
+{"delete": {"default_mode": "hard"}}
+```
+
+- `default_mode` ∈ `soft` / `hard`（大小写不敏感）；其它值 ⇒ **400 且不落盘**（破坏性语义不接受含糊值）。
+- 响应：`{"prefs": {"delete": {"default_mode": "<生效值>"}}}`；审计动作 `ui_prefs_update`。
+- 语义边界（**重要**）：本配置**不改变任何 API 默认语义**——`POST /delete` 不带 `soft` 仍是硬删、
+  `/api/batch/delete` 不带 `soft` 仍是硬删（CLI/脚本零回归）。配置只决定 **Web 页面**删除时
+  显式传 `soft=true` 还是 `soft=false`。回收站内的删除恒为硬删（「彻底删除」不受影响）。
+
 ### GET /api/config
 
 返回当前**脱敏**运行时配置（认证：主 mux `auth` / 隧道内层 `tunnel`）。

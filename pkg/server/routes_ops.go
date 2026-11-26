@@ -36,6 +36,9 @@ func opsRoutes() []router.Route[func(*Handlers, http.ResponseWriter, *http.Reque
 		// 跨节点只读视图：主 mux 公开（跨节点互访），隧道内层裸注册。
 		{Method: "GET", Path: "/api/cluster/nodes", Server: router.ClassPublic, Local: router.ClassTunnel, H: (*Handlers).handleClusterNodes},
 		{Method: "GET", Path: "/api/cluster/self", Server: router.ClassPublic, Local: router.ClassTunnel, H: (*Handlers).handleClusterSelf},
+		// 用户维度页面配置（按功能类别：删除默认方式）。
+		{Method: "GET", Path: "/api/ui/prefs", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).uiPrefsHandler},
+		{Method: "PUT", Path: "/api/ui/prefs", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).updateUIPrefsHandler, Mutating: true},
 		// 运行时配置（GET 读 / PUT 改；SIGHUP 只覆盖软配置）。
 		{Method: "GET", Path: "/api/config", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).configHandler},
 		{Method: "PUT", Path: "/api/config", Server: router.ClassAuth, Local: router.ClassTunnel, H: (*Handlers).updateConfigHandler, Mutating: true},

@@ -285,3 +285,7 @@ srvMux	POST /auth/ldap/login	public	# 插件登录面：同上（LDAP）
 localMux	GET /auth/oidc/login	tunnel	# 插件登录面（隧道内层裸注册：隧道加密即认证）
 localMux	GET /auth/oidc/callback	tunnel	# 插件回调面（同上）
 localMux	POST /auth/ldap/login	tunnel	# 插件登录面（同上）
+srvMux	GET /api/ui/prefs	auth	pkg/server/routes_ops.go
+srvMux	PUT /api/ui/prefs	auth	pkg/server/routes_ops.go
+localMux	GET /api/ui/prefs	tunnel	pkg/server/routes_ops.go
+localMux	PUT /api/ui/prefs	tunnel	pkg/server/routes_ops.go

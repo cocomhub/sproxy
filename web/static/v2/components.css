@@ -327,11 +327,13 @@ body {
 .cmdk-item.active { background: var(--accent-soft); font-weight: 600; }
 .cmdk-hint { padding: 8px 14px; border-top: 1px solid var(--border); font-size: 11px; }
 .cmdk-empty { padding: 14px; color: var(--text-3); font-size: 12.5px; }
-.help-sheet { position: fixed; z-index: 71; top: 16vh; left: 50%; transform: translateX(-50%);
-  width: min(520px, 92vw); background: var(--surface); border: 1px solid var(--border-strong);
+.help-sheet { position: fixed; z-index: 71; top: 10vh; left: 50%; transform: translateX(-50%);
+  width: min(520px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+  overflow: hidden; background: var(--surface); border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-2); }
 .help-sheet[hidden] { display: none; }
 .help-sheet header { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
   border-bottom: 1px solid var(--border); }
 .help-sheet header h3 { margin: 0; font-size: 14px; flex: 1; }
-.help-sheet .sheet-body { padding: 12px 14px; display: grid; gap: 8px; font-size: 12.5px; }
+.help-sheet .sheet-body { padding: 12px 14px; display: grid; gap: 8px; font-size: 12.5px;
+  overflow: auto; min-height: 0; }
