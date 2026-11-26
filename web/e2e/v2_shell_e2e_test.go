@@ -782,6 +782,10 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		{"#/files", "[data-panel=files] table.cards-narrow"},
 		{"#/transfer", "[data-panel=transfer] table.cards-narrow"},
 		{"#/trash", "[data-panel=trash] table.cards-narrow"},
+		// 控制台分区表（列数各异）也卡片化：通用规则不依赖固定列号。
+		{"#/console/tasks", "[data-panel=console] table.cards-narrow"},
+		{"#/console/issues", "[data-panel=console] table.cards-narrow"},
+		{"#/console/audit", "[data-panel=console] table.cards-narrow"},
 	} {
 		if _, err := page.Evaluate("(h) => { location.hash = h; }", panel.hash); err != nil {
 			t.Fatalf("切到 %s: %v", panel.hash, err)
@@ -954,8 +958,28 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
 		t.Fatalf("批量重试按钮未启用: %v", err)
 	}
+	// 批量重试必须走**服务端批量端点**（此前是前端串行 N 次单条请求）。
+	var batchURLs atomic.Int64
+	var batchBody atomic.Value
+	page.OnRequest(func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/api/cloud/tasks/actions/batch") {
+			batchURLs.Add(1)
+			if b, err := r.PostDataBuffer(); err == nil && b != nil {
+				batchBody.Store(string(b))
+			}
+		}
+	})
 	if err := page.Locator("#v2-cs-tasks-retry").Click(); err != nil {
 		t.Fatalf("批量重试点击: %v", err)
+	}
+	if _, err := page.WaitForFunction("() => true", nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(1500)}); err != nil {
+		t.Fatalf("等待批量请求: %v", err)
+	}
+	if batchURLs.Load() == 0 {
+		t.Fatal("批量重试未走服务端批量端点 /api/cloud/tasks/actions/batch（仍在串行单条）")
+	}
+	if body, _ := batchBody.Load().(string); !strings.Contains(body, `"action"`) || !strings.Contains(body, `"ids"`) {
+		t.Fatalf("批量请求体缺少 action/ids: %q", body)
 	}
 	if _, err := page.WaitForFunction(
 		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('已处理'); }",

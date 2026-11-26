@@ -74,9 +74,12 @@ func (m *CloudDownloadManager) ListTasks(status string, offset, limit int, owner
 			match = t.Status == "completed" && t.IntegrityStatus == "damaged"
 		}
 		if match && ownerVisible(t.Owner, owner) {
-			c := *t
-			c.account = nil // 快照不暴露运行时配额句柄（同 SnapshotTask）
-			all = append(all, &c)
+			// **必须深拷贝**（与 SnapshotTask 同源，2026-11-27 审查补漏）：浅拷贝
+			// `c := *t` 会与活动任务共享 `Chunks` 底层数组（`recordChunkState` **原地改写**
+			// `Chunks[i]`）与 `*Diagnostics`（`recordKeptPartial` 锁内写）。调用方（HTTP 层）
+			// 在**解锁后**才 json.Marshal；快照一旦逃逸到后续步骤，就与后续锁内写无同步 ⇒ DATA RACE。
+			// 直接调用（拿完即序列化）时 mutex 恰好提供了顺序，但"恰好"不能当契约。
+			all = append(all, deepCopyTask(t))
 		}
 	}
 	// CreatedAt 降序，ID 降序 tie-break（保持稳定排序）

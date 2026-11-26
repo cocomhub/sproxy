@@ -288,7 +288,7 @@
             </div>
             <div class="card" style="margin-top:14px">
               <div class="card-h"><h2>卷</h2><span class="hint">名称 / 类型 / 模式 / 容量</span></div>
-              <table class="table">
+              <table class="table cards-narrow">
                 <thead><tr><th>名称</th><th style="width:110px">类型</th><th style="width:90px">模式</th>
                   <th style="width:110px" class="r">容量</th><th style="width:150px" class="r">用量</th></tr></thead>
                 <tbody id="v2-cs-volumes"></tbody>
@@ -306,7 +306,7 @@
               </div>
               <div id="v2-nt-state" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th style="width:150px">时间</th><th style="width:130px">动作</th><th>对象</th>
                     <th style="width:110px">渠道</th><th style="width:90px">状态</th><th>详情</th></tr></thead>
                   <tbody id="v2-nt-body"></tbody>
@@ -341,7 +341,7 @@
               </div>
               <div id="v2-ac-state" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>AK</th><th>Owner</th><th style="width:110px" class="r">SK 数</th>
                     <th style="width:110px" class="r">存活 SK</th></tr></thead>
                   <tbody id="v2-ac-body"></tbody>
@@ -363,7 +363,7 @@
               </div>
               <div id="v2-vl-state" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>名称</th><th style="width:110px">类型</th><th style="width:100px">模式</th>
                     <th style="width:100px" class="r">容量</th><th style="width:180px">已用</th>
                     <th style="width:90px">状态</th><th style="width:150px"></th></tr></thead>
@@ -378,7 +378,7 @@
                   <span style="flex:1"></span>
                   <button class="btn btn-ghost" id="v2-vl-user-refresh" type="button">刷新</button>
                 </div>
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>名称</th><th style="width:130px">类型</th>
                     <th style="width:110px" class="r">容量</th><th style="width:110px" class="r">已用</th>
                     <th style="width:150px"></th></tr></thead>
@@ -398,7 +398,7 @@
                   <button class="btn" id="v2-sec-create" type="button">创建随机密钥</button>
                 </div>
                 <div id="v2-sec-state" class="banner" hidden role="status"></div>
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>名称</th><th style="width:120px"></th></tr></thead>
                   <tbody id="v2-sec-body"></tbody>
                 </table>
@@ -415,7 +415,7 @@
               </div>
               <div id="v2-mesh-state" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th style="width:150px">面 / 角色</th><th>状态</th><th style="width:220px">备注</th></tr></thead>
                   <tbody id="v2-mesh-body"></tbody>
                 </table>
@@ -432,7 +432,7 @@
               <div id="v2-hub-state" class="banner" hidden role="status"></div>
               <div class="muted" id="v2-hub-stats" style="font-size:12px;margin-bottom:8px" hidden></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>节点</th><th>服务</th><th style="width:90px">质量</th>
                     <th style="width:110px">RTT</th><th style="width:130px">虚拟 IP</th>
                     <th style="width:90px">操作</th></tr></thead>
@@ -458,7 +458,7 @@
               </div>
               <div id="v2-sh-banner" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th>文件</th><th style="width:100px">卷</th><th style="width:130px">状态</th>
                     <th style="width:110px" class="r">下载</th><th style="width:170px">过期</th><th style="width:150px"></th></tr></thead>
                   <tbody id="v2-sh-body"></tbody>
@@ -512,7 +512,7 @@
                 <pre class="json" id="v2-cs-tasks-detail-json"></pre>
               </div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th style="width:30px"></th><th>任务</th><th style="width:120px">状态</th><th style="width:150px">进度</th>
                     <th style="width:90px" class="r">大小</th><th style="width:130px">更新</th><th style="width:170px"></th></tr></thead>
                   <tbody id="v2-cs-tasks"></tbody>
@@ -543,7 +543,7 @@
                 <button class="btn" id="v2-cs-issues-refresh" type="button">刷新</button>
               </div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th style="width:130px">类型</th><th style="width:110px">卷</th><th>路径 / 说明</th>
                     <th style="width:70px" class="r">尝试</th><th style="width:120px">最近</th><th style="width:100px">状态</th><th style="width:150px"></th></tr></thead>
                   <tbody id="v2-cs-issues"></tbody>
@@ -571,7 +571,7 @@
               </div>
               <div id="v2-au-state" class="banner" hidden role="status"></div>
               <div class="card">
-                <table class="table">
+                <table class="table cards-narrow">
                   <thead><tr><th style="width:150px">时间</th><th style="width:150px">动作</th>
                     <th style="width:120px">主体</th><th style="width:90px">卷</th>
                     <th>对象 / 详情</th><th style="width:90px">结果</th></tr></thead>
@@ -632,7 +632,7 @@
 
             <div class="card" style="margin-top:14px" id="v2-cs-audit-card">
               <div class="card-h"><h2>最近审计</h2><span class="hint">仅管理员可读</span></div>
-              <table class="table">
+              <table class="table cards-narrow">
                 <thead><tr><th style="width:120px">时间</th><th>操作</th><th style="width:110px">Actor</th>
                   <th>对象</th><th style="width:90px">结果</th></tr></thead>
                 <tbody id="v2-cs-audit"></tbody>
