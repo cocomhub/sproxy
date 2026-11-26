@@ -230,6 +230,12 @@ func secretdataOptionsFromVolume(v volume.Volume, rep secretdata.IssueReporter) 
 	}
 	// 静态规则基线（extra.block_rules）：编译失败**装配期 fail-closed**——静默忽略会让运维
 	// 以为规则生效（设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md §7）。
+	// block_policy.mode 白名单：未知取值必须在装配期报错，不能静默落进 planner 判定
+	// （`single` 是合法 planner，但受 SinglePlanner 的 64 MiB 硬顶约束）。
+	if m := opts.Block.Mode; m != "" && m != shardseal.BlockModeRandom && m != shardseal.BlockModeSingle {
+		return opts, fmt.Errorf("卷 %q 的 block_policy.mode %q 非法（须为 %q 或 %q）",
+			v.Name, m, shardseal.BlockModeRandom, shardseal.BlockModeSingle)
+	}
 	rules, rerr := vcExtraBlockRules(v)
 	if rerr != nil {
 		return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, rerr)
@@ -240,6 +246,23 @@ func secretdataOptionsFromVolume(v volume.Volume, rep secretdata.IssueReporter) 
 			return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, cerr)
 		}
 		opts.Policy = compiled
+		// 规则里出现 single 而卷开了 erasure ⇒ 该文件没有冗余（单块无 parity）。不是错误
+		// （用户可能正要这个效果），但必须在装配期可见，避免事后才发现「以为有冗余」。
+		if opts.Erasure {
+			for _, r := range rules {
+				if r.Mode == shardseal.BlockModeSingle {
+					slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
+						"volume", v.Name, "path_regex", r.PathRegex)
+					break
+				}
+			}
+		}
+	}
+	// 可观测性（设计 §10「静默失效」缓解）：命中与未命中都上报，装配层接日志/指标。
+	// nil 回调 = 不上报，但**装配层恒注入**——否则「规则为什么没生效」无从排查。
+	opts.OnBlockModeResolved = func(rel, mode string, matched bool) {
+		slog.Debug("secretdata: 块级分块模式已确定",
+			"volume", v.Name, "rel", rel, "mode", mode, "rule_matched", matched)
 	}
 	return opts, nil
 }

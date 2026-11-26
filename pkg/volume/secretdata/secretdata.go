@@ -367,10 +367,13 @@ type SecretdataFS struct {
 	// convergent 报告本卷写路径是否用**确定性密文**（AlgoV2GCM）：名字与 meta blob 也走
 	// 确定性构造（见 features.go encryptMetaBlob / createContainerLocked / writeDirMetaLocked）。
 	convergent bool
-	// policy 是**分块规则快照**（atomic：热更新时整体替换，写路径读快照无锁竞争）。
-	// 见 block_policy.go。
+	// policy 是**运行期分块规则快照**（atomic：热更新时整体替换，写路径读快照无锁竞争）。
+	// 与 basePolicy 构成两级优先级（见 block_policy.go 的 effectivePolicy）。
 	policy policyPtr
-	temp   string
+	// basePolicy 是**静态基线**（`Options.Policy` = extra.block_rules，构造期固定、不再变）。
+	// 运行期规则清空时回落到它；两者都为空 ⇒ 卷默认策略（零回归）。
+	basePolicy *policy.Compiled
+	temp       string
 	// ownedTemp 标记 temp 目录由 NewFS 自建（os.MkdirTemp 随机目录），
 	// backend.Close 负责清理；显式配置的 TempDir 不清理（调用方所有）。
 	ownedTemp bool
@@ -590,6 +593,7 @@ func NewFS(inner syncpkg.FS, opts Options) (*SecretdataFS, error) {
 		metaLoadGate: make(metaLoadGate, metaLoadConcurrency(metaCacheBudget(opts.MetaCacheBytes.Bytes()))),
 	}
 	// 分块规则快照（装配层已编译；nil = 无规则）。用 atomic.Pointer 持有 ⇒ 运行期可整体替换。
+	fs.basePolicy = opts.Policy
 	if opts.Policy != nil {
 		fs.policy.Store(opts.Policy)
 	}

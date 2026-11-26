@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 )
 
 // TestSinglePlanner_Plan 锁定 single 模式把整文件规划为单块且覆盖 [0,size)。
@@ -125,4 +126,28 @@ func readRemote(t *testing.T, dir, name string) []byte {
 		t.Fatalf("读分块 %s: %v", name, err)
 	}
 	return b
+}
+
+// TestSinglePlanner_OversizeFailsClosed 锁定**任何**构造 single 策略的入口都受 64 MiB 硬顶
+// 约束（审查 Critical）：`block_policy.mode: single` 这条配置入口不经过 policy.Compile，
+// 若规划器不兜底，一个 900 MiB 文件会被整块 `make([]byte, 900MiB)` ⇒ OOM。
+func TestSinglePlanner_OversizeFailsClosed(t *testing.T) {
+	t.Parallel()
+	over := int64(shardseal.MaxSingleBlockBytes) + 1
+	if _, err := (shardseal.SinglePlanner{}).Plan(over); err == nil {
+		t.Fatalf("超过硬顶 %d 应 fail-closed", shardseal.MaxSingleBlockBytes)
+	}
+	// 恰好等于硬顶仍允许（与 policy.Compile 的 `<=` 语义一致）
+	if _, err := (shardseal.SinglePlanner{}).Plan(shardseal.MaxSingleBlockBytes); err != nil {
+		t.Fatalf("等于硬顶应允许: %v", err)
+	}
+}
+
+// TestPolicyHardMaxMatchesShardseal 锁定硬顶常量单一事实源（policy 引用 shardseal，不复制数值）。
+func TestPolicyHardMaxMatchesShardseal(t *testing.T) {
+	t.Parallel()
+	if int64(policy.HardMaxSingleBytes) != shardseal.MaxSingleBlockBytes {
+		t.Fatalf("policy.HardMaxSingleBytes=%d 与 shardseal.MaxSingleBlockBytes=%d 分叉",
+			policy.HardMaxSingleBytes, shardseal.MaxSingleBlockBytes)
+	}
 }

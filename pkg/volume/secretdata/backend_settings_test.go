@@ -26,13 +26,20 @@ type memSettingsStore struct {
 	saveErr        error
 	loadErr        error
 	lastSaveExpVer int64
+	// raceOnLoad 模拟「读到版本后、CAS 之前另一节点写入」的并发窗口：Load 返回后再把
+	// version 推进 1，使随后的 Save(expected=读到的版本) 必然 CAS 失配。
+	raceOnLoad bool
 }
 
 func (m *memSettingsStore) Load(_ context.Context, _ string) (json.RawMessage, int64, error) {
 	if m.loadErr != nil {
 		return nil, 0, m.loadErr
 	}
-	return m.payload, m.version, nil
+	v := m.version
+	if m.raceOnLoad {
+		m.version++ // 并发写者抢先提交
+	}
+	return m.payload, v, nil
 }
 
 func (m *memSettingsStore) Save(_ context.Context, _ string, payload json.RawMessage, expectedVersion int64) (int64, error) {
@@ -204,8 +211,8 @@ func TestBackend_UpdateSettings_CASConflict(t *testing.T) {
 	if err := b.SetSettingsStore(st); err != nil {
 		t.Fatalf("SetSettingsStore: %v", err)
 	}
-	// 让 CAS 期望版本落后：把 store 版本改成 9（模拟他人先写）
-	st.version = 9
+	// 模拟并发窗口：Load 读到 5 之后、Save 之前另一写者把版本推到 6 ⇒ CAS 必然失配。
+	st.raceOnLoad = true
 	payload := json.RawMessage(`{"rules":[]}`)
 	err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, payload)
 	if !errors.Is(err, registry.ErrSettingsVersionConflict) {
@@ -266,5 +273,87 @@ func TestBackend_SettingsStore_NilDisablesPersistence(t *testing.T) {
 	err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, json.RawMessage(`{"rules":[]}`))
 	if err == nil {
 		t.Fatal("无持久化后端时更新应返回明确错误（不得静默只改内存）")
+	}
+}
+
+// TestBackend_ClearingRulesFallsBackToBaseline 锁定「清空运行期规则 ⇒ 回落静态基线」
+// （设计 §7 / §12 回滚路径）：不能因内存里留了一个空快照就永久压制基线。
+func TestBackend_ClearingRulesFallsBackToBaseline(t *testing.T) {
+	t.Parallel()
+	baseline, err := policy.Compile(policy.Policy{Rules: []policy.Rule{
+		{PathRegex: `^baseline/`, MaxSize: 1 << 20, Mode: shardseal.BlockModeSingle},
+	}}, 0)
+	if err != nil {
+		t.Fatalf("Compile baseline: %v", err)
+	}
+	st := &memSettingsStore{}
+	b, fs := newBackendForSettings(t, Options{Policy: baseline})
+	if serr := b.SetSettingsStore(st); serr != nil {
+		t.Fatalf("SetSettingsStore: %v", serr)
+	}
+	// 先写入一条运行期规则（覆盖基线）
+	if uerr := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy,
+		json.RawMessage(`{"rules":[{"path_regex":"^runtime/","max_size":"1MiB","mode":"single"}]}`)); uerr != nil {
+		t.Fatalf("UpdateSettings(runtime): %v", uerr)
+	}
+	if _, hit := fs.effectivePolicy().Resolve("runtime/a.bin", 1024); !hit {
+		t.Fatal("运行期规则应生效")
+	}
+	// 清空 ⇒ 回落基线（baseline/ 命中、runtime/ 不再命中）
+	if uerr := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy,
+		json.RawMessage(`{"rules":[]}`)); uerr != nil {
+		t.Fatalf("UpdateSettings(empty): %v", uerr)
+	}
+	if fs.policySnapshot() != nil {
+		t.Fatal("清空运行期规则后不应遗留空快照（否则会永久压制基线）")
+	}
+	if _, hit := fs.effectivePolicy().Resolve("baseline/a.bin", 1024); !hit {
+		t.Fatal("清空运行期规则后应回落到静态基线")
+	}
+	if _, hit := fs.effectivePolicy().Resolve("runtime/a.bin", 1024); hit {
+		t.Fatal("清空后不应再命中运行期规则")
+	}
+}
+
+// TestBackend_CASUsesPersistedVersion 锁定 CAS 期望版本取自**持久化**（而非内存快照）：
+// 多节点部署下另一节点已写入 version=3、本节点内存快照仍是 0 时，本节点仍应能追加写入
+// （版本推进到 4），而不是用陈旧内存版本永久 409。
+func TestBackend_CASUsesPersistedVersion(t *testing.T) {
+	t.Parallel()
+	st := &memSettingsStore{} // 本节点启动时无记录（version 0）
+	b, _ := newBackendForSettings(t, Options{})
+	if err := b.SetSettingsStore(st); err != nil {
+		t.Fatalf("SetSettingsStore: %v", err)
+	}
+	// 模拟「另一节点已写入 version=3」，本节点内存快照仍是 0
+	st.payload = json.RawMessage(`{"rules":[]}`)
+	st.version = 3
+
+	if err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy,
+		json.RawMessage(`{"rules":[{"path_regex":"^x/","max_size":"1MiB","mode":"single"}]}`)); err != nil {
+		t.Fatalf("应以持久化版本为基准写入（不得因内存陈旧而失败）: %v", err)
+	}
+	if st.lastSaveExpVer != 3 {
+		t.Fatalf("CAS 期望版本应取自持久化（3），得到 %d", st.lastSaveExpVer)
+	}
+	if st.version != 4 {
+		t.Fatalf("写入后版本应为 4，得到 %d", st.version)
+	}
+}
+
+// TestBackend_InvalidPayloadSentinel 锁定载荷非法映射到 registry.ErrSettingsPayloadInvalid
+// （装配层据此回 400，而不是把客户端输入错误报成 500）。
+func TestBackend_InvalidPayloadSentinel(t *testing.T) {
+	t.Parallel()
+	st := &memSettingsStore{}
+	b, _ := newBackendForSettings(t, Options{})
+	if err := b.SetSettingsStore(st); err != nil {
+		t.Fatalf("SetSettingsStore: %v", err)
+	}
+	for _, payload := range []string{`{`, `{"rules":[{"path_regex":"x","mode":"single"}]}`, `{"rules":"nope"}`} {
+		err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, json.RawMessage(payload))
+		if !errors.Is(err, registry.ErrSettingsPayloadInvalid) {
+			t.Fatalf("payload=%s 应映射 ErrSettingsPayloadInvalid，得到 %v", payload, err)
+		}
 	}
 }

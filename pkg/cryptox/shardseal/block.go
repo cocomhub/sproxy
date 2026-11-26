@@ -29,6 +29,15 @@ const (
 	// BlockModeSingle 是整文件单块（SinglePlanner）：整文件 = 1 个密文 blob、1 次上传。
 	// 适用于小文件（图片/文本/日志/已压缩包），随机分块对其无收益。
 	BlockModeSingle = "single"
+
+	// MaxSingleBlockBytes 是 single 模式的**硬上限**（64 MiB）——单一事实源
+	// （`shardseal/policy.HardMaxSingleBytes` 直接引用本常量，不复制数值）。
+	//
+	// 为什么规划器自己也要兜底：单块加密会把整块明文载入内存（encryptWriteChunksAt 的
+	// `make([]byte, b.Size)`）⇒「无上限的整文件单块」就是 OOM 通道。`policy.Compile` 校验
+	// 只覆盖「经规则引擎」的入口；`extra.block_policy.mode: single` 这条**配置入口**不经过它
+	// （审查 Critical），故约束必须落在规划器上，才能对所有构造点生效。
+	MaxSingleBlockBytes int64 = 64 << 20
 )
 
 // BlockPlanner 是可插拔分块规划接口：把原始文件大小切成不定长的分块序列。
@@ -132,7 +141,8 @@ type Blocklet struct {
 	Data []byte
 }
 
-// FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成// 宽度 ≤BloffsetMax 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
+// FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成
+// 宽度 ≤Max 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
 // Min/Max 可继承 BlockPolicy 默认（64KB-4MB）；对小块测试可缩小。fixed 模式忽略 data。
 type FixedBlockletPlanner struct {
 	Min int64
@@ -176,13 +186,20 @@ func (p *FixedBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOf
 // 它也天然不参与 injectConvBlockSizes（该函数只对 *RandomPlanner 生效）。
 type SinglePlanner struct{}
 
-// Plan 实现 BlockPlanner：size>0 时返回单个覆盖 [0,size) 的块。
+// Plan 实现 BlockPlanner：size>0 且 ≤ MaxSingleBlockBytes 时返回单个覆盖 [0,size) 的块。
 //
 // 空文件（size ≤ 0）与 RandomPlanner 同族 fail-closed：分块存储至少需要 1 个数据分块承载
 // meta 引用与整文件哈希锚定，空文件无内容可分块（既有语义，不因本模式改变）。
+//
+// 超硬顶同样 fail-closed（**不是**静默回落 random）：回落会让「以为配了 single」与「实际多块」
+// 不可区分，而 fail-closed 的错误会明确指出该改为 random 或调小文件。
 func (SinglePlanner) Plan(origSize int64) ([]Block, error) {
 	if origSize <= 0 {
 		return nil, fmt.Errorf("shardseal: 空文件不可分块（size=%d）", origSize)
+	}
+	if origSize > MaxSingleBlockBytes {
+		return nil, fmt.Errorf("shardseal: single 模式文件大小 %d 超过硬上限 %d（整块加密需整块入内存；"+
+			"请改用 random 模式或减小文件）", origSize, MaxSingleBlockBytes)
 	}
 	return []Block{{Offset: 0, Size: origSize}}, nil
 }

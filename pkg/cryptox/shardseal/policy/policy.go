@@ -28,7 +28,10 @@ const (
 	// 为什么必须有上限：单块加密会把整块明文载入内存（shardseal.encryptWriteChunks 的
 	// `make([]byte, b.Size)`）⇒ 「无上限的整文件单块」就是一条 OOM 通道。64 MiB 覆盖
 	// 「图片/文本/日志/已压缩包」这些目标场景，同时低于默认块上限 200 MiB。
-	HardMaxSingleBytes int64 = 64 << 20
+	//
+	// **单一事实源**：直接引用 shardseal.MaxSingleBlockBytes（规划器用同一常量兜底非规则
+	// 入口，如 `extra.block_policy.mode: single`）。不要把数值复制到这里。
+	HardMaxSingleBytes int64 = shardseal.MaxSingleBlockBytes
 	// MaxRules 是单卷规则条数上限（匹配是每写一次全表扫描，条数直接决定写路径开销）。
 	MaxRules = 64
 	// MaxRegexLen 是 PathRegex 的字符串长度上限。Go regexp 是 RE2（线性时间、无回溯爆炸），

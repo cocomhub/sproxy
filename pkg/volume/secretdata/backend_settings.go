@@ -70,27 +70,36 @@ func (b *backend) UpdateSettings(ctx context.Context, section string, payload js
 	}
 	store := b.loadSettingsStore()
 	if store == nil {
-		return fmt.Errorf("secretdata: 本卷未装配设置持久化后端，无法保存规则（需要 state_store）")
+		return fmt.Errorf("%w: 本卷未装配设置持久化后端（需要 state_store）", registry.ErrSettingsPayloadInvalid)
 	}
 	var p policy.Policy
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return fmt.Errorf("secretdata: 分块规则载荷非法: %w", err)
+		return fmt.Errorf("%w: 规则载荷非法: %w", registry.ErrSettingsPayloadInvalid, err)
 	}
 	if _, err := policy.Compile(p, b.fs.opts.Block.Max); err != nil {
-		return err // 已带规则下标，装配层映射 400
+		return fmt.Errorf("%w: %w", registry.ErrSettingsPayloadInvalid, err)
 	}
-	// 落盘：以「当前内存快照的版本」为 CAS 期望（快照版本与持久化版本同源）。
-	expected := b.fs.policySnapshot().Version()
-	newVer, err := store.Save(ctx, b.fs.opts.VolumeName, payload, expected)
+	// CAS 期望版本取自**持久化**（不是内存快照）：多节点部署下另一节点可能已写过，用陈旧
+	// 内存版本会要么静默覆盖他人修改、要么永久 409（内存快照不刷新就永远读不到新版本）。
+	_, curVer, lerr := store.Load(ctx, b.fs.opts.VolumeName)
+	if lerr != nil {
+		return fmt.Errorf("读取当前卷设置版本: %w", lerr)
+	}
+	newVer, err := store.Save(ctx, b.fs.opts.VolumeName, payload, curVer)
 	if err != nil {
 		return err // ErrSettingsVersionConflict 由装配层映射 409
 	}
-	// 生效：把 CAS 返回的真实版本写回快照（payload 内自带的 version 可能陈旧/被忽略）。
+	// 生效（先落盘后生效）：空规则 = **清空运行期覆盖**，回落静态基线（不是「用一个空快照
+	// 永久压制基线」——设计 §7 的优先级链要求可回滚）。
+	if len(p.Rules) == 0 {
+		b.fs.SetPolicy(nil)
+		return nil
+	}
 	applied := policy.Policy{Rules: p.Rules, Version: newVer}
 	compiled, cerr := policy.Compile(applied, b.fs.opts.Block.Max)
 	if cerr != nil {
-		// 理论不可达（同一份 payload 刚校验过），但绝不静默：落盘已成功的版本必须生效。
-		return fmt.Errorf("secretdata: 规则已保存但热生效失败（重启后生效）: %w", cerr)
+		// 理论不可达（同一 payload 刚校验过），但绝不静默：落盘已成功的版本必须可见。
+		return fmt.Errorf("规则已保存但热生效失败（重启后生效）: %w", cerr)
 	}
 	b.fs.SetPolicy(compiled)
 	return nil
@@ -121,6 +130,10 @@ func (b *backend) SetSettingsStore(store registry.SettingsStore) error {
 		return nil
 	}
 	p.Version = version
+	if len(p.Rules) == 0 {
+		b.fs.SetPolicy(nil) // 清空 = 回落静态基线/卷默认
+		return nil
+	}
 	compiled, cerr := policy.Compile(p, b.fs.opts.Block.Max)
 	if cerr != nil {
 		slog.Warn("secretdata: 持久化分块规则校验失败（保留当前策略）",

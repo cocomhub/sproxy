@@ -1770,3 +1770,41 @@ func TestSecretdataOptions_BlockRulesInvalidFailsClosed(t *testing.T) {
 		t.Fatalf("错误应指出 max_size 缺失: %v", err)
 	}
 }
+
+// TestVcExtraBlockPolicy_ModeWhitelist 锁定 block_policy.mode 白名单：未知取值（拼错）
+// 不能静默变成一个 planner（`legend` 之前会被 blockPlanner 判 nil 而 fail-closed，
+// 但 `single` 现在是合法 planner ⇒ 必须显式告知其受 64 MiB 硬顶约束，见
+// SinglePlanner.Plan）。本用例锁「非空但未知的 mode 一律回落到默认 random 并在装配期报错」。
+func TestVcExtraBlockPolicy_ModeWhitelist(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "vault", Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "legend", "min": 4096, "max": 16384},
+	}}
+	_, err := secretdataOptionsFromVolume(v, nil)
+	if err == nil {
+		t.Fatal("未知 block_policy.mode 应装配期报错（不得静默）")
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("错误应指出 mode 非法: %v", err)
+	}
+	// single 合法（受规划器硬顶约束）
+	ok := volume.Volume{Name: "v2", Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "single", "min": 1, "max": 1 << 20},
+	}}
+	if _, oerr := secretdataOptionsFromVolume(ok, nil); oerr != nil {
+		t.Fatalf("single 应合法: %v", oerr)
+	}
+}
+
+// TestBlockModeResolvedCallbackWired 锁定装配层真的接了可观测性回调（设计 §10「静默失效」缓解）：
+// 未命中规则时也要能观察到（否则运维无从判断「规则为什么没生效」）。
+func TestBlockModeResolvedCallbackWired(t *testing.T) {
+	t.Parallel()
+	opts, err := secretdataOptionsFromVolume(volume.Volume{Name: "vault"}, nil)
+	if err != nil {
+		t.Fatalf("secretdataOptionsFromVolume: %v", err)
+	}
+	if opts.OnBlockModeResolved == nil {
+		t.Fatal("装配层必须注入 OnBlockModeResolved（nil ⇒ 命中/未命中全不可观测）")
+	}
+}

@@ -4,12 +4,12 @@
 package secretdata
 
 import (
-	"strings"
 	"sync/atomic"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // block_policy.go 是**分块规则引擎在 secretdata 写路径的接入点**
@@ -19,30 +19,7 @@ import (
 // blocklet 自动选型（helpers.go，按扩展名/显式配置）是**两个正交维度**——规则只覆盖块级
 // （Mode/Max），blocklet 仍由既有逻辑决定。混在一个函数里会让两者互相污染。
 
-// userVisibleRel 把卷内 FS 键 `<owner>/user/<rel>` 剥离为用户可见相对路径。
-//
-// **形状判据**（不是「找第一个 user 段」）：`secretdata` 不知道 owner（键是上游 Location.FSPath
-// 拼出来的），只能按形状识别——「首段 = owner、第二段必须 = user、其后非空」。
-//
-// 为什么不能用「找任意 user 段」：逻辑路径自身可以含 `user` 目录（`alice/user/docs/user/x`），
-// 取第一个 `user` 段会把 `docs/user/x` 误当边界；固定位置判据则唯一。owner 名叫 `user`
-// （`user/user/x` → rel=`x`）也正确。
-//
-// 形状不符（段数 <3、第二段不是 "user"、末段为空）⇒ ok=false：非用户面键（meta/chunk 等
-// 内部桶），**不套任何用户规则**（规则面对的是用户可见路径）。
-func userVisibleRel(fsKey string) (rel string, ok bool) {
-	parts := strings.Split(fsKey, "/")
-	if len(parts) < 3 || parts[0] == "" || parts[1] != "user" {
-		return "", false
-	}
-	rel = strings.Join(parts[2:], "/")
-	if rel == "" {
-		return "", false
-	}
-	return rel, true
-}
-
-// SetPolicy 原子替换已编译规则快照（nil = 清空，回落卷默认策略）。
+// SetPolicy 原子替换**运行期**规则快照（nil = 清空 ⇒ 回落静态基线/卷默认策略）。
 //
 // 编译（含校验）由调用方经 policy.Compile 完成——本方法不做校验、不返回错误，因此不存在
 // 「落盘成功但内存注入失败」的半生效窗口（设计 §10）。写路径读快照，无锁竞争。
@@ -73,16 +50,29 @@ func applyRuleToPolicy(base shardseal.BlockPolicy, r policy.Rule, size int64) sh
 	return base
 }
 
+// effectivePolicy 返回**当前生效**的规则快照：运行期规则优先，未设置则回落静态基线
+// （`Options.Policy` = `extra.block_rules`）。
+//
+// 为什么必须是两层而不是一个指针：运行期「清空规则」= 删除运行期覆盖，语义上是**回落基线**
+// （设计 §7 的优先级链 StateStore > extra.block_rules > 卷默认）。若清空时写入一个空快照，
+// 基线会被永久压制（重启载入空记录后同样压制），用户再也无法通过 UI 回到基线配置。
+func (s *SecretdataFS) effectivePolicy() *policy.Compiled {
+	if c := s.policy.Load(); c != nil {
+		return c
+	}
+	return s.basePolicy
+}
+
 // ruleForWrite 按 rel+size 解析规则命中的块级策略（未命中返回原策略与 false）。
 //
 // 非用户面键（形状不符）不参与匹配——规则只描述用户可见路径的语义。
 func (s *SecretdataFS) ruleForWrite(rel string, size int64) (shardseal.BlockPolicy, bool) {
 	base := s.opts.Block
-	c := s.policySnapshot()
+	c := s.effectivePolicy()
 	if c == nil {
 		return base, false
 	}
-	visible, ok := userVisibleRel(rel)
+	visible, ok := volume.UserVisibleRelOK(rel)
 	if !ok {
 		return base, false
 	}

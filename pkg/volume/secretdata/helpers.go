@@ -48,8 +48,9 @@ func (s *SecretdataFS) blockletPolicyFor(name string, size int64) (shardseal.Blo
 }
 
 // resolveBlockletPolicy 是 blockletPolicyFor 的实现体：解析块级规则 + blocklet 选型，
-// 返回 (策略, 是否规则命中, error)。上报统一由 blockletPolicyFor 在**所有返回路径**上做
-// （含显式配置早退、错误路径），避免「某些路径不上报」造成排障盲区。
+// 返回 (策略, 是否规则命中, error)。上报统一由 blockletPolicyFor 在**成功返回路径**上做
+// （含显式 blocklet_mode 早退）；**错误路径不上报**——写入会以该错误失败，调用方拿到的是
+// 明确的写失败原因，不存在「静默未命中」的排障盲区。
 func (s *SecretdataFS) resolveBlockletPolicy(name string, size int64) (shardseal.BlockPolicy, bool, error) {
 	policy, matched := s.ruleForWrite(name, size)
 	// 显式配置的 blocklet_mode（开关）优先。

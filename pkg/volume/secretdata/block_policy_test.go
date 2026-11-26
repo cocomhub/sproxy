@@ -15,6 +15,7 @@ import (
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/units/sizex"
+	"github.com/cocomhub/sproxy/pkg/volume"
 )
 
 // newFSPolicy 构造带规则快照的 FS（底层本地临时目录；小块策略加速）。
@@ -47,7 +48,8 @@ func mustCompilePolicy(t *testing.T, rules []policy.Rule) *policy.Compiled {
 	return c
 }
 
-// TestUserVisibleRel 锁定「剥离 <owner>/user/ 前缀」的形状判据。
+// TestUserVisibleRelOK 锁定「剥离 <owner>/user/ 前缀」的形状判据（实现收敛在
+// pkg/volume.UserVisibleRelOK，与既有 UserVisibleRel 共用一份键剥离规则）。
 func TestUserVisibleRel(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -67,7 +69,7 @@ func TestUserVisibleRel(t *testing.T) {
 		{"alice", "", false},
 	}
 	for _, c := range cases {
-		rel, ok := userVisibleRel(c.in)
+		rel, ok := volume.UserVisibleRelOK(c.in)
 		if ok != c.wantOK || rel != c.wantRel {
 			t.Fatalf("userVisibleRel(%q) = (%q,%v)，期望 (%q,%v)", c.in, rel, ok, c.wantRel, c.wantOK)
 		}
