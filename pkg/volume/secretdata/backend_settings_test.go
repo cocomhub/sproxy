@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
@@ -453,4 +454,51 @@ func TestBlockPolicyView_EffectiveSourceForEmptyRuntime(t *testing.T) {
 	if got := effectiveSourceOf(empty, nil); got != "volume_default" {
 		t.Fatalf("空运行期且无基线应判 volume_default，得到 %q", got)
 	}
+}
+
+// TestBackend_ErasureSingleWarnsOnHotUpdate 锁定热更新侧也告警「erasure × single」
+// （审查 P3-2）：装配期有告警，但运行期把规则改成 single 后此前无任何提示，
+// 用户会以为文件仍有冗余（单块不产 parity）。
+func TestBackend_ErasureSingleWarnsOnHotUpdate(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "backing")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	fs, err := NewFS(syncpkg.NewLocalFS(root, nil), Options{
+		Secret:    []byte("test-secret-key-000"),
+		Algorithm: testAlgo,
+		Block:     shardseal.BlockPolicy{Mode: shardseal.BlockModeRandom, Min: 64, Max: 1 << 20},
+		TempDir:   t.TempDir(),
+		Erasure:   true,
+	})
+	if err != nil {
+		t.Fatalf("NewFS: %v", err)
+	}
+	b := &backend{fs: fs}
+	st := &memSettingsStore{}
+	if serr := b.SetSettingsStore(st); serr != nil {
+		t.Fatalf("SetSettingsStore: %v", serr)
+	}
+	n := erasureSingleWarningsForTest(b, json.RawMessage(`{"rules":[
+		{"path_regex":"^archive/","max_size":"1MiB","mode":"single"}]}`))
+	if n == 0 {
+		t.Fatal("erasure 卷热更新写入 single 规则应告警一次")
+	}
+	// random 规则不告警
+	if got := erasureSingleWarningsForTest(b, json.RawMessage(`{"rules":[
+		{"path_regex":"^archive/","max_size":"1MiB","mode":"random"}]}`)); got != 0 {
+		t.Fatalf("random 规则不应告警，得到 %d", got)
+	}
+}
+
+// erasureSingleWarningsForTest 统计一次 UpdateSettings 触发的「erasure × single」告警次数。
+func erasureSingleWarningsForTest(b *backend, payload json.RawMessage) int {
+	before := atomic.LoadInt32(&erasureSingleWarnCount)
+	err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, payload)
+	if err != nil {
+		// 规则校验失败不算告警路径
+		return 0
+	}
+	return int(atomic.LoadInt32(&erasureSingleWarnCount) - before)
 }

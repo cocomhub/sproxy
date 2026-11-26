@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
@@ -64,6 +65,29 @@ func (b *backend) Settings(_ context.Context) ([]registry.VolumeSettings, error)
 		Value:    raw,
 		ReadOnly: b.loadSettingsStore() == nil,
 	}}, nil
+}
+
+// erasureSingleWarnCount 统计「erasure × single」告警次数（测试可断言；生产只用于日志节流）。
+var erasureSingleWarnCount int32
+
+// warnErasureSingle 在 erasure 卷写入含 single 规则时告警一次（装配期与热更新期同源）。
+//
+// 为什么热更新也要告警：erasure 的 parity 只在 ≥2 个数据块时生成 ⇒ 命中 single 的文件
+// **没有冗余**。装配期已有告警，但运行期把规则改成 single 后此前无任何提示，用户会以为
+// 文件仍有冗余（审查 P3-2）。
+func (b *backend) warnErasureSingle(rules []policy.Rule) {
+	if !b.fs.opts.Erasure {
+		return
+	}
+	for _, r := range rules {
+		if r.Mode != shardseal.BlockModeSingle {
+			continue
+		}
+		atomic.AddInt32(&erasureSingleWarnCount, 1)
+		slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
+			"volume", b.fs.opts.VolumeName, "path_regex", r.PathRegex, "source", "hot-update")
+		return
+	}
 }
 
 // blockPolicyView 是 `block_policy` 分区的**回显形状**（向后兼容：保留 rules/version 字段，
@@ -148,6 +172,7 @@ func (b *backend) UpdateSettings(ctx context.Context, section string, payload js
 		b.fs.SetPolicy(nil)
 		return nil
 	}
+	b.warnErasureSingle(p.Rules)
 	applied := policy.Policy{Rules: p.Rules, Version: newVer}
 	compiled, cerr := policy.Compile(applied, b.fs.opts.Block.Max)
 	if cerr != nil {
