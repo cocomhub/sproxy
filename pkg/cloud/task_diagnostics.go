@@ -65,7 +65,11 @@ func classifyCloudError(msg string) string {
 	case s == "":
 		return ErrClassUnknown
 	case strings.Contains(s, "no space") || strings.Contains(s, "storage full") ||
-		strings.Contains(s, "insufficient") || strings.Contains(s, "507"):
+		strings.Contains(s, "insufficient") || strings.Contains(s, "507") ||
+		// 配额类（2026-11-26 实测：超 owner_quotas 时错误为 "create quota sink: storage quota exceeded"，
+		// 旧判据归 unknown ⇒ UI 不显示「空间不足」、动作也不按 disk_full 走人工处置）。
+		strings.Contains(s, "quota") || strings.Contains(s, "配额") ||
+		strings.Contains(s, "disk full") || strings.Contains(s, "enospc"):
 		return ErrClassDiskFull
 	case strings.Contains(s, "401") || strings.Contains(s, "403") || strings.Contains(s, "unauthorized") ||
 		strings.Contains(s, "forbidden") || strings.Contains(s, "auth"):
