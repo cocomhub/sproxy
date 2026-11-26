@@ -1547,9 +1547,17 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
       {"key":"rules","label":"规则（按 priority 降序，首命中生效）","type":"rules","required":false},
       {"key":"max_size_limit","label":"单条规则块大小上限（字节）","type":"number","required":false}
     ],
-    "value": {"version": 3, "rules": [
-      {"path_regex":"^archive/.*\.zip$","max_size":20971520,"mode":"single","priority":100}
-    ]}
+    "value": {
+      "version": 3,                       // 运行期规则的持久化版本（无运行期规则时为 0）
+      "rules": [                          // **运行期**规则（可编辑；为空表示未覆盖基线）
+        {"path_regex":"^archive/.*\.zip$","max_size":20971520,"mode":"single","priority":100}
+      ],
+      "baseline_rules": [],               // 配置文件基线（extra.block_rules，只读回显）
+      "effective_source": "runtime",      // runtime | baseline | volume_default
+      "limits": {                         // single 规则的真实上限（UI 校验/提示复用）
+        "hard_max": 67108864, "volume_block_max": 209715200, "effective_max": 67108864
+      }
+    }
   }]
 }
 ```
@@ -1593,8 +1601,15 @@ curl -X PUT "https://host/api/volumes/vault/settings/block_policy"   -H 'Content
   （单块加密整块入内存 ⇒ 无上限即 OOM 通道；超出卷级上限会让物理配额上界被低估）
 - 单卷最多 64 条规则；`path_regex` 长度 ≤ 512 且必须可编译
 - **只影响新写入的文件**：改规则不重写已落盘文件（文件按自身 meta 读取，永远正确）
+- **卷级 `block_policy.mode: single` 会被拒绝**（装配期 fail-closed）：卷级形态无法表达「超过
+  64 MiB 怎么办」；请用本分区的规则形态（超限文件自动回落 `random`）
+- **回显的 `effective_source`** 是排障第一入口：`runtime` 表示运行期规则生效、`baseline` 表示
+  回落到配置文件基线、`volume_default` 表示未配置任何规则
+- **多实例收敛**：`POST /api/volumes/refresh?volume=<卷>` 在重建索引之外会**顺带重载本卷设置**
+  （响应与审计按实际结果描述；重载失败会在 message/detail 中显式给出）
 - 持久化：`state_store` 后端（键 `volume_policy/<卷名>`，CAS 版本）；未装配 StateStore 时分区
-  为 `read_only`、写入返回明确错误
+  为 `read_only`、写入返回明确错误。**多实例**：默认单机用本地兜底 StateStore（CAS 仅进程内），
+  多实例须配 `state_store: mongo`，并用 refresh 重载
 
 ## 卷运维（move / rebalance / copy / export / import / backup）
 

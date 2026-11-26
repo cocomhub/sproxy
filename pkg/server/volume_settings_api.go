@@ -389,15 +389,22 @@ func (h *Handlers) volumeSettingsRefresh(ctx context.Context, name string) error
 	if be == nil {
 		return nil
 	}
-	setter, ok := be.(registry.SettingsStoreSetter)
-	if !ok {
+	// 优先走**可返回错误**的显式重载能力：Setter 在装配期失败只告警（不能阻断挂载），
+	// 若 refresh 复用它做重载，收敛失败时仍会回「已重载」成功回执（审查 Important）。
+	if rl, ok := be.(registry.SettingsReloader); ok {
+		if err := rl.ReloadSettings(ctx); err != nil {
+			return fmt.Errorf("重载卷设置失败: %w", err)
+		}
+		slog.Info("volume settings: refresh 触发规则重载", "volume", name)
 		return nil
 	}
-	// 重载 = 重新注入同一个 store（后端在 SetSettingsStore 内 Load 最新版本并 SetPolicy）。
-	if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
-		return fmt.Errorf("重载卷设置失败: %w", err)
+	// 兼容：只实现 Setter 的后端（没有严格重载语义）——保留原行为，但调用方不再据它判定成功。
+	if setter, ok := be.(registry.SettingsStoreSetter); ok {
+		if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
+			return fmt.Errorf("重载卷设置失败: %w", err)
+		}
+		slog.Info("volume settings: refresh 触发规则重载（Setter 兼容路径）", "volume", name)
 	}
-	slog.Info("volume settings: refresh 触发规则重载", "volume", name)
 	return nil
 }
 

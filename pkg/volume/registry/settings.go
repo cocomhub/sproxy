@@ -62,6 +62,15 @@ type SettingsStore interface {
 	Delete(ctx context.Context, volume string) error
 }
 
+// SettingsReloader 是可选能力：从持久化后端**重新载入**卷设置并返回错误。
+//
+// 与 SettingsStoreSetter 的区别（为什么需要两个）：Setter 在**装配期**调用，失败只能告警并
+// 保留当前策略（否则一个坏配置/后端故障就让整卷挂不上）；而运维 refresh 触发的「重载」必须
+// **失败可见**——否则多实例收敛实际失败时，运维仍收到成功回执（审查 Important）。
+type SettingsReloader interface {
+	ReloadSettings(ctx context.Context) error
+}
+
 // SettingsStoreSetter 是可选能力：装配层在 StateStore 就绪后把持久化后端注入卷后端。
 //
 // 为什么需要注入点而不是构造参数：卷后端在 RegisterRoutes → assembleVolumes 期间构造，

@@ -600,3 +600,25 @@ func (b *reloadableBackend) SetSettingsStore(registry.SettingsStore) error {
 	b.setCalls++
 	return nil
 }
+
+// TestRefreshVolume_ReloadFailureSurfaces 锁定重载**失败必须可见**（审查 Important）：
+// `SetSettingsStore` 在载入失败时只告警返回 nil（挂载期不能阻断），若 refresh 走它做「重载」，
+// 多实例收敛实际失败时仍回「已重载」成功回执。故 refresh 必须走能返回错误的显式重载路径。
+func TestRefreshVolume_ReloadFailureSurfaces(t *testing.T) {
+	t.Parallel()
+	b := &failingReloadBackend{}
+	h := newSettingsTestHandlers(t, "reload-fail", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+
+	err := h.volumeSettingsRefresh(context.Background(), "reload-fail")
+	if err == nil {
+		t.Fatal("后端重载失败时 refresh 必须返回错误（不得回「已重载」）")
+	}
+}
+
+// failingReloadBackend 只实现 SettingsProvider（模拟「重载不可用」的后端）。
+type failingReloadBackend struct{ fakeSettingsBackend }
+
+func (f *failingReloadBackend) ReloadSettings(context.Context) error {
+	return errors.New("state store unavailable")
+}

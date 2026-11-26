@@ -163,3 +163,96 @@ func TestVolumeSettings_DetailDrawerEditsRules(t *testing.T) {
 		t.Fatalf("点 ✕ 后抽屉应关闭: %v", err)
 	}
 }
+
+// TestVolumeSettings_BaselineVisibleAndWarnsOnOverride 锁定 UI 层面的两个审查 Important 修复：
+// ① 只配静态基线的卷，抽屉必须**展示基线规则**（否则显示空表、用户看不到生效规则）；
+// ② 从基线编辑后保存会覆盖基线 ⇒ 保存前必须提示（否则用户以为在改基线）。
+func TestVolumeSettings_BaselineVisibleAndWarnsOnOverride(t *testing.T) {
+	// sproxy:serial: Playwright 浏览器 fixture 共享页面/路由拦截状态，串行更稳。
+	baseURL, _, cleanup := testServerCfg(t, nil)
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+
+	var putHits atomic.Int64
+	volumesBody := `{"volumes":[{"name":"basevault","type":"secretdata","capacity":0,"usage":0,"state":"healthy"}]}`
+	detailBody := `{"volume":{"name":"basevault","type":"secretdata","capacity":0,"usage":0,"state":"healthy"},
+	  "capabilities":["settings"],
+	  "settings":[{"key":"block_policy","label":"分块规则","read_only":false,
+	    "value":{"version":0,"rules":[],
+	      "baseline_rules":[{"path_regex":"^archive/","max_size":1048576,"mode":"single","priority":100}],
+	      "effective_source":"baseline",
+	      "limits":{"hard_max":67108864,"volume_block_max":209715200,"effective_max":67108864}}}]}`
+	jsonRoute := func(pattern, body string) {
+		if err := page.Route(pattern, func(route playwright.Route) {
+			_ = route.Fulfill(playwright.RouteFulfillOptions{
+				Status: playwright.Int(http.StatusOK), Body: playwright.String(body),
+				Headers: map[string]string{"Content-Type": "application/json"},
+			})
+		}); err != nil {
+			t.Fatalf("Route %s: %v", pattern, err)
+		}
+	}
+	jsonRoute("**/api/volumes", volumesBody)
+	jsonRoute("**/api/volumes/basevault/detail**", detailBody)
+	if err := page.Route("**/api/volumes/basevault/settings/*", func(route playwright.Route) {
+		putHits.Add(1)
+		_ = route.Fulfill(playwright.RouteFulfillOptions{
+			Status: playwright.Int(http.StatusOK), Body: playwright.String(`{"success":true,"version":1}`),
+			Headers: map[string]string{"Content-Type": "application/json"},
+		})
+	}); err != nil {
+		t.Fatalf("Route settings: %v", err)
+	}
+
+	if _, err := page.Goto(baseURL+"/ui/v2/", playwright.PageGotoOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("导航: %v", err)
+	}
+	if err := page.Locator(".nav[data-route=console]").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("进入控制台: %v", err)
+	}
+	if err := waitLoc(page, `button[data-cs="volumes"]`, playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		t.Fatalf("等待卷分区: %v", err)
+	}
+	if err := page.Locator(`button[data-cs="volumes"]`).First().Click(playwright.LocatorClickOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("点击卷分区: %v", err)
+	}
+	detailBtn := page.Locator(`#v2-vl-body button[data-volume="basevault"]`)
+	if err := detailBtn.WaitFor(playwright.LocatorWaitForOptions{State: playwright.WaitForSelectorStateVisible, Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("等待详情按钮: %v", err)
+	}
+	if err := detailBtn.First().Click(playwright.LocatorClickOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("点击详情: %v", err)
+	}
+	if err := waitLoc(page, "#v2-vdrawer.show", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("抽屉未打开: %v", err)
+	}
+
+	// ① 基线规则必须可见（不是空表）
+	if err := waitLoc(page, "#v2-vd-sections tbody tr input", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("基线规则未展示（规则表为空）: %v", err)
+	}
+	got, err := page.Locator("#v2-vd-sections tbody tr").First().Locator("input").First().InputValue()
+	if err != nil || got != `^archive/` {
+		t.Fatalf("基线规则未回显: %q err=%v", got, err)
+	}
+	// 来源提示
+	src, _ := page.Locator("#v2-vd-rule-source").TextContent()
+	if !strings.Contains(src, "基线") {
+		t.Fatalf("应提示当前生效来源为基线，得到 %q", src)
+	}
+
+	// ② 保存前必须提示「将覆盖基线」（用 confirm 拦截并取消，确保 PUT 未发出）
+	if err := page.Locator("#v2-vd-save").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("点击保存: %v", err)
+	}
+	if err := page.Locator("#v2-vd-rule-errors").WaitFor(playwright.LocatorWaitForOptions{
+		State: playwright.WaitForSelectorStateVisible, Timeout: playwright.Float(5000),
+	}); err != nil {
+		t.Fatalf("未显示覆盖基线提示: %v", err)
+	}
+	if putHits.Load() != 0 {
+		t.Fatalf("用户取消后不应发 PUT，got %d", putHits.Load())
+	}
+}

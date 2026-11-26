@@ -63,7 +63,9 @@ func applyRuleToPolicy(base shardseal.BlockPolicy, r policy.Rule, size int64) sh
 // （设计 §7 的优先级链 StateStore > extra.block_rules > 卷默认）。若清空时写入一个空快照，
 // 基线会被永久压制（重启载入空记录后同样压制），用户再也无法通过 UI 回到基线配置。
 func (s *SecretdataFS) effectivePolicy() *policy.Compiled {
-	if c := s.policy.Load(); c != nil {
+	// 判据与回显（effectiveSourceOf）**必须同一语义**：空规则的运行期快照不生效
+	// （否则回显说走基线、写路径却用空快照压制基线 —— 审查 nit）。
+	if c := s.policy.Load(); c != nil && len(c.Rules()) > 0 {
 		return c
 	}
 	return s.basePolicy

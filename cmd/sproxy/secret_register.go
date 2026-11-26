@@ -241,6 +241,9 @@ func vcExtraBlockRules(v volume.Volume) ([]policy.Rule, error) {
 
 // 用户裁定 2026-11-10：改名/移动后旧目录 meta 删除失败等「引擎无法自主决策或需要重试」的问题，
 // 必须能被人工感知并可定期重试 ⇒ 装配根把 `server.IssueCenter` 注入到这里（见 root.go）。
+// secretdataOptionsFromVolume 解析 secretdata 卷的 Options：`extra.*` 逐项映射 + 静态规则基线
+// 编译（`extra.block_rules`）。任何配置错误都在装配期 fail-closed（见 validateBlockPolicyMode /
+// applyBlockRules）。
 func secretdataOptionsFromVolume(v volume.Volume, rep secretdata.IssueReporter) (secretdata.Options, error) {
 	opts := secretdata.Options{
 		IssueReporter:      rep,

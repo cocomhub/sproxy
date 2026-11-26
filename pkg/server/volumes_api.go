@@ -1107,15 +1107,26 @@ func (h *Handlers) refreshExternalVolume(w http.ResponseWriter, r *http.Request,
 	// **卷设置（分块规则）同步重载**：多实例共享 StateStore 时，别处保存的规则要靠这里收敛
 	// （否则本实例继续用旧规则写 ⇒ 同卷不同实例产出不同块布局）。失败不阻断索引重建的
 	// 成功语义，但必须显式回显（否则运维以为已收敛）。
-	settingsNote := ""
-	if rerr := h.volumeSettingsRefresh(r.Context(), volName); rerr != nil {
-		h.logger.Warn("卷设置重载失败", "volume", volName, "error", rerr.Error())
-		settingsNote = "（卷设置重载失败：" + rerr.Error() + "）"
-	} else {
-		settingsNote = "，卷设置已重载"
-	}
-	h.auditVolumeRefresh(r, volName, "索引重建 + 卷设置重载（外部改动收敛）")
+	settingsNote, auditDetail := h.reloadVolumeSettingsNote(r, volName)
+	h.auditVolumeRefresh(r, volName, auditDetail)
 	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName + settingsNote}, http.StatusOK)
+}
+
+// reloadVolumeSettingsNote 重载卷设置并返回 (响应附加说明, 审计 detail)。
+//
+// 审计与响应都必须**按实际结果**描述：既有实现无条件写「卷设置重载」，在后端不支持设置或
+// 载入失败时与事实不符（审查 nit），事后按审计排查会误判已收敛。
+func (h *Handlers) reloadVolumeSettingsNote(r *http.Request, volName string) (note, auditDetail string) {
+	if err := h.volumeSettingsRefresh(r.Context(), volName); err != nil {
+		h.logger.Warn("卷设置重载失败", "volume", volName, "error", err.Error())
+		return "（卷设置重载失败：" + err.Error() + "）", "索引重建（卷设置重载失败: " + err.Error() + "）"
+	}
+	be := h.volSet.External(volName)
+	_, hasReloader := be.(registry.SettingsReloader)
+	if !hasReloader {
+		return "", "索引重建（外部改动收敛；该卷不支持设置重载）"
+	}
+	return "，卷设置已重载", "索引重建 + 卷设置重载（外部改动收敛）"
 }
 
 // auditVolumeRefresh 记录 refresh 成功审计（R35-b：action=volume_refresh）。

@@ -344,3 +344,22 @@ func TestErrEntryExistsStillWorks(t *testing.T) {
 		t.Fatal("哨兵错误比较异常")
 	}
 }
+
+// TestEffectivePolicy_EmptyRuntimeFallsBack 锁定写路径的判据与回显**同一语义**（审查 nit）：
+// 「运行期快照存在但规则为空」必须与回显一致地回落基线，而不是压制基线。
+func TestEffectivePolicy_EmptyRuntimeFallsBack(t *testing.T) {
+	t.Parallel()
+	baseline := mustCompilePolicy(t, []policy.Rule{{
+		PathRegex: `^baseline/`, MaxSize: 1 << 20, Mode: shardseal.BlockModeSingle,
+	}})
+	fs := newFSPolicy(t, baseline)
+	// 人为写入一个「空运行期快照」（模拟未来改动 SetPolicy(Compile(空))）
+	empty, err := policy.Compile(policy.Policy{}, 0)
+	if err != nil {
+		t.Fatalf("Compile empty: %v", err)
+	}
+	fs.SetPolicy(empty)
+	if _, hit := fs.effectivePolicy().Resolve("baseline/a.bin", 1024); !hit {
+		t.Fatal("空运行期规则不应压制基线（写路径判据须与 effective_source 一致）")
+	}
+}

@@ -141,3 +141,6 @@ func TestSettingsStore_PerVolumeIsolation(t *testing.T) {
 		t.Fatalf("vault-a 载荷被污染: %s", rawA)
 	}
 }
+
+// fakeReloadingBackend 用于服务端重载契约测试（放在 registry 包会跨包，故实际在 server 包测试）；
+// 此文件仅保留 SettingsStore 语义测试。
