@@ -26,6 +26,7 @@ package capacity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -879,6 +880,36 @@ func (b *Backend) PresignedURL(ctx context.Context, relPath, method string, expi
 	return "", fmt.Errorf("capacity: backend 未实现 PresignedURL: %w", syncpkg.ErrUnsupported)
 }
 
+// Settings 委托 inner（registry.SettingsProvider，卷设置分区只读面）。
+//
+// **为什么必须转发**（审查 Critical）：装配层经 `Set.External(卷名)` 只拿得到**容量包装器**，
+// 断言失败 ⇒ `GET /api/volumes/{name}/detail|settings` 恒空、`PUT .../settings/*` 恒 405、
+// StateStore 也注入不进去，整个「卷设置分区」能力在生产装配路径上是死的。与
+// Ping/Stats/OpenURL/PresignedURL 同模式：恒实现 + inner 未实现时返回 ErrUnsupported
+// （调用方据此判「该卷无可调配置」，而不是把能力缺失说成故障）。
+func (b *Backend) Settings(ctx context.Context) ([]registry.VolumeSettings, error) {
+	if sp, ok := b.ExternalBackend.(registry.SettingsProvider); ok {
+		return sp.Settings(ctx)
+	}
+	return nil, fmt.Errorf("capacity: backend 未实现 Settings: %w", syncpkg.ErrUnsupported)
+}
+
+// UpdateSettings 委托 inner（registry.SettingsWriter，卷设置写入）。
+func (b *Backend) UpdateSettings(ctx context.Context, section string, payload json.RawMessage) error {
+	if sw, ok := b.ExternalBackend.(registry.SettingsWriter); ok {
+		return sw.UpdateSettings(ctx, section, payload)
+	}
+	return fmt.Errorf("capacity: backend 未实现 UpdateSettings: %w", syncpkg.ErrUnsupported)
+}
+
+// SetSettingsStore 委托 inner（registry.SettingsStoreSetter，装配层注入持久化后端）。
+func (b *Backend) SetSettingsStore(store registry.SettingsStore) error {
+	if ss, ok := b.ExternalBackend.(registry.SettingsStoreSetter); ok {
+		return ss.SetSettingsStore(store)
+	}
+	return fmt.Errorf("capacity: backend 未实现 SetSettingsStore: %w", syncpkg.ErrUnsupported)
+}
+
 // SecretsManagerAny 委托 inner（secrets 卷的 Manager 反取）。
 // 用 any 而非具体类型，避免本包依赖具体 secrets 实现；装配层 secrets.ManagerOfExternal
 // 反取（未实现 → nil）。修对抗评审 P1：
@@ -1013,9 +1044,13 @@ func (c *CapacityFS) LookupByChecksum(checksum string) []string {
 	return nil
 }
 
-// 编译期断言：CapacityFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）。
+// 编译期断言：CapacityFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）；
+// Backend 必须转发卷设置三能力（同上，漏转发会让「卷设置分区」在生产装配路径整块失效）。
 var (
-	_ syncpkg.ContentLocator = (*CapacityFS)(nil)
+	_ syncpkg.ContentLocator       = (*CapacityFS)(nil)
+	_ registry.SettingsProvider    = (*Backend)(nil)
+	_ registry.SettingsWriter      = (*Backend)(nil)
+	_ registry.SettingsStoreSetter = (*Backend)(nil)
 )
 
 // OrphanChunks 转发「孤儿审计」可选能力（R21/R24：聚合接口强制，漏转发编译期失败）。
