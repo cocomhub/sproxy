@@ -252,6 +252,22 @@ type WebDAVConfig struct {
 	Enabled bool `yaml:"enabled" mapstructure:"enabled"`
 }
 
+// DefaultTrashRetention 是回收站保留期的默认值（7 天）。单源：GC 任务与
+// 「实际生效值」上报（GET /api/config 的 trash_retention）都读它，避免两处各写一份。
+const DefaultTrashRetention = 7 * 24 * time.Hour
+
+// EffectiveTrashRetention 返回**实际生效**的回收站保留期（ttl <= 0 ⇒ 默认 7 天）。
+//
+// 注意 ttl == 0 的语义在 GC 任务里是「立即过期」（cleanupTrashWalk 按 mtime+ttl 判定），
+// 但配置零值同时表示「未配置」⇒ 任务侧用 ttl<=0 回落默认值（见 routes_setup.trashGCTask）。
+// 本函数必须与任务侧同口径，否则 UI 显示保留期与真实 GC 行为不一致。
+func EffectiveTrashRetention(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return DefaultTrashRetention
+	}
+	return ttl
+}
+
 // TrashConfig 是回收站配置（roadmap P2 回收站）。
 type TrashConfig struct {
 	// TTL 是保留期（默认 7d；0 = 立即过期）。

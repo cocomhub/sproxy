@@ -213,10 +213,10 @@ func (s *Service) RestoreTrashIn(ctx context.Context, owner, volumeName, trashRe
 			continue
 		}
 		if err := s.restoreTrashAt(ctx, owner, vr.Volume, vr.Root, trashRel); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
+			s.auditTrash(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultSuccess, "volume="+vr.Volume)
+		s.auditTrash(ctx, "trash_restore", trashRel, auditResultSuccess, "volume="+vr.Volume)
 		return nil
 	}
 	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
@@ -333,6 +333,65 @@ func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
 	return ""
 }
 
+// auditTrash 是回收站域审计的**唯一出口**（R35-a 棘轮：域内新增动作不得再增加
+// recordFileAudit 散点）。action ∈ trash_restore / trash_purge / trash_empty。
+func (s *Service) auditTrash(ctx context.Context, action, target, result, detail string) {
+	s.rt.recordFileAudit(ctx, action, target, result, detail)
+}
+
+// PurgeTrashEntry 彻底删除**单个**回收站条目（回收站内的删除恒为硬删，不受软删配置影响）。
+//
+// 语义与 EmptyTrash 的逐条目处理一致：先按**原 rel** 释放配额（软删时保留，硬删即对称释放），
+// 再删除主文件**与同代 meta sidecar**（同代 = 同一 __deleted__ 后缀 nano；多代软删时不得
+// 误删别代的 meta）。volume 缺省 ⇒ 跨卷定位（条目只存在于软删时所在卷）。
+//
+// 为什么不能用「恢复 + 硬删」两步实现：那会把文件暴露回 user/ 原路径（短暂可见、
+// 可能与并发上传竞争），且第二步失败会留下「已恢复但没删掉」的中间态。这里在原地删除。
+func (s *Service) PurgeTrashEntry(ctx context.Context, owner, volumeName, trashRel string) error {
+	roots, rerr := s.TrashRoots(owner, volumeName)
+	if rerr != nil {
+		return rerr
+	}
+	for _, vr := range roots {
+		if !s.trashEntryExists(vr.Root, trashRel) {
+			continue
+		}
+		if err := s.purgeTrashAt(owner, vr.Volume, vr.Root, trashRel); err != nil {
+			s.auditTrash(ctx, "trash_purge", trashRel, auditResultError, "volume="+vr.Volume)
+			return err
+		}
+		s.auditTrash(ctx, "trash_purge", trashRel, auditResultSuccess, "volume="+vr.Volume)
+		return nil
+	}
+	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
+}
+
+// purgeTrashAt 在给定卷根上彻底删除单个条目（主文件 + 同代 meta sidecar）。
+func (s *Service) purgeTrashAt(owner, volumeName string, root *storage.Root, trashRel string) error {
+	if !strings.HasPrefix(trashRel, trashPrefix) {
+		return &HTTPError{Status: 400, Message: "无效的回收站路径"}
+	}
+	// 配额释放与 EmptyTrash 同口径（按原 rel，宁少放不多放）。
+	s.releaseTrashEntryQuota(owner, volumeName, root, trashRel)
+	if err := root.Remove(trashRel); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除回收站条目: %w", err)
+	}
+	// 同代 meta sidecar：由主条目名推出（<flat>.__deleted__<nano> → <flat>.meta.__deleted__<nano>）。
+	if metaRel := trashRelMetaSibling(trashRel); metaRel != "" {
+		_ = root.Remove(metaRel) // best-effort：meta 缺失不阻塞主条目删除
+	}
+	return nil
+}
+
+// trashRelMetaSibling 由主条目路径推出同代 meta 条目路径；形态不符返回 ""。
+func trashRelMetaSibling(trashRel string) string {
+	idx := strings.LastIndex(trashRel, trashDeletedSuffix)
+	if idx < 0 || !strings.HasPrefix(trashRel, trashPrefix) {
+		return ""
+	}
+	return trashRel[:idx] + trashMetaMarker + trashRel[idx:]
+}
+
 // EmptyTrash 清空回收站（删除全部 trash 桶文件）。
 // B-MAJOR-3 修复：删除条目时按**原 rel** 释放配额——软删时主文件/meta 配额保留
 // （可恢复），清空即永久删除，磁盘字节释放但配额键仍在原 user/meta 路径 → 必须
@@ -352,10 +411,10 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 		}
 		vol := volumeNameForTenant(s.rt.volSet(), tnt)
 		if err := s.emptyTrashAt(owner, vol, tnt.Root()); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vol)
+			s.auditTrash(ctx, "trash_empty", owner, auditResultError, "volume="+vol)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vol+" scope=default")
+		s.auditTrash(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vol+" scope=default")
 		return nil
 	}
 	roots, rerr := s.TrashRoots(owner, volumeName)
@@ -364,10 +423,10 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 	}
 	for _, vr := range roots {
 		if err := s.emptyTrashAt(owner, vr.Volume, vr.Root); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vr.Volume)
+			s.auditTrash(ctx, "trash_empty", owner, auditResultError, "volume="+vr.Volume)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vr.Volume+" all=true")
+		s.auditTrash(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vr.Volume+" all=true")
 	}
 	return nil
 }

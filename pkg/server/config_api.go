@@ -77,6 +77,9 @@ type configResponse struct {
 	Addr                     string `json:"addr"`
 	StorageRoot              string `json:"storage_root"` // 相对路径；若配置为绝对路径则返回原值
 	WebTunnel                bool   `json:"web_tunnel"`   // web.tunnel：Web UI 领域方法是否默认走加密隧道
+	// TrashRetention 是回收站的**实际生效**保留期（trash.ttl；未配置时按 7 天默认）。
+	// UI 必须显示真实值——此前页面写死「保留 30 天」，与默认 7 天矛盾（误导用户）。
+	TrashRetention string `json:"trash_retention"`
 }
 
 // configHandler 处理 GET /api/config，返回当前运行时配置（脱敏）。
@@ -108,6 +111,7 @@ func (h *Handlers) configHandler(w http.ResponseWriter, r *http.Request) {
 		Addr:                     cfg.Addr,
 		StorageRoot:              resolveDefaultVolumeRoot(cfg),
 		WebTunnel:                cfg.Web.Tunnel,
+		TrashRetention:           config.EffectiveTrashRetention(cfg.Trash.TTL).String(),
 	}
 
 	sendJSONResponse(w, resp, http.StatusOK)

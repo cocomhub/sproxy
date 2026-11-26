@@ -39,6 +39,7 @@ localMux	GET /api/versions	tunnel	pkg/server/routes.go:239
 localMux	POST /api/versions/restore	tunnel	pkg/server/routes.go:240
 localMux	DELETE /api/versions	tunnel	pkg/server/routes.go:241
 localMux	GET /api/trash	tunnel	pkg/server/routes.go:243
+localMux	DELETE /api/trash	tunnel	pkg/server/routes.go:244
 localMux	POST /api/trash/restore	tunnel	pkg/server/routes.go:244
 localMux	POST /api/trash/empty	tunnel	pkg/server/routes.go:245
 localMux	GET /api/volumes	tunnel	pkg/server/routes.go:247
@@ -133,6 +134,7 @@ srvMux	GET /api/versions	reader	pkg/server/routes.go:391
 srvMux	POST /api/versions/restore	user	pkg/server/routes.go:392
 srvMux	DELETE /api/versions	user	pkg/server/routes.go:393
 srvMux	GET /api/trash	auth	pkg/server/routes.go:394
+srvMux	DELETE /api/trash	auth	pkg/server/routes.go:395
 srvMux	POST /api/trash/restore	auth	pkg/server/routes.go:395
 srvMux	POST /api/trash/empty	auth	pkg/server/routes.go:396
 srvMux	GET /api/volumes	reader	pkg/server/routes.go:400

@@ -95,3 +95,27 @@
 - e2e（`TestV2Shell`，新增播种 210 文件目录）：分页首屏 200 + 提示 + 追加到 210 + 提示消失；
   排序真实请求带 `sort=size&order=asc` 且二次点击翻 `desc`；`DragEvent` 真实拖拽后文件出现；
   `←/→` 切换预览标题。5 处变异全部命中（跳过追加 / 不传 sort / drop 不处理 / ←→ 失效 / i18n 覆写）。
+
+## 2026-11-26 第三轮：回收站（保留期真实性 + 逐条操作）
+
+| # | 问题/能力 | 说明 |
+| --- | --- | --- |
+| 1 | **保留期文案是假数据** | v2 写死「删除的文件会保留 30 天」，而 `trash.ttl` 默认 **7 天**（`trashGCTask` 里 `ttl<=0` 回落 7 天）——文案与服务端行为矛盾。改：`GET /api/config` 新增 `trash_retention`（**实际生效值**，`config.EffectiveTrashRetention` 单一实现，GC 任务同源），UI 用 `formatRetention()` 显示「超过 7 天后自动清理」；读不到 → 通用文案，**不编造天数**。 |
+| 2 | **无按卷筛选** | 旧页有「卷」下拉 + 按卷清空；v2 只显示卷名不能筛。改：`volumeOptions`/`filterByVolume` 纯函数 + `#v2-trash-volume`（单卷时自动隐藏），选择持久化，计数显示「已筛 / 总数（卷 x）」。 |
+| 3 | **无单条彻底删除** | 只能「恢复」或「清空全部」——想删一条得先清空整个回收站。改：新增 `DELETE /api/trash?file=&volume=`（`files.Service.PurgeTrashEntry`）**原地**删除主文件 + 同代 meta sidecar + 按原 rel 释放配额，审计 `trash_purge`；前端每行「彻底删除」（二次确认）。 |
+
+为什么服务端新增端点而不是「恢复 + 硬删」两步：两步会把文件暴露回 `user/` 原路径
+（短暂可见、可与并发上传竞争），第二步失败还会留下「已恢复但没删掉」的中间态。
+
+### 门禁登记
+R38 `route_classes.tsv`（DELETE /api/trash × 2 mux）、R35-b `mutating_route_audit.tsv`
+（`action=trash_purge` + `trash_purge_test.go` 场景证据）、R55 `docs/api.md`（新端点 +
+`trash_retention` 字段）。
+
+### 验证与变异
+- Go：`TestEffectiveTrashRetention`（0/负值⇒7天；显式值原样）、`TestTrashRetentionObservableOverConfigAPI`
+  （默认 168h0m0s / 显式 36h0m0s）、`TestTrashPurgeEndpoint`（真删 / 保留其它条目 / 缺 file 400 /
+  未知 404 / 审计 trash_purge）。
+- node：`trash.test.js` 增 `volumeOptions` / `filterByVolume` / `formatRetention`（坏值返空）。
+- e2e：回收站提示含「7 天」且不含「30 天」；点「彻底删除」后该条消失、其它条目保留。
+- 变异 2/2 命中：提示写死「保留 30 天」⇒ 红；purge 不调服务端 ⇒ 红。

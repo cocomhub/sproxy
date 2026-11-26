@@ -78,6 +78,7 @@ POST /api/sync/tasks/{id}/cancel	pending	handler=syncCancelTask actions=NONE
 POST /api/sync/tasks/{id}/retry	pending	handler=syncRetryTask actions=NONE
 POST /api/tags	pending	handler=tagsHandler actions=NONE
 POST /api/trash/empty	pending	handler=emptyTrashHandler actions=NONE
+DELETE /api/trash	action=trash_purge	
 POST /api/trash/restore	pending	handler=restoreTrashHandler actions=NONE
 POST /api/volumes/rebalance	action=volume_rebalance	
 POST /delete	pending	handler=delete actions=NONE

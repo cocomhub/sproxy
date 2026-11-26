@@ -4,7 +4,7 @@ pkg/files/chunked_upload.go	1
 pkg/files/copy_ops.go	3	
 pkg/files/meta_update.go	1	
 pkg/files/tags.go	1	
-pkg/files/trash.go	6	
+pkg/files/trash.go	1	
 pkg/files/write_ops.go	32	
 pkg/server/ai_embed_wiring.go	1	
 pkg/server/ai_insight_handler.go	6	

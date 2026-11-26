@@ -235,16 +235,17 @@
           <div class="card-h">
             <b>回收站</b><span class="hint" id="v2-trash-count"></span>
             <span style="flex:1"></span>
+            <select id="v2-trash-volume" aria-label="按卷筛选回收站" hidden></select>
             <button class="btn btn-ghost" id="v2-trash-refresh" type="button">刷新</button>
             <button class="btn" id="v2-trash-empty" type="button">清空全部</button>
           </div>
           <div id="v2-trash-state" class="banner" hidden role="status"></div>
           <table class="table">
-            <thead><tr><th>名称</th><th style="width:140px">卷</th><th style="width:220px"></th></tr></thead>
+            <thead><tr><th>名称</th><th style="width:140px">卷</th><th style="width:240px"></th></tr></thead>
             <tbody id="v2-trash-body"></tbody>
           </table>
           <div class="empty" id="v2-trash-empty-hint" hidden><b>回收站为空</b>
-            <div class="muted">删除的文件会保留 30 天，可在此恢复。</div></div>
+            <div class="muted" id="v2-trash-retention">删除的文件可在此恢复；过期由服务端自动清理。</div></div>
         </div>
       </section>
 
