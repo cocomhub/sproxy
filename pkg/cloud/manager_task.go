@@ -1438,7 +1438,7 @@ func (m *CloudDownloadManager) persistCompleted(stored *CloudTask, task *CloudTa
 		"task_id", task.ID,
 		"url", redactURLForLog(task.URL),
 		"size", result.Size,
-		"checksum", result.Checksum[:16]+"...",
+		"checksum", shortChecksumForLog(result.Checksum),
 	)
 	m.metrics.TasksCompleted.Add(1)
 	m.metrics.BytesDownloaded.Add(result.Size)
@@ -1787,6 +1787,8 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 			s.UpdatedAt = time.Now()
 		}
 		m.mu.Unlock()
+		// 失败状态也必须落盘（2026-11-27 审查）：否则重启后显示 "cleaned"，掩盖真实失败。
+		m.markDirty(task.ID)
 		m.logger.Warn("cloud task auto-cleanup failed", "task_id", task.ID, "error", err)
 		return
 	}
@@ -1805,7 +1807,9 @@ func (m *CloudDownloadManager) cleanupTaskCloud(task *CloudTask, destPath string
 		}
 	}
 	m.mu.Unlock()
-	_ = m.saveTask(task)
+	// 用 markDirty 而不是 saveTask(task)：`task` 可能是调用方持有的旧指针，而上面改的是
+	// m.tasks 里的 `stored`；markDirty 由 flush 在 RLock 内取最新对象落盘（2026-11-27 审查）。
+	m.markDirty(task.ID)
 	m.logger.Info("cloud task auto-cleaned (save=false)", "task_id", task.ID)
 }
 
@@ -2219,4 +2223,18 @@ func (m *CloudDownloadManager) discardPartialOnFail(task *CloudTask) {
 		m.storage.ReleaseCloud(before - after)
 	}
 	m.clearPartialDiagnostics(task) // 内部 markDirty：诊断与 ReservedSize 变更都会随任务落盘
+}
+
+// shortChecksumForLog 返回日志用的短 checksum（**不得越界**）。
+//
+// 2026-11-27 审查：原写法 `result.Checksum[:16]` 在 checksum 为空或短于 16 字符时 panic
+// （插件/自定义下载器、`rebuiltResult` 读取失败时都可能给空串）——日志不应成为崩溃源。
+func shortChecksumForLog(ck string) string {
+	if ck == "" {
+		return "-"
+	}
+	if len(ck) <= 16 {
+		return ck
+	}
+	return ck[:16] + "..."
 }
