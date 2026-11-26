@@ -412,6 +412,8 @@ const CT_ACTIONS = {
   retry_transfer: { label: '仅重做转存', hint: '产物已完整，只重跑转存' },
   rotate_source: { label: '换源重试', hint: '切换到下一个备选源' },
   discard_partial: { label: '清残留重下', hint: '删除产物与断点，从零重下' },
+  retry_transfer_overwrite: { label: '覆盖转存', hint: '目标已存在时覆盖写入（显式 opt-in）' },
+  retry_from_url: { label: '换链接重试', hint: '提供新的源 URL（保留断点）' },
 };
 
 // ctActionsFor 返回任务可用动作（优先服务端下发的 actions；否则按本地判据兜底）。
@@ -428,6 +430,12 @@ function ctActionsFor(t) {
   if (!Array.isArray(t.fallback_sources) || t.fallback_sources.length < 2) {
     rotate.disabled = true; rotate.reason = '未提供备选源';
   }
+  const overwrite = { action: 'retry_transfer_overwrite', label: CT_ACTIONS.retry_transfer_overwrite.label,
+    hint: CT_ACTIONS.retry_transfer_overwrite.hint };
+  if (transfer.disabled) { overwrite.disabled = true; overwrite.reason = transfer.reason; }
+  plan.push(overwrite);
+  plan.push({ action: 'retry_from_url', label: CT_ACTIONS.retry_from_url.label,
+    hint: CT_ACTIONS.retry_from_url.hint, needs_url: true });
   plan.push(rotate);
   plan.push({ action: 'discard_partial', label: CT_ACTIONS.discard_partial.label, hint: CT_ACTIONS.discard_partial.hint });
   return plan;
@@ -457,6 +465,24 @@ function ctActionDisabled(plan, action) {
     if (list[i] && list[i].action === action) return !!list[i].disabled;
   }
   return true;
+}
+
+// ctBatchActionOptionsHtml 渲染批量动作下拉（只列可批量化的动作；换链接需逐个输入，故不含）。
+function ctBatchActionOptionsHtml() {
+  const order = ['retry_download', 'retry_transfer', 'retry_transfer_overwrite', 'rotate_source', 'discard_partial'];
+  return order.map(function (a) {
+    const info = CT_ACTIONS[a] || { label: a };
+    return '<option value="' + ctEsc(a) + '">' + ctEsc(info.label) + '</option>';
+  }).join('');
+}
+
+// ctActionNeedsURL 判断动作是否需要用户提供额外参数（目前仅 retry_from_url）。
+function ctActionNeedsURL(plan, action) {
+  const list = Array.isArray(plan) ? plan : [];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] && list[i].action === action) return !!list[i].needs_url;
+  }
+  return false;
 }
 
 // ctBlockMatrix 把分块状态转成「一行多小块」的矩阵数据（用户 2026-11-26）。
@@ -611,6 +637,8 @@ function ctTableHtml(tasks) {
     '<label><input type="checkbox" id="ct-pick-all"> 全选失败</label> ' +
     '<button id="ct-retry-selected" style="margin-left:8px;">批量重试选中</button>' +
     '<button id="ct-cancel-selected" style="margin-left:6px;">批量取消选中</button>' +
+    '<select id="ct-batch-action" style="margin-left:10px;font-size:12px;">' + ctBatchActionOptionsHtml() + '</select>' +
+    '<button id="ct-batch-apply" style="margin-left:4px;">批量执行动作</button>' +
     '<span id="ct-msg" style="margin-left:10px;color:var(--text-muted);"></span></div>' +
     '<table style="width:100%;font-size:12px;border-collapse:collapse;"><thead><tr>' +
     '<th style="width:24px;"></th><th>状态</th><th>文件</th><th>进度</th><th>阶段</th><th>失败原因</th><th>已下载</th><th>操作</th>' +
@@ -676,6 +704,8 @@ if (typeof module !== 'undefined' && module.exports) {
     ctActionControlsHtml: ctActionControlsHtml,
     ctActionsFor: ctActionsFor,
     ctActionDisabled: ctActionDisabled,
+    ctActionNeedsURL: ctActionNeedsURL,
+    ctBatchActionOptionsHtml: ctBatchActionOptionsHtml,
     CT_ACTIONS: CT_ACTIONS,
     ctBlockMatrix: ctBlockMatrix,
     ctBlockMatrixHtml: ctBlockMatrixHtml,
@@ -940,11 +970,17 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
             ? sel.selectedOptions[0].textContent : action) + '）');
           return;
         }
+        const payload = { action: action };
+        if (ctActionNeedsURL(ctActionsFor(t), action)) {
+          const input = window.prompt('请输入新的源 URL（retry_from_url）：', '');
+          if (!input) { setCtMsg('已取消（未提供 URL）'); return; }
+          payload.url = input.trim();
+        }
         btn.disabled = true;
         try {
           await window.sclientTransport.coreRequest('POST',
             '/api/cloud/tasks/' + encodeURIComponent(id) + '/actions',
-            { bodyBytes: new TextEncoder().encode(JSON.stringify({ action: action })) });
+            { bodyBytes: new TextEncoder().encode(JSON.stringify(payload)) });
           ctRecord('动作:' + action, id, 'ok', '');
           setCtMsg('已提交动作：' + action);
           await window.showCloudTasks();
@@ -954,6 +990,31 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
           btn.disabled = false;
         }
       });
+    });
+
+    // 批量动作：对勾选的失败任务串行执行同一动作（服务端逐项结果）。
+    const batchActionBtn = document.getElementById('ct-batch-apply');
+    if (batchActionBtn) batchActionBtn.addEventListener('click', async function () {
+      const ids = Array.prototype.slice.call(panel.querySelectorAll('.ct-pick:checked'))
+        .map(function (cb) { return cb.getAttribute('data-id'); });
+      if (!ids.length) { setCtMsg('请先勾选失败任务'); return; }
+      const sel = document.getElementById('ct-batch-action');
+      const action = sel ? sel.value : '';
+      if (!action) { setCtMsg('请选择批量动作'); return; }
+      batchActionBtn.disabled = true;
+      try {
+        const res = await window.sclientTransport.coreRequest('POST', '/api/cloud/tasks/actions/batch',
+          { bodyBytes: new TextEncoder().encode(JSON.stringify({ action: action, ids: ids })) });
+        const data = window.sclientUtil.decodeJSON(res.body) || {};
+        ctRecord('批量动作:' + action, ids.join(','), data.failed ? 'partial' : 'ok',
+          '成功 ' + (data.succeeded || 0) + '，失败 ' + (data.failed || 0));
+        setCtMsg('批量动作 ' + action + '：成功 ' + (data.succeeded || 0) + '，失败 ' + (data.failed || 0));
+        await window.showCloudTasks();
+      } catch (e) {
+        ctRecord('批量动作:' + action, ids.join(','), 'failed', e.message);
+        setCtMsg('批量动作失败：' + e.message);
+        batchActionBtn.disabled = false;
+      }
     });
 
     // 下拉切换时同步「执行」按钮可用性（禁用动作不得可点）。

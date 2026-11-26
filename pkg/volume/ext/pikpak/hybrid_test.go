@@ -1429,11 +1429,24 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 			},
 		})
 	})
-	// 分享直链慢（150ms/chunk），账号区快（20ms/chunk）；探测请求（小 Range）不 sleep
+	// 分享直链慢（150ms/chunk），账号区快（20ms/chunk）；探测请求（小 Range）不 sleep。
+	// 并发性用**结构性重叠**断言（不依赖墙钟，2026-11-26 消除 flake）：只要任一时刻
+	// 分享与账号请求同时在进行，就证明双池并行。
+	var shareInFlight, acctInFlight atomic.Int32
+	var overlapped atomic.Bool
+	enter := func(c *atomic.Int32) {
+		c.Add(1)
+		if shareInFlight.Load() > 0 && acctInFlight.Load() > 0 {
+			overlapped.Store(true)
+		}
+	}
+	leave := func(c *atomic.Int32) { c.Add(-1) }
 	mux.HandleFunc("/share/dl", func(w http.ResponseWriter, r *http.Request) {
 		var start, end int64
 		fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &start, &end)
 		if end-start > 1<<20 { // 真实 chunk
+			enter(&shareInFlight)
+			defer leave(&shareInFlight)
 			time.Sleep(150 * time.Millisecond)
 		}
 		serveRange(w, r, payload)
@@ -1460,6 +1473,8 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/drive/dl", func(w http.ResponseWriter, r *http.Request) {
+		enter(&acctInFlight)
+		defer leave(&acctInFlight)
 		time.Sleep(20 * time.Millisecond)
 		serveRange(w, r, payload)
 	})
@@ -1474,16 +1489,14 @@ func TestHybridDownload_ParallelPools(t *testing.T) {
 		ChunkSize: 2 << 20, ShareRatio: 0.5, Concurrency: 4, AutoDelete: false,
 	})
 	dest := filepath.Join(t.TempDir(), "out.mp4")
-	start := time.Now()
 	if _, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001123", dest, nil); err != nil {
 		t.Fatalf("Download error: %v", err)
 	}
-	elapsed := time.Since(start)
-	// 串行和：分享区 4 chunk × 150ms + 账号区 4 chunk × 20ms ≈ 680ms（并发 2/池）
-	// 并行（双池各并发 2）：分享区 4×150/2 ≈ 300ms + 账号区重叠 ≈ 320ms 内
-	// 若串行（C5 前）≈ 680ms；并行应显著 < 500ms。
-	if elapsed > 600*time.Millisecond {
-		t.Errorf("pools not parallel: elapsed %s (want < 600ms, serial ~680ms + probe)", elapsed)
+	// 结构性断言：分享与账号请求必须**同时**在飞（双池并行），不依赖耗时阈值
+	// （墙钟断言在 CI 慢机上会假红 —— 2026-11-26 实测 669ms vs 600ms 阈值）。
+	if !overlapped.Load() {
+		t.Fatalf("pools not parallel: 分享与账号请求从未同时进行（share=%d acct=%d）",
+			shareInFlight.Load(), acctInFlight.Load())
 	}
 }
 

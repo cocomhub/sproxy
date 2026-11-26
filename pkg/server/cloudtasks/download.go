@@ -440,6 +440,8 @@ func (s *Service) GetTaskProgress(w http.ResponseWriter, r *http.Request, owner 
 // 主接口方法数受门禁约束（只减不增），且扩接口会破坏所有测试替身。
 type TaskActioner interface {
 	ApplyTaskAction(id string, action cloud.TaskAction, owner string) (*cloud.CloudTask, error)
+	// ApplyTaskActionRequest 支持需要额外参数的动作（retry_from_url 的 url）。
+	ApplyTaskActionRequest(id string, req cloud.TaskActionRequest, owner string) (*cloud.CloudTask, error)
 }
 
 // ApplyTaskAction 处理 POST /api/cloud/tasks/{id}/actions（body: {"action": "..."}）。
@@ -448,16 +450,17 @@ type TaskActioner interface {
 // rotate_source（换备选源重下）/ discard_partial（清残留重下）。返回动作提交后的任务快照。
 func (s *Service) ApplyTaskAction(w http.ResponseWriter, r *http.Request, owner string) {
 	id := r.PathValue("id")
-	var req struct {
+	var body struct {
 		Action string `json:"action"`
+		URL    string `json:"url"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		s.writeJSON(w, map[string]string{"error": "invalid json: " + err.Error()}, http.StatusBadRequest)
 		return
 	}
-	action, err := cloud.ParseTaskAction(req.Action)
-	if err != nil {
-		s.writeJSON(w, map[string]string{"error": err.Error()}, http.StatusBadRequest)
+	action, rawURL, aerr := s.parseTaskAction(body.Action, body.URL)
+	if aerr != nil {
+		s.writeJSON(w, map[string]string{"error": aerr.Error()}, http.StatusBadRequest)
 		return
 	}
 	// 可选能力（不扩 Tasks 主接口）：方法数门禁只减不增，且扩主接口会破坏所有测试替身。
@@ -466,7 +469,7 @@ func (s *Service) ApplyTaskAction(w http.ResponseWriter, r *http.Request, owner 
 		s.writeJSON(w, map[string]string{"error": "当前装配不支持任务动作"}, http.StatusNotImplemented)
 		return
 	}
-	task, err := act.ApplyTaskAction(id, action, owner)
+	task, err := act.ApplyTaskActionRequest(id, cloud.TaskActionRequest{Action: action, URL: rawURL}, owner)
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
@@ -479,6 +482,77 @@ func (s *Service) ApplyTaskAction(w http.ResponseWriter, r *http.Request, owner 
 	// 业务审计（R35-b）：动作改变任务执行路径，必须留痕（含动作名）。
 	s.deps.Audit.Record(r.Context(), "cloud_task_action", "task", id, auditResultSuccess, string(action))
 	s.writeJSON(w, map[string]any{"success": true, "action": action, "task": task}, http.StatusOK)
+}
+
+// parseTaskAction 解析并校验动作参数（`retry_from_url` 的 URL 走与创建相同的 SSRF/清洗规则）。
+func (s *Service) parseTaskAction(rawAction, rawURL string) (cloud.TaskAction, string, error) {
+	action, err := cloud.ParseTaskAction(rawAction)
+	if err != nil {
+		return "", "", err
+	}
+	if action != cloud.TaskActionRetryFromURL {
+		return action, "", nil
+	}
+	if rawURL == "" {
+		return "", "", fmt.Errorf("retry_from_url 需要提供 url")
+	}
+	cleaned, _, verr := ValidateCloudDownloadURL(rawURL, "", s.deps.Tasks.AllowPrivate())
+	if verr != nil {
+		return "", "", fmt.Errorf("unsafe URL: %w", verr)
+	}
+	return action, cleaned, nil
+}
+
+// ApplyTaskActionsBatch 处理 POST /api/cloud/tasks/actions/batch：
+// body `{action, url?, ids:[...]}`，逐项执行并返回逐项结果（串行，上限 maxBatchActions）。
+//
+// 为什么需要：批量修复场景（一次几十个失败任务）逐个点动作不现实；串行执行避免瞬间打满下载槽。
+func (s *Service) ApplyTaskActionsBatch(w http.ResponseWriter, r *http.Request, owner string) {
+	const maxBatchActions = 50
+	var body struct {
+		Action string   `json:"action"`
+		URL    string   `json:"url"`
+		IDs    []string `json:"ids"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		s.writeJSON(w, map[string]string{"error": "invalid json: " + err.Error()}, http.StatusBadRequest)
+		return
+	}
+	if len(body.IDs) == 0 {
+		s.writeJSON(w, map[string]string{"error": "ids 不能为空"}, http.StatusBadRequest)
+		return
+	}
+	if len(body.IDs) > maxBatchActions {
+		s.writeJSON(w, map[string]string{"error": fmt.Sprintf("单次最多 %d 个任务", maxBatchActions)}, http.StatusBadRequest)
+		return
+	}
+	action, rawURL, aerr := s.parseTaskAction(body.Action, body.URL)
+	if aerr != nil {
+		s.writeJSON(w, map[string]string{"error": aerr.Error()}, http.StatusBadRequest)
+		return
+	}
+	act, ok := s.deps.Tasks.(TaskActioner)
+	if !ok {
+		s.writeJSON(w, map[string]string{"error": "当前装配不支持任务动作"}, http.StatusNotImplemented)
+		return
+	}
+	results := make([]map[string]any, 0, len(body.IDs))
+	okCount := 0
+	for _, id := range body.IDs {
+		task, err := act.ApplyTaskActionRequest(id, cloud.TaskActionRequest{Action: action, URL: rawURL}, owner)
+		if err != nil {
+			s.deps.Audit.Record(r.Context(), "cloud_task_action", "task", id, auditResultError, err.Error())
+			results = append(results, map[string]any{"task_id": id, "ok": false, "error": err.Error()})
+			continue
+		}
+		s.deps.Audit.Record(r.Context(), "cloud_task_action", "task", id, auditResultSuccess, string(action))
+		okCount++
+		results = append(results, map[string]any{"task_id": id, "ok": true, "task": task})
+	}
+	s.writeJSON(w, map[string]any{
+		"success": okCount == len(body.IDs), "action": action,
+		"succeeded": okCount, "failed": len(body.IDs) - okCount, "results": results,
+	}, http.StatusOK)
 }
 
 // CancelTask 处理 POST /api/cloud/tasks/{id}/cancel。
