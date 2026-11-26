@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,7 +46,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer hook.Close()
-	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+	baseURL, cfg, cleanup := testServerCfg(t, func(c *server.Config) {
 		// 云任务：允许回环源并快速失败，供控制台筛选/重试真实链路使用。
 		c.CloudDownloadAllowPrivate = true
 		c.CloudMaxRetries = 1
@@ -54,6 +56,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		c.Notify.Channels.Webhook.URL = hook.URL
 	})
 	defer cleanup()
+
+	// 播种 210 个文件（> 单页 200），供「分页/加载更多」真实链路断言。
+	manyDir := filepath.Join(cfg.StorageRoot, "anonymous", "user", "many")
+	if err := os.MkdirAll(manyDir, 0o755); err != nil {
+		t.Fatalf("建 many 目录: %v", err)
+	}
+	for i := 0; i < 210; i++ {
+		name := filepath.Join(manyDir, fmt.Sprintf("f%03d.txt", i))
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatalf("写 %s: %v", name, err)
+		}
+	}
 
 	page, stop := pageFixture(t)
 	defer stop()
@@ -227,7 +241,8 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("关闭检查器: %v", err)
 	}
 
-	if err := page.Locator("#v2-file-body a").First().Click(); err != nil {
+	// 用行选择器而非「第一个链接」：根目录还有别的播种目录（排序变化会先命中它们）。
+	if err := page.Locator("#v2-file-body tr[data-name=v2demo] a").Click(); err != nil {
 		t.Fatalf("进入 v2demo: %v", err)
 	}
 	if h, _ := page.Evaluate("() => location.hash", nil); h != "#/files/v2demo" {
@@ -328,6 +343,136 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 	if err := page.Locator("#v2-pv-close").Click(); err != nil {
 		t.Fatalf("关闭预览: %v", err)
+	}
+
+	// 预览键盘导航：同目录相邻文件 ←/→ 切换（跳过目录），并显示位置 i/n。
+	// 先上第二个可预览文件，确保 e2e.txt 有邻居。
+	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{{
+		Name: "e2e2.txt", MimeType: "text/plain", Buffer: []byte("second e2e"),
+	}}); err != nil {
+		t.Fatalf("上传第二个文件: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name=\"e2e2.txt\"] a[data-preview]", playwright.WaitForSelectorStateVisible, 10000); err != nil {
+		t.Fatalf("第二个文件未出现: %v", err)
+	}
+	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
+		t.Fatalf("打开 e2e.txt 预览: %v", err)
+	}
+	if err := waitLoc(page, "#v2-pv-pos", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("预览位置指示缺失: %v", err)
+	}
+	if err := page.Keyboard().Press("ArrowRight"); err != nil {
+		t.Fatalf("按 →: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => (document.querySelector('#v2-pv-title') || {}).textContent === 'e2e2.txt'",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("→ 未切到下一个文件: %v", err)
+	}
+	if err := page.Keyboard().Press("ArrowLeft"); err != nil {
+		t.Fatalf("按 ←: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => (document.querySelector('#v2-pv-title') || {}).textContent === 'e2e.txt'",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("← 未切回上一个文件: %v", err)
+	}
+	// 位置指示形如 "1 / 2"。
+	posTxt, _ := page.Locator("#v2-pv-pos").TextContent()
+	if strings.TrimSpace(posTxt) == "" {
+		t.Fatalf("预览位置指示为空（期望 i / n）")
+	}
+	if err := page.Locator("#v2-pv-close").Click(); err != nil {
+		t.Fatalf("关闭预览（键盘导航后）: %v", err)
+	}
+
+	// 列头排序：点「大小」⇒ 带 sort=size 的真实请求；再点翻转 desc。
+	var sortReqURL atomic.Value
+	page.OnRequest(func(r playwright.Request) {
+		if strings.Contains(r.URL(), "/api/files?") && strings.Contains(r.URL(), "sort=") {
+			sortReqURL.Store(r.URL())
+		}
+	})
+	if err := page.Locator("th.sortable[data-sort=size]").Click(); err != nil {
+		t.Fatalf("点大小列头: %v", err)
+	}
+	if _, err := page.WaitForFunction("() => !!document.querySelector('#v2-sort-size').textContent", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("排序箭头未出现: %v", err)
+	}
+	if u, _ := sortReqURL.Load().(string); !strings.Contains(u, "sort=size") || !strings.Contains(u, "order=asc") {
+		t.Fatalf("排序请求未带 sort=size&order=asc: %v", u)
+	}
+	if err := page.Locator("th.sortable[data-sort=size]").Click(); err != nil {
+		t.Fatalf("再次点大小列头: %v", err)
+	}
+	if _, err := page.WaitForFunction("() => (document.querySelector('#v2-sort-size') || {}).textContent === '↓'", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("第二次点击未翻转成 desc: %v", err)
+	}
+	if u, _ := sortReqURL.Load().(string); !strings.Contains(u, "order=desc") {
+		t.Fatalf("翻转后请求仍未带 order=desc: %v", u)
+	}
+	// 语言切换不得抹掉表头里的子元素（排序箭头曾被 textContent 整段覆写而消失）。
+	if _, err := page.Evaluate(`() => { window.v2i18n.setLang('en'); }`, nil); err != nil {
+		t.Fatalf("切英文: %v", err)
+	}
+	if ok, _ := page.Evaluate(`() => !!document.querySelector('th.sortable[data-sort=size] #v2-sort-size')`, nil); ok != true {
+		t.Fatalf("切英文后排序箭头元素被删除（applyTexts 只应改文本节点）")
+	}
+	if _, err := page.Evaluate(`() => { window.v2i18n.setLang('zh'); }`, nil); err != nil {
+		t.Fatalf("切回中文: %v", err)
+	}
+	// 复位成按名称（后续断言依赖名称排序）。
+	if err := page.Locator("th.sortable[data-sort=name]").Click(); err != nil {
+		t.Fatalf("复位按名称排序: %v", err)
+	}
+
+	// 分页：210 个文件的目录首屏只有一页，必须提示「还有更多」并可就地追加
+	// （此前 limit=200 静默截断，用户以为文件丢了）。
+	if _, err := page.Evaluate("() => { location.hash = '#/files/many'; }", nil); err != nil {
+		t.Fatalf("进入 many: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-file-body tr').length === 200", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("首屏未加载 200 行: %v", err)
+	}
+	if hidden, _ := page.Evaluate(`() => (document.querySelector('#v2-load-more-wrap') || {}).hidden`, nil); hidden != false {
+		t.Fatalf("已截断（200/210）但「加载更多」未显示")
+	}
+	if cnt, _ := page.Evaluate(`() => (document.querySelector('#v2-count') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(cnt), "200 / 210") {
+		t.Fatalf("计数未显示 已加载/总数: %v", cnt)
+	}
+	if err := page.Locator("#v2-load-more").Click(); err != nil {
+		t.Fatalf("点加载更多: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelectorAll('#v2-file-body tr').length === 210", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("加载更多未追加到 210 行: %v", err)
+	}
+	if hidden, _ := page.Evaluate(`() => (document.querySelector('#v2-load-more-wrap') || {}).hidden`, nil); hidden != true {
+		t.Fatalf("全部加载完后「加载更多」仍显示")
+	}
+	if err := page.Locator(".nav[data-route=files]").Click(); err != nil {
+		t.Fatalf("回到文件根: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
+		t.Fatalf("回 v2demo: %v", err)
+	}
+
+	// 拖拽上传：真实 DragEvent（DataTransfer 带 File）→ 走与选择文件同一条上传路径。
+	if _, err := page.Evaluate(`async () => {
+		const dt = new DataTransfer();
+		dt.items.add(new File(['dropped content'], 'dropped.txt', {type: 'text/plain'}));
+		document.dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+		return true;
+	}`, nil); err != nil {
+		t.Fatalf("模拟拖拽 drop: %v", err)
+	}
+	if err := waitLoc(page, "#v2-file-body tr[data-name='dropped.txt']", playwright.WaitForSelectorStateVisible, 15000); err != nil {
+		t.Fatalf("拖拽上传后未出现 dropped.txt: %v", err)
 	}
 
 	// Meta extra 编辑（merge）：真实 PUT /api/files/meta → 回读含新键。
@@ -892,6 +1037,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("v2demo 目录未列到 e2e.txt: %v", err)
 	}
+	// j 逐行下移直到焦点落在 e2e.txt（该目录还有其它播种文件，不能假定首行就是它）。
 	if err := page.Keyboard().Press("j"); err != nil {
 		t.Fatalf("j 移动: %v", err)
 	}
@@ -899,6 +1045,19 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => !!document.querySelector('#v2-file-body tr.row-focus')",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
 		t.Fatalf("键盘焦点行未出现: %v", err)
+	}
+	for i := 0; i < 12; i += 1 {
+		focused, _ := page.Evaluate(`() => { const r = document.querySelector('#v2-file-body tr.row-focus'); return r ? r.getAttribute('data-name') : ''; }`, nil)
+		if fmt.Sprint(focused) == "e2e.txt" {
+			break
+		}
+		if err := page.Keyboard().Press("j"); err != nil {
+			t.Fatalf("j 继续下移: %v", err)
+		}
+		<-time.After(80 * time.Millisecond)
+	}
+	if focused, _ := page.Evaluate(`() => { const r = document.querySelector('#v2-file-body tr.row-focus'); return r ? r.getAttribute('data-name') : ''; }`, nil); fmt.Sprint(focused) != "e2e.txt" {
+		t.Fatalf("j 未能把焦点移到 e2e.txt（当前 %v）", focused)
 	}
 	if err := page.Keyboard().Press("x"); err != nil {
 		t.Fatalf("x 选中: %v", err)

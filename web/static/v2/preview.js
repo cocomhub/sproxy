@@ -45,6 +45,39 @@
     msg.hidden = true; msg.textContent = '';
   }
 
+  /** 当前列表顺序里的相邻文件（跳过目录）；到边界不动。 */
+  function neighbor(delta) {
+    var v = view();
+    if (!v || !state.name || state.mode !== 'file') { return ''; }
+    var list = v.state ? v.state.files : [];
+    return f.neighborFile(list, state.name, delta);
+  }
+
+  /** 切到相邻文件（保持预览打开）。 */
+  function step(delta) {
+    var name = neighbor(delta);
+    if (!name) { return; }
+    open(name);
+  }
+
+  /** 刷新「上一张/下一张」按钮的可用状态（标题旁展示位置 i/n）。 */
+  function syncSteps() {
+    var prev = el('v2-pv-prev');
+    var next = el('v2-pv-next');
+    var pos = el('v2-pv-pos');
+    var hasPrev = !!neighbor(-1);
+    var hasNext = !!neighbor(1);
+    if (prev) { prev.disabled = !hasPrev; }
+    if (next) { next.disabled = !hasNext; }
+    if (pos) {
+      var list = view() && view().state ? view().state.files : [];
+      var files = list.filter(function (x) { return x && !x.isDir; });
+      var idx = -1;
+      for (var i = 0; i < files.length; i += 1) { if (files[i].name === state.name) { idx = i; break; } }
+      pos.textContent = idx >= 0 ? (idx + 1) + ' / ' + files.length : '';
+    }
+  }
+
   function open(name) {
     var file = view() ? view().file(name) : null;
     if (!file) { return; }
@@ -60,6 +93,8 @@
     document.body.classList.add('pv-open');
     showFloatClose(true);
     state.mode = 'file';
+    syncSteps();
+
 
     var img = el('v2-pv-img'), video = el('v2-pv-video'), text = el('v2-pv-text'), msg = el('v2-pv-msg');
     var type = ext(name);
@@ -110,7 +145,9 @@
     overlay.hidden = false;
     document.body.classList.add('pv-open');
     showFloatClose(true);
-    state.mode = 'file';
+    // 云任务产物不在文件列表里 ⇒ 没有可切换的相邻文件。
+    state.mode = 'cloud_task';
+    syncSteps();
 
     var img = el('v2-pv-img'), video = el('v2-pv-video'), text = el('v2-pv-text'), msg = el('v2-pv-msg');
     var type = ext(name);
@@ -183,7 +220,15 @@
         download(state.name);
       });
     }
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { close(); return; }
+      // ←/→ 切换同目录的相邻**文件**（跳过目录）——看图/看视频时不必退出重进。
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) { return; }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
+    });
+    var prev = el('v2-pv-prev'); if (prev) { prev.addEventListener('click', function () { step(-1); }); }
+    var next = el('v2-pv-next'); if (next) { next.addEventListener('click', function () { step(1); }); }
   }
 
   /** 云任务产物下载（cloud 桶，kind=cloud_task）。 */
