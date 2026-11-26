@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/downloader"
 	"github.com/cocomhub/sproxy/pkg/storage/capacity"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -129,5 +130,40 @@ func TestCreateTask_ResubmitCompletedIdempotent(t *testing.T) {
 	}
 	if again.ID != task.ID || again.Status != "completed" {
 		t.Fatalf("目标存在时应幂等返回 completed 任务，实际 id=%s status=%s", again.ID, again.Status)
+	}
+}
+
+// TestResubmitRevive_ClearsStaleChunks 锁定「复活任务清空上一轮分块状态」：
+// HTTP 下载器不报分块 ⇒ 不清会让 UI 永久显示旧的"已完成块"。
+func TestResubmitRevive_ClearsStaleChunks(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, resubmitTestConfig())
+	const url = "https://example.com/s/EXAMPLE-REVIVE-CHUNKS"
+	task, err := mgr.CreateTask("url", url, "rc.bin", 1024, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	mgr.mu.Lock()
+	stored := mgr.tasks[task.ID]
+	stored.Status = "failed"
+	stored.Chunks = []downloader.ChunkState{{Index: 0, Phase: "done", Length: 1024, Done: 1024}}
+	stored.Progress = []ProgressSample{{Downloaded: 512, Total: 1024}}
+	stored.UpdatedAt = time.Now()
+	mgr.mu.Unlock()
+
+	again, err := mgr.CreateTask("url", url, "rc.bin", 1024, "", TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask(resubmit): %v", err)
+	}
+	if again.ID != task.ID {
+		t.Fatalf("应复活原任务，实际新建 %s", again.ID)
+	}
+	if len(again.Chunks) != 0 {
+		t.Fatalf("复活后应清空分块状态，got %d", len(again.Chunks))
+	}
+	if len(again.Progress) == 0 {
+		t.Fatal("进度历史应保留（跨重试曲线）")
 	}
 }
