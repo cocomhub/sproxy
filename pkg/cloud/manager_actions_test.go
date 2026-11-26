@@ -163,8 +163,10 @@ func TestApplyTaskAction_RetryDownloadClearsArtifact(t *testing.T) {
 	if got.DownloadDone || got.DownloadedChecksum != "" {
 		t.Fatalf("退回下载应清产物标记，got done=%v ck=%q", got.DownloadDone, got.DownloadedChecksum)
 	}
-	if got.Status != "pending" {
-		t.Fatalf("动作提交后应为 pending，got %q", got.Status)
+	// 动作提交后任务立即被 goroutine 接管：状态可能是 pending 或已进入 downloading
+	// （CI 慢机实测竞态）——断言"已重新开始"而不是钉死中间态。
+	if got.Status != "pending" && got.Status != "downloading" {
+		t.Fatalf("动作提交后应重新开始（pending/downloading），got %q", got.Status)
 	}
 }
 
