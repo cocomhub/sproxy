@@ -502,3 +502,59 @@ func erasureSingleWarningsForTest(b *backend, payload json.RawMessage) int {
 	}
 	return int(atomic.LoadInt32(&b.erasureSingleWarn) - before)
 }
+
+// TestBackend_ReloadSettings_Branches 覆盖 ReloadSettings 的全部分支（审查 nit）：
+// 这些分支决定「多实例收敛是否真的生效」，此前无任何测试锁定。
+func TestBackend_ReloadSettings_Branches(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		store      *memSettingsStore
+		wantErr    bool
+		wantUnsupt bool // 期望 ErrSettingsReloadNotImplemented
+		wantRules  int  // 载入后运行期规则条数
+	}{
+		{"no store", nil, true, true, 0},
+		{"load error", &memSettingsStore{loadErr: errors.New("down")}, true, false, 0},
+		{"no record", &memSettingsStore{}, false, false, 0},
+		{"corrupt payload", &memSettingsStore{payload: json.RawMessage(`{`), version: 1}, true, false, 0},
+		{"empty rules", &memSettingsStore{payload: json.RawMessage(`{"rules":[]}`), version: 2}, false, false, 0},
+		{"compile error", &memSettingsStore{
+			payload: json.RawMessage(`{"rules":[{"path_regex":"x","mode":"single"}]}`), version: 3,
+		}, true, false, 0},
+		{"ok", &memSettingsStore{
+			payload: json.RawMessage(`{"rules":[{"path_regex":"^a/","max_size":"1MiB","mode":"single"}]}`), version: 4,
+		}, false, false, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			b, fs := newBackendForSettings(t, Options{})
+			if c.store != nil {
+				// 直接注入（绕过 SetSettingsStore 的宽松载入语义，模拟已装配后的重载）
+				var st registry.SettingsStore = c.store
+				b.settingsStore.Store(&st)
+			}
+			err := b.ReloadSettings(context.Background())
+			if c.wantErr && err == nil {
+				t.Fatalf("应报错")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("不应报错: %v", err)
+			}
+			if c.wantUnsupt && !errors.Is(err, registry.ErrSettingsReloadNotImplemented) {
+				t.Fatalf("应返回专用哨兵，得到 %v", err)
+			}
+			_, base := fs.PolicyState()
+			_ = base
+			runtime, _ := fs.PolicyState()
+			got := 0
+			if runtime != nil {
+				got = len(runtime.Rules())
+			}
+			if got != c.wantRules {
+				t.Fatalf("运行期规则条数=%d want %d", got, c.wantRules)
+			}
+		})
+	}
+}

@@ -65,7 +65,7 @@ func applyRuleToPolicy(base shardseal.BlockPolicy, r policy.Rule, size int64) sh
 func (s *SecretdataFS) effectivePolicy() *policy.Compiled {
 	// 判据与回显（effectiveSourceOf）**必须同一语义**：空规则的运行期快照不生效
 	// （否则回显说走基线、写路径却用空快照压制基线 —— 审查 nit）。
-	if c := s.policy.Load(); c != nil && len(c.Rules()) > 0 {
+	if c := s.policy.Load(); c.HasRules() {
 		return c
 	}
 	return s.basePolicy

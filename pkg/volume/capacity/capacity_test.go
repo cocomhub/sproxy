@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
@@ -154,4 +156,64 @@ func TestWrapStorageVolume_SettingsReloaderReachable(t *testing.T) {
 	if _, ok := wrapped.(registry.SettingsStoreSetter); !ok {
 		t.Fatal("经 WrapStorageVolume 后 SettingsStoreSetter 不可达")
 	}
+}
+
+// allCapsInner 实现 registry 的**全部**后端可选能力（用于「包装器能力全覆盖」回归）。
+type allCapsInner struct{ plainBackend }
+
+func (allCapsInner) StartMetaPrewarm(context.Context) {}
+func (allCapsInner) PresignedURL(context.Context, string, string, int64) (string, error) {
+	return "https://example.com/p", nil
+}
+func (allCapsInner) RefreshIndex(context.Context) error { return nil }
+func (allCapsInner) OpenURL(context.Context, string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+func (allCapsInner) Stats(context.Context) (*registry.VolumeStats, error) {
+	return &registry.VolumeStats{}, nil
+}
+func (allCapsInner) Ping(context.Context) error                                    { return nil }
+func (allCapsInner) Usage() int64                                                  { return 1 }
+func (allCapsInner) Settings(context.Context) ([]registry.VolumeSettings, error)   { return nil, nil }
+func (allCapsInner) UpdateSettings(context.Context, string, json.RawMessage) error { return nil }
+func (allCapsInner) ReloadSettings(context.Context) error                          { return nil }
+func (allCapsInner) SetSettingsStore(registry.SettingsStore) error                 { return nil }
+
+// TestBackend_ForwardsEveryRegistryCapability 锁定**能力全覆盖**（2026-11-27 第三次踩坑）：
+// 新增后端可选能力后，若忘在容量包装器上转发，装配层断言恒失败 ⇒ 功能在生产路径静默不可达
+// （本轮实测：INDEX REFRESH/重载整块不可达，因为 refresh 先断言 IndexRefresher）。
+//
+// 判据：inner 实现某能力 ⇒ 包装后**必须**也能断言到该能力（逐项枚举，新增能力自动纳入）。
+func TestBackend_ForwardsEveryRegistryCapability(t *testing.T) {
+	t.Parallel()
+	var wrapped registry.ExternalBackend = WrapBackend(allCapsInner{}, nopCounter{})
+
+	type probe struct {
+		name string
+		ok   bool
+	}
+	checks := []probe{
+		{"MetaPrewarmer", assertAny[registry.MetaPrewarmer](wrapped)},
+		{"Presigner", assertAny[registry.Presigner](wrapped)},
+		{"IndexRefresher", assertAny[registry.IndexRefresher](wrapped)},
+		{"URLResolver", assertAny[registry.URLResolver](wrapped)},
+		{"VolumeStatsProvider", assertAny[registry.VolumeStatsProvider](wrapped)},
+		{"HealthProbe", assertAny[registry.HealthProbe](wrapped)},
+		{"UsageProvider", assertAny[registry.UsageProvider](wrapped)},
+		{"SettingsProvider", assertAny[registry.SettingsProvider](wrapped)},
+		{"SettingsWriter", assertAny[registry.SettingsWriter](wrapped)},
+		{"SettingsReloader", assertAny[registry.SettingsReloader](wrapped)},
+		{"SettingsStoreSetter", assertAny[registry.SettingsStoreSetter](wrapped)},
+	}
+	for _, c := range checks {
+		if !c.ok {
+			t.Errorf("容量包装器未转发能力 %s（装配层经 Set.External 只拿得到包装器 ⇒ 该能力在生产路径不可达）", c.name)
+		}
+	}
+}
+
+// assertAny 报告 v 是否实现了 T（泛型类型断言助手，仅测试用）。
+func assertAny[T any](v any) bool {
+	_, ok := v.(T)
+	return ok
 }

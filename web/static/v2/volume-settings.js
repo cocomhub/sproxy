@@ -197,8 +197,9 @@
   /** saveWarning 返回保存前的警示文案（空前缀 = 无警示）。 */
   function saveWarning(eff) {
     if (!eff || !eff.fromBaseline || !(eff.baselineCount > 0)) { return ''; }
-    return '当前展示的是**静态基线**（extra.block_rules，共 ' + eff.baselineCount +
-      ' 条）。保存后将以运行期规则**覆盖**基线：基线中未在此列出的规则将不再生效（可从配置文件恢复）。';
+    return '当前展示的是静态基线（extra.block_rules，共 ' + eff.baselineCount +
+      ' 条）。保存后将以运行期规则覆盖基线：基线中未在此列出的规则将不再生效（可从配置文件恢复）。' +
+      '\n\n注意：留空（删除全部规则）保存等于清空运行期覆盖、回到基线，不会停用基线。';
   }
 
   var api = {

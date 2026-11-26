@@ -179,6 +179,17 @@ func sizeInRange(r Rule, size int64) bool {
 	return true
 }
 
+// HasRules 报告是否至少有一条规则（**零分配**，供写路径热路径判空用）。
+//
+// 为什么不能直接用 len(Rules())>0：Rules() 每次都 make 新切片并逐条 clone，而该判空在
+// 每次文件写入时都会执行（secretdata 写路径）⇒ 给热路径平白增加 O(规则数) 分配。
+func (c *Compiled) HasRules() bool {
+	if c == nil {
+		return false
+	}
+	return len(c.rules) > 0
+}
+
 // Rules 返回规则副本（API 回显用；调用方可自由修改）。
 func (c *Compiled) Rules() []Rule {
 	if c == nil {

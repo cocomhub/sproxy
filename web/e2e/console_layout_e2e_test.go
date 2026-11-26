@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/netutil"
 	"github.com/cocomhub/sproxy/pkg/server"
 	"github.com/mxschmitt/playwright-go"
 )
@@ -361,12 +362,17 @@ func TestConsoleCardJumpWritesDeepLink(t *testing.T) {
 	// job 慢，8s 偶发不足（本地稳定通过）。按仓库既有「-race/慢机超时翻倍」纪律放宽到 20s，
 	// 并在失败时抓取任务快照，便于区分「服务端无 failed 任务」与「前端渲染慢」。
 	if err := waitLoc(page, "#overview-cards [data-card='cloud-failed']", playwright.WaitForSelectorStateVisible, 20000); err != nil {
-		tasksResp, terr := http.Get(baseURL + "/api/cloud/tasks")
+		// 硬规则 17：禁止 http.DefaultClient / 共享 Transport（并发用例会因为别人的
+		// CloseIdleConnections 打断在途 idle 连接）⇒ 本次诊断请求自建 client。
+		// R19：不得裸构造 Transport 字面量（会丢默认调校）⇒ 用 netutil 基座（每实例独立连接池）。
+		client := &http.Client{Transport: netutil.IsolatedTransport(), Timeout: 5 * time.Second}
 		snapshot := "(读取任务快照失败)"
-		if terr == nil {
-			body, _ := io.ReadAll(tasksResp.Body)
-			tasksResp.Body.Close()
-			snapshot = string(body)
+		if tasksResp, terr := client.Get(baseURL + "/api/cloud/tasks"); terr == nil {
+			body, rerr := io.ReadAll(tasksResp.Body)
+			_ = tasksResp.Body.Close()
+			if rerr == nil {
+				snapshot = string(body)
+			}
 		}
 		t.Fatalf("概览卡片未渲染（20s）: %v；任务快照: %s", err, snapshot)
 	}

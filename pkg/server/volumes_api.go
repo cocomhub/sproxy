@@ -1090,27 +1090,42 @@ func (h *Handlers) refreshExternalVolume(w http.ResponseWriter, r *http.Request,
 		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "卷不存在"}, http.StatusNotFound)
 		return
 	}
-	refresher, ok := be.(registry.IndexRefresher)
-	if !ok {
-		if h.stateCache == nil {
-			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "该卷后端不支持索引重建（无内存索引）"}, http.StatusMethodNotAllowed)
+	// **两个职责互不依赖**（审查 2026-11-27）：卷设置重载**先**独立执行，再处理索引重建。
+	// 此前「先断言 IndexRefresher，不满足就早返回」会让无内存索引的卷（以及将来又漏转发该
+	// 能力的情形）永远无法收敛规则 —— 新增的三态/审计于是成了不可达代码。
+	settingsNote, settingsDetail, settingsResult, settingsReloadedNow := h.reloadVolumeSettingsNote(r, volName)
+
+	// 索引重建（可选能力）：不支持 ⇒ 只描述「状态缓存已清空」；失败 ⇒ 500（设置重载结果仍写入审计）。
+	if rr, ok := be.(registry.IndexRefresher); ok {
+		err := rr.RefreshIndex(r.Context())
+		if err != nil && !errors.Is(err, registry.ErrIndexRefreshNotImplemented) {
+			slog.Error("卷索引重建失败", "volume", volName, "error", err.Error())
+			h.auditVolumeRefreshWithResult(r, volName,
+				settingsDetail+"；索引重建失败: "+err.Error(), AuditResultError)
+			sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "索引重建失败: " + err.Error()}, http.StatusInternalServerError)
 			return
 		}
-		h.auditVolumeRefresh(r, volName, "状态缓存已清空（外部改动收敛）")
-		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName}, http.StatusOK)
+		if err == nil {
+			h.auditVolumeRefreshWithResult(r, volName, "索引重建 + "+settingsDetail, settingsResult)
+			sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName + settingsNote}, http.StatusOK)
+			return
+		}
+	}
+	// 三件事都没做成（无索引重建 / 无状态缓存 / 设置也未重载）⇒ 明确 405，**不静默 no-op**
+	// （既有契约：TestVolumesAPI_RefreshWithoutStateCache）。
+	if h.stateCache == nil && !settingsReloadedNow {
+		sendJSONResponse(w, refreshVolumeResponse{Success: false,
+			Message: "该卷不支持刷新（无内存索引、无状态缓存、无可重载设置）"}, http.StatusMethodNotAllowed)
 		return
 	}
-	if err := refresher.RefreshIndex(r.Context()); err != nil {
-		h.logger.Error("卷索引重建失败", "volume", volName, "error", err.Error())
-		sendJSONResponse(w, refreshVolumeResponse{Success: false, Message: "索引重建失败: " + err.Error()}, http.StatusInternalServerError)
+	if h.stateCache == nil {
+		// 设置重载确实发生了（settingsReloadedNow ⇒ 上面已排除）：如实描述（不声称「索引重建」）。
+		h.auditVolumeRefreshWithResult(r, volName, settingsDetail, settingsResult)
+		sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "已处理: " + volName + settingsNote}, http.StatusOK)
 		return
 	}
-	// **卷设置（分块规则）同步重载**：多实例共享 StateStore 时，别处保存的规则要靠这里收敛
-	// （否则本实例继续用旧规则写 ⇒ 同卷不同实例产出不同块布局）。失败不阻断索引重建的
-	// 成功语义，但必须显式回显（否则运维以为已收敛）。
-	settingsNote, auditDetail, auditResult := h.reloadVolumeSettingsNote(r, volName)
-	h.auditVolumeRefreshWithResult(r, volName, auditDetail, auditResult)
-	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷索引已重建: " + volName + settingsNote}, http.StatusOK)
+	h.auditVolumeRefreshWithResult(r, volName, "状态缓存已清空 + "+settingsDetail, settingsResult)
+	sendJSONResponse(w, refreshVolumeResponse{Success: true, Message: "卷状态缓存已清空: " + volName + settingsNote}, http.StatusOK)
 }
 
 // reloadVolumeSettingsNote 重载卷设置并返回 (响应附加说明, 审计 detail, 审计 result)。
@@ -1119,21 +1134,21 @@ func (h *Handlers) refreshExternalVolume(w http.ResponseWriter, r *http.Request,
 //  1. 文案与审计**基于三态结果**，而不是「包装器是否实现接口」（包装器恒实现 ⇒ 断言恒真）；
 //  2. 失败原因**分类化**：不回显内部 error 文本（可能是路径/驱动细节），只有类别；
 //  3. 重载失败时审计 result 记 error，而不是 success + detail 里夹一句失败。
-func (h *Handlers) reloadVolumeSettingsNote(r *http.Request, volName string) (note, auditDetail, auditResult string) {
+func (h *Handlers) reloadVolumeSettingsNote(r *http.Request, volName string) (note, auditDetail, auditResult string, didReload bool) {
 	be := h.volSet.External(volName)
 	outcome, err := h.volumeSettingsRefreshOutcome(r.Context(), volName, be)
 	switch outcome {
 	case settingsReloaded:
-		return "，卷设置已重载", "索引重建 + 卷设置重载（外部改动收敛）", AuditResultSuccess
+		return "，卷设置已重载", "索引重建 + 卷设置重载（外部改动收敛）", AuditResultSuccess, true
 	case settingsReloadFailed:
 		if err != nil {
 			// 完整错误只进服务端日志（包级 slog，测试构造的 Handlers 可能没有 logger）。
 			slog.Warn("卷设置重载失败", "volume", volName, "error", err.Error())
 		}
 		return "（卷设置重载失败：后端载入错误，详见服务端日志）",
-			"索引重建（卷设置重载失败: 后端载入错误）", AuditResultError
+			"索引重建（卷设置重载失败: 后端载入错误）", AuditResultError, false
 	default:
-		return "", "索引重建（外部改动收敛；该卷不支持设置重载）", AuditResultSuccess
+		return "", "索引重建（外部改动收敛；该卷不支持设置重载）", AuditResultSuccess, false
 	}
 }
 

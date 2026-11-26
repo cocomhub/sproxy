@@ -902,6 +902,28 @@ func (b *Backend) UpdateSettings(ctx context.Context, section string, payload js
 	return fmt.Errorf("capacity: backend 未实现 UpdateSettings: %w", syncpkg.ErrUnsupported)
 }
 
+// RefreshIndex 委托 inner（registry.IndexRefresher，refresh 重建内存索引）。
+//
+// **必须转发**（审查 2026-11-27 第三次同类问题）：`refreshExternalVolume` 先断言本能力，
+// 包装器不实现 ⇒ 直接走「状态缓存已清空」早返回 ⇒ 索引重建与卷设置重载**双双不执行**，
+// 新写的三态/审计成了不可达代码。
+func (b *Backend) RefreshIndex(ctx context.Context) error {
+	if rr, ok := b.ExternalBackend.(registry.IndexRefresher); ok {
+		return rr.RefreshIndex(ctx)
+	}
+	return fmt.Errorf("capacity: backend 未实现 RefreshIndex: %w", registry.ErrIndexRefreshNotImplemented)
+}
+
+// StartMetaPrewarm 委托 inner（registry.MetaPrewarmer，启动后台预热元数据缓存）。
+//
+// 该能力接口无返回值 ⇒ 未实现时静默 no-op（调用方无从判断「不支持」，这是接口本身的
+// 语义限制；本转发保证「inner 实现了就一定会被调用」）。
+func (b *Backend) StartMetaPrewarm(ctx context.Context) {
+	if mp, ok := b.ExternalBackend.(registry.MetaPrewarmer); ok {
+		mp.StartMetaPrewarm(ctx)
+	}
+}
+
 // ReloadSettings 委托 inner（registry.SettingsReloader，运维 refresh 触发的严格重载）。
 //
 // **必须转发**（安全审查 2026-11-27，与 Settings 三能力同一类错误）：装配层只拿得到容量
@@ -1064,6 +1086,8 @@ var (
 	_ registry.SettingsWriter      = (*Backend)(nil)
 	_ registry.SettingsStoreSetter = (*Backend)(nil)
 	_ registry.SettingsReloader    = (*Backend)(nil)
+	_ registry.IndexRefresher      = (*Backend)(nil)
+	_ registry.MetaPrewarmer       = (*Backend)(nil)
 )
 
 // OrphanChunks 转发「孤儿审计」可选能力（R21/R24：聚合接口强制，漏转发编译期失败）。
