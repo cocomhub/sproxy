@@ -122,37 +122,21 @@ func (m *CloudDownloadManager) CancelTask(id, owner string) error {
 	t.UpdatedAt = time.Now()
 	t.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 
-	// 释放实际预留的存储空间（ReservedSize 为准，释放后归零防二次释放）
-	if t.ReservedSize > 0 {
-		m.storage.ReleaseCloud(t.ReservedSize)
-		t.ReservedSize = 0
+	// 取消 = **中断**（用户 2026-11-26 裁定）：只做一件事——标记状态并停下载。
+	//   - **不删任务文件**（.partial / hybrid 断点保留，`retry_download` 才能真续传）；
+	//   - 账本**收敛到磁盘实际占用**（不是归零，也不是保留未知大小占位）：断点占的字节继续记账，
+	//     未写出的占位立即归还（否则"取消一个未开始的任务"会白占 1 GiB 直到 TTL）。
+	// 文件与账本的**整体释放**只由 DELETE 任务（或过期清理）负责。
+	// 一个操作只控制一个行为：取消不再顺带"删文件"，也不再把占用一刀切归零。
+	if actual := m.diskUsageOfTask(t.Owner, id); t.ReservedSize > actual {
+		m.storage.ReleaseCloud(t.ReservedSize - actual)
+		t.ReservedSize = actual
 	}
-	// P4 租户配额：取消即放弃。但下载 goroutine 仍存活（running）时不得在此回拨——
-	// 它还会继续 commit 字节，提前归零会被抬回（账本泄漏，CI run 34941359725 的
-	// `cancel 后 cloud 桶 Usage()=200 want 0`）；此时把释放推迟到 goroutine 退出路径
-	// （releaseAbandonedTaskScope，与清理 running 标记同一临界区，保证「goroutine 已停止
-	// ⇒ 配额已归零」）。无运行 goroutine（pending 未启动 / goroutine 已退出）时不会有后续
-	// commit，立即释放（releaseTaskScope 幂等）。
-	if !m.running[id] {
-		m.releaseTaskScope(t)
-	}
-
-	// 触发下载取消（排队中任务也已在 cancelFuncs 注册，可立即生效）
 	if cancel, ok := m.cancelFuncs[id]; ok {
 		cancel()
 		delete(m.cancelFuncs, id)
 	}
 	m.mu.Unlock()
-
-	// 取消即放弃：清理任务文件（含 .partial/.partial.etag），使磁盘占用与已归零
-	// 的存储账本一致——否则 partial 残留但账本释放，可累计突破 max_storage_bytes
-	// 配额。goroutine 可能仍在响应 cancel 收尾（Windows 下删除被占用文件会失败），
-	// 删除失败时由 executeDownload 的取消路径（removeTaskDir）兜底。
-	// 兜底清理：失败不阻断取消（executeDownload 的取消路径会重试），但**不得静默**（可观测）。
-	if rerr := m.removeTaskDir(t.Owner, id); rerr != nil {
-		m.logger.Warn("cancel: remove task dir failed (executeDownload 取消路径会兜底重试)",
-			"task_id", id, "error", rerr)
-	}
 
 	// 终态持久化失败会丢失 cancelled 状态（重启后可能被当作 downloading 重启），必须显式报错
 	if err := m.saveTask(t); err != nil {

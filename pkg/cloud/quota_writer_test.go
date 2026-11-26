@@ -715,36 +715,30 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 		t.Fatalf("任务状态=%q want cancelled", snap.Status)
 	}
 
-	// releaseTaskScope 幂等：Scope committed/reserved 精确归零、不反负
+	// 2026-11-26 语义：取消 = 中断 ⇒ 断点与配额都保留（账本必须等于磁盘实际占用）。
 	cloudB := h.quotaBucketFor("alice", "cloud")
 	if cloudB == nil {
 		t.Fatal("alice cloud 桶 Scope 应为非 nil")
 	}
-	if got := cloudB.Usage(); got != 0 {
-		t.Fatalf("cancel 后 cloud 桶 Usage()=%d want 0（已 commit 回拨）", got)
+	if got := cloudB.Usage(); got == 0 {
+		t.Fatal("cancel 后 cloud 桶 Usage()=0：断点仍在盘上，账本不得归零")
 	}
 	if got := cloudB.Reserved(); got != 0 {
-		t.Fatalf("cancel 后 cloud 桶 Reserved()=%d want 0（reserve 释放）", got)
+		t.Fatalf("cancel 后 cloud 桶 Reserved()=%d want 0（写盘已 commit）", got)
 	}
-	if got := h.quotaFor("alice").Usage(); got != 0 {
-		t.Fatalf("cancel 后租户根 Usage()=%d want 0", got)
+	if got := h.quotaFor("alice").Usage(); got == 0 {
+		t.Fatal("cancel 后租户根 Usage()=0：应与 cloud 桶一致保留占用")
 	}
-	// 幂等复调 releaseTaskScope：不得重复回拨（任务已结算）
-	mgr.mu.Lock()
-	realTask := mgr.tasks[task.ID]
-	mgr.mu.Unlock()
-	if realTask != nil {
-		mgr.releaseTaskScope(realTask)
+	// 只有**删除**才释放：DELETE 后账本归零且不反负（releaseTaskScope 是删除路径的原子，
+	// 取消路径不再调用它——取消保留断点与账本）。
+	if derr := mgr.DeleteTask(task.ID, "alice"); derr != nil {
+		t.Fatalf("DeleteTask: %v", derr)
 	}
 	if got := cloudB.Usage(); got != 0 {
-		t.Fatalf("幂等复调后 cloud 桶 Usage()=%d want 0（不重复回拨）", got)
+		t.Fatalf("删除后 cloud 桶 Usage()=%d want 0", got)
 	}
-	if got := cloudB.Reserved(); got != 0 {
-		t.Fatalf("幂等复调后 cloud 桶 Reserved()=%d want 0", got)
-	}
-	// storageMgr 全局账本同步归零（CancelTask 已释放 ReservedSize）
 	if got := sm.Usage(); got != 0 {
-		t.Fatalf("cancel 后 storageMgr Usage()=%d want 0", got)
+		t.Fatalf("删除后 storageMgr Usage()=%d want 0", got)
 	}
 }
 
@@ -868,15 +862,23 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 		t.Fatal("cancel 后下载 goroutine 未退出")
 	}
 
-	// 强断言（立即取值，不轮询）：goroutine 已停止 ⇒ 配额必须已归零。
-	if got := cloudB.Usage(); got != 0 {
-		t.Fatalf("goroutine 退出后 cloud 桶 Usage()=%d want 0（释放须发生在最后一次 commit 之后）", got)
+	// 强断言（立即取值，不轮询）：取消 = 中断 ⇒ 账本等于**磁盘实际占用**（400 字节，
+	// 两块都已 commit 落盘），不得归零（否则账本低于磁盘 = fail-open）。
+	if got := cloudB.Usage(); got != 400 {
+		t.Fatalf("goroutine 退出后 cloud 桶 Usage()=%d want 400（保留断点，账本=磁盘）", got)
 	}
 	if got := cloudB.Reserved(); got != 0 {
 		t.Fatalf("goroutine 退出后 cloud 桶 Reserved()=%d want 0", got)
 	}
-	if got := h.quotaFor("alice").Usage(); got != 0 {
-		t.Fatalf("goroutine 退出后租户根 Usage()=%d want 0", got)
+	if got := h.quotaFor("alice").Usage(); got != 400 {
+		t.Fatalf("goroutine 退出后租户根 Usage()=%d want 400", got)
+	}
+	// 删除才释放。
+	if derr := mgr.DeleteTask(task.ID, "alice"); derr != nil {
+		t.Fatalf("DeleteTask: %v", derr)
+	}
+	if got := cloudB.Usage(); got != 0 {
+		t.Fatalf("删除后 cloud 桶 Usage()=%d want 0", got)
 	}
 
 	// 保留 testutil.WaitFor 版本：观察者（轮询 API）所见最终收敛到全零。

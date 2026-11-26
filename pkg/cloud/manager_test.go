@@ -761,7 +761,10 @@ func TestCloudDownloadManager_CancelStopsDownload(t *testing.T) {
 // TestCloudDownloadManager_CancelCleansUpTaskDir 回归测试：取消下载后任务目录
 // （含 .partial）必须被清理。旧代码只删最终文件，.partial 残留但存储账本已释放
 // 归零，磁盘占用不被记账，可累计突破 max_storage_bytes 配额。
-func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
+// TestCloudDownloadManager_CancelKeepsTaskDirForResume 锁定 2026-11-26 语义：
+// **取消 = 中断**——保留 `.partial` 断点（retry_download 才能续传），不删文件、不归还配额；
+// 文件删除只由 DELETE 任务（或过期清理）负责。
+func TestCloudDownloadManager_CancelKeepsTaskDirForResume(t *testing.T) {
 	// 并行化：本测试不依赖 t.Setenv/全局可变状态。
 	t.Parallel()
 	// 服务端写入少量数据（使 .partial 落盘）后阻塞，等待取消
@@ -812,10 +815,13 @@ func TestCloudDownloadManager_CancelCleansUpTaskDir(t *testing.T) {
 		t.Fatal("download goroutine did not stop after cancel")
 	}
 
-	// 任务目录应被清理（无 .partial/.partial.etag 残留；目录不存在或为空均可）
-	entries, readErr := os.ReadDir(taskDir)
-	if readErr == nil && len(entries) > 0 {
-		t.Fatalf("expected task dir cleaned after cancel, found %d entries", len(entries))
+	// 断点必须保留（取消只是中断）：.partial 仍在，且任务状态为 cancelled。
+	if _, statErr := os.Stat(filepath.Join(taskDir, "cancel.bin.partial")); statErr != nil {
+		t.Fatalf("取消后 .partial 必须保留（否则 retry_download 无法续传）: %v", statErr)
+	}
+	snap, ok := mgr.SnapshotTask(task.ID, "")
+	if !ok || snap.Status != "cancelled" {
+		t.Fatalf("任务应为 cancelled，got %+v", snap)
 	}
 }
 

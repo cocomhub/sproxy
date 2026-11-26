@@ -204,18 +204,22 @@ func TestE2E_CLI_CloudDownloadCancel(t *testing.T) {
 		t.Fatalf("cancel 后状态应为 cancelled, got %q", task.Status)
 	}
 
-	// 磁盘副作用：取消丢弃未完成产物——断言 `slow.bin*` 前缀下**无任何残留**，
-	// 覆盖 slow.bin.partial 与 slow.bin.partial.etag（只断精确名 "slow.bin" 会恒真空转：
-	// 未完成时根本没有 slow.bin 这个文件）。
-	// 清理是 best-effort 且可能异步：CancelTask 先尝试 removeTaskDir，若下载 goroutine
-	// 仍持有文件（Windows 删除被占用文件会失败）则由 executeDownload 的取消路径兜底
-	// （pkg/server/cloud_download.go CancelTask 注释）。故轮询至产物消失（-race 3 倍余量）。
+	// 磁盘副作用（2026-11-26 语义）：**取消 = 中断** ⇒ 未完成产物必须**保留**（断点可续传）；
+	// 只有 `cloud-download delete` 才清理。这里断言取消后 slow.bin* 仍在。
+	var kept []string
+	testutil.WaitFor(t, 30*time.Second, func() bool {
+		kept = findFilesPrefixed(t, env.StorageRoot, "slow.bin")
+		return len(kept) > 0
+	}, "取消后应保留未完成产物（断点），但磁盘上已找不到 slow.bin*")
+
+	// 删除任务 → 残留清理（唯一的清理入口）。
+	env.sclient(t, env.TmpDir, "cloud-download", "delete", "--yes", tid)
 	var leftover []string
 	testutil.WaitFor(t, 30*time.Second, func() bool {
 		leftover = findFilesPrefixed(t, env.StorageRoot, "slow.bin")
 		return len(leftover) == 0
 	}, func() string {
-		return fmt.Sprintf("取消后未完成产物（slow.bin.partial / .partial.etag）应被清理, got %v", leftover)
+		return fmt.Sprintf("删除任务后未完成产物应被清理, got %v", leftover)
 	})
 }
 
