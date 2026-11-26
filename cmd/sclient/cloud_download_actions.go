@@ -35,13 +35,17 @@ func NewCmdCloudDownloadActions(factory clientfactory.Factory, ios cli.IOStreams
 				return nil
 			}
 			tw := tabwriter.NewWriter(ios.Out, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(tw, "动作\t说明\t可用\t原因")
+			fmt.Fprintln(tw, "动作\t说明\t可用\t原因\t参数")
 			for _, a := range task.Actions {
 				ok := "是"
 				if a.Disabled {
 					ok = "否"
 				}
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.Action, a.Label+"（"+a.Hint+"）", ok, a.Reason)
+				need := ""
+				if a.NeedsURL {
+					need = "需要 --url"
+				}
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", a.Action, a.Label+"（"+a.Hint+"）", ok, a.Reason, need)
 			}
 			return tw.Flush()
 		},

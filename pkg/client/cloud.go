@@ -32,6 +32,8 @@ type CloudTaskAction struct {
 	Hint     string `json:"hint"`
 	Disabled bool   `json:"disabled,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// NeedsURL 表示该动作需要额外参数（目前仅 retry_from_url 的 url）。
+	NeedsURL bool `json:"needs_url,omitempty"`
 }
 
 type CloudTask struct {
