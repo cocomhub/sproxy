@@ -841,7 +841,13 @@ func (s *SecretdataFS) runExportAction(ctx context.Context) {
 }
 
 // backend 是 ExternalBackend 实现。
-type backend struct{ fs *SecretdataFS }
+type backend struct {
+	fs *SecretdataFS
+	// settingsStore 是卷设置分区的持久化后端（装配层在 StateStore 就绪后经
+	// SetSettingsStore 注入；nil = 无持久化 ⇒ 分区只读）。接口值用 atomic.Pointer 包装，
+	// 便于装配后替换且读侧无锁。
+	settingsStore settingsStoreField
+}
 
 func (b *backend) FS() syncpkg.FS { return b.fs }
 
