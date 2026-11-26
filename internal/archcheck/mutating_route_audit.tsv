@@ -48,6 +48,7 @@ POST /api/volumes/import	action=volume_import
 POST /api/volumes/move	action=volume_move	
 POST /api/volumes/user	action=user_volume_create	
 PUT /api/config	action=config_update	
+PUT /api/ui/prefs	action=ui_prefs_update	
 DELETE /api/credentials/{ak}	pending	handler=akDeleteHandler actions=NONE
 DELETE /api/credentials/{ak}/sk/{skID}	pending	handler=skDeleteHandler actions=NONE
 DELETE /api/hub/nodes/{id}	pending	handler=hubRemoveNodeHandler actions=NONE

@@ -30,7 +30,7 @@ type BatchDeleteRequest struct {
 	// 为什么需要（缺陷修复 2026-11-26）：Web UI 的「删除所选」走批量族，而批量族**没有软删入口**
 	// ⇒ 同一界面「单条删除可恢复、批量删除不可恢复」，违反「删除必须可恢复」的既定语义。
 	// 缺省 false 保持零回归（CLI/旧客户端行为不变）。
-	Soft bool `json:"soft,omitempty"`
+	Soft *bool `json:"soft,omitempty"`
 }
 
 // BatchDeleteFile 批量删除中的单条文件。
@@ -45,12 +45,15 @@ type BatchDeleteFile struct {
 // 本处理器只做「解析入参 → 调域方法 → 写响应」；全部领域逻辑（文件级互斥、跨卷定位、
 // checksum 门禁、配额/卷池/台账释放、审计）在 write_ops.go 的 DeleteFile 内。
 func (s *Service) Delete(w http.ResponseWriter, r *http.Request) {
+	// soft 语义：显式 `?soft=true` 才软删（历史契约不变——API/CLI 默认仍是硬删）；
+	// **页面级**「默认删除方式」由 Web UI 读 /api/ui/prefs 后显式传入，避免改协议默认值。
+	soft := r.URL.Query().Get("soft") == "true"
 	res, err := s.DeleteFile(r.Context(), DeleteFileInput{
 		Owner:            s.rt.actorOf(r),
 		RemotePath:       r.URL.Query().Get("filename"),
 		ExpectedChecksum: r.Header.Get(headerFileChecksum),
 		ExplicitVol:      r.URL.Query().Get("volume"),
-		SoftDelete:       r.URL.Query().Get("soft") == "true",
+		SoftDelete:       soft,
 	})
 	if err != nil {
 		if he, ok := errors.AsType[*HTTPError](err); ok {
@@ -130,9 +133,11 @@ func (s *Service) BatchDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := s.rt.actorOf(r)
+	// soft：仅当显式传 true 才软删（历史契约不变；页面按用户配置显式传）。
+	soft := req.Soft != nil && *req.Soft
 	results := make([]BatchOperationResult, 0, len(req.Files))
 	for _, f := range req.Files {
-		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f, req.Soft))
+		results = append(results, s.processBatchDeleteItem(r.Context(), owner, f, soft))
 	}
 	s.sendJSON(w, BatchResponse{Results: results}, http.StatusOK)
 }

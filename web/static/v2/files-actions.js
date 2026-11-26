@@ -264,7 +264,10 @@
       message: (isDir ? T('dlg.delDir.msg') : T('dlg.delFile.msg')) + rel,
       danger: true, okText: T('dlg.delete'),
       onOk: function () {
-        var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
+        // 页面按用户配置（设置 → 删除默认方式）**显式**传 soft：
+        // 服务端 API 默认语义保持不变（CLI/脚本零回归），配置只决定页面默认行为。
+        var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true'
+          : '/delete?filename=' + enc(rel) + '&soft=' + (deleteMode() === 'hard' ? 'false' : 'true');
         run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), T('toast.deleted') + name);
       }
     });
@@ -289,6 +292,22 @@
   }
 
   /** 行名 → 相对路径（搜索态 name 已是完整路径，见 v2files.resolveRel）。 */
+  /** 当前「页面默认删除方式」：soft（缺省）/ hard，来自 /api/ui/prefs（设置页写入）。 */
+  var deleteModeCache = 'soft';
+  function deleteMode() { return deleteModeCache === 'hard' ? 'hard' : 'soft'; }
+
+  /** 读取页面配置（失败 = soft 安全默认）。 */
+  function loadDeleteMode() {
+    if (!api) { return Promise.resolve(); }
+    return api.json('GET', '/api/ui/prefs')
+      .then(function (body) {
+        var d = body && body.prefs && body.prefs['delete'];
+        deleteModeCache = (d && d.default_mode === 'hard') ? 'hard' : 'soft';
+      })
+      .catch(function () { deleteModeCache = 'soft'; });
+  }
+  window.v2deleteMode = { mode: deleteMode, reload: loadDeleteMode };
+
   function relOf(name) {
     var sub = view() ? view().subdir() : '';
     var search = !!(view() && view().search && view().search());
@@ -409,7 +428,7 @@
           danger: true, okText: T('dlg.delete'),
           onOk: function () {
             var sub = view() ? view().subdir() : '';
-            // 文件走**批量族**（一次请求，服务端逐条聚合）：带 soft=true 与单条删除语义一致
+            // 文件走**批量族**（一次请求，服务端逐条聚合）：软/硬由服务端按用户配置决定
             // （此前逐个 /delete 串行，N 个文件 = N 次请求；且批量族此前无软删入口）。
             var files = [];
             var dirs = [];
@@ -430,8 +449,9 @@
             }
             if (files.length) {
               chain = chain.then(function () {
+                // 批量族同样按页面配置**显式**传 soft（与单条一致）。
                 return api.json('POST', '/api/batch/delete', {
-                  body: new TextEncoder().encode(JSON.stringify({ soft: true, files: files })),
+                  body: new TextEncoder().encode(JSON.stringify({ soft: deleteMode() !== 'hard', files: files })),
                   contentType: 'application/json'
                 }).then(function (res) {
                   var results = (res && res.results) || [];
