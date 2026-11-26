@@ -1097,7 +1097,11 @@ type Config struct {
 	CloudDownloader    string        `yaml:"cloud_downloader" mapstructure:"cloud_downloader"`
 	CloudTaskTTL       time.Duration `yaml:"cloud_task_ttl" mapstructure:"cloud_task_ttl"`
 	CloudFailedTaskTTL time.Duration `yaml:"cloud_failed_task_ttl" mapstructure:"cloud_failed_task_ttl"`
-	CloudMaxConcurrent int           `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
+	// CloudDiscardPartialOnTransientFailure 关闭「瞬态失败保留断点」（默认 false = 保留）：
+	// 源不可达/限流/认证失败时保留已下字节，使「退回下载阶段续传」真正有效；显式 true 恢复
+	// "失败即删"（空间优先）。语义反转（bool 默认 false 规则）。
+	CloudDiscardPartialOnTransientFailure bool `yaml:"cloud_discard_partial_on_transient_failure" mapstructure:"cloud_discard_partial_on_transient_failure"`
+	CloudMaxConcurrent                    int  `yaml:"cloud_max_concurrent" mapstructure:"cloud_max_concurrent"`
 	// CloudTransferConcurrency 转存并发上限（NM5 独立限流；0/缺省 = 与 cloud_max_concurrent 相同）。
 	CloudTransferConcurrency  int           `yaml:"cloud_transfer_concurrency" mapstructure:"cloud_transfer_concurrency"`
 	CloudMaxBatchURLs         int           `yaml:"cloud_max_batch_urls" mapstructure:"cloud_max_batch_urls"`

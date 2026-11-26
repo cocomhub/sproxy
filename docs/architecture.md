@@ -664,7 +664,9 @@ type StorageInspector interface {
 同一 URL 重提：进行中任务复用；7d 内 failed/cancelled **复活并保留进度**；completed 且转存目标存在 ⇒
 幂等短路。失败任务支持四种人工动作（`POST /api/cloud/tasks/{id}/actions`，见 `docs/api.md`）：
 `retry_download`（退回下载阶段续传）/ `retry_transfer`（仅重做转存，产物须在盘）/ `rotate_source`（换源）/
-`discard_partial`（清残留重下）。
+`discard_partial`（清残留重下）。**断点策略**：瞬态失败（源不可达/限流/认证）默认**保留**已下字节
+（`cloud_discard_partial_on_transient_failure: true` 可改回"失败即删"），因此 `retry_download` 真能续传；
+完整性不符/磁盘满/取消会清理残留，此时动作提示会明确写「从零重新下载（无可续断点）」。
 
 **进度观测**：任务内环形采样（10s 节流、阶段变化立即采样、上限 240 点，随任务持久化）+
 `GET /api/cloud/tasks/{id}/progress?since=` 增量拉取；分块状态经 `pkg/downloader.WithChunkProgress`

@@ -52,7 +52,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// 终态复用（用户 2026-11-26）：同一 URL 再次提交时——
 	//   failed/cancelled（7d 内）⇒ 复活为 pending 并**保留已下载进度**（不再从 0 重下）；
 	//   completed 且转存目标仍存在 ⇒ 幂等短路，直接返回该任务（不重复下载）。
-	if reused := m.reuseTerminalTask(url, owner, params); reused != nil {
+	if reused := m.reuseTerminalTask(url, owner, params, filename); reused != nil {
 		m.logger.Info("resubmit reused terminal task",
 			"url", url, "task_id", reused.ID, "status", reused.Status)
 		return reused, nil
@@ -151,8 +151,8 @@ const resubmitReuseWindow = 7 * 24 * time.Hour
 //
 // 只复用 sameTaskParams 一致的任务：语义不同（transfer/save/download_local/integrity）时
 // 吸收会静默吞掉本次请求意图。
-func (m *CloudDownloadManager) reuseTerminalTask(url, owner string, params TaskParams) *CloudTask {
-	revive, completed := m.collectTerminalCandidates(url, owner, params)
+func (m *CloudDownloadManager) reuseTerminalTask(url, owner string, params TaskParams, filename string) *CloudTask {
+	revive, completed := m.collectTerminalCandidates(url, owner, params, filename)
 	// completed 幂等短路：转存目标必须仍存在（避免"任务 completed 但文件已被删"的假成功）。
 	for _, c := range completed {
 		if m.transferTargetExists(c) {
@@ -165,18 +165,30 @@ func (m *CloudDownloadManager) reuseTerminalTask(url, owner string, params TaskP
 	return m.reviveTerminalTask(revive)
 }
 
+// matchesResubmit 判断已有任务是否与本次提交「同一意图」（URL/可见性/参数/文件名全等）。
+// 文件名不同 = 用户要另一个落盘名，复用会静默沿用旧名（2026-11-26 实测发现）。
+func matchesResubmit(t *CloudTask, url, owner string, params TaskParams, filename string) bool {
+	if t == nil || t.URL != url || !ownerVisible(t.Owner, owner) {
+		return false
+	}
+	if !sameTaskParams(t, params) {
+		return false
+	}
+	return t.Filename == filename
+}
+
 // isRevivableStatus 判断任务状态是否可被「同 URL 重提」复活（失败/取消）。
 func isRevivableStatus(status string) bool {
 	return status == "failed" || status == "cancelled"
 }
 
 // collectTerminalCandidates 收集可复用的终态任务快照（failed/cancelled 取最新，completed 全部）。
-func (m *CloudDownloadManager) collectTerminalCandidates(url, owner string, params TaskParams) (revive *CloudTask, completed []*CloudTask) {
+func (m *CloudDownloadManager) collectTerminalCandidates(url, owner string, params TaskParams, filename string) (revive *CloudTask, completed []*CloudTask) {
 	now := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
-		if t.URL != url || !ownerVisible(t.Owner, owner) || !sameTaskParams(t, params) {
+		if !matchesResubmit(t, url, owner, params, filename) {
 			continue
 		}
 		if isRevivableStatus(t.Status) && now.Sub(t.UpdatedAt) <= resubmitReuseWindow {
@@ -2026,6 +2038,17 @@ func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg str
 	transferStage := strings.HasPrefix(errMsg, "transfer:") ||
 		(len(keepFiles) > 0 && keepFiles[0])
 	if !transferStage {
+		// 瞬态失败保留断点（用户 2026-11-26 实测驱动）：删掉 .partial 会让「退回下载阶段续传」
+		// 实际变成从零重下（实测：取消/失败后任务目录被删 ⇒ retry_download 进度归零）。
+		// 仅当**确实下载过字节**且错误属瞬态（源不可达/限流/认证）才保留；完整性不符/磁盘满/
+		// 未知错误仍删除（坏字节或没空间，留着无意义）。
+		if m.keepPartialOnFail(task, errMsg) {
+			m.cleanupTaskTempsOnFail(task)
+			d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
+			d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
+			d.PartialSize = task.Downloaded
+			return
+		}
 		m.cleanupTaskDirOnFail(task)
 		return
 	}
@@ -2091,4 +2114,22 @@ func (m *CloudDownloadManager) setStage(task *CloudTask, stage string) {
 	id := task.ID
 	m.mu.Unlock()
 	m.markDirty(id)
+}
+
+// keepPartialOnFail 判断下载阶段失败后是否**保留断点**（用户 2026-11-26）。
+//
+// 判据（缺一不可）：
+//   - 未配置 `cloud_discard_partial_on_transient_failure`（默认保留）；
+//   - 确实下载过字节（Downloaded > 0）——否则没有可续内容；
+//   - 失败归类属**瞬态**（源不可达/限流/认证）——完整性不符/磁盘满/未知错误删除（坏字节或没空间）。
+func (m *CloudDownloadManager) keepPartialOnFail(task *CloudTask, errMsg string) bool {
+	if task == nil || m.config.DiscardPartialOnTransientFailure || task.Downloaded <= 0 {
+		return false
+	}
+	switch classifyCloudError(errMsg) {
+	case ErrClassSourceUnreachable, ErrClassThrottled, ErrClassAuth:
+		return true
+	default:
+		return false
+	}
 }
