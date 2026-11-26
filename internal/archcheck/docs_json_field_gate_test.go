@@ -65,6 +65,9 @@ func docJSONFields(t *testing.T) map[string]bool {
 
 // jsonCodeBlocks 抽出 ```json ... ``` 代码块内容。
 func jsonCodeBlocks(doc string) []string {
+	// Windows 工作副本可能是 CRLF（contributor/git 配置差异）——先归一，否则
+	// json 代码块开头永远匹配不到，解析结果为空（下限护栏会红，但根因是行尾）。
+	doc = strings.ReplaceAll(doc, "\r\n", "\n")
 	var out []string
 	rest := doc
 	for {

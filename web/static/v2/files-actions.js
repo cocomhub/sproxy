@@ -409,17 +409,39 @@
           danger: true, okText: T('dlg.delete'),
           onOk: function () {
             var sub = view() ? view().subdir() : '';
-            var chain = Promise.resolve();
+            // 文件走**批量族**（一次请求，服务端逐条聚合）：带 soft=true 与单条删除语义一致
+            // （此前逐个 /delete 串行，N 个文件 = N 次请求；且批量族此前无软删入口）。
+            var files = [];
+            var dirs = [];
             names.forEach(function (name) {
-              chain = chain.then(function () {
-                var info = view() && view().rowInfo(name);
-                var rel = relOf(name);
-                var path = info && info.isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true' : '/delete?filename=' + enc(rel) + '&soft=true';
-                // rmdir 不需要 checksum 头（目录无单一校验和），只有单文件删除需要。
-                var opts = info && info.isDir ? {} : { headers: ops.checksumHeader(info ? info.checksum : '') };
-                return api.json('POST', path, opts);
-              });
+              var info = view() && view().rowInfo(name);
+              var rel = relOf(name);
+              if (info && info.isDir) { dirs.push(rel); return; }
+              files.push({ filename: rel, checksum: info ? info.checksum : '' });
             });
+            var chain = Promise.resolve();
+            if (dirs.length) {
+              // 目录必须逐个 /rmdir（无批量族）；不需要 checksum 头。
+              dirs.forEach(function (rel) {
+                chain = chain.then(function () {
+                  return api.json('POST', '/rmdir?dirname=' + enc(rel) + '&force=true', {});
+                });
+              });
+            }
+            if (files.length) {
+              chain = chain.then(function () {
+                return api.json('POST', '/api/batch/delete', {
+                  body: new TextEncoder().encode(JSON.stringify({ soft: true, files: files })),
+                  contentType: 'application/json'
+                }).then(function (res) {
+                  var results = (res && res.results) || [];
+                  var okN = results.filter(function (r) { return r.success; }).length;
+                  if (okN !== results.length) {
+                    toast('warn', '已删除 ' + okN + '/' + results.length + ' 项（部分失败）');
+                  }
+                });
+              });
+            }
             run(chain, T('toast.deleted') + names.length);
           }
         });
