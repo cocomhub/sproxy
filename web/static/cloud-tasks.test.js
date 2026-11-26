@@ -380,3 +380,11 @@ test('ctRowHtml 失败行含动作控件（v2 不只「重试」）', () => {
   assert.ok(html.includes('ct-action-select'));
   assert.ok(html.includes('ct-retry'));
 });
+
+test('ctActionDisabled 按服务端计划判定（未知动作按禁用处理）', () => {
+  const plan = m.ctActionsFor({ status: 'failed' }); // 下载未完成 ⇒ retry_transfer 禁用
+  assert.strictEqual(m.ctActionDisabled(plan, 'retry_transfer'), true);
+  assert.strictEqual(m.ctActionDisabled(plan, 'retry_download'), false);
+  assert.strictEqual(m.ctActionDisabled(plan, 'no_such_action'), true);
+  assert.strictEqual(m.ctActionDisabled(null, 'retry_download'), true);
+});
