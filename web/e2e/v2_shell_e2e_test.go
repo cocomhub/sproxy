@@ -557,7 +557,8 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
 		t.Fatalf("上传队列行未出现: %v", err)
 	}
-	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "上传中") {
+	// 汇总文案按状态分项（排队 / 上传中 / 暂停 / 失败）：多文件刚投放时至少会有「排队 N」。
+	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "排队") && !strings.Contains(fmt.Sprint(sum), "上传中") {
 		t.Fatalf("上传汇总缺失: %q", sum)
 	}
 	// 队列跑完后容器应隐藏、文件出现。
@@ -565,6 +566,49 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => { const b = document.querySelector('#v2-uploads'); return !b || b.hidden; }", nil,
 		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
 		t.Fatalf("上传队列未清空: %v", err)
+	}
+
+	// ①b 审查回归：小文件（走 uploadSimpleFile，非分块）失败也必须落到 failed 态 ——
+	// 早期只有分块路径处理失败，小文件失败时行永远停在「排队中」（既无原因也无重试）。
+	// 构造：**故障注入**——临时把 api.request 换成恒 reject，再投放一个小文件，
+	// 走的就是 uploadSimpleFile 的失败分支（不依赖服务端配额/校验等外部条件）。
+	if _, err := page.Evaluate(`() => {
+		window.__origRequest = window.v2api.request;
+		window.v2api.request = function () { return Promise.reject(new Error('注入的失败')); };
+		const dt = new DataTransfer();
+		dt.items.add(new File(['x'], 'inject-fail.txt', {type: 'text/plain'}));
+		document.dispatchEvent(new DragEvent('drop', {dataTransfer: dt, bubbles: true, cancelable: true}));
+		return true;
+	}`, nil); err != nil {
+		t.Fatalf("注入失败并投放: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const r = document.querySelector('#v2-uploads .up-row[data-file=\"inject-fail.txt\"]'); return r && r.getAttribute('data-state') === 'failed'; }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(12000)}); err != nil {
+		st, _ := page.Evaluate(`() => { const r = document.querySelector('#v2-uploads .up-row[data-file="inject-fail.txt"]');
+			return r ? r.getAttribute('data-state') + '|' + r.textContent : 'no-row'; }`, nil)
+		t.Fatalf("小文件失败未落到 failed 态（行状态=%v）: %v", st, err)
+	}
+	// 失败行必须给出「重试」并可关闭（不残留）。
+	// 汇总必须**分项**统计：有 1 个失败时不能仍写「上传中 N 项」（自相矛盾）。
+	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "失败 1") {
+		t.Fatalf("上传汇总未分项统计失败数（got %q）", sum)
+	}
+	if hasRetry, _ := page.Evaluate(`() => {
+		const r = document.querySelector('#v2-uploads .up-row[data-file="inject-fail.txt"]');
+		return !!(r && Array.from(r.querySelectorAll('button')).some(b => b.textContent === '重试'));
+	}`, nil); hasRetry != true {
+		t.Fatalf("失败行缺少「重试」按钮")
+	}
+	if _, err := page.Evaluate(`() => {
+		const r = document.querySelector('#v2-uploads .up-row[data-file="inject-fail.txt"]');
+		const b = r && Array.from(r.querySelectorAll('button')).find(x => x.textContent === '关闭');
+		if (b) { b.click(); }
+		// 恢复真实请求层（否则后续上传全部失败）。
+		if (window.__origRequest) { window.v2api.request = window.__origRequest; delete window.__origRequest; }
+		return true;
+	}`, nil); err != nil {
+		t.Fatalf("关闭失败行: %v", err)
 	}
 
 	// ② 窄屏卡片化：≤760px 时文件表转卡片（thead 隐藏、行有边框）。
@@ -589,6 +633,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		if m["rowDisplay"] != "grid" {
 			t.Fatalf("窄屏行应为 grid 卡片，got %v", m["rowDisplay"])
 		}
+	}
+	// 审查回归：操作列必须跨整行（三张表列数不同，用 nth-child 写死列号会让按钮挤在第二列）。
+	if span, err := page.Evaluate(`() => {
+		const tr = document.querySelector('[data-panel=files] table.cards-narrow tbody tr');
+		const act = tr && tr.querySelector('td.actions');
+		if (!act) { return 'missing'; }
+		const cs = getComputedStyle(act);
+		return cs.gridColumnStart + '/' + cs.gridColumnEnd;
+	}`, nil); err != nil {
+		t.Fatalf("读取操作列 grid 跨列: %v", err)
+	} else if txt := fmt.Sprint(span); txt == "missing" || (!strings.Contains(txt, "1") || !strings.Contains(txt, "-1")) {
+		t.Fatalf("窄屏操作列未跨整行（grid-column=%v）", txt)
 	}
 	if err := page.SetViewportSize(1440, 900); err != nil {
 		t.Fatalf("恢复视口: %v", err)

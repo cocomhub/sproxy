@@ -239,27 +239,7 @@
           sumUploads();
           return;
         }
-        // **失败保留行**：说明是哪个文件、失败原因，并给「重试 / 关闭」。
-        item.state = 'failed';
-        item.row.setAttribute('data-state', 'failed');
-        item.info.textContent = '失败：' + ((err && err.message) || T('toast.network'));
-        item.pause.hidden = true;
-        item.cancel.textContent = '关闭';
-        if (!item.retry) {
-          item.retry = document.createElement('button');
-          item.retry.type = 'button';
-          item.retry.className = 'btn btn-sm';
-          item.retry.textContent = '重试';
-          item.retry.addEventListener('click', function () {
-            item.retry.remove(); item.retry = null;
-            item.fill.style.width = '0%';
-            run();
-            sumUploads();
-          });
-          item.cancel.parentNode.insertBefore(item.retry, item.cancel);
-        }
-        sumUploads();
-        toast('bad', T('toast.uploadFailed') + file.name);
+        markFailed(item, file, err, function () { run(); });
       });
     };
     return run();
@@ -344,6 +324,40 @@
     });
   }
 
+  /**
+   * 把一行标成「失败」并挂上重试。
+   *
+   * 为什么抽出来：分块路径与小文件路径**都必须**有失败态 —— 早期只有分块路径处理，
+   * 小文件失败时行永远停在「排队中」（既无原因也无重试），是本次审查发现的真实缺陷。
+   *
+   * @param {object} item 行对象
+   * @param {File} file 源文件
+   * @param {Error} err 失败原因
+   * @param {function} retry 重试回调（重新发起该文件的上传）
+   */
+  function markFailed(item, file, err, retry) {
+    item.state = 'failed';
+    item.row.setAttribute('data-state', 'failed');
+    item.info.textContent = '失败：' + ((err && err.message) || T('toast.network'));
+    item.pause.hidden = true;
+    item.cancel.textContent = '关闭';
+    if (!item.retry) {
+      item.retry = document.createElement('button');
+      item.retry.type = 'button';
+      item.retry.className = 'btn btn-sm';
+      item.retry.textContent = '重试';
+      item.retry.addEventListener('click', function () {
+        item.retry.remove(); item.retry = null;
+        item.fill.style.width = '0%';
+        retry();
+        sumUploads();
+      });
+      item.cancel.parentNode.insertBefore(item.retry, item.cancel);
+    }
+    sumUploads();
+    toast('bad', T('toast.uploadFailed') + file.name);
+  }
+
   /** 队列为空时隐藏容器（多点复用，避免各处重复判断）。 */
   function pruneUploadsBox() {
     var box = el('v2-uploads');
@@ -366,11 +380,21 @@
     if (!box || !sum) { return; }
     var rows = Array.prototype.slice.call(box.querySelectorAll('.up-row'));
     if (!rows.length) { sum.textContent = ''; return; }
-    var done = rows.filter(function (r) { return r.getAttribute('data-state') === 'done'; }).length;
-    var failed = rows.filter(function (r) { return r.getAttribute('data-state') === 'failed'; }).length;
-    var paused = rows.filter(function (r) { return r.getAttribute('data-state') === 'paused'; }).length;
-    var parts = ['上传中 ' + rows.length + ' 项', '失败 ' + failed];
+    var count = function (st) {
+      return rows.filter(function (r) { return r.getAttribute('data-state') === st; }).length;
+    };
+    var queued = count('queued');
+    var running = count('running');
+    var failed = count('failed');
+    var paused = count('paused');
+    // 文案必须**只统计真在上传的**：此前把 failed/paused/queued 都算进「上传中」，
+    // 与旁边的「失败 N」自相矛盾（审查发现的措辞缺陷）。
+    var parts = [];
+    if (running) { parts.push('上传中 ' + running); }
+    if (queued) { parts.push('排队 ' + queued); }
     if (paused) { parts.push('暂停 ' + paused); }
+    if (failed) { parts.push('失败 ' + failed); }
+    if (!parts.length) { parts.push('共 ' + rows.length + ' 项'); }
     sum.textContent = parts.join(' · ');
   }
 
@@ -390,18 +414,32 @@
       return { file: file, item: uploadItem(file) };
     });
     sumUploads();
+    /** 跑一个文件（分块 / 小文件两条路径，失败都被收敛到行上的 failed 态）。 */
+    var attempt = function (pair) {
+      var file = pair.file;
+      var item = pair.item;
+      var isChunked = !!(chunked && file.size > chunked.SIMPLE_LIMIT);
+      if (isChunked) {
+        return uploadChunkedFile(file, sub, vol, item);
+      }
+      if (item) {
+        item.state = 'running';
+        item.row.setAttribute('data-state', 'running');
+        item.pause.hidden = true; // 小文件不可暂停（一次性请求），只留取消
+      }
+      return uploadSimpleFile(file, sub, vol).then(function () {
+        if (item) { item.state = 'done'; item.row.remove(); pruneUploadsBox(); sumUploads(); }
+      }, function (err) {
+        // **小文件失败也要有失败态**（否则行卡在「排队中」）。
+        if (item) { markFailed(item, file, err, function () { attempt(pair); }); }
+      });
+    };
     var chain = Promise.resolve();
     items.forEach(function (pair) {
-      var file = pair.file;
-      chain = chain.then(function () {
-        if (chunked && file.size > chunked.SIMPLE_LIMIT) { return uploadChunkedFile(file, sub, vol, pair.item); }
-        return uploadSimpleFile(file, sub, vol).then(function () {
-          if (pair.item) { pair.item.state = 'done'; pair.item.row.remove(); pruneUploadsBox(); sumUploads(); }
-        });
-      });
+      chain = chain.then(function () { return attempt(pair); })
+        .then(function () { return null; }, function () { return null; }); // 单文件失败不阻断队列
     });
-    chain.then(function () { if (view()) { view().load(); } })
-      .catch(function (err) { toast('bad', T('toast.uploadFailed') + (err && err.message ? err.message : T('toast.network'))); });
+    chain.then(function () { if (view()) { view().load(); } });
   }
 
   function mkdir() {
