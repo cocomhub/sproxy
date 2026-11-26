@@ -54,14 +54,14 @@ func TestSettleArtifactsOnFail_NoRaceWithSaveTask(t *testing.T) {
 	// 写方：失败产物处置（会写 Diagnostics；修复后必须不在此处无锁写 task）。
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			mgr.settleArtifactsOnFail(task, "source unreachable: i/o timeout", nil)
 		}
 	}()
 	// 读方：后台持久化（json.Marshal 读整条 task）。
 	go func() {
 		defer wg.Done()
-		for i := 0; i < rounds; i++ {
+		for range rounds {
 			_ = mgr.saveTask(task)
 		}
 	}()
