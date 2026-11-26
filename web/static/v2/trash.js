@@ -110,8 +110,10 @@
       var tr = document.createElement('tr');
       var name = document.createElement('td');
       name.className = 'mono'; name.textContent = e.name; name.title = e.rel;
+      name.setAttribute('data-label', '名称');
       tr.appendChild(name);
       var vol = document.createElement('td');
+      vol.setAttribute('data-label', '卷');
       if (e.volume) {
         var pill = document.createElement('span');
         pill.className = 'pill pill-info'; pill.textContent = e.volume;

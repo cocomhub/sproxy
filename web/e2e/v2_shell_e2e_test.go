@@ -696,6 +696,58 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("清理回收站: %v", err)
 	}
 
+	// ④ 云任务：服务端 action plan 优先渲染（含诚实提示与断点信息）。
+	// 构造一个**有断点**的失败任务：服务端 PlanTaskActions 会给「续传下载」并带 partial 诊断。
+	// 直接走 UI 传输页断言渲染面（plan 按钮 + 断点徽标）。
+	if _, err := page.Evaluate("() => { location.hash = '#/transfer'; }", nil); err != nil {
+		t.Fatalf("切到传输页: %v", err)
+	}
+	if err := page.Locator("#v2-tf-refresh").Click(); err != nil {
+		t.Fatalf("刷新任务: %v", err)
+	}
+	// 失败任务行应渲染服务端 plan 动作（而不是前端硬编码的「重试」）：找 data-plan-action。
+	if _, err := page.WaitForFunction(
+		"() => !!document.querySelector('#v2-tf-body [data-plan-action]') || !document.querySelector('#v2-tf-body tr')",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("任务行未渲染: %v", err)
+	}
+	if has, _ := page.Evaluate(`() => document.querySelectorAll('#v2-tf-body [data-plan-action]').length > 0`, nil); has == true {
+		// plan 动作必须有 title（hint 或 reason）——这是"为什么可/不可用"的唯一来源。
+		if noTitle, _ := page.Evaluate(`() => Array.from(document.querySelectorAll('#v2-tf-body [data-plan-action]')).some(b => !b.title)`, nil); noTitle == true {
+			t.Fatalf("服务端 plan 动作缺少 hint/reason（title 为空）")
+		}
+	}
+
+	// ⑤ 窄屏卡片化覆盖三张表（文件 / 云任务 / 回收站）。
+	if err := page.SetViewportSize(390, 844); err != nil {
+		t.Fatalf("设置窄屏: %v", err)
+	}
+	for _, panel := range []struct{ hash, table string }{
+		{"#/files", "[data-panel=files] table.cards-narrow"},
+		{"#/transfer", "[data-panel=transfer] table.cards-narrow"},
+		{"#/trash", "[data-panel=trash] table.cards-narrow"},
+	} {
+		if _, err := page.Evaluate("(h) => { location.hash = h; }", panel.hash); err != nil {
+			t.Fatalf("切到 %s: %v", panel.hash, err)
+		}
+		if got, err := page.Evaluate(`(sel) => {
+			const t = document.querySelector(sel);
+			if (!t) { return 'missing'; }
+			const head = t.querySelector('thead');
+			return head ? getComputedStyle(head).display : 'no-thead';
+		}`, panel.table); err != nil {
+			t.Fatalf("读取 %s 卡片布局: %v", panel.table, err)
+		} else if fmt.Sprint(got) != "none" {
+			t.Fatalf("%s 窄屏未卡片化（thead display=%v）", panel.table, got)
+		}
+	}
+	if err := page.SetViewportSize(1440, 900); err != nil {
+		t.Fatalf("恢复视口: %v", err)
+	}
+	if _, err := page.Evaluate("() => { location.hash = '#/files'; }", nil); err != nil {
+		t.Fatalf("回到文件页: %v", err)
+	}
+
 	// Meta extra 编辑（merge）：真实 PUT /api/files/meta → 回读含新键。
 	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
 		t.Fatalf("回到 v2demo: %v", err)

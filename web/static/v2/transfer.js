@@ -111,11 +111,32 @@
     } catch (e) { /* 忽略 */ }
   }
 
+  /** 动作中文名（服务端 plan 的 label 优先；这里只兜底少数固定动作）。 */
+  function actionName(kind, t) {
+    if (Array.isArray(t && t.actions)) {
+      for (var i = 0; i < t.actions.length; i += 1) {
+        if (t.actions[i] && t.actions[i].action === kind) { return t.actions[i].label || kind; }
+      }
+    }
+    var m = { 'delete': '删除', 'retry': '重试', 'cancel': '取消' };
+    return m[kind] || kind;
+  }
+
   function taskAction(kind, t) {
+    // `retry_from_url`（换链接重试）需要用户补 URL —— 这是服务端 plan 里 needs_url 的唯一动作。
+    var extraURL = '';
+    if (kind === 'retry_from_url') {
+      extraURL = window.prompt('换链接重试：请输入新的下载链接（同名文件，断点可能不适用）') || '';
+      if (!extraURL) { return; }
+    }
     window.v2cloudTable.perform(kind, t, api, function (ok, e) {
-      if (ok) { if (window.v2toast) { window.v2toast('ok', '已' + (kind === 'delete' ? '删除' : kind === 'retry' ? '重试' : '取消') + '任务'); } load(); }
-      else if (window.v2toast) { window.v2toast('bad', '操作失败：' + (e.message || e)); }
-    });
+      if (ok) {
+        if (window.v2toast) { window.v2toast('ok', '已执行：' + actionName(kind, t)); }
+        load();
+      } else if (window.v2toast) {
+        window.v2toast('bad', (actionName(kind, t) || '操作') + '失败：' + (e.message || e));
+      }
+    }, extraURL);
   }
 
   function renderGroups() {
