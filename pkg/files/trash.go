@@ -213,10 +213,10 @@ func (s *Service) RestoreTrashIn(ctx context.Context, owner, volumeName, trashRe
 			continue
 		}
 		if err := s.restoreTrashAt(ctx, owner, vr.Volume, vr.Root, trashRel); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
+			s.auditTrash(ctx, "trash_restore", trashRel, auditResultError, "volume="+vr.Volume)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_restore", trashRel, auditResultSuccess, "volume="+vr.Volume)
+		s.auditTrash(ctx, "trash_restore", trashRel, auditResultSuccess, "volume="+vr.Volume)
 		return nil
 	}
 	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
@@ -333,6 +333,12 @@ func restoreTrashMetaSuffix(root *storage.Root, flat, nano string) string {
 	return ""
 }
 
+// auditTrash 是回收站域审计的**唯一出口**（R35-a 棘轮：域内新增动作不得再增加
+// recordFileAudit 散点）。action ∈ trash_restore / trash_purge / trash_empty。
+func (s *Service) auditTrash(ctx context.Context, action, target, result, detail string) {
+	s.rt.recordFileAudit(ctx, action, target, result, detail)
+}
+
 // PurgeTrashEntry 彻底删除**单个**回收站条目（回收站内的删除恒为硬删，不受软删配置影响）。
 //
 // 语义与 EmptyTrash 的逐条目处理一致：先按**原 rel** 释放配额（软删时保留，硬删即对称释放），
@@ -351,10 +357,10 @@ func (s *Service) PurgeTrashEntry(ctx context.Context, owner, volumeName, trashR
 			continue
 		}
 		if err := s.purgeTrashAt(owner, vr.Volume, vr.Root, trashRel); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_purge", trashRel, auditResultError, "volume="+vr.Volume)
+			s.auditTrash(ctx, "trash_purge", trashRel, auditResultError, "volume="+vr.Volume)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_purge", trashRel, auditResultSuccess, "volume="+vr.Volume)
+		s.auditTrash(ctx, "trash_purge", trashRel, auditResultSuccess, "volume="+vr.Volume)
 		return nil
 	}
 	return &HTTPError{Status: 404, Message: "回收站条目不存在"}
@@ -405,10 +411,10 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 		}
 		vol := volumeNameForTenant(s.rt.volSet(), tnt)
 		if err := s.emptyTrashAt(owner, vol, tnt.Root()); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vol)
+			s.auditTrash(ctx, "trash_empty", owner, auditResultError, "volume="+vol)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vol+" scope=default")
+		s.auditTrash(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vol+" scope=default")
 		return nil
 	}
 	roots, rerr := s.TrashRoots(owner, volumeName)
@@ -417,10 +423,10 @@ func (s *Service) EmptyTrashIn(ctx context.Context, owner, volumeName string, al
 	}
 	for _, vr := range roots {
 		if err := s.emptyTrashAt(owner, vr.Volume, vr.Root); err != nil {
-			s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultError, "volume="+vr.Volume)
+			s.auditTrash(ctx, "trash_empty", owner, auditResultError, "volume="+vr.Volume)
 			return err
 		}
-		s.rt.recordFileAudit(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vr.Volume+" all=true")
+		s.auditTrash(ctx, "trash_empty", owner, auditResultSuccess, "volume="+vr.Volume+" all=true")
 	}
 	return nil
 }
