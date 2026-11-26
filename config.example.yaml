@@ -117,7 +117,8 @@ storage_root: "./storage"
 #   #       erasure: false         # XOR parity（k-of-k+1，≥2 分块时纠错；**实验性**，未生产验证，可选）
 #   #       max_file_bytes: 0      # 单文件上限（0=不限；大文件内存防护，见设计 §4.1）
 #   #       block_policy:          # 分块策略（缺省 random 1MB-200MB + 自动选型）
-#   #         mode: "random"       #   块模式（"random" 默认）
+#   #         mode: "random"       #   块模式（"random" 默认；**不接受 "single"** —— 卷级 single 无法
+#   #                              #   表达「超过 64MiB 怎么办」，请用下方 block_rules 规则形态）
 #   #         blocklet_mode: ""    #   视频关键帧分块开关：""（缺省）= 按扩展名自动选型
 #   #                              #   （MP4/MOV→go-mp4、MKV/TS/AVI→ffprobe 若有、否则 fixed）；
 #   #                              #   "fixed" = 关闭关键帧分块（定长 blocklet，可显式禁用）；

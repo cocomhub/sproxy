@@ -167,6 +167,53 @@ func defaultSecretsFS(ctx context.Context, v volume.Volume) (syncpkg.FS, error) 
 // secretdataOptionsFromVolume 注入**存储问题上报器**（可选；nil = 不上报，零回归），并解析/编译
 // extra.block_rules（非法即返回错误，装配期 fail-closed）。
 //
+// validateBlockPolicyMode 校验 `block_policy.mode`：只接受 random/空，**卷级 single 一律拒绝**。
+//
+// 为什么（生产高可用）：single 单块受 `shardseal.MaxSingleBlockBytes`（64 MiB）硬顶约束，
+// 卷级配置无法表达「超过上限怎么办」⇒ 任何 >64MiB 文件都会在写路径末尾失败
+// （`max_upload_bytes` 默认 1 GiB），故障晚到写时才暴露。规则形态（`extra.block_rules` +
+// `max_size`）天然表达「超限落到 random」，是唯一正确写法。
+func validateBlockPolicyMode(v volume.Volume, mode string) error {
+	if mode == "" || mode == shardseal.BlockModeRandom {
+		return nil
+	}
+	if mode == shardseal.BlockModeSingle {
+		return fmt.Errorf("卷 %q 的 block_policy.mode 不接受 %q：卷级 single 无法表达"+
+			"「超过 %d MiB 的文件怎么办」（会让大文件整卷写失败）；请改用 extra.block_rules 的"+
+			" `{path_regex, max_size, mode: single}` 规则（超限文件自动回落 random）",
+			v.Name, mode, shardseal.MaxSingleBlockBytes>>20)
+	}
+	return fmt.Errorf("卷 %q 的 block_policy.mode %q 非法（须为 %q 或留空）",
+		v.Name, mode, shardseal.BlockModeRandom)
+}
+
+// applyBlockRules 解析并编译 `extra.block_rules` 静态基线（失败装配期 fail-closed），
+// 并在「erasure + single 规则」组合下告警（命中 single 的文件无冗余）。
+func applyBlockRules(v volume.Volume, opts *secretdata.Options) error {
+	rules, rerr := vcExtraBlockRules(v)
+	if rerr != nil {
+		return fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, rerr)
+	}
+	if len(rules) == 0 {
+		return nil
+	}
+	compiled, cerr := policy.Compile(policy.Policy{Rules: rules}, opts.Block.Max)
+	if cerr != nil {
+		return fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, cerr)
+	}
+	opts.Policy = compiled
+	if opts.Erasure {
+		for _, r := range rules {
+			if r.Mode == shardseal.BlockModeSingle {
+				slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
+					"volume", v.Name, "path_regex", r.PathRegex)
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // vcExtraBlockRules 解析 extra.block_rules（有序规则列表）。
 //
 // 兼容形态：YAML/JSON 反序列化后是 `[]any` 内 `map[string]any`；也接受已构造好的
@@ -228,35 +275,11 @@ func secretdataOptionsFromVolume(v volume.Volume, rep secretdata.IssueReporter) 
 		// 上游调用开销（含 baidupcs 每块 exec 一次二进制）远大于传输本身。
 		UploadConcurrency: vcExtraInt(v, "upload_concurrency"),
 	}
-	// 静态规则基线（extra.block_rules）：编译失败**装配期 fail-closed**——静默忽略会让运维
-	// 以为规则生效（设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md §7）。
-	// block_policy.mode 白名单：未知取值必须在装配期报错，不能静默落进 planner 判定
-	// （`single` 是合法 planner，但受 SinglePlanner 的 64 MiB 硬顶约束）。
-	if m := opts.Block.Mode; m != "" && m != shardseal.BlockModeRandom && m != shardseal.BlockModeSingle {
-		return opts, fmt.Errorf("卷 %q 的 block_policy.mode %q 非法（须为 %q 或 %q）",
-			v.Name, m, shardseal.BlockModeRandom, shardseal.BlockModeSingle)
+	if merr := validateBlockPolicyMode(v, opts.Block.Mode); merr != nil {
+		return opts, merr
 	}
-	rules, rerr := vcExtraBlockRules(v)
-	if rerr != nil {
-		return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, rerr)
-	}
-	if len(rules) > 0 {
-		compiled, cerr := policy.Compile(policy.Policy{Rules: rules}, opts.Block.Max)
-		if cerr != nil {
-			return opts, fmt.Errorf("卷 %q 的 extra.block_rules 非法: %w", v.Name, cerr)
-		}
-		opts.Policy = compiled
-		// 规则里出现 single 而卷开了 erasure ⇒ 该文件没有冗余（单块无 parity）。不是错误
-		// （用户可能正要这个效果），但必须在装配期可见，避免事后才发现「以为有冗余」。
-		if opts.Erasure {
-			for _, r := range rules {
-				if r.Mode == shardseal.BlockModeSingle {
-					slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
-						"volume", v.Name, "path_regex", r.PathRegex)
-					break
-				}
-			}
-		}
+	if berr := applyBlockRules(v, &opts); berr != nil {
+		return opts, berr
 	}
 	// 可观测性（设计 §10「静默失效」缓解）：命中与未命中都上报，装配层接日志/指标。
 	// nil 回调 = 不上报，但**装配层恒注入**——否则「规则为什么没生效」无从排查。

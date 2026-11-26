@@ -377,6 +377,30 @@ func (h *Handlers) forgetVolumeSettings(ctx context.Context, name string) {
 	})
 }
 
+// volumeSettingsRefresh 让支持持久化注入的后端**重新载入**卷设置（多实例收敛入口）。
+//
+// 为什么挂在 refresh 上（审查 P1-2）：多实例共享 StateStore 时，A 保存规则后 B 仍用旧规则写
+// ⇒ 同卷不同实例产出不同块布局（读不出错，但确定性/秒传命中率下降）。`POST /api/volumes/refresh`
+// 是全仓既有的运维收敛通道（本进程外改动收敛），在这里顺带重载规则不需要新 API、不需要新 CLI。
+//
+// 未实现 SettingsStoreSetter 的卷 ⇒ no-op（nil）。
+func (h *Handlers) volumeSettingsRefresh(ctx context.Context, name string) error {
+	be := h.volSet.External(name)
+	if be == nil {
+		return nil
+	}
+	setter, ok := be.(registry.SettingsStoreSetter)
+	if !ok {
+		return nil
+	}
+	// 重载 = 重新注入同一个 store（后端在 SetSettingsStore 内 Load 最新版本并 SetPolicy）。
+	if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
+		return fmt.Errorf("重载卷设置失败: %w", err)
+	}
+	slog.Info("volume settings: refresh 触发规则重载", "volume", name)
+	return nil
+}
+
 // settingsStateStore 返回卷设置用的持久化后端：优先装配好的 StateStore，其次本地兜底。
 //
 // **必须显式判 nil 再赋值**（不能 `st := h.stateStore; if st == nil { st = h.volumeSettingsLocalStore }`）：

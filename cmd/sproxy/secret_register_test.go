@@ -1803,12 +1803,13 @@ func TestVcExtraBlockPolicy_ModeWhitelist(t *testing.T) {
 	if !strings.Contains(err.Error(), "mode") {
 		t.Fatalf("错误应指出 mode 非法: %v", err)
 	}
-	// single 合法（受规划器硬顶约束）
+	// 卷级 single **不再合法**（改为经 block_rules 表达，见
+	// TestSecretdataOptions_VolumeLevelSingleRejected）；这里只锁 random 仍合法。
 	ok := volume.Volume{Name: "v2", Extra: map[string]any{
-		"block_policy": map[string]any{"mode": "single", "min": 1, "max": 1 << 20},
+		"block_policy": map[string]any{"mode": "random", "min": 1, "max": 1 << 20},
 	}}
 	if _, oerr := secretdataOptionsFromVolume(ok, nil); oerr != nil {
-		t.Fatalf("single 应合法: %v", oerr)
+		t.Fatalf("random 应合法: %v", oerr)
 	}
 }
 
@@ -1822,5 +1823,34 @@ func TestBlockModeResolvedCallbackWired(t *testing.T) {
 	}
 	if opts.OnBlockModeResolved == nil {
 		t.Fatal("装配层必须注入 OnBlockModeResolved（nil ⇒ 命中/未命中全不可观测）")
+	}
+}
+
+// TestSecretdataOptions_VolumeLevelSingleRejected 锁定**卷级** `block_policy.mode: single`
+// 在装配期 fail-closed（生产高可用，审查 P1-1）。
+//
+// 为什么拒绝：卷级 single 不携带「超过 64 MiB 怎么办」的语义 ⇒ 任何 >64MiB 文件上传都在
+// 写路径末尾失败（`max_upload_bytes` 默认 1GiB），故障晚到写时且只有运行期日志可见。
+// 规则形态（block_rules + max_size）天然表达「超限落到 random」，是唯一正确表达方式。
+func TestSecretdataOptions_VolumeLevelSingleRejected(t *testing.T) {
+	t.Parallel()
+	v := volume.Volume{Name: "vault", Extra: map[string]any{
+		"block_policy": map[string]any{"mode": "single", "min": 1, "max": 1 << 20},
+	}}
+	_, err := secretdataOptionsFromVolume(v, nil)
+	if err == nil {
+		t.Fatal("卷级 mode: single 应装配期拒绝（>64MiB 文件会整卷写失败）")
+	}
+	if !strings.Contains(err.Error(), "block_rules") {
+		t.Fatalf("错误应指向 block_rules 的正确写法: %v", err)
+	}
+	// 规则形态仍然合法（single 经 block_rules + max_size 表达）
+	ok := volume.Volume{Name: "v2", Extra: map[string]any{
+		"block_rules": []any{map[string]any{
+			"path_regex": `^archive/`, "max_size": "20MiB", "mode": "single",
+		}},
+	}}
+	if _, oerr := secretdataOptionsFromVolume(ok, nil); oerr != nil {
+		t.Fatalf("规则形态的 single 应合法: %v", oerr)
 	}
 }
