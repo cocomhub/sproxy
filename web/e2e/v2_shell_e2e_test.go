@@ -1571,6 +1571,57 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "#v2-tf-body tr", playwright.WaitForSelectorStateVisible, 10000); err != nil {
 		t.Fatalf("任务列表未渲染: %v", err)
 	}
+	// 分页：列表请求必须带 limit/offset（此前固定 limit 且忽略 total ⇒ 静默截断 + 假计数）；
+	// 状态筛选必须**下推服务端**（本地过滤只能看到已加载子集，计数会低估）。
+	var taskListURLs []string
+	page.OnRequest(func(r playwright.Request) {
+		if strings.Contains(r.URL(), "/api/cloud/tasks?") && !strings.Contains(r.URL(), "/progress") {
+			taskListURLs = append(taskListURLs, r.URL())
+		}
+	})
+	if err := page.Locator("#v2-tf-refresh").Click(); err != nil {
+		t.Fatalf("刷新以捕获分页请求: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-tf-loaded') && document.querySelector('#v2-tf-loaded').textContent !== ''", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("任务列表未显示「已加载」文案: %v", err)
+	}
+	if loaded, _ := page.Locator("#v2-tf-loaded").TextContent(); !strings.Contains(loaded, "条") {
+		t.Fatalf("已加载文案应含条数: %q", loaded)
+	}
+	sawLimit := false
+	for _, u := range taskListURLs {
+		if strings.Contains(u, "limit=100") {
+			sawLimit = true
+		}
+	}
+	if !sawLimit {
+		t.Fatalf("任务列表请求未带分页参数 limit=100: %v", taskListURLs)
+	}
+	// 失败 chip ⇒ status=failed 下推。
+	if err := page.Locator("[data-tf=failed]").Click(); err != nil {
+		t.Fatalf("点失败筛选: %v", err)
+	}
+	sawStatus := false
+	for i := 0; i < 40 && !sawStatus; i++ {
+		for _, u := range taskListURLs {
+			if strings.Contains(u, "status=failed") {
+				sawStatus = true
+			}
+		}
+		if !sawStatus {
+			<-time.After(100 * time.Millisecond)
+		}
+	}
+	if !sawStatus {
+		t.Fatalf("失败筛选未下推服务端（请求未带 status=failed）: %v", taskListURLs)
+	}
+	// 复位到「全部」，后续断言依赖全量列表。
+	if err := page.Locator("[data-tf='']").Click(); err != nil {
+		t.Fatalf("复位全部筛选: %v", err)
+	}
+
 	if _, err := page.WaitForFunction(
 		"() => Array.from(document.querySelectorAll('#v2-tf-body tr')).some(r => r.textContent.includes('pv.txt') && r.textContent.includes('预览'));",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
