@@ -642,6 +642,35 @@ type StorageInspector interface {
 - **未实现能力的卷** ⇒ `501 not_inspectable`，绝不返回空结果（空结果会被误读为「没有落点」）。
 - 设计：`docs/archive/2026-11-04-secretdata-storage-inspection.md`。
 
+## 云下载内核（PikPak hybrid）与任务处理
+
+**同一内核、两个入口**：sproxy 云端下载与 CLI `pikget` 共用 `pkg/volume/ext/pikpak` 的
+`HybridDownloader`（分片规划 / manifest / GCID 校验 / 416 边界探测 / 账号回落 / 进度 WAL 均为一份实现）。
+默认参数由 `TestPikpakHybridDefaults_MatchPikget` 锁定一致，任一侧改默认值未同步即红灯。
+
+- **分享优先**：`[0, shareEnd)` 走匿名分享直链（免账号配额、更快），其余走账号区；分享段失败才降级账号。
+  `shareEnd` 由 416 边界探测决定（`share_ratio=0` = auto），**边界可落在 1 MiB 子块内部**——
+  一个 chunk 跨越边界时拆成「分享段 + 账号段」两段下载。
+- **1 MiB 子块续传**：manifest 记 `blocks` 位图（每 chunk ≤64 位），中断后只补缺失子块，
+  连续缺失合并成一次 Range；旧 manifest（无位图）按整块未完成处理（零回归）。
+- **chunk 自适应**：`chunk_size=0`（默认）⇒ 取满足 `ceil(total/chunk) ≤ 20` 的最小 2^k MiB
+  （2–64 MiB），页面「一行一个 chunk」恒 ≤20 行；续传沿用 manifest 记录的几何（防 offset 错位）。
+- **完整性**：整文件完成后按候选块大小复算 GCID 与权威 hash 比对；失配默认**清续传状态从零重下一次**
+  （`disable_reset_on_gcid_mismatch` 可关），仍失配则按 `content_mismatch` 保留产物转人工。
+- **损坏定点修复**：`downloader.Rebuilder` 能力（`RebuildTo`）——`completed+damaged` 任务先做
+  零尾扫描 + 定点补片，修好跳过整份下载，失败回落整份下载。
+
+**任务生命周期与人工处理**：`pending → downloading → completed | failed | cancelled`（失败保留 7d）。
+同一 URL 重提：进行中任务复用；7d 内 failed/cancelled **复活并保留进度**；completed 且转存目标存在 ⇒
+幂等短路。失败任务支持四种人工动作（`POST /api/cloud/tasks/{id}/actions`，见 `docs/api.md`）：
+`retry_download`（退回下载阶段续传）/ `retry_transfer`（仅重做转存，产物须在盘）/ `rotate_source`（换源）/
+`discard_partial`（清残留重下）。
+
+**进度观测**：任务内环形采样（10s 节流、阶段变化立即采样、上限 240 点，随任务持久化）+
+`GET /api/cloud/tasks/{id}/progress?since=` 增量拉取；分块状态经 `pkg/downloader.WithChunkProgress`
+（ctx 通道，按任务隔离）上报，驱动 v2 速率曲线与 1 MiB 块矩阵。指标：
+`sproxy_cloud_task_actions_total{action,result}`、`sproxy_cloud_task_failed_total{reason}`。
+
 ## 统一转存（归档 = 转存 + 预处理）
 
 **单一管道**：`源(source) → [可选预处理] → 目标卷(destination)`。无预处理 = 纯转存（individual）；
