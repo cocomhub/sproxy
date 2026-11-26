@@ -6,6 +6,7 @@ package cloud
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,5 +308,44 @@ func TestApplyTaskAction_ClearsChunkMatrixOnRedownload(t *testing.T) {
 	mgr.mu.RUnlock()
 	if got != 0 {
 		t.Fatalf("重下应清空旧块矩阵，got %d 块", got)
+	}
+}
+
+// TestRetryDownloadHint_Honest 锁定「续传下载」提示必须反映磁盘真实情况
+// （2026-11-26 实测：取消后残留已删，提示不能再说"从断点继续"）。
+func TestRetryDownloadHint_Honest(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		task *CloudTask
+		want string
+	}{
+		{"有保留断点", &CloudTask{Status: "failed", Diagnostics: &TaskDiagnostics{PartialSize: 15 << 20}},
+			"保留已下载部分，从断点继续（不重下已完成块）"},
+		{"产物已完整（转存失败）", &CloudTask{Status: "failed", DownloadDone: true, Diagnostics: &TaskDiagnostics{PartialSize: 64 << 20}},
+			"重新下载整个文件（产物已完整时请改用「仅重做转存」，避免重复下载）"},
+		{"取消已清理残留", &CloudTask{Status: "cancelled", Downloaded: 9 << 20},
+			"从零重新下载（无可续断点：上次结束时残留已清理）"},
+		{"从未下载", &CloudTask{Status: "failed"}, "从零重新下载（无可续断点：上次结束时残留已清理）"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := retryDownloadHint(c.task); got != c.want {
+				t.Fatalf("hint = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestPlanTaskActions_HintWired 锁定计划里用的是诚实提示（不是固定文案）。
+func TestPlanTaskActions_HintWired(t *testing.T) {
+	t.Parallel()
+	plan := PlanTaskActions(&CloudTask{Status: "failed"})
+	if len(plan) == 0 || plan[0].Action != TaskActionRetryDownload {
+		t.Fatalf("首个动作应为 retry_download: %+v", plan)
+	}
+	if !strings.Contains(plan[0].Hint, "无可续断点") {
+		t.Fatalf("无断点时应明确提示从零重下，got %q", plan[0].Hint)
 	}
 }
