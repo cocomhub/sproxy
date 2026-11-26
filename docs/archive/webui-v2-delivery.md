@@ -344,3 +344,67 @@ type spanFetchResult struct {
 
 **同一个返回位不要表达两种语义**。"已解密明文" 与 "密文区间" 是两种东西，用 `[]byte` + 一个
 隐含约定就必然有人（包括自己）接错。宁可多一个结构体字段，也不要靠注释约定。
+
+## 2026-11-27 修 `pkg/cloud` 失败路径数据竞争（-race 命中）
+
+CI `Test(windows)` / `Test(ubuntu,+Vault)` 的 `-race` 报（#1301 阶段首次出现）：
+
+```
+WARNING: DATA RACE
+Read at ... reflect.Value.Int() / encoding/json/v2.makeStructArshaler
+  ← CloudDownloadManager.saveTask → json.Marshal(t)   (manager_persist.go)
+  ← flushDirty → flushLoop                            (manager_lifecycle.go)
+Previous write at ...
+  ← settleArtifactsOnFail                             (manager_task.go)
+  ← failTask → handleDownloadDone → executeDownload
+```
+
+### 根因：约定存在但被违反
+
+仓内既有约定（`task_diagnostics.go`）：
+
+```go
+// noteStage 记录阶段（幂等…）。调用方须持有 m.mu。
+// noteFailure 记录一次失败…。调用方须持有 m.mu。
+```
+
+`failTask` 也确实在 `m.mu.Lock()` 内调用了 `noteStage` / `noteFailure`；**但** `m.mu.Unlock()`
+之后又调 `settleArtifactsOnFail`，而它写 `task.Diagnostics.PartialPath/PartialSize`
+（+ `task.diag()` 可能新建 `Diagnostics`）—— **无锁写 task 字段**。
+
+`saveTask` 的 `m.mu.RLock(); json.Marshal(t)` 保护不了「根本不持锁的写方」。
+
+### 修复：拆成三步，把 task 字段写入收回锁内
+
+```go
+// ① 纯决策（只读 task，锁内调用）
+type artifactSettlePlan struct { keepPartial, keepAll, wipe bool }
+func (m *CloudDownloadManager) planArtifactSettle(task, errMsg, keepFiles) artifactSettlePlan
+
+// ② 写诊断（锁内；调用方须持 m.mu —— 与 noteStage/noteFailure 同一约定）
+func noteArtifactDiagnostics(task *CloudTask, plan artifactSettlePlan, taskDir string)
+
+// ③ 文件系统清理（**锁外**；只收目录参数，不读不写 task 字段）
+func (m *CloudDownloadManager) applyArtifactSettle(plan, owner, id, filename string)
+```
+
+`failTask`：锁内 `plan := m.planArtifactSettle(...)` + `noteArtifactDiagnostics(...)` → 解锁 →
+`m.applyArtifactSettle(plan, owner, id, filename)`。
+
+顺带把两个清理 helper 从「收 task」改为「收目录参数」（`cleanupTaskDirOnFailDir` /
+`cleanupTaskTempsOnFailDir`）：锁外执行时不再读 task 字段（读 `Owner`/`ID` 虽不可变、
+但传参更明确）。按「一种能力只留一个真身」删掉原来的薄委托（unused 门禁也会拦）。
+
+### 验证与变异
+
+- 红：`TestSettleArtifactsOnFail_NoRaceWithSaveTask` —— 两个 goroutine 各 200 轮并发驱动
+  `settleArtifactsOnFail` 与 `saveTask`，`-race` 立刻报
+  `Read at … / Previous write at …`（与 CI 同型）。
+- 绿：修复后同一用例无告警；`go test ./pkg/cloud -race -count=2` 全绿。
+- 变异命中：把 `noteArtifactDiagnostics` 移出锁（`Unlock()` 之后调用）⇒ `-race` 三处报错。
+
+### 教训
+
+**"注释里的约定"必须变成结构上的约束**。`noteStage`/`noteFailure` 的注释写明了「须持有 m.mu」，
+但只要有一条路径在解锁后碰 task，竞争就成立。判据：**凡是写 task 字段的代码，要么在锁内，
+要么接收值参数**——后者能从签名上一眼看出来（`...Dir(taskDir string)` vs `(task *CloudTask)`）。

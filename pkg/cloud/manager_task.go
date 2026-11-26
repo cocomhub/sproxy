@@ -1554,6 +1554,11 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 		task.noteStage("downloading")
 	}
 	task.noteFailure(errMsg, actual, task.partialRelPath())
+	// 产物处置的**决策 + 诊断写入**必须在锁内：`flushDirty → saveTask` 会在 RLock 下
+	// json.Marshal(task)，而无锁写 task 字段会被竞争检测抓到（2026-11-26 CI 命中）。
+	// 文件系统清理耗时不持锁（见 applyArtifactSettle）。
+	plan := m.planArtifactSettle(task, errMsg, keepFiles)
+	noteArtifactDiagnostics(task, plan, m.TaskDirFor(task.Owner, task.ID))
 	task.UpdatedAt = time.Now()
 	task.ExpiresAt = time.Now().Add(m.config.FailedTaskTTL)
 	m.mu.Unlock()
@@ -1569,7 +1574,8 @@ func (m *CloudDownloadManager) failTask(task *CloudTask, errMsg string, keepFile
 	// 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
 	// keepFiles=true（转存失败场景）：已下载完整产物保留（Save 可取用/重试），不清理。
 	// 保留产物策略（2026-11-24 用户裁定）：失败不得直接删掉已下载的产物。
-	m.settleArtifactsOnFail(task, errMsg, keepFiles)
+	// **锁外**只做文件系统动作（plan 已定型，不读不写 task 字段）。
+	m.applyArtifactSettle(plan, task.Owner, task.ID, task.Filename)
 }
 
 // failTaskOnStorageFull 处理失败路径中「磁盘占用超占位且 TryReserve 失败」的分支：
@@ -1626,9 +1632,11 @@ func (m *CloudDownloadManager) reconcileFailureQuota(task *CloudTask, actual int
 	}
 }
 
-// cleanupTaskDirOnFail 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
-func (m *CloudDownloadManager) cleanupTaskDirOnFail(task *CloudTask) {
-	taskDir := m.TaskDirFor(task.Owner, task.ID)
+// cleanupTaskDirOnFailDir 保留 .partial 供 ResumeTask 续传，仅清理临时文件与空目录。
+//
+// 收**目录参数**而非 task：调用方（失败处置）在**锁外**执行清理，已在锁内取出
+// owner/id/filename，避免清理期间再读 task 字段（与后台持久化并发 ⇒ 数据竞争）。
+func (m *CloudDownloadManager) cleanupTaskDirOnFailDir(taskDir, taskID string) {
 	if taskDir == "" {
 		return
 	}
@@ -1651,7 +1659,7 @@ func (m *CloudDownloadManager) cleanupTaskDirOnFail(task *CloudTask) {
 	}
 	if !hasPartial {
 		if err := os.RemoveAll(taskDir); err != nil {
-			m.logger.Warn("failed to clean up task dir on fail", "task_id", task.ID, "error", err)
+			m.logger.Warn("failed to clean up task dir on fail", "task_id", taskID, "error", err)
 		}
 	}
 }
@@ -1848,7 +1856,7 @@ func (m *CloudDownloadManager) failTaskWithTransfer(task *CloudTask, destPath st
 		stored.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()
-	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFail 删完整文件）。
+	// H1：转存失败保留已下载完整产物（keepFiles=true，不调 cleanupTaskDirOnFailDir 删完整文件）。
 	m.failTask(task, "transfer: "+terr.Error(), true)
 	// W5：save=false 一律删 cloud 桶（用户裁定——save 控制 cloud 副本存在性，与成败无关）。
 	// 注意：清理须是最后一步（删除后不再有桶文件操作）。用户裁定还要求：若要归档，
@@ -2007,10 +2015,11 @@ func (m *CloudDownloadManager) releaseIntegrityRetryBytes(task *CloudTask, resul
 	m.releaseDownloadedBytes(task, diskSize)
 }
 
-// cleanupTaskTempsOnFail 失败时**只清理临时文件**，保留已下载产物与 .partial
+// cleanupTaskTempsOnFailDir 失败时**只清理临时文件**，保留已下载产物与 .partial
 // （用户裁定 2026-11-24：转存/完整性失败不得直接删文件，应留给人工或换源重试）。
-func (m *CloudDownloadManager) cleanupTaskTempsOnFail(task *CloudTask) {
-	taskDir := m.TaskDirFor(task.Owner, task.ID)
+//
+// 收目录参数而非 task（理由同 cleanupTaskDirOnFailDir：锁外执行，不再读 task 字段）。
+func (m *CloudDownloadManager) cleanupTaskTempsOnFailDir(taskDir string) {
 	if taskDir == "" {
 		return
 	}
@@ -2028,38 +2037,81 @@ func (m *CloudDownloadManager) cleanupTaskTempsOnFail(task *CloudTask) {
 	}
 }
 
-// settleArtifactsOnFail 按错误类别处置失败任务的产物（保留 / 只清临时 / 整体清理）。
+// artifactSettlePlan 是「失败产物处置」的**纯决策结果**（不碰 task，便于持锁计算、锁外执行）。
 //
-// 决策（用户裁定 2026-11-24）：只有 `disk_full` 需要腾空间 ⇒ 整体清理；其余失败保留产物与
-// `.partial`（慢源下几小时的下载不应被清空），并把产物目录记入诊断供事项通知人工。
-// 调用方 `keepFiles=true`（转存失败）时同样保留。
-func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg string, keepFiles []bool) {
-	// 决策依据是**失败阶段**而非错误类别（用户 2026-11-25 裁定）：
-	//   - **转存阶段失败**（errMsg 前缀 "transfer:"，或调用方显式 keepFiles）：下载产物是正确的，
-	//     保留供直接重试/复传，避免慢源重下（此前 1.24 GiB 白跑两轮）；
-	//   - **下载阶段失败**（含完整性校验失败、源不可达、限流等）：云端桶里的残留（.partial /
-	//     半成品）继续占用空间（实测空间不足是批量失败的主因）⇒ **删除**，让后续任务有空间跑。
+// 为什么拆成三步（2026-11-26 修数据竞争）：
+//  1. `planArtifactSettle` 只读 task 并给出决策（持锁调用）；
+//  2. `noteArtifactDiagnostics` 在**锁内**写诊断字段（task 字段写入必须持 m.mu——与
+//     `task_diagnostics.go` 的 noteStage/noteFailure 同一约定）；
+//  3. `applyArtifactSettle` 在**锁外**做文件系统清理（慢 I/O 不占锁，且不再触碰 task 字段）。
+//
+// 此前三步揉在一个 `settleArtifactsOnFail` 里、且在 `m.mu.Unlock()` 之后写
+// `task.Diagnostics.PartialPath/PartialSize` ⇒ 与 `flushDirty → saveTask`（RLock 下
+// json.Marshal）构成数据竞争（CI -race 命中）。
+type artifactSettlePlan struct {
+	// keepPartial 保留 .partial 断点（瞬态失败），只清临时文件。
+	keepPartial bool
+	// keepAll 保留全部产物（转存阶段失败），只清临时文件。
+	keepAll bool
+	// wipe 整体清理（磁盘满，需要腾空间）。
+	wipe bool
+}
+
+// planArtifactSettle 按错误类别决定产物处置。**只读 task，不写**（可在锁内调用）。
+//
+// 决策依据是**失败阶段**而非错误类别（用户 2026-11-25 裁定）：
+//   - **转存阶段失败**（errMsg 前缀 "transfer:"，或调用方显式 keepFiles）：下载产物是正确的，
+//     保留供直接重试/复传，避免慢源重下（此前 1.24 GiB 白跑两轮）；
+//   - **下载阶段失败**（含完整性校验失败、源不可达、限流等）：云端桶里的残留（.partial /
+//     半成品）继续占用空间（实测空间不足是批量失败的主因）⇒ **删除**，让后续任务有空间跑；
+//     但瞬态失败（确实下载过字节 + 源不可达/限流/认证）**保留 .partial** 供续传
+//     （用户 2026-11-26 实测：删掉会让「退回下载阶段续传」变成从零重下）。
+func (m *CloudDownloadManager) planArtifactSettle(task *CloudTask, errMsg string, keepFiles []bool) artifactSettlePlan {
 	transferStage := strings.HasPrefix(errMsg, "transfer:") ||
 		(len(keepFiles) > 0 && keepFiles[0])
-	if !transferStage {
-		// 瞬态失败保留断点（用户 2026-11-26 实测驱动）：删掉 .partial 会让「退回下载阶段续传」
-		// 实际变成从零重下（实测：取消/失败后任务目录被删 ⇒ retry_download 进度归零）。
-		// 仅当**确实下载过字节**且错误属瞬态（源不可达/限流/认证）才保留；完整性不符/磁盘满/
-		// 未知错误仍删除（坏字节或没空间，留着无意义）。
-		if m.keepPartialOnFail(task, errMsg) {
-			m.cleanupTaskTempsOnFail(task)
-			d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
-			d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
-			d.PartialSize = task.Downloaded
-			return
+	if transferStage {
+		return artifactSettlePlan{keepAll: true}
+	}
+	if m.keepPartialOnFail(task, errMsg) {
+		return artifactSettlePlan{keepPartial: true}
+	}
+	return artifactSettlePlan{wipe: true}
+}
+
+// noteArtifactDiagnostics 把产物目录写进诊断。**调用方须持有 m.mu**（task 字段写入）。
+func noteArtifactDiagnostics(task *CloudTask, plan artifactSettlePlan, taskDir string) {
+	switch {
+	case plan.keepPartial:
+		d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
+		d.PartialPath = taskDir
+		d.PartialSize = task.Downloaded
+	case plan.keepAll:
+		if d := task.Diagnostics; d != nil && d.PartialPath == "" {
+			d.PartialPath = taskDir
 		}
-		m.cleanupTaskDirOnFail(task)
-		return
 	}
-	m.cleanupTaskTempsOnFail(task)
-	if d := task.Diagnostics; d != nil && d.PartialPath == "" {
-		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
+}
+
+// applyArtifactSettle 执行产物清理。**锁外调用**：只做文件系统动作，不读不写 task 字段
+// （参数已由调用方在锁内取出）。
+func (m *CloudDownloadManager) applyArtifactSettle(plan artifactSettlePlan, owner, id, filename string) {
+	taskDir := m.TaskDirFor(owner, id)
+	switch {
+	case plan.keepPartial, plan.keepAll:
+		m.cleanupTaskTempsOnFailDir(taskDir)
+	case plan.wipe:
+		m.cleanupTaskDirOnFailDir(taskDir, filename)
 	}
+}
+
+// settleArtifactsOnFail 是三步式的**便捷组合**（供测试与内部单点调用；调用方**不得**持锁，
+// 因为中间会取锁写诊断）。
+func (m *CloudDownloadManager) settleArtifactsOnFail(task *CloudTask, errMsg string, keepFiles []bool) {
+	m.mu.Lock()
+	plan := m.planArtifactSettle(task, errMsg, keepFiles)
+	noteArtifactDiagnostics(task, plan, m.TaskDirFor(task.Owner, task.ID))
+	m.mu.Unlock()
+	m.applyArtifactSettle(plan, task.Owner, task.ID, task.Filename)
 }
 
 // takeRebuildFirst 取出并清除「先尝试定点修复」标记（每次 resume 只尝试一次）。
