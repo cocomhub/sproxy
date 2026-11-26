@@ -605,6 +605,10 @@ func TestStoragePeriodicScan_RecalculatesUsage(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	cs := checksum.NewChecksumStore(openTestRoot(t, dir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "test.txt")
@@ -641,6 +645,10 @@ func TestStoragePeriodicScan_ScanOnceAfterFileAdd(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	cs := checksum.NewChecksumStore(openTestRoot(t, dir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	sm := NewStorageManager(dir, 1024*1024, cs, testLogger())
 
 	filePath := filepath.Join(dir, "scan-test.txt")

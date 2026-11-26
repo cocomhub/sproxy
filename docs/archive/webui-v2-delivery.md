@@ -408,3 +408,31 @@ os.doInRoot(0x0, ...) <- os.(*Root).MkdirAll <- checksum.(*ChecksumStore).save
 `pkg/storage` **之外**的测试（`pkg/files` / `pkg/server` / `pkg/checksum` …）同样有
 `OpenRoot` 调用点，理论上也会泄漏句柄。本轮只修 `pkg/storage`（CI 实际命中处）+
 提供助手与门禁范式；其余包可按同一模式逐步迁移（需要时把门禁扩到全仓）。
+
+### 追加：同批修掉「debounce 落盘协程」类的 TempDir 清理 flake
+
+`Root.Close()` 修好后，同一 PR 的 CI 露出**下一个** Windows 清理失败（原因不同）：
+
+```
+--- FAIL: TestTrash_RestoreRestoresChecksumLedger
+    TempDir RemoveAll cleanup: unlinkat ...\alice\meta: The directory is not empty.
+```
+
+根因：`checksum.ChecksumStore` 带 **debounce 落盘协程**（`internal/savemerger`）。
+测试创建它但**从不 Close**（31 处调用点全部如此）⇒ 协程在测试结束后仍写一次
+⇒ 与 `t.TempDir()` 的 `RemoveAll` 撞车（`RemoveAll` 已遍历完 meta 目录、随后又冒出文件）。
+
+修复（同一 flake 类必须一起修，否则换个用例又炸）：
+- `pkg/checksum` 6 处调用点补 `t.Cleanup(func(){ _ = cs.Close() })`；
+- `pkg/files` 三个夹具（`dirsEnv` / `externalChunkEnv` / `chunkedTestEnv`）在 `t.Cleanup`
+  里**先停协程、再关 root 句柄**（LIFO 注册顺序）；
+- `pkg/cloud` 夹具同理（遍历已建 store 逐个 Close）；
+- `pkg/server`（`integration_test` / `store_test` / `e2e_test` / `verify`）与
+  `pkg/storage/capacity` 逐处补；
+- 新增门禁 `pkg/checksum/TestNewChecksumStore_CallSitesRegisterClose`（源码级 + 下限护栏）。
+  上线即抓到 `pkg/checksum` 自身 6 处遗漏。
+
+变异命中：删掉任一处 `t.Cleanup(... cs.Close())` ⇒ 门禁报「未登记关闭」。
+
+**教训**：修「测试夹具没释放资源」时，**同一类资源（协程 / 句柄 / 监听器）必须一次清干净**，
+否则修完一个 flake 只是让下一个浮出水面 —— 而每轮 CI 都是十分钟级成本。

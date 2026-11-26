@@ -12,7 +12,10 @@ import (
 // newTestStore 构造内存态台账（root=nil ⇒ 只读空台账 + save 报错被日志吞掉，读路径可测）。
 func newTestStore(t *testing.T) *ChecksumStore {
 	t.Helper()
-	return NewChecksumStore(nil, "meta/checksums.json", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cs := NewChecksumStore(nil, "meta/checksums.json", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// debounce 落盘协程（savemerger）必须停，否则测试后仍可能写盘。
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
 }
 
 // TestStore_VolumeKeyedIsolation 钉住卷维度键：不同卷上的**同名文件**各自保留自己的 checksum

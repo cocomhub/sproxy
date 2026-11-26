@@ -15,6 +15,9 @@ import (
 func TestChecksumStore_DeletePrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
 
 	cs.Set("dir1/a.txt", "aaa")
 	cs.Set("dir1/b.txt", "bbb")
@@ -41,6 +44,10 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs2.Close() })
+
 	if _, ok := cs2.Get("dir1/a.txt"); ok {
 		t.Fatal("persisted file still has deleted prefix entry")
 	}
@@ -52,6 +59,9 @@ func TestChecksumStore_DeletePrefix(t *testing.T) {
 func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 	tmpDir := t.TempDir()
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
 
 	cs.Set("from.txt", "fromVal")
 	cs.Set("to.txt", "toVal")
@@ -70,6 +80,10 @@ func TestChecksumStore_Rename_ToExisting(t *testing.T) {
 func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 
@@ -78,6 +92,10 @@ func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs2.Close() })
+
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(all))
@@ -90,6 +108,9 @@ func TestChecksumStore_RecoverFromDisk(t *testing.T) {
 func TestChecksumStore_GetAll_Consistency(t *testing.T) {
 	tmpDir := t.TempDir()
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
 
 	for i := range 100 {
 		cs.Set(fmt.Sprintf("f%d", i), fmt.Sprintf("cs%d", i))

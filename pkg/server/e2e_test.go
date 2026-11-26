@@ -507,6 +507,10 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	cs := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.Set("k1", "v1")
 	cs.Set("k2", "v2")
 	if err := cs.Flush(); err != nil { // 写合并窗口内需显式 flush，才代表「已完成落盘」的崩溃语义
@@ -519,6 +523,10 @@ func TestChaos_ChecksumStoreCrashAtomic(t *testing.T) {
 
 	// 新实例: 应清理 .tmp 并正确加载已持久化的 .json
 	cs2 := checksum.NewChecksumStore(openRootForTest(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs2.Close() })
+
 	all := cs2.GetAll()
 	if len(all) != 2 {
 		t.Fatalf("expected 2 entries, got %d; tmp residue was not cleaned", len(all))

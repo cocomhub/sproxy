@@ -93,6 +93,10 @@ func (f *tenantFixture) reloadStore(t *testing.T) {
 func (f *tenantFixture) openStore(t *testing.T) *checksum.ChecksumStore {
 	t.Helper()
 	cs := checksum.NewChecksumStore(f.tnt.Root(), "meta/checksums.json", testLogger())
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }

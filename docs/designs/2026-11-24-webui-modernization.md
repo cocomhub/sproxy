@@ -564,8 +564,10 @@
     `m.mu.Unlock()` 之后写 `task.Diagnostics`，而后台 `flushDirty → saveTask` 在 RLock 下
     `json.Marshal(task)` ⇒ 数据竞争（RLock 保护不了不持锁的写方）。判据可执行：
     `...Dir(taskDir string)` 比 `(task *CloudTask)` 更能一眼看出"锁外安全"。
-20. **测试夹具必须显式关闭持有系统资源的句柄**：`os.Root` 持目录 fd 且**无 finalizer**，
-    漏关在 Windows 上会让 `t.TempDir()` 的 `RemoveAll` 失败。做法：统一测试助手
+20. **测试夹具必须显式关闭**持有系统资源的**全部**形态：句柄（`os.Root` 目录 fd，无 finalizer）、
+    后台协程（`checksum` 的 debounce savemerger）、监听器。修一个类时**同一类必须一次清干净** ——
+    否则修完一个 flake 只是让下一个浮出水面（实测：关掉 `os.Root` 后立刻露出
+    「debounce 协程写盘 ⇒ TempDir not empty」，31 处未关）。做法：统一测试助手
     （`openTestRoot` 自动 `t.Cleanup(Close)`）+ 源码级门禁（含「扫到 0 个即失败」下限护栏）。
     **反例**：为求幂等把内部指针置空（`rt.r = nil`）⇒ 关闭后再用从 `os.ErrClosed` 变成
     nil 指针 panic，而后台 debounce goroutine 恰好在清理后还会写一次。

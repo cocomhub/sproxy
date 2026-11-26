@@ -991,6 +991,9 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 	tmpDir := testutil.MkdirTemp(t, "csstore-test-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
 
 	var wg sync.WaitGroup
 	const goroutines = 50
@@ -1014,6 +1017,10 @@ func TestChecksumStore_ConcurrentSetDelete(t *testing.T) {
 
 	// 重新打开 store，确认磁盘内容能正确解析
 	cs2 := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs2.Close() })
+
 	all := cs2.GetAll()
 	// 至少不能 panic、不能丢出错误。具体保留数量取决于调度。
 	t.Logf("after concurrent ops, store has %d entries", len(all))
@@ -1026,6 +1033,10 @@ func TestChecksumStore_AtomicWriteNoTmpLeftover(t *testing.T) {
 	tmpDir := testutil.MkdirTemp(t, "csstore-atomic-")
 
 	cs := checksum.NewChecksumStore(testRootAt(t, tmpDir), "checksums.json", nil)
+	// checksum 台账带 debounce 落盘协程（savemerger）：不 Close 会在测试结束后仍写一次，
+	// 与 t.TempDir() 的 RemoveAll 撞车（Windows 实测 `The directory is not empty`）。
+	t.Cleanup(func() { _ = cs.Close() })
+
 	cs.Set("k", "v")
 	cs.Set("k2", "v2")
 	cs.Delete("k")
