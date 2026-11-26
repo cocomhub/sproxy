@@ -38,20 +38,27 @@ func TestRecordProgressSample_ThrottleAndRate(t *testing.T) {
 	}
 }
 
-// TestRecordProgressSample_RingCap 锁定环形上限：超出 progressSampleCap 丢最旧。
-func TestRecordProgressSample_RingCap(t *testing.T) {
+// TestRecordProgressSample_CapAndDecimate 锁定容量语义（2026-11-26 更新）：
+// 满窗后**降采样**（不是丢最旧），长度恒 ≤ progressSampleCap，且最早采样仍在。
+func TestRecordProgressSample_CapAndDecimate(t *testing.T) {
 	t.Parallel()
 	task := &CloudTask{}
 	base := time.Unix(1_700_000_000, 0)
-	for i := range progressSampleCap + 30 {
-		recordProgressSample(task, int64(i), int64(progressSampleCap+30), base.Add(time.Duration(i)*progressSampleInterval))
+	total := progressSampleCap * 3
+	for i := range total {
+		recordProgressSample(task, int64(i), int64(total), base.Add(time.Duration(i)*progressSampleInterval))
 	}
-	if len(task.Progress) != progressSampleCap {
-		t.Fatalf("环形缓冲长度 = %d, want %d", len(task.Progress), progressSampleCap)
+	if len(task.Progress) > progressSampleCap {
+		t.Fatalf("采样长度 = %d, 应 ≤ %d", len(task.Progress), progressSampleCap)
 	}
-	// 最旧的已丢弃（保留最近 progressSampleCap 点）
-	if got := task.Progress[0].Downloaded; got != 30 {
-		t.Fatalf("首点 Downloaded = %d, want 30（最旧 30 点应被丢弃）", got)
+	// 历史不丢：最早采样仍在（旧实现会丢最旧）
+	if got := task.Progress[0].At; !got.Equal(base) {
+		t.Fatalf("最早采样 = %v, want %v（降采样不得丢历史）", got, base)
+	}
+	// 最新采样必须保留
+	lastAt := base.Add(time.Duration(total-1) * progressSampleInterval)
+	if got := task.Progress[len(task.Progress)-1].At; !got.Equal(lastAt) {
+		t.Fatalf("最新采样 = %v, want %v", got, lastAt)
 	}
 }
 
@@ -90,5 +97,69 @@ func TestSetStage_RecordsSampleImmediately(t *testing.T) {
 	}
 	if task.Diagnostics == nil || task.Diagnostics.Stage != "transferring" {
 		t.Fatalf("Diagnostics.Stage 未更新: %+v", task.Diagnostics)
+	}
+}
+
+// TestProgressDecimation_KeepsHistoryAndStages 锁定长任务降采样（2026-11-26）：
+// 满窗后隔点保留（历史不丢、窗口翻倍），且**阶段切换点必留**。
+func TestProgressDecimation_KeepsHistoryAndStages(t *testing.T) {
+	t.Parallel()
+	task := &CloudTask{TotalSize: 1 << 30}
+	base := time.Unix(1_700_000_000, 0)
+	// 写满 cap 点（每 10s 一点，全部 downloading）
+	for i := range progressSampleCap {
+		recordProgressSample(task, int64(i)*(1<<20), task.TotalSize, base.Add(time.Duration(i)*progressSampleInterval))
+	}
+	if len(task.Progress) != progressSampleCap {
+		t.Fatalf("满窗长度 = %d, want %d", len(task.Progress), progressSampleCap)
+	}
+	firstBefore := task.Progress[0].At
+	// 触发一次降采样（再记一点，且是阶段切换 ⇒ 必留）
+	task.Diagnostics = &TaskDiagnostics{Stage: "transferring"}
+	at := base.Add(time.Duration(progressSampleCap) * progressSampleInterval)
+	if !recordProgressSample(task, task.TotalSize, task.TotalSize, at) {
+		t.Fatal("阶段切换应立即采样")
+	}
+	if len(task.Progress) > progressSampleCap {
+		t.Fatalf("降采样后长度 = %d, 应 ≤ %d", len(task.Progress), progressSampleCap)
+	}
+	// 历史起点不得被丢弃（此前环形裁剪会丢最旧）
+	if !task.Progress[0].At.Equal(firstBefore) {
+		t.Fatalf("降采样不得丢最早采样：got %v want %v", task.Progress[0].At, firstBefore)
+	}
+	// 阶段切换点必须保留
+	found := false
+	for _, s := range task.Progress {
+		if s.Stage == "transferring" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("阶段切换采样必须保留（时间轴依赖它）")
+	}
+}
+
+// TestDecimateProgressSamples_KeepsStageBoundaries 单元级：奇偶点 + 阶段边界。
+func TestDecimateProgressSamples_KeepsStageBoundaries(t *testing.T) {
+	t.Parallel()
+	in := []ProgressSample{
+		{At: time.Unix(0, 0), Stage: "downloading"},
+		{At: time.Unix(1, 0), Stage: "downloading"},
+		{At: time.Unix(2, 0), Stage: "downloading"},
+		{At: time.Unix(3, 0), Stage: "verifying"}, // 奇数下标 + 阶段切换 ⇒ 必留
+		{At: time.Unix(4, 0), Stage: "verifying"},
+	}
+	out := decimateProgressSamples(in)
+	if len(out) != 4 {
+		t.Fatalf("降采样结果 = %d, want 4（偶数下标 0/2/4 + 阶段切换点 3）", len(out))
+	}
+	seen := map[time.Time]bool{}
+	for _, s := range out {
+		seen[s.At] = true
+	}
+	for _, want := range []time.Time{time.Unix(0, 0), time.Unix(2, 0), time.Unix(3, 0), time.Unix(4, 0)} {
+		if !seen[want] {
+			t.Fatalf("缺少采样点 %v（got %v）", want, out)
+		}
 	}
 }
