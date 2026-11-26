@@ -494,11 +494,11 @@ func TestBackend_ErasureSingleWarnsOnHotUpdate(t *testing.T) {
 
 // erasureSingleWarningsForTest 统计一次 UpdateSettings 触发的「erasure × single」告警次数。
 func erasureSingleWarningsForTest(b *backend, payload json.RawMessage) int {
-	before := atomic.LoadInt32(&erasureSingleWarnCount)
+	before := atomic.LoadInt32(&b.erasureSingleWarn)
 	err := b.UpdateSettings(context.Background(), settingsSectionBlockPolicy, payload)
 	if err != nil {
 		// 规则校验失败不算告警路径
 		return 0
 	}
-	return int(atomic.LoadInt32(&erasureSingleWarnCount) - before)
+	return int(atomic.LoadInt32(&b.erasureSingleWarn) - before)
 }

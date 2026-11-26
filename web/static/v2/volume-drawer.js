@@ -124,6 +124,12 @@
       'random = 卷默认变长分块。规则只影响新写入的文件，不会重写已存在文件。';
     card.appendChild(note);
 
+    var srcLine = document.createElement('div');
+    srcLine.className = 'muted';
+    srcLine.style.fontSize = '11.5px';
+    srcLine.id = 'v2-vd-rule-source';
+    card.appendChild(srcLine);
+
     if (sec.read_only) {
       var ro = document.createElement('div');
       ro.className = 'banner banner-warn';
@@ -149,8 +155,12 @@
     table.appendChild(tbody);
     card.appendChild(table);
 
-    state.rows = S ? S.fromValue(sec.value) : [];
-    state.rows = S ? S.sortRules(state.rows) : state.rows;
+    // fromEffective：**运行期为空时展示基线**（否则仅配 extra.block_rules 的卷在抽屉里是空表，
+    // 用户看不到实际生效的规则；随手保存会静默压制基线 —— 审查 Important）。
+    var eff = S ? S.fromEffective(sec.value) : { source: '', rows: [], fromBaseline: false, baselineCount: 0 };
+    state.eff = eff;
+    srcLine.textContent = sourceLabel(eff);
+    state.rows = S ? S.sortRules(eff.rows) : eff.rows;
     fillRuleRows(tbody, !!sec.read_only);
 
     var bar = document.createElement('div');
@@ -187,6 +197,17 @@
     card.appendChild(errs);
 
     box.appendChild(card);
+  }
+
+  /** sourceLabel 把 effective_source 翻译成可读文案（排障入口：先看这一行）。 */
+  function sourceLabel(eff) {
+    var n = eff.baselineCount || 0;
+    switch (eff.source) {
+      case 'runtime': return '当前生效：运行期规则（已覆盖配置文件基线）';
+      case 'baseline': return '当前生效：配置文件基线（extra.block_rules，共 ' + n + ' 条；编辑并保存后将生成运行期规则并覆盖基线）';
+      case 'volume_default': return '当前生效：卷默认分块策略（未配置任何规则）';
+      default: return '';
+    }
   }
 
   function fillRuleRows(tbody, readOnly) {
@@ -267,6 +288,14 @@
   function saveBlockPolicy(sec) {
     var S = settings();
     if (!S || !api) { return Promise.resolve(); }
+    // 从基线编辑后保存 = 用运行期规则**覆盖**基线（基线中未列出的规则会失效）⇒ 必须显式提示，
+    // 否则用户以为在「修改基线」（审查 Important）。
+    var warn = S.saveWarning(state.eff);
+    var box0 = el('v2-vd-rule-errors');
+    if (warn) {
+      if (box0) { box0.hidden = false; box0.textContent = warn; }
+      if (!window.confirm(warn + ' 继续保存？')) { return Promise.resolve(); }
+    }
     var check = S.validateRules(state.rows, { hardMax: S.HARD_MAX_SINGLE_BYTES });
     var box = el('v2-vd-rule-errors');
     if (!check.ok) {

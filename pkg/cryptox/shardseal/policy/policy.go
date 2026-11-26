@@ -29,8 +29,9 @@ const (
 	// `make([]byte, b.Size)`）⇒ 「无上限的整文件单块」就是一条 OOM 通道。64 MiB 覆盖
 	// 「图片/文本/日志/已压缩包」这些目标场景，同时低于默认块上限 200 MiB。
 	//
-	// **单一事实源**：直接引用 shardseal.MaxSingleBlockBytes（规划器用同一常量兜底非规则
-	// 入口，如 `extra.block_policy.mode: single`）。不要把数值复制到这里。
+	// **单一事实源**：直接引用 shardseal.MaxSingleBlockBytes（规划器用同一常量兜底**所有**
+	// 构造入口）。注意：卷级 `extra.block_policy.mode: single` 已在装配期被拒（无法表达超限
+	// 语义），现只剩规则入口与程序内直接构造 BlockPolicy 两条路径。不要把数值复制到这里。
 	HardMaxSingleBytes int64 = shardseal.MaxSingleBlockBytes
 	// MaxRules 是单卷规则条数上限（匹配是每写一次全表扫描，条数直接决定写路径开销）。
 	MaxRules = 64

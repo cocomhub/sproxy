@@ -377,27 +377,76 @@ func (h *Handlers) forgetVolumeSettings(ctx context.Context, name string) {
 	})
 }
 
-// volumeSettingsRefresh 让支持持久化注入的后端**重新载入**卷设置（多实例收敛入口）。
+// settingsReloadOutcome 是「重载卷设置」的**三态结论**（安全审查 2026-11-27）。
+//
+// 为什么必须三态：包装器（capacity.Backend）**恒实现** SettingsReloader（inner 未实现时返回
+// 专用哨兵）⇒ 「接口断言」不能代表「真的支持重载」。文案与审计必须基于**结果**。
+type settingsReloadOutcome int
+
+const (
+	// settingsReloaded 表示确实从持久化后端重新载入并生效。
+	settingsReloaded settingsReloadOutcome = iota
+	// settingsReloadNotSupported 表示该后端没有严格重载语义（只有装配式注入）。
+	settingsReloadNotSupported
+	// settingsReloadFailed 表示重载真的失败（错误必须可见，不得当作成功）。
+	settingsReloadFailed
+)
+
+// String 供日志/审计使用（低基数、无内部细节）。
+func (o settingsReloadOutcome) String() string {
+	switch o {
+	case settingsReloaded:
+		return "reloaded"
+	case settingsReloadNotSupported:
+		return "not_supported"
+	default:
+		return "failed"
+	}
+}
+
+// volumeSettingsRefreshOutcome 让支持持久化注入的后端**重新载入**卷设置，返回三态结论。
 //
 // 为什么挂在 refresh 上（审查 P1-2）：多实例共享 StateStore 时，A 保存规则后 B 仍用旧规则写
-// ⇒ 同卷不同实例产出不同块布局（读不出错，但确定性/秒传命中率下降）。`POST /api/volumes/refresh`
-// 是全仓既有的运维收敛通道（本进程外改动收敛），在这里顺带重载规则不需要新 API、不需要新 CLI。
+// ⇒ 同卷不同实例产出不同块布局。`POST /api/volumes/refresh` 是全仓既有的运维收敛通道。
 //
-// 未实现 SettingsStoreSetter 的卷 ⇒ no-op（nil）。
+// 错误分类（安全审查）：只有**专用哨兵** ErrSettingsReloadNotImplemented 才判「不支持」；
+// 其余任何错误（包括 inner 意外 wrap 了通用 ErrUnsupported）都判 failed —— 绝不让真实失败
+// 落回「吞错」的装配式注入而变成成功回执。
+func (h *Handlers) volumeSettingsRefreshOutcome(ctx context.Context, name string, be registry.ExternalBackend) (settingsReloadOutcome, error) {
+	if be == nil {
+		return settingsReloadNotSupported, nil
+	}
+	if rl, ok := be.(registry.SettingsReloader); ok {
+		err := rl.ReloadSettings(ctx)
+		switch {
+		case err == nil:
+			slog.Info("volume settings: refresh 触发规则重载", "volume", name)
+			return settingsReloaded, nil
+		case errors.Is(err, registry.ErrSettingsReloadNotImplemented):
+			return settingsReloadNotSupported, nil
+		default:
+			slog.Warn("volume settings: 重载失败", "volume", name, "error", err)
+			return settingsReloadFailed, err
+		}
+	}
+	// 完全没实现 Reloader 的旧后端：走装配式注入（保持既有行为），但结论是「不支持严格重载」，
+	// 不能对外宣称「已重载」。
+	if setter, ok := be.(registry.SettingsStoreSetter); ok {
+		if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
+			slog.Warn("volume settings: 装配式注入失败", "volume", name, "error", err)
+			return settingsReloadFailed, err
+		}
+	}
+	return settingsReloadNotSupported, nil
+}
+
+// volumeSettingsRefresh 是 outcome 版本的便捷包装（只需要「是否成功」的调用方用）。
 func (h *Handlers) volumeSettingsRefresh(ctx context.Context, name string) error {
 	be := h.volSet.External(name)
-	if be == nil {
-		return nil
-	}
-	setter, ok := be.(registry.SettingsStoreSetter)
-	if !ok {
-		return nil
-	}
-	// 重载 = 重新注入同一个 store（后端在 SetSettingsStore 内 Load 最新版本并 SetPolicy）。
-	if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
+	outcome, err := h.volumeSettingsRefreshOutcome(ctx, name, be)
+	if outcome == settingsReloadFailed {
 		return fmt.Errorf("重载卷设置失败: %w", err)
 	}
-	slog.Info("volume settings: refresh 触发规则重载", "volume", name)
 	return nil
 }
 

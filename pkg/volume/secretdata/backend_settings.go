@@ -31,6 +31,7 @@ var (
 	_ registry.SettingsProvider    = (*backend)(nil)
 	_ registry.SettingsWriter      = (*backend)(nil)
 	_ registry.SettingsStoreSetter = (*backend)(nil)
+	_ registry.SettingsReloader    = (*backend)(nil)
 )
 
 // Settings 实现 registry.SettingsProvider：返回 `block_policy` 分区的 schema 与当前值。
@@ -67,9 +68,6 @@ func (b *backend) Settings(_ context.Context) ([]registry.VolumeSettings, error)
 	}}, nil
 }
 
-// erasureSingleWarnCount 统计「erasure × single」告警次数（测试可断言；生产只用于日志节流）。
-var erasureSingleWarnCount int32
-
 // warnErasureSingle 在 erasure 卷写入含 single 规则时告警一次（装配期与热更新期同源）。
 //
 // 为什么热更新也要告警：erasure 的 parity 只在 ≥2 个数据块时生成 ⇒ 命中 single 的文件
@@ -83,7 +81,7 @@ func (b *backend) warnErasureSingle(rules []policy.Rule) {
 		if r.Mode != shardseal.BlockModeSingle {
 			continue
 		}
-		atomic.AddInt32(&erasureSingleWarnCount, 1)
+		atomic.AddInt32(&b.erasureSingleWarn, 1)
 		slog.Warn("secretdata: 卷同时启用了 erasure 与 single 规则——命中 single 的文件无冗余",
 			"volume", b.fs.opts.VolumeName, "path_regex", r.PathRegex, "source", "hot-update")
 		return
@@ -119,7 +117,7 @@ func rulesOf(c *policy.Compiled) []policy.Rule { return c.Rules() }
 // effectiveSourceOf 判定**实际生效**的规则来源（与 FS 的两级优先级一致）。
 func effectiveSourceOf(runtime, baseline *policy.Compiled) string {
 	switch {
-	case runtime != nil && runtime.Version() >= 0 && len(runtime.Rules()) > 0:
+	case runtime != nil && len(runtime.Rules()) > 0:
 		return "runtime"
 	case baseline != nil:
 		return "baseline"
@@ -221,6 +219,41 @@ func (b *backend) SetSettingsStore(store registry.SettingsStore) error {
 	b.fs.SetPolicy(compiled)
 	slog.Info("secretdata: 已载入持久化分块规则",
 		"volume", b.fs.opts.VolumeName, "rules", len(p.Rules), "version", version)
+	return nil
+}
+
+// ReloadSettings 实现 registry.SettingsReloader：从持久化后端**重新载入**并返回错误。
+//
+// 与 SetSettingsStore 的差异：后者是装配期入口、失败只告警（不能因一个坏配置让整卷挂不上）；
+// 本方法是运维 refresh 触发的显式重载，**任何失败都必须返回**——否则多实例收敛失败仍报成功。
+func (b *backend) ReloadSettings(ctx context.Context) error {
+	store := b.loadSettingsStore()
+	if store == nil {
+		// 未装配持久化后端：无「重载」语义，视为成功（分区本就只读）。
+		return nil
+	}
+	raw, version, err := store.Load(ctx, b.fs.opts.VolumeName)
+	if err != nil {
+		return fmt.Errorf("读取持久化卷设置失败: %w", err)
+	}
+	if raw == nil {
+		b.fs.SetPolicy(nil) // 无记录 = 回落静态基线/卷默认
+		return nil
+	}
+	var p policy.Policy
+	if uerr := json.Unmarshal(raw, &p); uerr != nil {
+		return fmt.Errorf("持久化卷设置载荷损坏: %w", uerr)
+	}
+	p.Version = version
+	if len(p.Rules) == 0 {
+		b.fs.SetPolicy(nil)
+		return nil
+	}
+	compiled, cerr := policy.Compile(p, b.fs.opts.Block.Max)
+	if cerr != nil {
+		return fmt.Errorf("持久化卷设置校验失败: %w", cerr)
+	}
+	b.fs.SetPolicy(compiled)
 	return nil
 }
 

@@ -172,6 +172,35 @@
     });
   }
 
+  /**
+   * fromEffective 把分区回显（含 rules / baseline_rules / effective_source）解析为「要展示的行」：
+   * **运行期规则为空时展示基线**（否则仅配 extra.block_rules 的卷在抽屉里是空表，运维看不到
+   * 实际生效的规则）；并标记 fromBaseline 供保存时提示「将压制基线」。
+   *
+   * 这是本函数存在的唯一理由：只读 value.rules 会让基线配置在 UI 中「隐形」，用户随手新增
+   * 一条规则保存后，运行期快照整体覆盖基线 —— 基线规则静默失效（审查 Important）。
+   */
+  function fromEffective(value) {
+    var v = value || {};
+    var runtimeRows = fromValue({ rules: v.rules || [] });
+    var baselineRows = fromValue({ rules: v.baseline_rules || [] });
+    var source = String(v.effective_source || '');
+    if (runtimeRows.length > 0) {
+      return { source: source || 'runtime', rows: runtimeRows, fromBaseline: false, baselineCount: baselineRows.length };
+    }
+    if (baselineRows.length > 0) {
+      return { source: source || 'baseline', rows: baselineRows, fromBaseline: true, baselineCount: baselineRows.length };
+    }
+    return { source: source || 'volume_default', rows: [], fromBaseline: false, baselineCount: 0 };
+  }
+
+  /** saveWarning 返回保存前的警示文案（空前缀 = 无警示）。 */
+  function saveWarning(eff) {
+    if (!eff || !eff.fromBaseline || !(eff.baselineCount > 0)) { return ''; }
+    return '当前展示的是**静态基线**（extra.block_rules，共 ' + eff.baselineCount +
+      ' 条）。保存后将以运行期规则**覆盖**基线：基线中未在此列出的规则将不再生效（可从配置文件恢复）。';
+  }
+
   var api = {
     HARD_MAX_SINGLE_BYTES: HARD_MAX_SINGLE_BYTES,
     MAX_RULES: MAX_RULES,
@@ -183,7 +212,9 @@
     removeRule: removeRule,
     validateRules: validateRules,
     toPayload: toPayload,
-    fromValue: fromValue
+    fromValue: fromValue,
+    fromEffective: fromEffective,
+    saveWarning: saveWarning
   };
 
   if (typeof window !== 'undefined') { window.v2volumeSettings = api; }

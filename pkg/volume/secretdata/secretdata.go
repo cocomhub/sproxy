@@ -223,9 +223,11 @@ type Options struct {
 	// （对远端卷是必需的节流）。装配层可只对外部卷开启。
 	DisableMetaPrewarm bool
 
-	// Policy 是**分块规则快照**（装配层从 extra.block_rules 或运行期 StateStore 载入，经
-	// policy.Compile 预编译；nil = 无规则，写路径零回归）。规则按「用户可见相对路径 + 体积
-	// 区间」命中，只覆盖块级（Mode/Max）；blocklet 仍由既有扩展名/显式配置选型。
+	// Policy 是**静态基线**（装配层从 extra.block_rules 解析并 policy.Compile 预编译；nil = 无基线）。
+	// **运行期规则不经过本字段**：它们由 SetSettingsStore/ReloadSettings 从 StateStore 载入后经
+	// SetPolicy 注入（两级优先级：运行期 > 基线 > 卷默认，见 effectivePolicy）。
+	// 规则按「用户可见相对路径 + 体积区间」命中，只覆盖块级（Mode/Max）；blocklet 仍由既有
+	// 扩展名/显式配置选型。
 	// 设计 docs/designs/2026-11-26-secretdata-block-policy-rules.md。
 	Policy *policy.Compiled
 
@@ -847,6 +849,9 @@ func (s *SecretdataFS) runExportAction(ctx context.Context) {
 // backend 是 ExternalBackend 实现。
 type backend struct {
 	fs *SecretdataFS
+	// erasureSingleWarn 统计本实例「erasure × single」告警次数（测试断言用；per-instance
+	// 避免包级全局计数器在并行用例间交叉污染）。
+	erasureSingleWarn int32
 	// settingsStore 是卷设置分区的持久化后端（装配层在 StateStore 就绪后经
 	// SetSettingsStore 注入；nil = 无持久化 ⇒ 分区只读）。接口值用 atomic.Pointer 包装，
 	// 便于装配后替换且读侧无锁。

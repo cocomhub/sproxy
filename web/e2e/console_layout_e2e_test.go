@@ -9,6 +9,7 @@ package e2e
 // ② 左侧导航含全部分区；③ 点击「云端任务」切分区并写 hash；④ **刷新后仍停在云端任务**（深链）。
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -348,8 +349,26 @@ func TestConsoleCardJumpWritesDeepLink(t *testing.T) {
 	defer stop()
 	page.Goto(baseURL + "/ui/")
 	openStatsModal(t, page)
-	if err := waitLoc(page, "#overview-cards [data-card='cloud-failed']", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("概览卡片未渲染: %v", err)
+	// 并发触发重放（2026-11-27）：首屏渲染在飞时再次触发统计面板；旧的「inFlight 直接丢弃」
+	// 实现会让卡片区**永不渲染**（CI 实测服务端已 failed 但 20s 无卡片）。这里主动制造该
+	// 并发窗口，卡片必须仍然出现。注意：**不能**再点一次 #stats-btn（modal 已打开会拦截点击），
+	// 改为直接调用渲染入口模拟并发触发。
+	if _, err := page.Evaluate("() => { void renderOverviewCards(); void renderOverviewCards(); }", nil); err != nil {
+		t.Fatalf("并发触发概览渲染: %v", err)
+	}
+	// 超时口径（2026-11-27 实测 CI 偶发）：概览卡片需要 modal 打开后再串行拉
+	// /api/cloud/tasks → /api/issues/stats → /api/volumes 三份数据才插入 DOM；CI 容器比其他
+	// job 慢，8s 偶发不足（本地稳定通过）。按仓库既有「-race/慢机超时翻倍」纪律放宽到 20s，
+	// 并在失败时抓取任务快照，便于区分「服务端无 failed 任务」与「前端渲染慢」。
+	if err := waitLoc(page, "#overview-cards [data-card='cloud-failed']", playwright.WaitForSelectorStateVisible, 20000); err != nil {
+		tasksResp, terr := http.Get(baseURL + "/api/cloud/tasks")
+		snapshot := "(读取任务快照失败)"
+		if terr == nil {
+			body, _ := io.ReadAll(tasksResp.Body)
+			tasksResp.Body.Close()
+			snapshot = string(body)
+		}
+		t.Fatalf("概览卡片未渲染（20s）: %v；任务快照: %s", err, snapshot)
 	}
 	if err := page.Locator("#overview-cards [data-card='cloud-failed']").Click(); err != nil {
 		t.Fatalf("点击失败卡片: %v", err)

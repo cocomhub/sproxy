@@ -73,8 +73,10 @@ func TestStageDL_WindowCachedThenAllLocal(t *testing.T) {
 		t.Fatal("首轮应回源（窗口未就绪）")
 	}
 
-	// 等窗口缓存落盘完成（4MiB 内容 = 1 块；块内 4 个 256KiB blocklet ⇒ 1 个 4MiB 窗口）。
-	waitWindows(t, func() bool { return countCacheFiles(stageDir) > 0 }, "窗口缓存落盘")
+	// 等**目标窗口就绪**（4MiB 内容 = 1 块；块内 4 个 256KiB blocklet ⇒ 1 个 4MiB 窗口）。
+	// 判据必须是「所需窗口可读」（与读路径同一语义），不能是「有任意缓存文件」——后者在
+	// 慢机上会早于就绪，导致二轮读回源、断言「零远端」偶发失败。
+	waitWindowReady(t, fs, "big.bin", 0, 1<<20)
 
 	// 二轮：同一批窗口应完全命中本地（零新增远端 Range）。
 	for off := int64(0); off < 1<<20; off += 256 << 10 {
@@ -272,4 +274,81 @@ func TestStageDL_WindowCacheHitIsFinalPlaintext(t *testing.T) {
 	if !bytes.Equal(got, content[:4096]) {
 		t.Fatalf("缓存命中返回内容不符：len=%d want=%d", len(got), 4096)
 	}
+}
+
+// waitWindowReady 等到**该范围所需的窗口**在 stage 缓存中真正就绪（而非「有任意缓存文件」）。
+//
+// 为什么需要（2026-11-27 CI 实测）：`countCacheFiles>0` 只能证明「落了某个文件」，慢机上
+// 首个窗口落盘后目标窗口可能仍未就绪 ⇒ 测试紧接着的二轮读回源一次，断言「零远端」偶发失败
+// （TestStageDL_WindowCachedThenAllLocal 曾因此红）。就绪判据必须与读路径同一语义：
+// windowCacheRead 命中 ⇔ 所需窗口全部可读。
+func waitWindowReady(t *testing.T, fs *SecretdataFS, rel string, off, end int64) {
+	t.Helper()
+	waitWindows(t, windowReadyProbe(fs, rel, off, end), "目标窗口就绪")
+}
+
+// windowReadyProbe 返回「目标窗口是否就绪」的判定闭包（与读路径同一语义：windowCacheRead）。
+// 抽出来是为了让判据本身可被测试锁定（变异「只看缓存文件数」必须变红）。
+func windowReadyProbe(fs *SecretdataFS, rel string, off, end int64) func() bool {
+	return func() bool {
+		fs.mu.RLock()
+		e := fs.index[rel]
+		fs.mu.RUnlock()
+		if e == nil || e.meta == nil {
+			return false
+		}
+		key, salt, kerr := fs.fileLevelKey(e)
+		if kerr != nil {
+			return false
+		}
+		o := chunkRangeOpts{e: e, rel: rel, ci: e.meta.Chunks[0], keyBytes: key, salt: salt}
+		_, ok := fs.windowCacheRead(o, off, end)
+		return ok
+	}
+}
+
+// TestWindowCacheReadinessIsNotFileNameCount 是 TestStageDL_WindowCachedThenAllLocal 那次
+// CI 偶发失败的**确定性回归证据**（2026-11-27）：
+//
+// 旧判据 `countCacheFiles(stageDir) > 0` 只说明「缓存目录里有任意最终产物」，与「读路径所需的
+// 目标窗口可读」**没有蕴含关系**：并发下载下先落盘的是别的窗口、或本窗口尚未完成，都能让旧
+// 判据为真而 readWindowsReadyOnly 仍为假 ⇒ 二轮读回源一次 ⇒ 断言「二轮零远端」偶发失败。
+//
+// 本用例构造出「有缓存文件但目标窗口未就绪」这一确定状态，锁定判据必须与读路径同一语义
+// （windowCacheRead），而不是文件个数。
+func TestWindowCacheReadinessIsNotFileNameCount(t *testing.T) {
+	t.Parallel()
+	fs, _, _ := newCacheEnv(t, -1)
+	stageDir := t.TempDir()
+	fs.stageDL = newStageDL(stageDir, 64<<20, fs)
+
+	// 制造「有缓存文件」：放一个与任何窗口无关的最终产物名。
+	if err := os.WriteFile(filepath.Join(stageDir, "unrelated-blob"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("写无关缓存文件: %v", err)
+	}
+	if countCacheFiles(stageDir) == 0 {
+		t.Fatal("前置失败：应已有缓存文件")
+	}
+
+	// 目标窗口此刻仍未就绪（未曾下载）⇒ 旧判据在此为真、读路径判据为假。
+	fs.mu.RLock()
+	e := fs.index["big.bin"]
+	fs.mu.RUnlock()
+	if e == nil || e.meta == nil {
+		t.Fatal("条目缺失")
+	}
+	key, salt, kerr := fs.fileLevelKey(e)
+	if kerr != nil {
+		t.Fatalf("fileLevelKey: %v", kerr)
+	}
+	o := chunkRangeOpts{e: e, rel: "big.bin", ci: e.meta.Chunks[0], keyBytes: key, salt: salt}
+	if _, ok := fs.windowCacheRead(o, 0, 4096); ok {
+		t.Fatal("未下载时窗口不应就绪（若就绪说明判据失效）")
+	}
+	// **等待判据本身**必须同样不就绪：若有人把判据改成「有缓存文件即可」（回归旧 bug），
+	// 这里会变成 true 而红。
+	if windowReadyProbe(fs, "big.bin", 0, 4096)() {
+		t.Fatal("就绪判据在「有无关缓存文件但目标窗口未下载」时不应为真（判据退化为文件计数）")
+	}
+	// ⇒ 「countCacheFiles>0」不足以作为二轮零远端的等待条件。
 }

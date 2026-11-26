@@ -110,3 +110,41 @@ test('fromValue：后端 value → 行数组（缺字段归一）', () => {
   });
   assert.deepStrictEqual(vs.fromValue(null), []);
 });
+
+test('fromEffective：运行期为空时展示基线并标记来源（避免「看不到基线」）', () => {
+  const eff = vs.fromEffective({
+    rules: [],
+    baseline_rules: [{ path_regex: '^archive/', mode: 'single', max_size: 1024, priority: 100 }],
+    effective_source: 'baseline'
+  });
+  assert.strictEqual(eff.source, 'baseline');
+  assert.strictEqual(eff.rows.length, 1);
+  assert.strictEqual(eff.rows[0].path_regex, '^archive/');
+  assert.strictEqual(eff.fromBaseline, true);
+});
+
+test('fromEffective：运行期非空时优先运行期且不标记基线', () => {
+  const eff = vs.fromEffective({
+    rules: [{ path_regex: '^runtime/', mode: 'single', max_size: 2048 }],
+    baseline_rules: [{ path_regex: '^archive/', mode: 'single', max_size: 1024 }],
+    effective_source: 'runtime'
+  });
+  assert.strictEqual(eff.source, 'runtime');
+  assert.strictEqual(eff.rows.length, 1);
+  assert.strictEqual(eff.rows[0].path_regex, '^runtime/');
+  assert.strictEqual(eff.fromBaseline, false);
+});
+
+test('fromEffective：都为空时来源 volume_default 且零行', () => {
+  const eff = vs.fromEffective({ rules: [], effective_source: 'volume_default' });
+  assert.strictEqual(eff.source, 'volume_default');
+  assert.strictEqual(eff.rows.length, 0);
+});
+
+test('saveWarning：从基线编辑后保存会压制基线的提示', () => {
+  const warn = vs.saveWarning({ source: 'baseline', fromBaseline: true, baselineCount: 3 });
+  assert.match(warn, /基线/);
+  assert.match(warn, /覆盖/);
+  assert.strictEqual(vs.saveWarning({ source: 'runtime', fromBaseline: false, baselineCount: 3 }), '');
+  assert.strictEqual(vs.saveWarning({ source: 'volume_default', fromBaseline: false, baselineCount: 0 }), '');
+});

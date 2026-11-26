@@ -902,6 +902,17 @@ func (b *Backend) UpdateSettings(ctx context.Context, section string, payload js
 	return fmt.Errorf("capacity: backend 未实现 UpdateSettings: %w", syncpkg.ErrUnsupported)
 }
 
+// ReloadSettings 委托 inner（registry.SettingsReloader，运维 refresh 触发的严格重载）。
+//
+// **必须转发**（安全审查 2026-11-27，与 Settings 三能力同一类错误）：装配层只拿得到容量
+// 包装器；漏转发 ⇒ refresh 落回「吞错的 Setter 兼容路径」⇒「重载失败可见」在生产上等于没修。
+func (b *Backend) ReloadSettings(ctx context.Context) error {
+	if rl, ok := b.ExternalBackend.(registry.SettingsReloader); ok {
+		return rl.ReloadSettings(ctx)
+	}
+	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", registry.ErrSettingsReloadNotImplemented)
+}
+
 // SetSettingsStore 委托 inner（registry.SettingsStoreSetter，装配层注入持久化后端）。
 func (b *Backend) SetSettingsStore(store registry.SettingsStore) error {
 	if ss, ok := b.ExternalBackend.(registry.SettingsStoreSetter); ok {
@@ -1045,12 +1056,14 @@ func (c *CapacityFS) LookupByChecksum(checksum string) []string {
 }
 
 // 编译期断言：CapacityFS 必须转发「按内容反查」（R21/R24，漏转发会静默降级）；
-// Backend 必须转发卷设置三能力（同上，漏转发会让「卷设置分区」在生产装配路径整块失效）。
+// Backend 必须转发卷设置**四**能力（同上，漏转发会让「卷设置分区」在生产装配路径整块失效；
+// ReloadSettings 漏转发会让 refresh 的重载失败不可见）。
 var (
 	_ syncpkg.ContentLocator       = (*CapacityFS)(nil)
 	_ registry.SettingsProvider    = (*Backend)(nil)
 	_ registry.SettingsWriter      = (*Backend)(nil)
 	_ registry.SettingsStoreSetter = (*Backend)(nil)
+	_ registry.SettingsReloader    = (*Backend)(nil)
 )
 
 // OrphanChunks 转发「孤儿审计」可选能力（R21/R24：聚合接口强制，漏转发编译期失败）。
