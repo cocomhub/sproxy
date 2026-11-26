@@ -153,3 +153,46 @@ R38 `route_classes.tsv`（DELETE /api/trash × 2 mux）、R35-b `mutating_route_
 - e2e：任务列表请求含 `limit=100`；点「失败」chip 后请求含 `status=failed`；
   「已加载」文案非空。
 - 变异 2/2 命中：不传分页参数 ⇒ 红；状态不下推 ⇒ 红（断言看请求 URL）。
+
+## 2026-11-26 第五轮：用户页面配置扩展到三个功能类别
+
+`GET/PUT /api/ui/prefs` 从「只有 delete」扩到**按功能类别**组织（同一 schema、同一存储文件
+`<租户根>/meta/ui/prefs.json`）：
+
+| 类别 | 字段 | 取值 | 安全默认 |
+| --- | --- | --- | --- |
+| `delete` | `default_mode` | `soft` / `hard` | `soft`（回收站可恢复） |
+| `files` | `default_sort` | `name` / `size` / `time` | `name` |
+| `files` | `default_order` | `asc` / `desc` | `asc` |
+| `uploads` | `default_volume` | 单段卷名 / `""`=自动 | `""`（服务端按卷策略选） |
+
+### 语义要点
+
+- **PUT 是部分更新**：只改请求体里出现的字段；一个都没出现 ⇒ 400。
+- **任何字段非法 ⇒ 400 且整请求不落盘**（不会"改了一半"）。
+- `uploads.default_volume` 会被拼进 `/api/files?volume=` 与上传路由，属**外部输入**：
+  含 `/`、`\`、`..`、空字节一律 400（`normalizeVolumeName` fail-closed 到空 = 自动）。
+- 上传目标卷优先级：**卷过滤有值 > 用户配置的默认卷 > 空（自动）**。配置卷不存在时由服务端
+  报错，**不静默改道**（避免传错卷）。
+- 文件页排序优先级：**用户点列头 > 配置的默认排序 > 代码默认 name/asc**；
+  设置面板保存后调 `v2filesView.reloadPrefs()` 再 `load()`（否则仍用旧 `state.sort`）。
+
+### 前端
+
+设置面板改为 4 个控件（删除方式 / 排序字段 / 排序方向 / 默认上传卷），**一个保存按钮**提交
+三类；`prefsDirty` 覆盖全部控件（异步回填不得覆盖用户刚改的值）。
+
+### 验证与变异
+
+- Go：`TestUIPrefs_FilesAndUploadsCategories`（未配置默认 / 两类分别设置 / **部分更新不重置他字段** /
+  清空卷 / 6 种非法值 400 且配置不变 / 多类别一次提交 / 审计 detail 记录实际改动字段）、
+  `TestUIPrefs_NormalizeVolumeName`（`a/b`、`a`、`..`、`a..b`、空字节一律空）、
+  `TestUIPrefs_NormalizeAllCategories`（坏配置文件逐字段归一）。
+- e2e：设置里设 `size/desc` → 保存 → `/api/ui/prefs` 回读一致 → 文件页表头箭头为「大小 ↓」。
+- 变异 2/2 命中：忽略配置排序 ⇒ 红（无箭头）；`normalizeVolumeName` 不校验 ⇒ 红（3 例）。
+
+### 坑
+
+`updateUIPrefsHandler` 三个类别堆在一个函数里 gocognit 17 > 15 ⇒ 拆成
+`applyDeleteCategory` / `applyFilesCategory` / `applyUploadsCategory`（各返回
+`(next, details, status)`，并共用 `categoryErrMsg` 映射文案）。

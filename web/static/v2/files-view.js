@@ -299,6 +299,31 @@
     });
   }
 
+  /**
+   * 应用用户页面配置（按功能类别）：
+   *   - `files.default_sort/order` ⇒ 首次进入时的排序列与方向（用户点列头后以点击为准）；
+   *   - `uploads.default_volume`  ⇒ 只作**默认目标卷提示**（不存在则回落自动，不硬绑定）。
+   * 读不到就保持代码默认（name/asc），不阻断列表。
+   */
+  function applyPrefs(p) {
+    if (!p) { return; }
+    if (p.files) {
+      var sort = p.files.default_sort;
+      var order = p.files.default_order;
+      if (['name', 'size', 'time'].indexOf(sort) >= 0) { state.sort = sort; }
+      if (order === 'asc' || order === 'desc') { state.order = order; }
+    }
+    state.defaultUploadVolume = (p.uploads && p.uploads.default_volume) || '';
+  }
+
+  function loadPrefs() {
+    var api = window.v2api;
+    if (!api) { return Promise.resolve(); }
+    return api.json('GET', '/api/ui/prefs')
+      .then(function (body) { applyPrefs(body && body.prefs); })
+      .catch(function () { /* 配置不可用：代码默认 */ });
+  }
+
   function loadVolumes() {
     var sel = el('v2-volume');
     var api = window.v2api;
@@ -410,11 +435,21 @@
     window.addEventListener('hashchange', function () {
       if (window.location.hash.indexOf('#/files') === 0) { load(); }
     });
-    load();
+    // 先拿用户页面配置（默认排序/默认上传卷），再首屏加载，避免"先按 name 排再跳一次"。
+    loadPrefs().then(function () { load(); });
   }
 
   window.v2filesView = {
     load: load,
+    /** 页面配置里的「默认上传目标卷」（空 = 自动）；files-actions 上传时读取。 */
+    defaultUploadVolume: function () { return state.defaultUploadVolume || ''; },
+    /**
+     * 重新读取用户页面配置并**重绘排序指示**（设置面板保存后调用）。
+     * 不自动重载列表：调用方决定是否 load()（保存流程本身要 load）。
+     */
+    reloadPrefs: function () {
+      return loadPrefs().then(function () { renderSortMarks(); });
+    },
     state: state,
     subdir: function () { return state.subdir; },
     volume: function () { return state.volume; },

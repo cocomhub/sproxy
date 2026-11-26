@@ -191,36 +191,83 @@
   // prefsDirty：用户已在本次打开里改过选择 ⇒ 异步回填**不得**覆盖（否则会静默把 hard 改回 soft）。
   var prefsDirty = false;
 
-  /** 读取用户维度页面配置（默认删除方式）。 */
+  /** 下拉取值 → 归一（非法视为未选）。 */
+  function pick(id, allowed) {
+    var n = el(id);
+    var v = n ? n.value : '';
+    return allowed.indexOf(v) >= 0 ? v : '';
+  }
+
+  /** 读取用户页面配置（三类：删除/文件列表/上传）。 */
   function loadPrefs() {
-    var sel = el('v2-set-delete-mode');
-    if (!sel) { return; }
     api.json('GET', '/api/ui/prefs')
       .then(function (body) {
         if (prefsDirty) { return; }
-        var mode = body && body.prefs && body.prefs['delete'] ? body.prefs['delete'].default_mode : 'soft';
-        sel.value = mode === 'hard' ? 'hard' : 'soft';
+        var p = (body && body.prefs) || {};
+        var del = el('v2-set-delete-mode');
+        if (del) { del.value = (p['delete'] && p['delete'].default_mode === 'hard') ? 'hard' : 'soft'; }
+        var sort = el('v2-set-default-sort');
+        if (sort) { sort.value = (p.files && p.files.default_sort) || 'name'; }
+        var order = el('v2-set-default-order');
+        if (order) { order.value = (p.files && p.files.default_order) || 'asc'; }
+        var vol = el('v2-set-upload-volume');
+        if (vol) { vol.value = (p.uploads && p.uploads.default_volume) || ''; }
       })
-      .catch(function () { if (!prefsDirty) { sel.value = 'soft'; } });
+      .catch(function () { /* 配置不可用：保持表单默认 */ });
+    loadVolumeOptions();
   }
 
-  /** 保存默认删除方式（破坏性语义：hard 需二次确认）。 */
-  function savePrefs() {
-    var sel = el('v2-set-delete-mode');
+  /** 填充「默认上传卷」下拉（真实卷列表；读不到就只留「自动」）。 */
+  function loadVolumeOptions() {
+    var sel = el('v2-set-upload-volume');
     if (!sel) { return; }
-    var mode = sel.value === 'hard' ? 'hard' : 'soft';
+    api.json('GET', '/api/volumes')
+      .then(function (body) {
+        var keep = sel.value;
+        sel.textContent = '';
+        var auto = document.createElement('option');
+        auto.value = ''; auto.textContent = '自动（由服务端按卷策略选）';
+        sel.appendChild(auto);
+        ((body && body.volumes) || []).forEach(function (v) {
+          if (!v || !v.name) { return; }
+          var o = document.createElement('option');
+          o.value = v.name; o.textContent = v.name;
+          sel.appendChild(o);
+        });
+        sel.value = keep;
+      })
+      .catch(function () { /* 无卷列表：保留「自动」 */ });
+  }
+
+  /** 保存页面配置（只提交有变化的类别；hard 二次确认）。 */
+  function savePrefs() {
+    var del = el('v2-set-delete-mode');
+    var mode = del && del.value === 'hard' ? 'hard' : 'soft';
     if (mode === 'hard' && !window.confirm('把默认删除改成「直接删除」？页面上的删除将不再进回收站，无法恢复。')) {
-      sel.value = 'soft';
+      if (del) { del.value = 'soft'; }
       return;
     }
+    var body = {
+      'delete': { default_mode: mode },
+      files: {
+        default_sort: pick('v2-set-default-sort', ['name', 'size', 'time']) || 'name',
+        default_order: pick('v2-set-default-order', ['asc', 'desc']) || 'asc'
+      },
+      uploads: { default_volume: (el('v2-set-upload-volume') || {}).value || '' }
+    };
     api.json('PUT', '/api/ui/prefs', {
-      body: new TextEncoder().encode(JSON.stringify({ delete: { default_mode: mode } })),
+      body: new TextEncoder().encode(JSON.stringify(body)),
       contentType: 'application/json'
     }).then(function () {
       prefsDirty = false;
-      // 让文件页的删除默认值立即跟上（避免刷新才生效）。
+      if (window.v2toast) { window.v2toast('ok', '页面配置已保存'); }
       if (window.v2deleteMode && window.v2deleteMode.reload) { void window.v2deleteMode.reload(); }
-      if (window.v2toast) { window.v2toast('ok', '删除默认方式已保存：' + (mode === 'hard' ? '直接删除' : '软删进回收站')); }
+      if (window.v2filesView && window.v2filesView.reloadPrefs) {
+        // 先按新配置重读排序/上传卷，再重载列表（否则仍用旧的 state.sort）。
+        window.v2filesView.reloadPrefs().then(function () {
+          if (window.v2filesView.load) { window.v2filesView.load(); }
+        });
+      }
     }).catch(function (e) { banner('保存失败：' + (e.message || e), 'warn'); });
   }
 
@@ -275,8 +322,10 @@
     var rt = el('v2-set-register-toggle'); if (rt) { rt.addEventListener('click', function () { toggleRegister(); }); }
     var rs = el('v2-reg-submit'); if (rs) { rs.addEventListener('click', register); }
     var dmSave = el('v2-set-delete-save'); if (dmSave) { dmSave.addEventListener('click', savePrefs); }
-    var dmSel = el('v2-set-delete-mode');
-    if (dmSel) { dmSel.addEventListener('change', function () { prefsDirty = true; }); }
+    ['v2-set-delete-mode', 'v2-set-default-sort', 'v2-set-default-order', 'v2-set-upload-volume'].forEach(function (id) {
+      var n = el(id);
+      if (n) { n.addEventListener('change', function () { prefsDirty = true; }); }
+    });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { close(); } });
   }
 

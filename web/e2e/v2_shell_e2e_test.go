@@ -842,9 +842,9 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("保存删除默认方式: %v", err)
 	}
 	if _, err := page.WaitForFunction(
-		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('删除默认方式已保存'); }",
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('页面配置已保存'); }",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
-		t.Fatalf("删除默认方式未保存: %v", err)
+		t.Fatalf("页面配置未保存: %v", err)
 	}
 	// 服务端已生效。
 	// 用页面自己的签名客户端读（裸 fetch 无 SproxySig 凭据 ⇒ 401）。
@@ -863,6 +863,64 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-settings-close").Click(); err != nil {
 		t.Fatalf("关闭设置: %v", err)
 	}
+	// 其余两个类别：默认排序 + 默认上传卷（真实落盘 → 文件页/上传读取）。
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("重开设置: %v", err)
+	}
+	if err := waitLoc(page, "#v2-set-default-sort", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("默认排序选择器缺失: %v", err)
+	}
+	if _, err := page.Locator("#v2-set-default-sort").SelectOption(playwright.SelectOptionValues{Values: &[]string{"size"}}); err != nil {
+		t.Fatalf("选默认排序: %v", err)
+	}
+	if _, err := page.Locator("#v2-set-default-order").SelectOption(playwright.SelectOptionValues{Values: &[]string{"desc"}}); err != nil {
+		t.Fatalf("选排序方向: %v", err)
+	}
+	if total, _ := page.Locator("#v2-set-upload-volume option").Count(); total >= 1 {
+		// 有卷可选时选第一个真实卷；无卷（测试夹具）保持「自动」也能验证保存链路。
+		if total > 1 {
+			if name, _ := page.Evaluate(`() => (document.querySelectorAll('#v2-set-upload-volume option')[1] || {}).value || ''`, nil); fmt.Sprint(name) != "" {
+				if _, err := page.Locator("#v2-set-upload-volume").SelectOption(playwright.SelectOptionValues{Values: &[]string{fmt.Sprint(name)}}); err != nil {
+					t.Fatalf("选默认上传卷: %v", err)
+				}
+			}
+		}
+	}
+	if err := page.Locator("#v2-set-delete-save").Click(); err != nil {
+		t.Fatalf("保存页面配置: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('页面配置已保存'); }",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
+		t.Fatalf("页面配置未保存: %v", err)
+	}
+	if prefs, err := page.Evaluate(`async () => {
+		const g = await window.v2api.json('GET','/api/ui/prefs');
+		return g.prefs;
+	}`, nil); err != nil {
+		t.Fatalf("读取页面配置: %v", err)
+	} else if m, ok := prefs.(map[string]any); ok {
+		files, _ := m["files"].(map[string]any)
+		if files["default_sort"] != "size" || files["default_order"] != "desc" {
+			t.Fatalf("默认排序未落盘: %v", files)
+		}
+	}
+	// 文件页必须按配置排序（点列头前，表头箭头已反映配置）。
+	if err := page.Locator("#v2-settings-close").Click(); err != nil {
+		t.Fatalf("关闭设置: %v", err)
+	}
+	if _, err := page.Evaluate("() => { window.v2filesView.load(); }", nil); err != nil {
+		t.Fatalf("重载文件页: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => (document.querySelector('#v2-sort-size') || {}).textContent === '↓'", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("文件页未应用配置的默认排序（大小 ↓）: %v", err)
+	}
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("重开设置: %v", err)
+	}
+
 	// 复位为软删，避免影响后续用例。
 	if _, err := page.Evaluate(`() => window.v2api.json('PUT','/api/ui/prefs', {
 		contentType: 'application/json',

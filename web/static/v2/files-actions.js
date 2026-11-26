@@ -273,9 +273,19 @@
     });
   }
 
+  /**
+   * 上传目标卷：卷过滤有值 ⇒ 用它；否则用户配置的「默认上传卷」；都没有 ⇒ 空 = 服务端
+   * 自动路由。配置卷可能已不存在 ⇒ 由服务端按未知卷报错（**不静默改道**，避免传错卷）。
+   */
+  function uploadTargetVolume() {
+    var picked = view() && view().volume ? view().volume() : '';
+    if (picked) { return picked; }
+    return (view() && view().defaultUploadVolume) ? view().defaultUploadVolume() : '';
+  }
+
   function uploadFiles(files) {
     var sub = view() ? view().subdir() : '';
-    var vol = view() && view().volume ? view().volume() : '';
+    var vol = uploadTargetVolume();
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) { return; }
     var chain = Promise.resolve();

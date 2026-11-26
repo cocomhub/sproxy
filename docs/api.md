@@ -2102,22 +2102,47 @@ AI 端点默认关闭（`notify.ai_insight.enabled` / `notify.ai_quota.enabled` 
 返回请求者 owner 的**用户维度页面配置**（按功能类别分组）。未配置时返回**安全默认**。
 
 ```json
-{"prefs": {"delete": {"default_mode": "soft"}},
- "defaults": {"delete": {"default_mode": "soft"}}}
+{"prefs": {
+   "delete":  {"default_mode": "soft"},
+   "files":   {"default_sort": "name", "default_order": "asc"},
+   "uploads": {"default_volume": ""}
+ },
+ "defaults": {
+   "delete":  {"default_mode": "soft"},
+   "files":   {"default_sort": "name", "default_order": "asc"},
+   "uploads": {"default_volume": ""}
+ }}
 ```
 
-- `delete.default_mode`：`soft`（缺省，删除进回收站可恢复）/ `hard`（默认直接硬删）。
+| 类别 | 字段 | 取值 | 安全默认 |
+| --- | --- | --- | --- |
+| `delete` | `default_mode` | `soft` / `hard` | `soft`（软删进回收站，可恢复） |
+| `files` | `default_sort` | `name` / `size` / `time` | `name` |
+| `files` | `default_order` | `asc` / `desc` | `asc` |
+| `uploads` | `default_volume` | 单段卷名 / `""`=自动 | `""`（由服务端按卷策略选） |
+
 - `defaults` 回显服务端安全默认，前端据此标注「未设置」。
+- 配置损坏/字段非法 ⇒ 逐字段归一为安全默认（**不因坏配置改变破坏性行为**）。
 - 认证：主 mux `auth` / 隧道内层 `tunnel`（owner 取请求身份）。
 - 存储：`<租户根>/meta/ui/prefs.json`（随租户卷加密/封印）；文件缺失或损坏 ⇒ 回落 `soft`。
 
 ### PUT /api/ui/prefs
 
-设置用户维度页面配置（当前仅支持「默认删除方式」）。
+设置用户维度页面配置（**部分更新**：只改请求体里出现的字段；一个字段都没有 ⇒ 400）。
 
 ```json
 {"delete": {"default_mode": "hard"}}
+{"files": {"default_sort": "size", "default_order": "desc"}}
+{"uploads": {"default_volume": "v-main"}}
+{"delete": {"default_mode": "hard"}, "uploads": {"default_volume": "v-main"}}
 ```
+
+校验（任一非法 ⇒ **400 且整请求不落盘**，不会出现「改了一半」）：
+
+- `delete.default_mode` ∈ `soft`/`hard`（大小写不敏感）；
+- `files.default_sort` ∈ `name`/`size`/`time`；`files.default_order` ∈ `asc`/`desc`；
+- `uploads.default_volume`：合法单段卷名，或 `""` 表示清除（自动）。含 `/`、`\`、`..`、
+  空字节的名称一律 400（该值会被拼进列表/上传路由，属外部输入，fail-closed）。
 
 - `default_mode` ∈ `soft` / `hard`（大小写不敏感）；其它值 ⇒ **400 且不落盘**（破坏性语义不接受含糊值）。
 - 响应：`{"prefs": {"delete": {"default_mode": "<生效值>"}}}`；审计动作 `ui_prefs_update`。
