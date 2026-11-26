@@ -462,6 +462,53 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("回 v2demo: %v", err)
 	}
 
+	// 上传目标必须是**具体卷**：「全部卷」是多卷聚合视图，上传目标不可预期。
+	// 单卷部署（最常见）自动选中该卷；多卷时「全部卷」禁用上传并要求显式选卷。
+	if gate, err := page.Evaluate(`() => {
+		const v = document.querySelector('#v2-volume');
+		const input = document.querySelector('#v2-upload-input');
+		const label = document.querySelector('label[for="v2-upload-input"]');
+		const vols = Array.from(v.options).filter(o => o.value).map(o => o.value);
+		return {vol: v.value, vols: vols, disabled: input.disabled,
+			ariaDisabled: label ? label.getAttribute('aria-disabled') : null,
+			single: vols.length === 1};
+	}`, nil); err == nil {
+		if m, ok := gate.(map[string]any); ok {
+			if m["single"] == true && m["vol"] == "" {
+				t.Fatalf("单卷部署应自动选中该卷（否则无法上传）: %v", m)
+			}
+			if m["single"] != true && m["vol"] == "" && m["disabled"] != true {
+				t.Fatalf("多卷时选「全部卷」必须禁用上传: %v", m)
+			}
+			if m["vol"] != "" && m["disabled"] == true {
+				t.Fatalf("已选具体卷时上传不应被禁用: %v", m)
+			}
+		}
+	} else {
+		t.Fatalf("读取上传门禁: %v", err)
+	}
+
+	// 排序记忆：点「大小」列 → 刷新页面 → 排序与箭头保持。
+	if err := page.Locator("th.sortable[data-sort=size]").Click(); err != nil {
+		t.Fatalf("点大小列头: %v", err)
+	}
+	if _, err := page.WaitForFunction("() => (document.querySelector('#v2-sort-size') || {}).textContent !== ''", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
+		t.Fatalf("排序箭头未出现: %v", err)
+	}
+	if _, err := page.Reload(); err != nil {
+		t.Fatalf("刷新页面: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => (document.querySelector('#v2-sort-size') || {}).textContent === '↑'", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(10000)}); err != nil {
+		t.Fatalf("刷新后排序偏好未保留（应记住上次点的列）: %v", err)
+	}
+	// 复位为名称升序，后续断言依赖名称排序。
+	if err := page.Locator("th.sortable[data-sort=name]").Click(); err != nil {
+		t.Fatalf("复位按名称: %v", err)
+	}
+
 	// 拖拽上传：真实 DragEvent（DataTransfer 带 File）→ 走与选择文件同一条上传路径。
 	if _, err := page.Evaluate(`async () => {
 		const dt = new DataTransfer();
@@ -1303,12 +1350,20 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 
 	// 分享：带口令创建 → 列表显示 → 缺口令 401 / 正确口令 200 → 撤销。
-	// 卷过滤复位为「全部卷」并显式重载（hash 相同不会触发 hashchange）。
+	// 卷过滤选**具体卷**（上传要求具体卷：「全部卷」是多卷聚合视图，无法确定上传目标）。
 	if _, err := page.Evaluate(`() => {
 		const v = document.querySelector('#v2-volume');
-		if (v) { v.selectedIndex = 0; v.dispatchEvent(new Event('change')); }
+		if (!v) { return; }
+		const real = Array.from(v.options).find(o => o.value);
+		v.value = real ? real.value : '';
+		v.dispatchEvent(new Event('change'));
 	}`, nil); err != nil {
-		t.Fatalf("复位卷过滤: %v", err)
+		t.Fatalf("选择具体卷: %v", err)
+	}
+	// 切卷走 history.replaceState（不触发 hashchange），且「按卷记忆子目录」可能让 hash 不变
+	// ⇒ 必须显式切回文件面板 + 重载，否则面板还停在回收站（上传按钮也拿不到）。
+	if err := page.Locator(".nav[data-route=files]").Click(); err != nil {
+		t.Fatalf("切回文件面板: %v", err)
 	}
 	if _, err := page.Evaluate("() => { location.hash = '#/files/v2demo'; }", nil); err != nil {
 		t.Fatalf("回到 v2demo: %v", err)

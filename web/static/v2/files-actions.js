@@ -247,8 +247,12 @@
       }
     };
     var stop = function (e) { e.preventDefault(); e.stopPropagation(); };
+    /** 当前视图是否允许上传（「全部卷」聚合视图不允许）。 */
+    var allowed = function () { return f.canUploadTo(view() ? view().volume() : ''); };
     document.addEventListener('dragenter', function (e) {
       if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
+      // 不允许上传时不显示投放层（否则会承诺一个做不到的动作）。
+      if (!allowed()) { return; }
       stop(e);
       depth = du.bump(depth, 1);
       if (depth === 1) { show(true); }
@@ -266,6 +270,12 @@
     document.addEventListener('drop', function (e) {
       if (!du.acceptsDrag(e.dataTransfer && e.dataTransfer.types)) { return; }
       stop(e);
+      if (!allowed()) {
+        if (window.v2toast) {
+          window.v2toast('warn', '请先选择具体卷再用上传（「全部卷」是多卷聚合视图，无法确定上传目标）');
+        }
+        return;
+      }
       depth = 0;
       show(false);
       var files = (e.dataTransfer && e.dataTransfer.files) || [];
@@ -275,7 +285,13 @@
 
   function uploadFiles(files) {
     var sub = view() ? view().subdir() : '';
+    // 兜底：必须有**具体卷**（「全部卷」是多卷聚合视图，上传目标不可预期）。
+    // UI 已禁用入口，这里再挡一次——拖拽/脚本/旧快捷键都可能绕过按钮状态。
     var vol = view() && view().volume ? view().volume() : '';
+    if (!f.canUploadTo(vol)) {
+      toast('warn', '请先选择具体卷再用上传（「全部卷」是多卷聚合视图，无法确定上传目标）');
+      return;
+    }
     var list = Array.prototype.slice.call(files || []);
     if (!list.length) { return; }
     var chain = Promise.resolve();

@@ -159,6 +159,34 @@
     return '/api/files' + (params.length ? '?' + params.join('&') : '');
   }
 
+  /**
+   * 归一排序偏好（从存储/URL 读到的任意值）：非法字段回落 name、非法方向回落 asc。
+   *
+   * 排序是**瞬时视图偏好**（用户上次点过哪个列头），不是策略配置，所以只做本地记忆，
+   * 不进 `/api/ui/prefs`——策略配置需要用户去设置页发现并维护，收益不抵成本。
+   * @param {{sort?:string, order?:string}|null} raw
+   * @returns {{sort:string, order:string}}
+   */
+  function normalizeSort(raw) {
+    var r = raw || {};
+    var sort = ['name', 'size', 'time'].indexOf(r.sort) >= 0 ? r.sort : 'name';
+    var order = (r.order === 'asc' || r.order === 'desc') ? r.order : 'asc';
+    return { sort: sort, order: order };
+  }
+
+  /**
+   * 是否允许向当前视图上传：必须有**具体卷**。
+   *
+   * 「全部卷」是多卷**聚合视图**（同一子目录下多卷条目混排）⇒ 上传落哪张卷由服务端 placement
+   * 自动决定，用户看到的是聚合结果，切卷过滤后文件就"消失"了。上传目标必须可见、可预期，
+   * 因此聚合视图禁用上传，提示先选具体卷。
+   * @param {string} volume 当前卷过滤（空 = 全部卷）
+   * @returns {boolean}
+   */
+  function canUploadTo(volume) {
+    return String(volume || '').trim() !== '';
+  }
+
   return {
     formatSize: formatSize,
     formatTime: formatTime,
@@ -171,6 +199,8 @@
     nextSort: nextSort,
     sortMark: sortMark,
     neighborFile: neighborFile,
-    listURL: listURL
+    listURL: listURL,
+    normalizeSort: normalizeSort,
+    canUploadTo: canUploadTo
   };
 });

@@ -13,10 +13,14 @@
 
   var VOL_KEY = 'sproxy_v2_volume';
   var SUBDIR_KEY = 'sproxy_v2_subdir_by_vol';
+  // 排序是**视图偏好**（上次点过哪个列头），本地记忆即可；不进服务端页面配置。
+  var SORT_KEY = 'sproxy_v2_sort';
   var PAGE = 200;
   var state = {
     subdir: '', volume: '', query: '', files: [], selected: Object.create(null),
-    sort: 'name', order: 'asc', limit: PAGE, offset: 0, total: -1, hasMore: false, loading: false
+    sort: 'name', order: 'asc', limit: PAGE, offset: 0, total: -1, hasMore: false, loading: false,
+    // booted：是否已完成首屏加载（用于区分「首次恢复」与「用户显式导航」）。
+    booted: false
   };
 
   function el(id) { return document.getElementById(id); }
@@ -244,10 +248,14 @@
   function load(reset) {
     if (reset !== false) { state.offset = 0; }
     var subdir = subdirFromHash();
-    if (state.volume && subdir === '' && !window.__v2volSwitch) {
+    // 「按卷记忆子目录」只用于**恢复**：首次打开、切卷。
+    // 显式导航（hashchange 到 #/files 或 #/files/xxx）一律以 hash 为准 —— 否则用户点面包屑
+    // 「全部卷」会被弹回上次子目录，看起来像"根目录点不进去"。
+    if ((!state.booted || window.__v2volSwitch) && state.volume && subdir === '') {
       subdir = subdirForVolume(state.volume);
     }
     window.__v2volSwitch = false;
+    state.booted = true;
     if (state.volume && subdir) { rememberSubdir(state.volume, subdir); }
     state.subdir = subdir;
     renderCrumbs(subdir);
@@ -299,6 +307,24 @@
     });
   }
 
+  /**
+   * 上传入口门禁：**必须有具体卷**才允许上传。
+   *
+   * 「全部卷」是多卷聚合视图（同目录下多卷条目混排）⇒ 服务端按 placement 自动选卷，用户看到
+   * 的是聚合结果、切卷后文件"消失"，属"上传目标不可见"。因此聚合视图禁用上传并给出理由。
+   */
+  function syncUploadGate() {
+    var ok = f.canUploadTo(state.volume);
+    var label = document.querySelector('label[for="v2-upload-input"]');
+    var input = el('v2-upload-input');
+    if (label) {
+      label.setAttribute('aria-disabled', ok ? 'false' : 'true');
+      label.classList.toggle('is-disabled', !ok);
+      label.title = ok ? '' : '请先在右上角选择具体卷（「全部卷」是多卷聚合视图，上传目标不明确）';
+    }
+    if (input) { input.disabled = !ok; }
+  }
+
   function loadVolumes() {
     var sel = el('v2-volume');
     var api = window.v2api;
@@ -316,18 +342,43 @@
         sel.appendChild(o);
       });
       try { state.volume = localStorage.getItem(VOL_KEY) || ''; } catch (e) { state.volume = ''; }
+      // 只有一个卷时「全部卷」与它等价 ⇒ 自动选中它，避免单卷部署（最常见）无法上传。
+      // 多卷才是真聚合视图（上传目标不可预期 ⇒ 禁用，由用户显式选卷）。
+      if (!state.volume && vols.length === 1) {
+        state.volume = vols[0].name;
+        try { localStorage.setItem(VOL_KEY, state.volume); } catch (e) { /* 忽略 */ }
+      }
       sel.value = state.volume;
+      syncUploadGate();
     }).catch(function () { /* 列表仍可用，仅无卷过滤 */ });
+  }
+
+  /** 读排序偏好（非法/缺失 ⇒ name/asc）。 */
+  function readSort() {
+    try { return f.normalizeSort(JSON.parse(localStorage.getItem(SORT_KEY) || '{}')); }
+    catch (e) { return f.normalizeSort(null); }
+  }
+
+  /** 写排序偏好（隐私模式/配额失败静默忽略——排序不是关键路径）。 */
+  function writeSort() {
+    try { localStorage.setItem(SORT_KEY, JSON.stringify({ sort: state.sort, order: state.order })); }
+    catch (e) { /* 忽略 */ }
   }
 
   function applySort(field) {
     var next = f.nextSort({ sort: state.sort, order: state.order }, field);
     state.sort = next.sort;
     state.order = next.order;
+    writeSort();
     load();
   }
 
   function init() {
+    // 恢复上次排序（视图偏好，跨刷新保留）。
+    var saved = readSort();
+    state.sort = saved.sort;
+    state.order = saved.order;
+
     Array.prototype.forEach.call(document.querySelectorAll('th.sortable'), function (th) {
       var field = th.getAttribute('data-sort');
       th.addEventListener('click', function () { applySort(field); });
@@ -354,6 +405,7 @@
       vol.addEventListener('change', function () {
         state.volume = vol.value;
         try { localStorage.setItem(VOL_KEY, state.volume); } catch (e) { /* 忽略 */ }
+        syncUploadGate();
         // 切卷：跳回该卷上次目录（root 时清 hash 子路径）。
         window.__v2volSwitch = true;
         var target = subdirForVolume(state.volume);

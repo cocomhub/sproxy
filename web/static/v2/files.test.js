@@ -119,3 +119,22 @@ test('listURL：分页/排序/卷过滤/搜索各自拼对', () => {
   // 搜索走独立端点，仍支持分页。
   assert.strictEqual(m.listURL({ query: 'x y', limit: 200, offset: 200 }), '/api/files/search?q=x%20y&limit=200&offset=200');
 });
+
+test('normalizeSort：非法字段回落 name，非法方向回落 asc', () => {
+  assert.deepStrictEqual(m.normalizeSort({ sort: 'size', order: 'desc' }), { sort: 'size', order: 'desc' });
+  assert.deepStrictEqual(m.normalizeSort({ sort: 'time' }), { sort: 'time', order: 'asc' });
+  assert.deepStrictEqual(m.normalizeSort({ order: 'desc' }), { sort: 'name', order: 'desc' });
+  assert.deepStrictEqual(m.normalizeSort({ sort: 'bogus', order: 'sideways' }), { sort: 'name', order: 'asc' });
+  assert.deepStrictEqual(m.normalizeSort(null), { sort: 'name', order: 'asc' });
+  assert.deepStrictEqual(m.normalizeSort(undefined), { sort: 'name', order: 'asc' });
+});
+
+test('canUploadTo：必须有具体卷（全部卷是聚合视图，不可上传）', () => {
+  assert.strictEqual(m.canUploadTo('v1'), true);
+  assert.strictEqual(m.canUploadTo('default'), true);
+  // 「全部卷」= 空 ⇒ 聚合视图，上传目标不可预期 ⇒ 禁止。
+  assert.strictEqual(m.canUploadTo(''), false);
+  assert.strictEqual(m.canUploadTo('   '), false);
+  assert.strictEqual(m.canUploadTo(null), false);
+  assert.strictEqual(m.canUploadTo(undefined), false);
+});
