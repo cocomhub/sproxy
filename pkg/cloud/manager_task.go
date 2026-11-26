@@ -1276,14 +1276,10 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 		go m.executeDownload(context.Background(), task) //nolint:gosec
 		return true
 	}
-	// 用户取消：CancelTask 已更新状态并释放存储，这里不重复处理，仅兜底清理
-	// 可能残留的任务文件（CancelTask 的 RemoveAll 在 Windows 下可能因文件被占用失败）。
+	// 用户取消：取消 = 中断（用户 2026-11-26 裁定）——**保留断点**，不删任务文件，
+	// 也不在此归还配额（字节仍在盘上）。释放/清理只由 DELETE 任务或过期清理负责。
 	if dlCtx.Err() == context.Canceled {
-		m.logger.Info("download cancelled", "task_id", task.ID)
-		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
-			m.logger.Warn("cancelled: remove task dir failed (CancelTask 已兜底，可能为 Windows 占用)",
-				"task_id", task.ID, "error", rerr)
-		}
+		m.logger.Info("download cancelled, partial kept for resume", "task_id", task.ID)
 		return true
 	}
 	m.failTask(task, downloadErr.Error())
@@ -1312,13 +1308,9 @@ func (m *CloudDownloadManager) finalizeCompleted(task *CloudTask, result *downlo
 	}
 	if stored.Status == "cancelled" {
 		m.mu.Unlock()
-		m.logger.Info("download finished after cancel, discarding result", "task_id", task.ID)
-		// 取消即放弃：连同 .partial/.partial.etag 一并清理（CancelTask 已释放存储
-		// 并尝试删除，这里兜底），保持磁盘与已归零账本一致。
-		if rerr := m.removeTaskDir(task.Owner, task.ID); rerr != nil {
-			m.logger.Warn("discard after cancel: remove task dir failed (CancelTask 已兜底)",
-				"task_id", task.ID, "error", rerr)
-		}
+		// 取消 = 中断：产物/断点保留（用户可 retry_download 续传或 retry_transfer 复用完整产物）。
+		// 只有 DELETE 任务或过期清理才删除文件并归还配额（一个操作只控制一个行为）。
+		m.logger.Info("download finished after cancel, artifacts kept", "task_id", task.ID)
 		return
 	}
 

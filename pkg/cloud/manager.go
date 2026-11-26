@@ -996,7 +996,9 @@ func (m *CloudDownloadManager) releaseAbandonedTaskScope(task *CloudTask) {
 	if m.running[task.ID] {
 		return
 	}
-	if stored, ok := m.tasks[task.ID]; ok && stored.Status != "cancelled" {
+	// 2026-11-26 语义更新：cancelled 不再等于"放弃"——取消保留断点与配额，只有**删除**
+	// （或过期清理）才归还。因此这里仅在任务已从 m.tasks 消失（= 删除）时释放。
+	if _, ok := m.tasks[task.ID]; ok {
 		return
 	}
 	m.releaseTaskScope(task)

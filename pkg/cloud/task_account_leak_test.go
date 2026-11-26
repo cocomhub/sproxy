@@ -52,8 +52,9 @@ func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
 		t.Fatalf("前置不成立：failTask 后 Scope=%d want 90", got)
 	}
 
-	// resumeWindowHook：在 ResumeTask 的 unlock→relock 窗口里 CancelTask（置 cancelled +
-	// 删文件 + 释放存储；Scope 因 running 推迟到 goroutine 退出）。
+	// resumeWindowHook：在 ResumeTask 的 unlock→relock 窗口里 CancelTask。
+	// 2026-11-26 语义：取消 = 中断（保留断点与账本），因此终态期望是 **Scope == 磁盘字节（90）**，
+	// 而不是归零；本用例守的是"取消/恢复竞态下不得出现账本与磁盘不一致（多记或漏记）"。
 	origHook := resumeWindowHook
 	resumeWindowHook = func(m *CloudDownloadManager, taskID string) {
 		if taskID == task.ID {
@@ -70,11 +71,19 @@ func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
 	testutil.WaitFor(t, 30*time.Second, func() bool {
 		return !re.isRunning(task.ID)
 	}, "resume 启动的 goroutine 未退出")
-	// 终态断言：Scope 必须归零（releaseAbandonedTaskScope 判据漏 pending 时残留 90）。
-	if got := re.scopeUsage(owner); got != 0 {
-		t.Fatalf("取消后 Scope=%d want 0（泄漏窗口：resume 改回 pending 且 goroutine 已退）", got)
+	// 终态断言：断点仍在盘上 ⇒ Scope 必须等于磁盘字节（90），既不得归零（fail-open）
+	// 也不得翻倍（重复记账）。
+	if got := re.scopeUsage(owner); got != 90 {
+		t.Fatalf("取消后 Scope=%d want 90（账本必须等于磁盘断点字节）", got)
 	}
-	if got := re.cloudUsage(); got != 0 {
-		t.Fatalf("取消后全局账本=%d want 0", got)
+	if got := re.cloudUsage(); got != 90 {
+		t.Fatalf("取消后全局账本=%d want 90", got)
+	}
+	// 删除才释放：DELETE 后归零且不反负。
+	if derr := mgr.DeleteTask(task.ID, owner); derr != nil {
+		t.Fatalf("DeleteTask: %v", derr)
+	}
+	if got := re.scopeUsage(owner); got != 0 {
+		t.Fatalf("删除后 Scope=%d want 0", got)
 	}
 }

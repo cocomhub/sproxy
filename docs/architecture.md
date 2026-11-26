@@ -661,6 +661,7 @@ type StorageInspector interface {
   零尾扫描 + 定点补片，修好跳过整份下载，失败回落整份下载。
 
 **任务生命周期与人工处理**：`pending → downloading → completed | failed | cancelled`（失败保留 7d）。
+**取消 = 中断**（保留断点与账本，可续传）；**删除 = 清理**（删文件并归还配额）——一个操作只控制一个行为。
 同一 URL 重提：进行中任务复用；7d 内 failed/cancelled **复活并保留进度**；completed 且转存目标存在 ⇒
 幂等短路。失败任务支持四种人工动作（`POST /api/cloud/tasks/{id}/actions`，见 `docs/api.md`）：
 `retry_download`（退回下载阶段续传）/ `retry_transfer`（仅重做转存，产物须在盘）/ `rotate_source`（换源）/
