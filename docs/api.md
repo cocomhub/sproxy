@@ -788,6 +788,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 > 回落到下载**开始**时刻，绝不使用「下载完成时刻」冒充源时间；目标卷 `ctime` 是首次
 > 写入时刻，源创建时间见 `download_stats.source_created_at` / meta `x_source_created_at`。
 
+> **创建期校验**（2026-11-26 实测）：`transfer.volume` 必须已装配且可访问，`transfer.path` 必须是合法
+> 用户路径（`../` 穿越/绝对路径/非法段 ⇒ **创建即 400**，不会等到下载完成后的转存阶段才失败）。
+
 ### GET /api/cloud/tasks/{id}/progress?since=<unix 秒>
 
 返回任务的**进度采样**（增量）：`{task_id, status, samples:[{at, downloaded, total, rate_bps, stage}], now}`。

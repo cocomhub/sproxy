@@ -207,6 +207,9 @@ func newCloudTestManagerInEnv(t *testing.T, env *cloudTestEnv, sm *capacity.Stor
 	if len(opts) > 0 && opts[0].TransferFSFor != nil {
 		o.TransferFSFor = opts[0].TransferFSFor // 转存目标卷解析（测试注入本地卷）
 	}
+	if len(opts) > 0 && opts[0].VolumeFor != nil {
+		o.VolumeFor = opts[0].VolumeFor // 卷元信息（创建期转存路径校验用）
+	}
 	mgr := NewCloudDownloadManager(o)
 	t.Cleanup(func() { mgr.Close() })
 	return mgr
