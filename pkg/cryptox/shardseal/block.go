@@ -132,8 +132,7 @@ type Blocklet struct {
 	Data []byte
 }
 
-// FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成
-// 宽度 ≤BloffsetMax 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
+// FixedBlockletPlanner 是默认定长 blocklet 规划器（BlockletMode "fixed"）：把单块切成// 宽度 ≤BloffsetMax 的连续 blocklet，末块收尾（剩余 <BlockletMin 时收尾块允许更小）。
 // Min/Max 可继承 BlockPolicy 默认（64KB-4MB）；对小块测试可缩小。fixed 模式忽略 data。
 type FixedBlockletPlanner struct {
 	Min int64
@@ -165,4 +164,25 @@ func (p *FixedBlockletPlanner) PlanBlocklets(data io.ReaderAt, origSize, blockOf
 		off += size
 	}
 	return out, nil
+}
+
+// SinglePlanner 是整文件单块规划器（BlockMode "single"）：把整个文件规划为**一个块**。
+//
+// 为什么需要：小文件（图片/文本/日志/已压缩包）走随机分块会切成多个底层 blob ⇒ 多次上传/
+// 校验往返，而随机块边界对小文件没有任何安全收益。
+//
+// 确定性：本规划器是**纯函数**（不查 SizeAt、不引用任何随机源），故收敛档（AlgoV2GCM）下
+// 「同内容 + 同策略」两次加密产出逐字节相同的 blob 与名（single_planner_test.go 锁定）。
+// 它也天然不参与 injectConvBlockSizes（该函数只对 *RandomPlanner 生效）。
+type SinglePlanner struct{}
+
+// Plan 实现 BlockPlanner：size>0 时返回单个覆盖 [0,size) 的块。
+//
+// 空文件（size ≤ 0）与 RandomPlanner 同族 fail-closed：分块存储至少需要 1 个数据分块承载
+// meta 引用与整文件哈希锚定，空文件无内容可分块（既有语义，不因本模式改变）。
+func (SinglePlanner) Plan(origSize int64) ([]Block, error) {
+	if origSize <= 0 {
+		return nil, fmt.Errorf("shardseal: 空文件不可分块（size=%d）", origSize)
+	}
+	return []Block{{Offset: 0, Size: origSize}}, nil
 }

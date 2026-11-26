@@ -66,9 +66,13 @@ func (p BlockPolicy) Planner() (BlockPlanner, BlockletPlanner) {
 	return bp, lp
 }
 
-// blockPlanner 构造块规划器（仅 random/空；未知 fail-closed nil）。
+// blockPlanner 构造块规划器（random/空 + single；未知 fail-closed nil）。
 func (p BlockPolicy) blockPlanner() BlockPlanner {
-	if p.Mode == "" || p.Mode == "random" {
+	// 整文件单块：规则引擎按路径/体积命中后由 secretdata 写路径注入该模式。
+	if p.Mode == BlockModeSingle {
+		return SinglePlanner{}
+	}
+	if p.Mode == "" || p.Mode == BlockModeRandom {
 		minSize, maxSize := p.Min, p.Max
 		if minSize <= 0 {
 			minSize = 1
