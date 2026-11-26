@@ -301,7 +301,6 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 		client.WithTimeout(time.Duration(cfg.Timeout) * time.Second),
 	}
 	// 下载回退代理：flag --download-proxy > 配置 download_proxy > 默认关闭（空=不回退）。
-	// 弱网直连失败时经本地代理（如 127.0.0.1:1080）重发，见 WithDownloadProxy。
 	proxyURL := cfg.DownloadProxy
 	if flag, _ := cmd.Flags().GetString("download-proxy"); flag != "" {
 		proxyURL = flag
@@ -309,22 +308,8 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 	if proxyURL != "" {
 		opts = append(opts, client.WithDownloadProxy(proxyURL))
 	}
-	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
-		// 有 AK/SK 且未显式 --server：走 access-key 驱动的加密隧道（WithTunnel 内部
-		// 已存 AK/SK 供外层 SproxySig 签名，无需再 WithAccessKey）。
-		opts = append(opts, client.WithTunnel(cfg.AccessKey, cfg.AccessKeySecret))
-	}
-	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
-		opts = append(opts, client.WithChunkSize(cs))
-	} else if cfg.ChunkSize > 0 {
-		opts = append(opts, client.WithChunkSize(cfg.ChunkSize))
-	}
-	if cfg.MaxChunkSize > 0 {
-		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))
-	}
-	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
-		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
-	}
+	opts = append(opts, accessKeyOptions(cmd, cfg, xferEnabled)...)
+	opts = append(opts, chunkOptions(cmd, cfg)...)
 	// 卷上下文（多卷服务端）：**路径内 URI / 当前工作目录所在卷**（命令层解析后经 volumectx 上下文
 	// 传入；用户口径 2026-10-14 移除 `--volume` flag）优先，回落配置 volume；皆空 = auto（零变化）。
 	switch vol, ok := volumectx.From(cmd.Context()); {
@@ -333,16 +318,45 @@ func authAndTunnelOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bo
 	case cfg.Volume != "":
 		opts = append(opts, client.WithVolume(cfg.Volume))
 	}
-	if cfg.AccessKeyID != "" {
-		// SK 条目 ID（entryID）：签发 header 携带 sk=<id> 使服务端精确取条目
-		// （多 SK 共存时避免逐条试签）。`trust renew` 回填的配置项。
+	return opts
+}
+
+// accessKeyOptions 装配凭据/SK 条目 ID 与 access-key 驱动隧道。显式 --server 时不启用
+// 传统隧道（按直连 API 面发送），避免 upload-direct/presign 等 API-only 命令被静默切隧道。
+func accessKeyOptions(cmd *cobra.Command, cfg *client.Config, xferEnabled bool) []client.Option {
+	var opts []client.Option
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" && serverFlagNotSet(cmd) && !xferEnabled {
+		opts = append(opts, client.WithTunnel(cfg.AccessKey, cfg.AccessKeySecret))
+	}
+	if cfg.AccessKey != "" && cfg.AccessKeySecret != "" {
+		opts = append(opts, client.WithAccessKey(cfg.AccessKey, cfg.AccessKeySecret))
+	}
+	if id, _ := cmd.Flags().GetString("access-key-id"); id != "" {
+		opts = append(opts, client.WithAccessKeyID(id))
+	} else if cfg.AccessKeyID != "" {
 		opts = append(opts, client.WithAccessKeyID(cfg.AccessKeyID))
 	}
 	if ak, _ := cmd.Flags().GetString("access-key"); ak != "" && !xferEnabled {
 		sk, _ := cmd.Flags().GetString("access-key-secret")
-		// 显式 AK/SK（flag 覆盖）同样开启 access-key 驱动隧道：WithTunnel 内部已存
-		// AK/SK 供外层 SproxySig 签名，无需重复 WithAccessKey。
-		opts = append(opts, client.WithTunnel(ak, sk))
+		if serverFlagNotSet(cmd) {
+			opts = append(opts, client.WithTunnel(ak, sk))
+		} else {
+			opts = append(opts, client.WithAccessKey(ak, sk))
+		}
+	}
+	return opts
+}
+
+// chunkOptions 装配分块大小（flag 优先于配置）。
+func chunkOptions(cmd *cobra.Command, cfg *client.Config) []client.Option {
+	var opts []client.Option
+	if cs, _ := cmd.Flags().GetInt64("chunk-size"); cs > 0 {
+		opts = append(opts, client.WithChunkSize(cs))
+	} else if cfg.ChunkSize > 0 {
+		opts = append(opts, client.WithChunkSize(cfg.ChunkSize))
+	}
+	if cfg.MaxChunkSize > 0 {
+		opts = append(opts, client.WithMaxChunkSize(cfg.MaxChunkSize))
 	}
 	return opts
 }
