@@ -110,14 +110,25 @@ func recordChunkState(task *CloudTask, st downloader.ChunkState) {
 	if task == nil || st.Index < 0 {
 		return
 	}
-	for i := range task.Chunks {
-		if task.Chunks[i].Index == st.Index {
-			task.Chunks[i] = st
+	// **写时复制**（2026-11-27 审查）：`SnapshotTask`/`ListTasks` 返回的是结构体浅拷贝，
+	// `Chunks` 与任务共享底层数组；HTTP 层在**解锁后**序列化快照，而本函数在锁内原地改写
+	// `task.Chunks[i]` ⇒ 读（marshal）与写（更新块状态）无同步 ⇒ DATA RACE 隐患。
+	// 每次更新替换为新切片即可让在途快照安全（块数 ≤128，拷贝成本可忽略）。
+	next := make([]downloader.ChunkState, 0, len(task.Chunks)+1)
+	replaced := false
+	for _, cur := range task.Chunks {
+		if cur.Index == st.Index {
+			next = append(next, st) // 覆盖该块（保留原位置）
+			replaced = true
+			continue
+		}
+		next = append(next, cur)
+	}
+	if !replaced {
+		if len(task.Chunks) >= chunkStateCap {
 			return
 		}
+		next = append(next, st)
 	}
-	if len(task.Chunks) >= chunkStateCap {
-		return
-	}
-	task.Chunks = append(task.Chunks, st)
+	task.Chunks = next
 }
