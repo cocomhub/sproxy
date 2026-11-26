@@ -367,7 +367,9 @@ body {
   .table.cards-narrow td:nth-child(4),
   .table.cards-narrow td:nth-child(5),
   .table.cards-narrow td:nth-child(6) { grid-column: 2; }
-  .table.cards-narrow td:nth-child(7) { grid-column: 1 / -1; text-align: left; }
+  /* 操作列必须**跨整行**：三张表列数不同（文件 7 / 云任务 6 / 回收站 3），
+     用 nth-child 写死列号会让云任务与回收站表的按钮挤在第二列（实测）。 */
+  .table.cards-narrow td.actions { grid-column: 1 / -1; text-align: left; }
   .table.cards-narrow td[data-label]::before {
     content: attr(data-label) ' '; color: var(--text-3); font-size: 11.5px;
   }
