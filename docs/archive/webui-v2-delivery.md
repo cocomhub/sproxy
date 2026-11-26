@@ -119,3 +119,37 @@ R38 `route_classes.tsv`（DELETE /api/trash × 2 mux）、R35-b `mutating_route_
 - node：`trash.test.js` 增 `volumeOptions` / `filterByVolume` / `formatRetention`（坏值返空）。
 - e2e：回收站提示含「7 天」且不含「30 天」；点「彻底删除」后该条消失、其它条目保留。
 - 变异 2/2 命中：提示写死「保留 30 天」⇒ 红；purge 不调服务端 ⇒ 红。
+
+## 2026-11-26 第四轮：传输页分页（云任务 / 任务组）
+
+| # | 问题 | 说明 |
+| --- | --- | --- |
+| 1 | **云任务静默截断** | 传输页固定 `GET /api/cloud/tasks?limit=100` 且**忽略 `total`** ⇒ 第 101 个任务起不可见。 |
+| 2 | **筛选计数是假数据** | 四个 chip（全部/进行中/失败/已完成）的计数来自**已加载子集**：有 300 个失败任务时页面显示「失败 0+」甚至「失败 0」。且筛选只在本地做，服务端 `status=` 参数从未使用。 |
+| 3 | **任务组静默截断** | `GET /api/cloud/groups?limit=50` 同样忽略 `total`（服务端本来就返回 `{groups, total}`）。 |
+
+修复（新增 `web/static/v2/paging.js`，纯函数 + node 单测）：
+
+- `pageMeta(body, key, loadedBefore)` → `{pageCount, loaded, total, hasTotal, hasMore}`；
+  `total` 缺省/`null`/`''` 一律视为**未返回**（`Number(null)===0` 的坑），不编造总数；
+- `pageURL(path, offset, limit)`：保留既有查询串，只追加分页参数（`/x?` 结尾也能正确拼接）；
+- `loadedText(meta)` → 「已加载 120 / 共 300 条」；无 total 时只说「已加载 N 条」；
+- `partial(meta)` → 未全部加载时四个 chip 的计数**必须带 `+`**，否则就是新的假数据；
+- 状态筛选**下推服务端**（`status=failed|completed`；`running` 是非终态合集，服务端无此状态 ⇒ 仍本地筛
+  并在 `partial` 时标注）；筛选变化重新拉第一页；
+- 两张卡片各加「加载更多任务 / 加载更多组」+「已加载 / 共 N」文案。
+
+### 坑（会再犯）
+
+`paging.js` 与 `drop-upload.js` 原先放在视图脚本**之后**，而 `transfer.js` 在模块求值期就
+`var pg = window.v2paging` ⇒ `Cannot read properties of undefined (reading 'pageURL')`，
+整个传输页不初始化（表现为「任务列表未渲染」，无任何可见报错）。已在 HTML 中把两者移到
+`shared/creds.js` 之后、所有视图脚本之前，并加注释说明原因。
+
+### 验证与变异
+
+- node：`paging.test.js` 6 例（total 权威 / 末页 / 无 total 不臆测 / `total:0` 有效 /
+  `inferHasMore` / `pageURL` 拼接 / `loadedText` / `partial`）。
+- e2e：任务列表请求含 `limit=100`；点「失败」chip 后请求含 `status=failed`；
+  「已加载」文案非空。
+- 变异 2/2 命中：不传分页参数 ⇒ 红；状态不下推 ⇒ 红（断言看请求 URL）。

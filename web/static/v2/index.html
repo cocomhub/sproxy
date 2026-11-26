@@ -144,6 +144,10 @@
           </table>
           <div class="empty" id="v2-tf-empty" hidden><b>暂无云端任务</b>
             <div class="muted">提交下载链接后，任务会出现在这里。</div></div>
+          <div class="load-more" id="v2-tf-more-wrap" hidden>
+            <button class="btn" id="v2-tf-more" type="button">加载更多任务</button>
+            <span class="muted" id="v2-tf-loaded" style="font-size:12px"></span>
+          </div>
         </div>
 
         <div class="card" style="margin-top:14px">
@@ -162,6 +166,10 @@
           </table>
           <div class="empty" id="v2-grp-empty" hidden><b>暂无任务组</b>
             <div class="muted">创建组后可整组取消/重试。</div></div>
+          <div class="load-more" id="v2-grp-more-wrap" hidden>
+            <button class="btn" id="v2-grp-more" type="button">加载更多组</button>
+            <span class="muted" id="v2-grp-loaded" style="font-size:12px"></span>
+          </div>
         </div>
         <div class="card" style="margin-top:14px">
           <div class="card-h">
@@ -810,6 +818,9 @@
 <script src="../sclient/sig.js"></script>
 <script src="../shared/format.js"></script>
 <script src="../shared/creds.js"></script>
+<!-- 通用工具必须在视图脚本之前（视图在模块求值期就读取 window.v2paging / window.v2dropUpload） -->
+<script src="paging.js"></script>
+<script src="drop-upload.js"></script>
 <script src="../vendor/qrcode-generator.js"></script>
 <script src="../qrcode.js"></script>
 <script src="../login.js"></script>
@@ -841,7 +852,6 @@
 <script src="i18n.js"></script>
 <script src="shell.js"></script>
 <script src="keyboard.js"></script>
-<script src="drop-upload.js"></script>
 <script src="nav-badges.js"></script>
 <script src="settings.js"></script>
 <script src="mesh-console.js"></script>

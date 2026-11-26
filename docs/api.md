@@ -770,7 +770,12 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 ### GET /api/cloud/tasks
 
-列出当前 owner 的下载任务（`{tasks: [...]}`；owner 为空 = 管理员可见全部）。
+列出当前 owner 的下载任务（`{tasks: [...], total: N}`；owner 为空 = 
+- 分页：`offset` / `limit`；`total` 是**按 status 过滤后的总数**（不受分页影响）。
+  只按固定 limit 拉取会静默截断，筛选计数也随之低估 —— UI 必须读 total。
+- 状态筛选：`status=` 支持 `pending|downloading|completed|failed|cancelled` 与 `damaged`
+  （= 已完成且完整性校验失败的子集，非任务状态）。列表**不返回进度采样**。
+管理员可见全部）。
 
 ### GET /api/cloud/tasks/{id}
 

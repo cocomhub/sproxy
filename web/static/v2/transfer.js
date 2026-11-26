@@ -11,7 +11,15 @@
   var ct = window.ctStatusLabel ? window : null; // cloud-tasks.js 以全局函数暴露
   if (!api || !fmt) { return; }
 
-  var state = { tasks: [], groups: [], syncs: [], filter: '', timer: null, auto: true, loading: false };
+  var PAGE_TASKS = 100;
+  var PAGE_GROUPS = 50;
+  var state = {
+    tasks: [], groups: [], syncs: [], filter: '', timer: null, auto: true, loading: false,
+    // 分页元信息（服务端返回 total；此前固定 limit 且忽略 total ⇒ 静默截断 + 假计数）
+    taskMeta: { loaded: 0, total: -1, hasTotal: false, hasMore: false },
+    groupMeta: { loaded: 0, total: -1, hasTotal: false, hasMore: false }
+  };
+  var pg = window.v2paging;
 
   function el(id) { return document.getElementById(id); }
 
@@ -89,8 +97,11 @@
     if (empty) { empty.hidden = rows.length > 0; }
     var s = summarize(state.tasks);
     var set = function (id, v) { var n = el(id); if (n) { n.textContent = String(v); } };
-    set('v2-tf-all', s.total); set('v2-tf-running', s.running);
-    set('v2-tf-failed', s.failed); set('v2-tf-completed', s.completed);
+    // 计数基于**已加载**子集：未全部加载时必须标注，否则就是新的假数据。
+    var suffix = pg.partial(state.taskMeta) ? '+' : '';
+    set('v2-tf-all', s.total + suffix); set('v2-tf-running', s.running + suffix);
+    set('v2-tf-failed', s.failed + suffix); set('v2-tf-completed', s.completed + suffix);
+    renderTaskMore();
     // 侧栏徽标 = 进行中数量（0 也显示，避免"徽标消失=未知"）。
     badge('transfer', s.running);
     try {
@@ -110,6 +121,7 @@
   function renderGroups() {
     var body = el('v2-grp-body');
     if (!body) { return; }
+    renderGroupMore();
     body.textContent = '';
     state.groups.forEach(function (g) {
       var tr = document.createElement('tr');
@@ -248,14 +260,28 @@
 
   window.v2chainRun = chainRun;
 
-  function loadGroups() {
+  function loadGroups(append) {
     setGroupState('', '');
-    api.json('GET', '/api/cloud/groups?limit=50')
+    var before = append ? state.groups.length : 0;
+    api.json('GET', pg.pageURL('/api/cloud/groups', before, PAGE_GROUPS))
       .then(function (body) {
-        state.groups = (body && (body.groups || body.items)) || [];
+        var page = (body && (body.groups || body.items)) || [];
+        state.groups = append ? state.groups.concat(page) : page;
+        var meta = pg.pageMeta({ groups: page, total: body ? body.total : undefined }, 'groups', before);
+        if (!meta.hasTotal) { meta.hasMore = pg.inferHasMore(meta.pageCount, PAGE_GROUPS); }
+        state.groupMeta = meta;
         renderGroups();
       })
       .catch(function (e) { setGroupState('error', '任务组加载失败：' + (e.message || e)); });
+  }
+
+  /** 任务组「已加载 / 共 N」+ 加载更多。 */
+  function renderGroupMore() {
+    var wrap = el('v2-grp-more-wrap');
+    var label = el('v2-grp-loaded');
+    var meta = state.groupMeta || {};
+    if (wrap) { wrap.hidden = !meta.hasMore; }
+    if (label) { label.textContent = pg.loadedText(meta); }
   }
 
   function setGroupState(kind, text) {
@@ -415,21 +441,45 @@
     });
   }
 
-  function load() {
+  /** 拉云任务（append=true 表示「加载更多」，累加到既有列表）。 */
+  function load(append) {
     if (state.loading) { return; }
     state.loading = true;
     setState('', '');
-    api.json('GET', '/api/cloud/tasks?limit=100')
+    var before = append ? state.tasks.length : 0;
+    // 状态筛选下推到服务端：**本地过滤只能看到已加载的子集**，计数会低估（假数据）。
+    var statusQ = statusFilterQuery();
+    var base = statusQ ? ('/api/cloud/tasks?status=' + encodeURIComponent(statusQ)) : '/api/cloud/tasks';
+    api.json('GET', pg.pageURL(base, before, PAGE_TASKS))
       .then(function (body) {
-        state.tasks = (body && (body.tasks || body.items)) || [];
+        var page = (body && (body.tasks || body.items)) || [];
+        state.tasks = append ? state.tasks.concat(page) : page;
+        var meta = pg.pageMeta({ tasks: page, total: body ? body.total : undefined }, 'tasks', before);
+        if (!meta.hasTotal) { meta.hasMore = pg.inferHasMore(meta.pageCount, PAGE_TASKS); }
+        state.taskMeta = meta;
         render();
       })
       .catch(function (e) {
         setState('error', '云端任务加载失败：' + (e.message || e));
       })
       .then(function () { state.loading = false; });
-    loadGroups();
-    loadSyncs();
+    loadGroups(append);
+    if (!append) { loadSyncs(); }
+  }
+
+  /** 状态筛选映射到服务端 status 参数（空 = 全部；running 是「非终态」合集，需本地再筛）。 */
+  function statusFilterQuery() {
+    if (state.filter === 'failed' || state.filter === 'completed') { return state.filter; }
+    return '';
+  }
+
+  /** 渲染「已加载 X / 共 Y」+ 加载更多按钮。 */
+  function renderTaskMore() {
+    var wrap = el('v2-tf-more-wrap');
+    var label = el('v2-tf-loaded');
+    var meta = state.taskMeta || {};
+    if (wrap) { wrap.hidden = !meta.hasMore; }
+    if (label) { label.textContent = pg.loadedText(meta); }
   }
 
   function setAuto(on) {
@@ -457,11 +507,16 @@
         Array.prototype.forEach.call(document.querySelectorAll('[data-tf]'), function (x) { x.setAttribute('aria-pressed', 'false'); });
         c.setAttribute('aria-pressed', 'true');
         state.filter = c.getAttribute('data-tf');
-        render();
+        // 筛选条件变化必须**重新拉第一页**（状态已下推服务端，本地只对已加载子集过滤）。
+        load();
       });
     });
     var refresh = el('v2-tf-refresh');
-    if (refresh) { refresh.addEventListener('click', function () { load(); loadGroups(); }); }
+    if (refresh) { refresh.addEventListener('click', function () { load(); }); }
+    var moreTasks = el('v2-tf-more');
+    if (moreTasks) { moreTasks.addEventListener('click', function () { load(true); }); }
+    var moreGroups = el('v2-grp-more');
+    if (moreGroups) { moreGroups.addEventListener('click', function () { loadGroups(true); }); }
     var sr = el('v2-sync-refresh');
     if (sr) { sr.addEventListener('click', loadSyncs); }
     var sc = el('v2-sync-create');
