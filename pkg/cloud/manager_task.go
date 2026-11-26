@@ -216,6 +216,10 @@ func (m *CloudDownloadManager) reviveTerminalTask(revive *CloudTask) *CloudTask 
 	stored.Status = "pending"
 	stored.Error = ""
 	stored.TransferErr = ""
+	// 分块状态属于**上一轮会话**：复活后下载器会按新几何重新上报；不清会让 UI 显示旧的
+	// "已完成块"（HTTP 下载器根本不报分块 ⇒ 旧矩阵永久残留）。进度采样（Progress）保留，
+	// 它是跨重试的历史曲线，不清。
+	stored.Chunks = nil
 	stored.UpdatedAt = time.Now()
 	stored.ExpiresAt = time.Now().Add(m.config.TaskTTL)
 	snap := snapshotTask(stored)
