@@ -254,6 +254,8 @@
     if (maxDl) { body.max_downloads = maxDl; }
     if (one) { body.one_time = true; }
     if (pw) { body.password = pw; }
+    var wm = ((el('v2-share-watermark') || {}).value || '').trim();
+    if (wm) { body.watermark = wm; }
     api.json('POST', '/api/shares', {
       body: new TextEncoder().encode(JSON.stringify(body)),
       contentType: 'application/json'

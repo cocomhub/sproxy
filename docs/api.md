@@ -652,6 +652,9 @@ Web UI 文件列表实时刷新；sclient/脚本可用 `Last-Event-ID` 头重连
 
 - 有口令的分享必须提供口令：优先 `X-Share-Password` 请求头（**推荐**，不进 URL/访问日志/Referer），
   也支持 `?password=`（兼容浏览器直达）。缺失或错误 ⇒ **401**，且**不消耗下载计数**。
+- **派生内容**：支持 `?transform=thumb&width=N`（缩略图）与 `?watermark=<seed>`（水印）——
+  与 `/download` 共用同一派生管线与缓存；仅**本地卷**文件可用（外部卷 ⇒ 501，不静默回原文件）。
+  分享级响应头（`X-Share-ReadOnly` / `X-Share-Watermark` / no-store / no-referrer）在派生响应上同样存在。
 - 分享文件已删除/移走/卷 ACL 收紧 ⇒ 410；一次性/超额 ⇒ 409。
 
 ### GET /api/shares

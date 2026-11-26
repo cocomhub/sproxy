@@ -172,3 +172,31 @@ golangci-lint run web/e2e/...                      # 0 issues
 - 分享目录：服务端明确 400（`不支持分享目录`），v2 未提供入口；
 - 口令修改：需撤销后重建（无「改口令」接口）；
 - 分享访问统计（IP/UA）：服务端只记次数。
+
+---
+
+## 第四批（2026-11-25 续）：文档声称但实现缺失的「语义层」契约
+
+R55 门禁只校验「文档里的**路径**是否存在于路由表」，**不校验语义**（参数是否真的生效）。
+本轮按语义核了分享面，发现第三个「从未生效」的能力：
+
+| 级别 | 缺陷 | 证据 |
+| --- | --- | --- |
+| P1 | **分享的 `?transform=thumb&watermark=` 从未生效**：`streamShareFile` 直接 `io.Copy` 原文件，参数被完全忽略；`docs/api.md` 与本仓注释都声称支持 | 探针实测：`?transform=thumb` 返回 `Content-Type: application/octet-stream` 且长度 = 原文件 |
+| P2 | 派生分支若直接复用 `/download` 管线，**会丢掉分享级响应头**（`X-Share-Watermark` 等） | 修复中实测：只加 transform 分支后 `X-Share-Watermark` 变空 |
+
+### 修复
+
+- `files.Service.ServeTransform(w, r, dp)`：把「按 transform 派生响应」暴露成**单一实现**，
+  `/download` 与分享面共用（不再各自一份）。
+- 分享面：`?transform=` 存在时走同一派生管线（缩略图/水印 + 派生缓存）；**仅本地卷**可用，
+  外部卷明确 501（不静默回原文件，避免用户以为水印生效）。
+- 抽出 `setShareHeaders`：只读/水印/no-store/no-referrer 在**原始流式与派生响应**两条路径都设置。
+- TDD：`TestShareAccess_TransformThumbnail`（512×512 噪声 PNG → `?transform=thumb&width=8`
+  必须 `image/*` 且**体积小于原图**；水印分享的 `X-Share-Watermark` 在派生响应上可见）；
+  **变异命中**：把 transform 分支短路为 `false &&` ⇒ 「Content-Type = application/octet-stream」红，还原后绿。
+
+### 顺带补齐
+
+- v2 检查器分享页签新增**水印种子输入**（此前 API 支持但 UI 无入口）；
+- e2e 断言「创建带水印分享 → 访问响应头含该种子」。
