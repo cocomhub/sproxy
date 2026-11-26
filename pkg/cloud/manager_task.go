@@ -42,7 +42,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	// 否则不吸收创建新任务——否则本次的转存/保留意图被静默吞掉（去重吸收改变语义）。
 	if existing := m.findByURL(url, owner, params); existing != nil {
 		m.logger.Info("duplicate cloud download request, reusing existing task",
-			"url", url,
+			"url", redactURLForLog(url),
 			"existing_id", existing.ID,
 			"existing_status", existing.Status,
 		)
@@ -54,7 +54,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	//   completed 且转存目标仍存在 ⇒ 幂等短路，直接返回该任务（不重复下载）。
 	if reused := m.reuseTerminalTask(url, owner, params, filename); reused != nil {
 		m.logger.Info("resubmit reused terminal task",
-			"url", url, "task_id", reused.ID, "status", reused.Status)
+			"url", redactURLForLog(url), "task_id", reused.ID, "status", reused.Status)
 		return reused, nil
 	}
 
@@ -66,7 +66,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	}
 	if err := m.storage.TryReserveCloud(reserved); err != nil {
 		m.logger.Warn("storage full, cloud download rejected",
-			"url", url,
+			"url", redactURLForLog(url),
 			"requested_size", totalSize,
 			"current_usage", m.storage.Usage(),
 			"max_bytes", m.storage.MaxBytes(),
@@ -92,7 +92,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 			if err != nil {
 				m.storage.ReleaseCloud(reserved)
 				m.logger.Warn("storage full, cloud download rejected",
-					"url", url,
+					"url", redactURLForLog(url),
 					"requested_size", totalSize,
 					"owner", owner,
 				)
@@ -132,7 +132,7 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 	_ = m.saveTask(task)
 	m.logger.Info("cloud download task created",
 		"task_id", task.ID,
-		"url", url,
+		"url", redactURLForLog(url),
 		"filename", filename,
 		"reserved_size", totalSize,
 	)
@@ -288,14 +288,14 @@ func (m *CloudDownloadManager) SubmitAndStart(method, url, filename string, tota
 	useSync := syncCtx != nil && totalSize > 0 && totalSize < m.config.SyncThreshold
 
 	if useSync {
-		m.logger.Info("starting sync cloud download", "task_id", realTask.ID, "url", url, "size", totalSize)
+		m.logger.Info("starting sync cloud download", "task_id", realTask.ID, "url", redactURLForLog(url), "size", totalSize)
 		// 同步下载：直接在当前 goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
 		m.wg.Add(1)
 		m.executeDownload(syncCtx, realTask)
 		return task, nil
 	}
 
-	m.logger.Info("starting async cloud download", "task_id", realTask.ID, "url", url, "size", totalSize)
+	m.logger.Info("starting async cloud download", "task_id", realTask.ID, "url", redactURLForLog(url), "size", totalSize)
 	// 异步下载：goroutine 执行，wg.Add(1) 在 go 之前确保不竞态
 	//nolint:gosec
 	m.wg.Add(1)
@@ -699,7 +699,7 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
-	m.logger.Info("download started", "task_id", task.ID, "url", task.URL, "filename", task.Filename)
+	m.logger.Info("download started", "task_id", task.ID, "url", redactURLForLog(task.URL), "filename", task.Filename)
 
 	// 构建目标文件路径（按任务 owner 落租户 cloud 桶）
 	taskDir := m.TaskDirFor(task.Owner, task.ID)
@@ -1112,7 +1112,7 @@ func (m *CloudDownloadManager) retryAttemptWait(ctx, dlCtx context.Context, atte
 	if stopped {
 		return true, waitErr
 	}
-	m.logger.Info("retrying download", "task_id", task.ID, "url", task.URL, "attempt", attempt+1, "max", maxRetries)
+	m.logger.Info("retrying download", "task_id", task.ID, "url", redactURLForLog(task.URL), "attempt", attempt+1, "max", maxRetries)
 	return false, nil
 }
 
@@ -1266,7 +1266,7 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 	// goroutine 的 defer 不清除二者，避免新 goroutine 短暂丢失运行标记与取消句柄。
 	if ctx.Err() != nil && dlCtx.Err() == nil {
 		m.logger.Info("sync download client disconnected, switching to async",
-			"task_id", task.ID, "url", task.URL)
+			"task_id", task.ID, "url", redactURLForLog(task.URL))
 		//nolint:gosec // G118: 断线后异步继续需要独立 context
 		m.mu.Lock()
 		m.markRunningLocked(task.ID)
@@ -1283,7 +1283,7 @@ func (m *CloudDownloadManager) handleDownloadDone(ctx context.Context, dlCtx con
 		return true
 	}
 	m.failTask(task, downloadErr.Error())
-	m.logger.Error("download failed", "task_id", task.ID, "url", task.URL, "error", downloadErr)
+	m.logger.Error("download failed", "task_id", task.ID, "url", redactURLForLog(task.URL), "error", downloadErr)
 	return true
 }
 
@@ -1433,7 +1433,7 @@ func (m *CloudDownloadManager) persistCompleted(stored *CloudTask, task *CloudTa
 	}
 	m.logger.Info("download completed",
 		"task_id", task.ID,
-		"url", task.URL,
+		"url", redactURLForLog(task.URL),
 		"size", result.Size,
 		"checksum", result.Checksum[:16]+"...",
 	)
