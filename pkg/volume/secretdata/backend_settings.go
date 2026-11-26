@@ -117,7 +117,7 @@ func rulesOf(c *policy.Compiled) []policy.Rule { return c.Rules() }
 // effectiveSourceOf 判定**实际生效**的规则来源（与 FS 的两级优先级一致）。
 func effectiveSourceOf(runtime, baseline *policy.Compiled) string {
 	switch {
-	case runtime != nil && len(runtime.Rules()) > 0:
+	case runtime.HasRules():
 		return "runtime"
 	case baseline != nil:
 		return "baseline"
@@ -229,8 +229,9 @@ func (b *backend) SetSettingsStore(store registry.SettingsStore) error {
 func (b *backend) ReloadSettings(ctx context.Context) error {
 	store := b.loadSettingsStore()
 	if store == nil {
-		// 未装配持久化后端：无「重载」语义，视为成功（分区本就只读）。
-		return nil
+		// 未装配持久化后端 ⇒ **没有重载动作**：必须报「不支持」，否则 refresh 回执会把它说成
+		// 「卷设置已重载」（正是本 PR 要消灭的假成功）。
+		return fmt.Errorf("卷未装配设置持久化后端: %w", registry.ErrSettingsReloadNotImplemented)
 	}
 	raw, version, err := store.Load(ctx, b.fs.opts.VolumeName)
 	if err != nil {

@@ -1537,7 +1537,7 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 路径为三段（`/{name}/detail`）而非 `/{name}`：卷名可合法取 `export`/`user` 等值，两段通配会与
   既有字面路由撞名
 
-```jsonc
+```json
 {
   "volume": {"name":"vault","type":"secretdata","mode":"","capacity":0,"usage":123,"state":"healthy"},
   "capabilities": ["settings"],
@@ -1548,19 +1548,29 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
       {"key":"max_size_limit","label":"单条规则块大小上限（字节）","type":"number","required":false}
     ],
     "value": {
-      "version": 3,                       // 运行期规则的持久化版本（无运行期规则时为 0）
-      "rules": [                          // **运行期**规则（可编辑；为空表示未覆盖基线）
-        {"path_regex":"^archive/.*\.zip$","max_size":20971520,"mode":"single","priority":100}
+      "version": 3,
+      "rules": [
+        {"path_regex": "^archive/.*\\\\.zip$", "max_size": 20971520, "mode": "single", "priority": 100}
       ],
-      "baseline_rules": [],               // 配置文件基线（extra.block_rules，只读回显）
-      "effective_source": "runtime",      // runtime | baseline | volume_default
-      "limits": {                         // single 规则的真实上限（UI 校验/提示复用）
-        "hard_max": 67108864, "volume_block_max": 209715200, "effective_max": 67108864
-      }
+      "baseline_rules": [
+        {"path_regex": "^photos/", "max_size": 10485760, "mode": "single", "priority": 50}
+      ],
+      "effective_source": "runtime",
+      "limits": {"hard_max": 67108864, "volume_block_max": 209715200, "effective_max": 67108864}
     }
   }]
 }
 ```
+
+`block_policy.value` 的字段（**示例中的 `baseline_rules` 带 `omitempty`：无静态基线时该键不出现**）：
+
+| 字段 | 含义 |
+|---|---|
+| `version` | 运行期规则的持久化版本（无运行期规则时为 0） |
+| `rules` | **运行期**规则（可编辑；为空表示未覆盖基线） |
+| `baseline_rules` | 配置文件静态基线（`extra.block_rules`，只读回显；**可选**） |
+| `effective_source` | 实际生效来源：`runtime` / `baseline` / `volume_default` |
+| `limits` | `single` 规则的真实上限（`hard_max` 算法硬顶 / `volume_block_max` 卷块上限 / `effective_max` 取小） |
 
 ### GET /api/volumes/{name}/settings
 
@@ -1583,7 +1593,9 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
   取值一致；`detail` 只含条数与载荷摘要，**不含规则全文**）
 
 ```bash
-curl -X PUT "https://host/api/volumes/vault/settings/block_policy"   -H 'Content-Type: application/json'   -d '{"rules":[{"path_regex":"^archive/.*\.zip$","max_size":"20MiB","mode":"single","priority":100}]}'
+curl -X PUT "https://host/api/volumes/vault/settings/block_policy" \
+  -H 'Content-Type: application/json' \
+  -d '{"rules":[{"path_regex":"^archive/.*\\.zip$","max_size":"20MiB","mode":"single","priority":100}]}'
 ```
 
 **规则语义**（`block_policy`）：

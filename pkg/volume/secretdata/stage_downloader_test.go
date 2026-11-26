@@ -245,21 +245,8 @@ func TestStageDL_WindowCacheHitIsFinalPlaintext(t *testing.T) {
 	_ = rc.Close()
 	// 等到**窗口就绪**（windowCacheRead 真的命中），而不是只等「有缓存文件」——前者才是
 	// 触发缓存命中分支的充要条件（后者可以早于就绪标记）。用轮询把竞态变成确定性前置。
-	waitWindows(t, func() bool {
-		fs.mu.RLock()
-		e := fs.index["big.bin"]
-		fs.mu.RUnlock()
-		if e == nil || e.meta == nil {
-			return false
-		}
-		key, salt, kerr := fs.fileLevelKey(e)
-		if kerr != nil {
-			return false
-		}
-		o := chunkRangeOpts{e: e, rel: "big.bin", ci: e.meta.Chunks[0], keyBytes: key, salt: salt}
-		_, ok := fs.windowCacheRead(o, 0, 4096)
-		return ok
-	}, "窗口缓存就绪")
+	// 复用同一就绪判据（CLAUDE.md 收敛原则④：同一语义只留一份实现）。
+	waitWindowReady(t, fs, "big.bin", 0, 4096)
 
 	// 第二轮：此时窗口已就绪 ⇒ 走缓存命中路径，必须返回正确明文且不报错。
 	rc2, err := fs.OpenRangeRead(context.Background(), "big.bin", 0, 4096)

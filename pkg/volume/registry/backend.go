@@ -5,6 +5,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -67,6 +68,13 @@ type IndexRefresher interface {
 	// 绝不让瞬时故障把卷变成空视图）。
 	RefreshIndex(ctx context.Context) error
 }
+
+// ErrIndexRefreshNotImplemented 是「该后端没有内存索引可重建」的**专用**哨兵。
+//
+// 为什么不用通用 syncpkg.ErrUnsupported：包装器（capacity.Backend）恒实现本能力，
+// 若用通用哨兵，inner 的真实失败（恰好 wrap ErrUnsupported）会被误判成「不支持」
+// （与 SettingsReloader 同一教训，2026-11-27）。
+var ErrIndexRefreshNotImplemented = errors.New("registry: 后端未实现索引重建")
 
 // 不支持/未知 URL → 实现方必须 fail-closed（返回错误，绝不静默返回 nil）。
 type URLResolver interface {

@@ -633,9 +633,10 @@ func (f *failingReloadBackend) ReloadSettings(context.Context) error {
 	return errors.New("state store unavailable")
 }
 
-// TestVolumeSettingsRefresh_UnsupportedMeansNoReload 锁定「包装器转发但 inner 未实现」
-// 的情形：必须视为**无重载语义**（返回 ErrUnsupported 供调用方按「不支持」描述），
-// 绝不能落回吞错的 Setter 兼容路径（安全审查）。
+// TestVolumeSettingsRefresh_UnsupportedMeansNoReload 锁定「包装器转发但 inner 未实现」的
+// 情形：必须视为**无重载语义**（outcome=not_supported；哨兵为专用
+// registry.ErrSettingsReloadNotImplemented —— **不是**通用 syncpkg.ErrUnsupported，
+// 后者会让 inner 的真实失败被误判成「不支持」），且绝不落回吞错的 Setter 兼容路径。
 func TestVolumeSettingsRefresh_UnsupportedMeansNoReload(t *testing.T) {
 	t.Parallel()
 	// 只实现 Provider+Writer+Setter（无 Reloader）：capacity 包装器的 ReloadSettings 返回
@@ -643,7 +644,7 @@ func TestVolumeSettingsRefresh_UnsupportedMeansNoReload(t *testing.T) {
 	b := &setterOnlyBackend{}
 	h := newSettingsTestHandlers(t, "no-reload", b)
 	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
-	// inner 无严格重载语义（专用哨兵）⇒ 结论 not_supported，**不回退** Setter 吞错路径
+	// inner 无严格重载语义（专用哨兵 ErrSettingsReloadNotImplemented）⇒ 结论 not_supported，**不回退** Setter 吞错路径
 	// （安全审查：不支持就不能伪装成「已重载」，也不该走失败不可见的注入）。
 	outcome, err := h.volumeSettingsRefreshOutcome(context.Background(), "no-reload", b)
 	if err != nil || outcome != settingsReloadNotSupported {
@@ -726,7 +727,7 @@ func TestVolumeSettingsReload_ErrorNotLeakedToAudit(t *testing.T) {
 	attachTestAudit(t, h)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/volumes/refresh?volume=leak", nil)
-	note, detail, auditResult := h.reloadVolumeSettingsNote(r.WithContext(settingsCtx("boss", string(accesskey.RoleAdmin))), "leak")
+	note, detail, auditResult, _ := h.reloadVolumeSettingsNote(r.WithContext(settingsCtx("boss", string(accesskey.RoleAdmin))), "leak")
 	if auditResult != AuditResultError {
 		t.Fatalf("重载失败时审计 result 应为 error，得到 %q", auditResult)
 	}
@@ -759,4 +760,26 @@ type genericUnsupportedReloadBackend struct{ plainSettingsBackend }
 
 func (genericUnsupportedReloadBackend) ReloadSettings(context.Context) error {
 	return fmt.Errorf("inner: %w", syncpkg.ErrUnsupported)
+}
+
+// TestRefreshExternalVolume_ReloadsSettingsWithoutIndexRefresher 锁定 refresh 的两个职责
+// **互不依赖**（审查 Important，2026-11-27）：卷设置重载不得被「后端是否有内存索引」前置
+// 拦住 —— 否则没有 IndexRefresher 的卷（或将来又漏转发该能力）就永远无法收敛规则。
+func TestRefreshExternalVolume_ReloadsSettingsWithoutIndexRefresher(t *testing.T) {
+	t.Parallel()
+	// 只实现 Settings 能力（无 IndexRefresher）的后端
+	b := &reloadableBackend{}
+	h := newSettingsTestHandlers(t, "no-index", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/volumes/refresh?volume=no-index", nil).
+		WithContext(settingsCtx("boss", string(accesskey.RoleAdmin)))
+	h.refreshExternalVolume(rec, req, "no-index")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if b.reloadCalls != 1 {
+		t.Fatalf("无 IndexRefresher 时也必须重载设置，reloadCalls=%d", b.reloadCalls)
+	}
 }
