@@ -152,6 +152,8 @@ func TestRestoreUserVolumes_NestedInheritsSourcePool(t *testing.T) {
 	if oerr != nil {
 		t.Fatalf("OpenRoot: %v", oerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	store := server.NewUserVolumeStore(t.TempDir())
 	if err := store.Create("alice", server.UserVolume{
 		Name: "wrap", Type: uvRestoreTestType, Capacity: 50,
@@ -223,6 +225,8 @@ func TestRestoreUserVolumes_ChainedPoolOrder(t *testing.T) {
 	if oerr != nil {
 		t.Fatalf("OpenRoot: %v", oerr)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	store := server.NewUserVolumeStore(t.TempDir())
 	// 名称序：aaa < zzz（ScanRestore 升序返回 aaa 先），zzz 是 aaa 的底层。
 	if err := store.Create("alice", server.UserVolume{

@@ -435,6 +435,8 @@ func (e *dirsEnv) enableVolumes(t *testing.T, names ...string) {
 		if err != nil {
 			t.Fatalf("OpenRoot(%s): %v", name, err)
 		}
+		// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+		t.Cleanup(func() { _ = rt.Close() })
 		roots[name] = rt
 		e.volRoots[name] = rt
 		e.volDirs[name] = dir
@@ -486,6 +488,7 @@ func (e *dirsEnv) defaultRoot() *storage.Root {
 	if err != nil {
 		return nil
 	}
+	// 关闭由 dirsEnv 的 t.Cleanup（遍历 e.volRoots）统一负责，此处不重复登记。
 	e.volRoots["main"] = r
 	return r
 }

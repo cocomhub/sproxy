@@ -92,6 +92,8 @@ func newChunkedTestHandlers(t *testing.T, dir string, chunkSize int64) *Handlers
 	if err != nil {
 		t.Fatalf("打开存储根失败: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = globalRoot.Close() })
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))

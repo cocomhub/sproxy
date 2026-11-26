@@ -1040,6 +1040,8 @@ func newTransferACLSet(t *testing.T) *registry.Set {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	vols := []volume.Volume{
 		{
 			// ModeAllow + 空白名单 = 默认拒绝（所有 owner 拒），模拟「私有卷」。
@@ -1187,6 +1189,8 @@ func TestCloudArchiveGroupToVolume_UnifiedTransfer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open root: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = tenantRoot.Close() })
 	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0755); mkErr != nil {
 		t.Fatalf("mkdir: %v", mkErr)
 	}
@@ -1255,6 +1259,8 @@ func TestCloudArchiveGroupToVolume_TrustedVolumeWiring(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open root: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = tenantRoot.Close() })
 	if mkErr := tenantRoot.MkdirAll("cloud/g1", 0o755); mkErr != nil {
 		t.Fatalf("mkdir: %v", mkErr)
 	}

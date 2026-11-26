@@ -25,6 +25,8 @@ func newCacheTenant(t *testing.T) *storage.Tenant {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	if err := rt.MkdirAll("meta/transform", 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -115,6 +117,8 @@ func TestTransformCacheGC_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = rt.Close() })
 	tnt2, terr := storage.NewTenant("t2", rt)
 	if terr != nil {
 		t.Fatalf("NewTenant: %v", terr)

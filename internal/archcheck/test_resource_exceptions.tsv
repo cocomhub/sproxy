@@ -1,0 +1,5 @@
+# R59 例外清单（**只减不增**）：测试夹具的资源构造点，但关闭归属在别处（需写明为什么）。
+# 格式：<rel>:<line>	<理由>
+pkg/files/dirs_test.go:487	volRoots 由 dirsEnv 的 t.Cleanup 遍历统一 Close（此处再登记会重复）
+pkg/files/dirs_test.go:516	checksum store 由 dirsEnv 的 t.Cleanup 遍历统一 Close
+pkg/cloud/manager_test_common_test.go:113	checksum store 由 newCloudTestEnv 的 t.Cleanup 遍历统一 Close

@@ -35,6 +35,8 @@ func newAssemblyTestHandlers(t *testing.T, storageRoot string) *Handlers {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// os.Root 持目录 fd 且无 finalizer：不关会让 t.TempDir() 的 RemoveAll 在 Windows 上失败。
+	t.Cleanup(func() { _ = globalRoot.Close() })
 	h := &Handlers{
 		cfgPtr:               &cfgPtr,
 		logger:               testLogger(),

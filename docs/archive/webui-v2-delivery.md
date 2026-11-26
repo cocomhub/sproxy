@@ -436,3 +436,48 @@ os.doInRoot(0x0, ...) <- os.(*Root).MkdirAll <- checksum.(*ChecksumStore).save
 
 **教训**：修「测试夹具没释放资源」时，**同一类资源（协程 / 句柄 / 监听器）必须一次清干净**，
 否则修完一个 flake 只是让下一个浮出水面 —— 而每轮 CI 都是十分钟级成本。
+
+## 2026-11-27 门禁 R59：把「夹具释放资源」从局部纪律升级为全仓门禁
+
+上一轮只守 `pkg/storage` 与 `pkg/checksum`；本轮把同类违规**在全仓一次清干净**并收口为门禁。
+
+### 清理（30 处 `OpenRoot` + 3 处 checksum store）
+
+| 包 | 补 `t.Cleanup(Close)` |
+| --- | --- |
+| `cmd/sproxy` | 9（`secret_register_test` 8 / `user_volume_restore_test` 1→2 处） |
+| `pkg/server` | 10（`chunked_owner` / `chunked_upload` / `cloud_download_handler`×3 / `dav` / `download_external` / `files_external_ops` / `handlers` / `stream_followup` / `upload_init` / `upload_owner`） |
+| `pkg/files` | 2（`dirs_test` / `transform_cache_gc_test`） |
+| `pkg/sync` / `pkg/volume/registry` | 3 |
+
+`pkg/files/dirs_test.go` 与 `pkg/cloud` 的 checksum store 属**容器统一关闭**（`dirsEnv` /
+`newCloudTestEnv` 的 `t.Cleanup` 遍历关闭），在例外清单登记并写理由 —— 避免"两处都登记"的重复。
+
+### 门禁 R59（`internal/archcheck/test_resource_release_gate_test.go`）
+
+- 扫描全仓 `*_test.go`（跳过 `build/` `node_modules/` `.git/` `.worktrees/` `vendor/`）；
+- 判据：`storage.OpenRoot(` / `checksum.NewChecksumStore(` 调用点后 10 行内必须有
+  `Close()` 或 `t.Cleanup(`；助手（`openTestRoot`/`openRootForTest`/`testRootAt`）与定义行不计；
+- 例外清单 `internal/archcheck/test_resource_exceptions.tsv`（`<rel>:<line>\t<理由>`，**只减不增**）；
+- **双侧下限护栏**：测试文件 ≥900、调用点 ≥130（实测 142），防扫描面被改窄或正则失效假绿；
+- 跳过两个「门禁自身」文件——它们的匹配字符串不是真实调用（否则门禁会举报自己）。
+
+### 关键实现细节（复用价值）
+
+**跳过目录必须用「相对 module root」的路径判定**：worktree 的绝对路径本身含
+`/.worktrees/`，用绝对路径判定会把**整个仓库**跳过（扫描 0 个 → 靠下限护栏才发现）。
+这是 R57 已踩过的同一个坑。
+
+### 验证与变异
+
+- `go test ./internal/archcheck`（含 R59 + R56 索引门禁）全绿；
+- 受影响 8 个包 + `cmd/sproxy` 全绿；`golangci-lint ./...` 0 issues；
+- 变异命中：删掉 `pkg/server/stream_followup_test.go` 的 `t.Cleanup(... root.Close())`
+  ⇒ R59 报 `pkg/server/stream_followup_test.go:39 …`（证明门禁确实覆盖到**别的包**）。
+- 索引登记：`docs/gates.md` 增补 R59 行（R56 门禁强制）。
+
+### 关于「门禁只能减少不能新增」的裁定
+
+本门禁属**收口既有纪律**（上一轮已用同样的判据守了两个包），不是提高既有门禁基线：
+它把「测试夹具必须释放资源」这条已在 AGENTS 与设计文档里写明的纪律变成可执行判据，
+且**新代码不会因为「以前没人管」而被卡** —— 清完 30 处违规后才上线，起点是零违规。
