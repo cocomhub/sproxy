@@ -30,12 +30,15 @@ var Managed = map[string]bool{
 	// pkg/sync 消费；零 pkg/* 内部依赖除 storage/volume（G0）⇒ G0。
 	// 同时承载 FileMeta.Extra 的字段 schema/校验（extra.go：白名单+类型+长度）。
 	"github.com/cocomhub/sproxy/pkg/files/meta": true,
-	"github.com/cocomhub/sproxy/pkg/syncmgr":    true,
-	"github.com/cocomhub/sproxy/pkg/downloader": true,
-	"github.com/cocomhub/sproxy/pkg/cloud":      true,
-	"github.com/cocomhub/sproxy/pkg/compressx":  true, // 转存内核的预处理依赖（历史未登记，随 pkg/transfer 一并纳入）
-	"github.com/cocomhub/sproxy/pkg/transfer":   true, // 统一转存内核（pkg/cloud 转存路径复用其读回校验）
-	"github.com/cocomhub/sproxy/pkg/remote":     true,
+	// secretdata 分块规则引擎（2026-11-26）：Rule/Policy 用户面形状 + Compiled 预编译快照。
+	// 只依赖 shardseal(L0) + units/sizex(L0) ⇒ L1。
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy": true,
+	"github.com/cocomhub/sproxy/pkg/syncmgr":                  true,
+	"github.com/cocomhub/sproxy/pkg/downloader":               true,
+	"github.com/cocomhub/sproxy/pkg/cloud":                    true,
+	"github.com/cocomhub/sproxy/pkg/compressx":                true, // 转存内核的预处理依赖（历史未登记，随 pkg/transfer 一并纳入）
+	"github.com/cocomhub/sproxy/pkg/transfer":                 true, // 统一转存内核（pkg/cloud 转存路径复用其读回校验）
+	"github.com/cocomhub/sproxy/pkg/remote":                   true,
 	// 本工作新增（server 治理 S1）：服务端配置 schema/校验/默认值/加载。
 	// **server 作用域**（只在 sproxy 服务端进程有意义），故路径在 pkg/server/ 子树下，
 	// 由 R4（pkg/** 非子树不得导入）与 R5（子包不得导入装配根）共同约束。
@@ -143,7 +146,10 @@ var Levels = map[string]int{
 	// sizex 后 R3 才暴露（2026-10-07 登记）。
 	"github.com/cocomhub/sproxy/pkg/units/sizex": 0,
 	"github.com/cocomhub/sproxy/pkg/volume":      0,
-	"github.com/cocomhub/sproxy/pkg/clustercred": 0,
+	// 分块加密算法包（实测只依赖 pkg/plugin ⇒ G0）；分块规则引擎在其上 ⇒ L1。
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal":        0,
+	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal/policy": 1,
+	"github.com/cocomhub/sproxy/pkg/clustercred":              0,
 	// 本工作新增（server 域抽取 S1）：同步任务管理器，从 pkg/server 的子包提升为顶层。
 	// 零 pkg/* 内部依赖（实测），故 G0。
 	"github.com/cocomhub/sproxy/pkg/syncmgr": 0,
