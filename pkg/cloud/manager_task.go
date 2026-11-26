@@ -718,6 +718,9 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 		return
 	}
 
+	// 阶段打点（2026-11-26）：下载开始 → downloading（v2 阶段时间轴 + 采样）。
+	m.setStage(task, "downloading")
+
 	// 执行下载（带重试）。审计：download 阶段 span 由 runDownloadWithAudit 包裹（收敛复杂度）——
 	// 其内部 runRetryLoop（含 #743 完整性校验管道 + 并发槽 acquire/释放）逐次执行，完整性与
 	// 审计双语义并集保留。
@@ -740,6 +743,9 @@ func (m *CloudDownloadManager) executeDownload(ctx context.Context, task *CloudT
 	// 转存（客户端任务参数 Transfer 非 nil）：下载产物 → 目标卷（secretdata 自动加密/
 	// 普通卷纯上传），流程层不感知加密。失败分类：目标卷异常 3 次指数重试；文件异常
 	// 删本地重下载（两次校验和一致仍失败 → 任务失败）。KeepLocal=false 转存成功后删本地。
+	if task.Transfer != nil {
+		m.setStage(task, "transferring") // 阶段打点：下载完成 → 转存
+	}
 	var handled bool
 	if handled, result = m.transferAfterDownload(ctx, dlCtx, task, destPath, result); handled {
 		return
@@ -2071,4 +2077,18 @@ func (m *CloudDownloadManager) tryRebuildInPlace(ctx context.Context, task *Clou
 	}
 	m.logger.Info("cloud download rebuilt in place", "task_id", task.ID, "dest", destPath)
 	return m.rebuiltResult(destPath), true
+}
+
+// setStage 记录任务阶段并**立即打点**（阶段变化本身是一个采样点：v2 时间轴与速率曲线
+// 需要精确的阶段起点；否则要等下一次进度回调才记录，短阶段会整段丢失）。
+func (m *CloudDownloadManager) setStage(task *CloudTask, stage string) {
+	if task == nil {
+		return
+	}
+	m.mu.Lock()
+	task.noteStage(stage)
+	recordProgressSample(task, task.Downloaded, task.TotalSize, time.Now())
+	id := task.ID
+	m.mu.Unlock()
+	m.markDirty(id)
 }

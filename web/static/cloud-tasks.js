@@ -450,6 +450,15 @@ function ctActionControlsHtml(t) {
     (firstEnabled ? '' : ' disabled') + '>执行</button></span>';
 }
 
+// ctActionDisabled 判断某动作在当前计划里是否禁用（未知动作按禁用处理：不猜可用）。
+function ctActionDisabled(plan, action) {
+  const list = Array.isArray(plan) ? plan : [];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] && list[i].action === action) return !!list[i].disabled;
+  }
+  return true;
+}
+
 // ctBlockMatrix 把分块状态转成「一行多小块」的矩阵数据（用户 2026-11-26）。
 // 每块按 1MiB 拆小块（上限 64 小块/行，避免一行过宽）；小块状态：done/active/todo。
 function ctBlockMatrix(chunks) {
@@ -666,6 +675,7 @@ if (typeof module !== 'undefined' && module.exports) {
     ctRateText: ctRateText,
     ctActionControlsHtml: ctActionControlsHtml,
     ctActionsFor: ctActionsFor,
+    ctActionDisabled: ctActionDisabled,
     CT_ACTIONS: CT_ACTIONS,
     ctBlockMatrix: ctBlockMatrix,
     ctBlockMatrixHtml: ctBlockMatrixHtml,
@@ -924,6 +934,12 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
         const sel = panel.querySelector('.ct-action-select[data-id="' + id + '"]');
         const action = sel ? sel.value : '';
         if (!action) { setCtMsg('请选择动作'); return; }
+        const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
+        if (ctActionDisabled(ctActionsFor(t), action)) {
+          setCtMsg('该动作当前不可用（' + (sel && sel.selectedOptions && sel.selectedOptions[0]
+            ? sel.selectedOptions[0].textContent : action) + '）');
+          return;
+        }
         btn.disabled = true;
         try {
           await window.sclientTransport.coreRequest('POST',
@@ -937,6 +953,16 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
           setCtMsg('动作失败：' + e.message);
           btn.disabled = false;
         }
+      });
+    });
+
+    // 下拉切换时同步「执行」按钮可用性（禁用动作不得可点）。
+    panel.querySelectorAll('.ct-action-select').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        const id = sel.getAttribute('data-id');
+        const t = (window.__ctLastTasks || []).filter(function (x) { return x && x.id === id; })[0];
+        const btn = panel.querySelector('.ct-action-apply[data-id="' + id + '"]');
+        if (btn) btn.disabled = ctActionDisabled(ctActionsFor(t), sel.value);
       });
     });
 

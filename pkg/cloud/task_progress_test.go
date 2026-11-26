@@ -73,3 +73,22 @@ func TestProgressSince(t *testing.T) {
 		t.Fatalf("未来 since 应返回 0 点，got %d", len(got))
 	}
 }
+
+// TestSetStage_RecordsSampleImmediately 锁定「阶段变化立即打点」：
+// 短阶段（如转存很快）若只等下一次进度回调，会在时间轴上整段丢失。
+func TestSetStage_RecordsSampleImmediately(t *testing.T) {
+	t.Parallel()
+	mgr := &CloudDownloadManager{}
+	task := &CloudTask{ID: "t-stage", TotalSize: 1000, Downloaded: 1000}
+	mgr.setStage(task, "downloading")
+	mgr.setStage(task, "transferring") // 同一时刻也必须有采样（阶段变化优先于节流）
+	if len(task.Progress) != 2 {
+		t.Fatalf("阶段变化应各记一条采样，got %d 条", len(task.Progress))
+	}
+	if task.Progress[0].Stage != "downloading" || task.Progress[1].Stage != "transferring" {
+		t.Fatalf("阶段序列异常: %+v", task.Progress)
+	}
+	if task.Diagnostics == nil || task.Diagnostics.Stage != "transferring" {
+		t.Fatalf("Diagnostics.Stage 未更新: %+v", task.Diagnostics)
+	}
+}
