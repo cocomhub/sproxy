@@ -325,7 +325,7 @@ func (m *CloudDownloadManager) failOrphanPendingTask(task *CloudTask) {
 	m.refreshTaskGroup(task)
 	m.metrics.TasksFailed.Add(1)
 	m.logger.Warn("orphan pending task marked failed on recovery (never started, or queued before shutdown)",
-		"task_id", task.ID, "url", task.URL, "owner", task.Owner, "group_id", task.GroupID)
+		"task_id", task.ID, "url", redactURLForLog(task.URL), "owner", task.Owner, "group_id", task.GroupID)
 }
 
 // diskUsageOfTask 返回任务目录中所有普通文件的实际字节占用。
