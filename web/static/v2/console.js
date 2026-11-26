@@ -376,24 +376,103 @@
       .catch(function (e) { pre.textContent = '读取失败：' + (e.message || e); box.hidden = false; });
   }
 
+  /**
+   * 批量执行任务动作。
+   *
+   * **走服务端批量端点**（`POST /api/cloud/tasks/actions/batch`，上限 50）：此前是前端串行
+   * N 次单条请求 —— N 个任务 = N 次往返，且每条的可用性判据由前端猜。
+   * 服务端批量端点逐项串行执行并回**逐项结果**，前端只负责分组与展示。
+   *
+   * 分组规则：`cancel` 走单条端点（批量端点只接受 6 种 plan 动作）；其余动作按
+   * **服务端 plan 里该任务实际可用的动作**分组（同组一次批量请求）。
+   *
+   * @returns {Promise<number>} 成功条数
+   */
   function batchTasks(kind) {
     var target = selectedTaskList().filter(function (t) {
       return kind === 'retry' ? (t.status === 'failed' || t.status === 'cancelled') : (t.status === 'pending' || t.status === 'downloading');
     });
     if (!target.length) { return Promise.resolve(0); }
-    var chain = Promise.resolve();
-    var done = 0;
+    recordOp('批量' + (kind === 'retry' ? '重试' : '取消') + ' ' + target.length + ' 项（提交中）');
+
+    if (kind === 'cancel') {
+      // 批量端点不支持 cancel ⇒ 串行单条（保持既有语义，改由服务端校验状态）。
+      var chain = Promise.resolve();
+      var doneCancel = 0;
+      target.forEach(function (t) {
+        chain = chain.then(function () {
+          return window.v2cloudTable.perform('cancel', t, api, function (ok) { if (ok) { doneCancel += 1; } });
+        });
+      });
+      return chain.then(function () {
+        finishBatch('批量取消', doneCancel, target.length, []);
+        return doneCancel;
+      });
+    }
+
+    // 重试：按**服务端 plan 给出的动作**分组（没有 plan 时回落 retry_download）。
+    var groups = Object.create(null);
     target.forEach(function (t) {
-      chain = chain.then(function () {
-        return window.v2cloudTable.perform(kind, t, api, function (ok) { if (ok) { done += 1; } });
+      var act = pickRetryAction(t);
+      (groups[act] = groups[act] || []).push(t.id);
+    });
+    var acts = Object.keys(groups);
+    var chain2 = Promise.resolve({ ok: 0, total: 0, fails: [] });
+    acts.forEach(function (act) {
+      chain2 = chain2.then(function (acc) {
+        var ids = groups[act].slice(0, 50); // 与端点上限一致；超出部分提示分次
+        return api.json('POST', '/api/cloud/tasks/actions/batch', {
+          body: new TextEncoder().encode(JSON.stringify({ action: act, ids: ids })),
+          contentType: 'application/json'
+        }).then(function (res) {
+          var results = (res && res.results) || [];
+          results.forEach(function (r) {
+            acc.total += 1;
+            if (r && r.ok) { acc.ok += 1; } else { acc.fails.push(r && r.error ? r.error : '未知错误'); }
+          });
+          if (groups[act].length > ids.length) {
+            acc.fails.push('另有 ' + (groups[act].length - ids.length) + ' 项超出单次上限 50，请分次执行');
+          }
+          return acc;
+        }, function (e) {
+          acc.total += ids.length;
+          acc.fails.push(act + '：' + (e.message || e));
+          return acc;
+        });
       });
     });
-    return chain.then(function () {
-      if (window.v2toast) { window.v2toast(done ? 'ok' : 'bad', '已处理 ' + done + '/' + target.length + ' 个任务'); }
-      recordOp((kind === 'retry' ? '批量重试 ' : '批量取消 ') + done + '/' + target.length);
-      loadTasks();
-      return done;
+    return chain2.then(function (acc) {
+      finishBatch('批量重试', acc.ok, acc.total, acc.fails);
+      return acc.ok;
     });
+  }
+
+  /** 取该任务在服务端 plan 里的**重试动作**（无 plan / 无重试项时回落 retry_download）。 */
+  function pickRetryAction(t) {
+    if (Array.isArray(t && t.actions)) {
+      for (var i = 0; i < t.actions.length; i += 1) {
+        var a = t.actions[i];
+        if (!a || a.disabled || !a.action) { continue; }
+        if (a.action === 'retry_download' || a.action === 'retry_transfer' ||
+            a.action === 'retry_transfer_overwrite' || a.action === 'rotate_source') {
+          if (a.action === 'retry_transfer_overwrite') { continue; } // 破坏性动作不进批量
+          return a.action;
+        }
+      }
+    }
+    return 'retry_download';
+  }
+
+  /** 批量结束的统一收尾：toast（含首个失败原因）+ 最近操作 + 刷新。 */
+  function finishBatch(label, ok, total, fails) {
+    // 文案保持既有「已处理 x/y 个任务」口径（e2e 与用户预期都按它断言），失败时补首个原因。
+    var msg = '已处理 ' + ok + '/' + total + ' 个任务';
+    if (window.v2toast) {
+      window.v2toast(ok === total && !fails.length ? 'ok' : 'bad',
+        label + '：' + msg + (fails.length ? '（' + fails[0] + '）' : ''));
+    }
+    recordOp(label + ' ' + ok + '/' + total + (fails.length ? ' · 失败 ' + fails.length : ''));
+    loadTasks();
   }
 
   var RECENT_KEY = 'sproxy_v2_task_ops';
