@@ -485,7 +485,8 @@ func (m *CloudDownloadManager) flushDirty() {
 		if !ok {
 			continue
 		}
-		// 进度类批量持久化 best-effort（saveTask 内部已 Warn），失败不阻塞
+		// 进度类批量持久化 best-effort（saveTask 内部已 Warn），失败不阻塞。
+		// 注：saveTask 在 RLock 内完成 json.Marshal（与锁内写入互斥），故此处无需再深拷贝。
 		_ = m.saveTask(task)
 	}
 }

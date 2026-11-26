@@ -51,7 +51,16 @@ func (a *cloudTasksAdapter) MaxBatchURLs() int { return a.h.cloudMgr.MaxBatchURL
 
 func (a *cloudTasksAdapter) SubmitAndStart(method, url, filename string, totalSize int64,
 	syncCtx context.Context, owner string, params cloud.TaskParams) (*cloud.CloudTask, error) {
-	return a.h.cloudMgr.SubmitAndStart(method, url, filename, totalSize, syncCtx, owner, params)
+	t, err := a.h.cloudMgr.SubmitAndStart(method, url, filename, totalSize, syncCtx, owner, params)
+	if err != nil || t == nil {
+		return t, err
+	}
+	// 返回**快照**：HTTP 层在解锁后序列化响应，而下载 goroutine 会并发改写任务字段
+	// （Diagnostics/Progress/Chunks）⇒ 直接返回活对象会 DATA RACE（2026-11-27 审查）。
+	if snap, ok := a.h.cloudMgr.SnapshotTask(t.ID, owner); ok {
+		return snap, nil
+	}
+	return t, nil
 }
 
 func (a *cloudTasksAdapter) SnapshotTask(id, owner string) (*cloud.CloudTask, bool) {

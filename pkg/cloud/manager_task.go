@@ -137,6 +137,8 @@ func (m *CloudDownloadManager) CreateTask(method, url, filename string, totalSiz
 		"reserved_size", totalSize,
 	)
 	m.metrics.TasksCreated.Add(1)
+	// 注意：返回的是**活对象**（测试/内部调用依赖其可变性）。HTTP 装配层负责在序列化前取快照
+	// （cloudTasksAdapter.SubmitAndStart → SnapshotTask），避免与下载 goroutine 的字段改写并发。
 	return task, nil
 }
 
@@ -229,12 +231,9 @@ func (m *CloudDownloadManager) reviveTerminalTask(revive *CloudTask) *CloudTask 
 	return snap
 }
 
-// snapshotTask 返回任务的对外快照（不暴露运行时配额句柄）。
-func snapshotTask(t *CloudTask) *CloudTask {
-	c := *t
-	c.account = nil
-	return &c
-}
+// snapshotTask 返回任务的对外快照（深拷贝；不暴露运行时配额句柄）。
+// 必须深拷贝：快照会被调用方在解锁后使用/序列化，而任务字段在锁内被下载 goroutine 改写。
+func snapshotTask(t *CloudTask) *CloudTask { return deepCopyTask(t) }
 
 // transferTargetExists 判断 completed 任务的转存目标是否仍存在（幂等短路的前置条件）。
 func (m *CloudDownloadManager) transferTargetExists(t *CloudTask) bool {
