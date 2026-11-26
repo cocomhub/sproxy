@@ -21,6 +21,16 @@ func cryptoRandN(n int64) int64 {
 	return bi.Int64()
 }
 
+// 块级分块模式名（**单一事实源**：BlockPolicy.Mode / 规则引擎 policy 包 / secretdata 选型共用，
+// 避免字符串字面量散落——与 BlockletMode 常量的收敛理由相同）。
+const (
+	// BlockModeRandom 是可变长随机分块（默认；RandomPlanner，1MB-200MB）。
+	BlockModeRandom = "random"
+	// BlockModeSingle 是整文件单块（SinglePlanner）：整文件 = 1 个密文 blob、1 次上传。
+	// 适用于小文件（图片/文本/日志/已压缩包），随机分块对其无收益。
+	BlockModeSingle = "single"
+)
+
 // BlockPlanner 是可插拔分块规划接口：把原始文件大小切成不定长的分块序列。
 // 默认实现是 RandomPlanner（1MB-200MB 随机）；可扩展 video-keyframe 等
 // 按内容语义分片（plugin，见设计 §7）。
