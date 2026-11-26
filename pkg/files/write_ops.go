@@ -607,12 +607,7 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 	} else {
 		logger.WarnContext(context.Background(), "per-tenant checksum store 不可用，跳过记录", "file_name", remotePath)
 	}
-	if mtime > 0 {
-		modTime := time.Unix(0, mtime)
-		if err := root.Chtimes(rel, modTime, modTime); err != nil {
-			logger.WarnContext(context.Background(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
-		}
-	}
+	s.applyUploadMTime(root, remotePath, rel, mtime, logger)
 	// 搜索索引**不在此维护**（设计 2026-10-30 Phase 2）：写入经 `storage.Root` 的原子落位
 	// （tmp + rename）发 `MutationRename` ⇒ `ApplyRootMutation` 是唯一索引入口。
 	// 文件变更事件（roadmap §2 P1）：upload 成功（含覆盖写/分块 complete 共用本函数）。
@@ -622,6 +617,19 @@ func (s *Service) recordUploadSuccess(root *storage.Root, owner, remotePath, rel
 		}
 		return 0
 	}())
+}
+
+// applyUploadMTime 应用客户端声明的文件修改时间（mtime==0 表示不设置）。
+// 这是「上传成功副作用」中 mtime 的唯一实现：单次/分块/块写路径都经它落地，
+// 避免各路径复制的 epoch 语义分叉；archcheck R8 以 Chtimes 唯一调用点守护。
+func (s *Service) applyUploadMTime(root *storage.Root, remotePath, rel string, mtime int64, logger *slog.Logger) {
+	if mtime <= 0 {
+		return
+	}
+	modTime := time.Unix(0, mtime)
+	if err := root.Chtimes(rel, modTime, modTime); err != nil {
+		logger.WarnContext(context.Background(), "设置文件时间戳失败", "file_name", remotePath, "error", err)
+	}
 }
 
 // volumeNameForRoot 返回 root 所在卷名（多卷）；旧装配（volSet nil）或未命中返回空。

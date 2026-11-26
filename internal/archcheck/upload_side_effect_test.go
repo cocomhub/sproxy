@@ -6,8 +6,8 @@ package archcheck
 // upload_side_effect_test.go 是「**上传成功的副作用必须单一实现**」的门禁（R8，P2-d 配套）。
 //
 // 判据（语义化，不锁死实现细节）：在 `pkg/files` 的**非测试源码**里，设置文件 mtime 的调用
-// （`.Chtimes(`）必须**恰好一处**，且必须落在 `recordUploadSuccess` 所在的 write_ops.go——
-// 即「上传成功的副作用内核（mtime + checksum 台账）」只有一个实现。
+// （`.Chtimes(`）必须**恰好一处**，且必须落在 write_ops.go 的上传副作用内核
+// （`recordUploadSuccess` → `applyUploadMTime`）——mtime 只有一个实现，单次/分块/块写共用。
 //
 // 为什么必须单一事实源：单次上传（`WriteFile`）与分块上传（`UploadComplete` →
 // `recordCompleteMetadata`）都要在落盘后**应用客户端声明的 mtime**（`X-File-MTime` /
@@ -71,6 +71,6 @@ func TestUploadSuccessSideEffectsSingleImplementation(t *testing.T) {
 			"不要各自实现 mtime + checksum 台账。", len(sites), sites)
 	}
 	if !strings.HasPrefix(sites[0], "write_ops.go:") {
-		t.Fatalf("唯一设置 mtime 的位置应在 write_ops.go 的 recordUploadSuccess 内，实测 %q", sites[0])
+		t.Fatalf("唯一设置 mtime 的位置应在 write_ops.go 的上传 mtime helper（recordUploadSuccess 调用）内，实测 %q", sites[0])
 	}
 }

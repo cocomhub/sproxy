@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestBlockWrite_SessionFlow open→write→close 全流程。
@@ -80,5 +81,32 @@ func TestBlockWrite_MissingSession(t *testing.T) {
 	}
 	if err := env.svc.CloseBlockWrite(context.Background(), "nope"); err == nil {
 		t.Fatal("不存在会话 close 应报错")
+	}
+}
+
+// TestBlockWrite_MetaSeesClientMTime 块写 close 必须先应用客户端 mtime，再生成 sidecar；
+// 否则块级远程写的 meta mtime 会退化为完成时刻（与单次上传同一类缺口）。
+func TestBlockWrite_MetaSeesClientMTime(t *testing.T) {
+	t.Parallel()
+	env := newDirsEnv(t)
+	policy := &mtimeCapturePolicy{}
+	env.metaPolicy = policy
+	env.rebuild()
+	want := time.Unix(1_700_000_002, 0).UTC()
+	id, err := env.svc.OpenBlockWrite(context.Background(), "alice", "docs/mtime.bin", "main", 4, want.UnixNano())
+	if err != nil {
+		t.Fatalf("OpenBlockWrite: %v", err)
+	}
+	if werr := env.svc.WriteBlock(context.Background(), id, 0, []byte("data")); werr != nil {
+		t.Fatalf("WriteBlock: %v", werr)
+	}
+	if cerr := env.svc.CloseBlockWrite(context.Background(), id); cerr != nil {
+		t.Fatalf("CloseBlockWrite: %v", cerr)
+	}
+	if !policy.seen {
+		t.Fatal("WriteMeta 未被调用")
+	}
+	if delta := policy.got.Sub(want); delta > time.Second || delta < -time.Second {
+		t.Fatalf("块写 sidecar 看到 mtime=%s want %s", policy.got, want)
 	}
 }
