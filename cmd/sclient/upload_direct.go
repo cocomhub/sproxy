@@ -31,8 +31,9 @@ func NewCmdUploadDirect(factory clientfactory.Factory, ios cli.IOStreams, st *st
 	var remotePath string
 	var metaExtraRaw string
 	cmd := &cobra.Command{SilenceUsage: true, SilenceErrors: true,
-		Use:   "upload-direct <backend> <file1> [file2...]",
-		Short: "直传文件到外部后端（S3 预签名，绕过服务端）",
+		Annotations: map[string]string{clientfactory.AnnotationAPIOnly: "true"},
+		Use:         "upload-direct <backend> <file1> [file2...]",
+		Short:       "直传文件到外部后端（S3 预签名，绕过服务端）",
 		Long: `经服务端签发 PUT 预签名 URL，客户端直传对象存储（当前 s3），完成后服务端登记。
 		<backend> 是已注册后端类型（GET /api/backends 可查，如 s3）。
 		受当前目录 (cd) 影响：相对路径会拼接当前目录前缀。
