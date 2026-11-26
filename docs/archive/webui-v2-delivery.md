@@ -507,3 +507,54 @@ R60 上线后 CI 立刻抓到同一个 flake 的**另一种形态**（`pkg/serve
 **这已经是同一类资源在同一 PR 里第二次「换个形态露出来」** —— 印证了
 「同一类资源必须一次清干净」的纪律：`os.Root` 有三个创建入口（`OpenRoot` / `OpenTenant` /
 `TenantCache`），只堵一个不够。
+
+## 2026-11-27 `pkg/cloud` 并发面审计：锁纪律良好，补行为级守卫
+
+结论先行：**`pkg/cloud` 的锁纪律执行得很好**，除已修的 `settleArtifactsOnFail`（#1304）外，
+没有发现新的锁外写。
+
+### 审计方法与结论
+
+用脚本枚举 `pkg/cloud` 非测试代码里对 task 字段的写入（61 处），按「所在函数是否出现
+`m.mu.Lock()`」初筛 → 22 处"疑似"。逐个核对后**全部是误报**：
+
+| 误报来源 | 例 |
+| --- | --- |
+| `xxxLocked` 后缀函数（约定：调用方持锁） | `rotateSourceLocked` / `forceRotateSourceLocked` / `clearRunningLocked` |
+| 注释已声明「调用方持 m.mu」 | `recordProgressSample` / `recordChunkState` / `diag` / `reconcileReservedSize` / `failTaskOnStorageFull` |
+| 调用点显式取锁 | `manager_query.go:210`（`m.mu.Lock(); releaseTaskScope(t)`） |
+
+⇒ **文本判据不可靠**（22/61 误报率），放弃"扫描赋值是否在锁内"的门禁思路。
+
+### 改为行为级守卫
+
+新增 `pkg/cloud/manager_concurrent_readers_test.go`：真实下载进行中，**紧凑轮询**读面
+（`ListTasks` / `SnapshotTask` / `GetTask` / `saveTask` / `markDirty`）与下载 goroutine 的
+写面（`task.Downloaded`、`recordProgressSample`、`recordChunkState`）并发，`-race` 必须无告警。
+
+### 让守卫真的有效（两个必须踩的坑）
+
+1. **`SyncThreshold <= 0` 会被配置归一成默认 20MB**（`applyCloudConfigDefaults`）⇒ 下载走
+   **同步**路径、在 `SubmitAndStart` 内完成 ⇒ 读面**完全无法重叠**（首版测试的
+   `before wait` 与 `after wait` 时间戳相同，一眼看出）。必须显式给正值 `1`。
+2. **窗口太短 ⇒ 变异不报**：512KiB × 1ms 只产生 **1** 个进度采样点。改为
+   4MiB / 32KiB 分块 / 2ms 间隔 ⇒ 进度回调 **130+ 次**、下载持续 ~250ms。
+
+这两条与 #1308 的教训同源：**并发测试必须让「被竞争的那次写入」反复发生**，
+且必须确认读面真的在执行（时间戳/计数器探针，别假设它跑了）。
+
+### 变异
+
+| 变异 | 结果 |
+| --- | --- |
+| `progressFn` 里把 `task.Downloaded = downloaded` 移到 `m.mu.Lock()` **之前** | `-race` 报 4 处 DATA RACE ✅ |
+
+验证：`go test ./pkg/cloud -race -count=2` 全绿；`go build ./...`；`golangci-lint` 0 issues；
+`internal/archcheck` 全绿。
+
+### 顺带确认（无改动）
+
+- `pkg/downloader` 的 HTTP 下载器**确实**通过 `copyBodyWithProgress(..., pw.onProgress, ...)`
+  回调进度（早期 grep 范围太窄曾误判"完全忽略"）；
+- `WithChunkProgress` 只有**分块型**下载器（网盘类）会报，内建 HTTP 下载器不报
+  ⇒ 进度条对 HTTP 直链只有 `Downloaded`，无分块明细 —— 属既有设计。
