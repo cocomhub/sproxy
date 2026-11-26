@@ -4,6 +4,7 @@
 package cloud
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -207,5 +208,44 @@ func TestDiscardPartialOnFail_ReleasesQuota(t *testing.T) {
 	}
 	if fileExists(dir) {
 		t.Fatal("任务目录应被删除")
+	}
+}
+
+// TestSettleArtifacts_PersistsDiagnostics 锁定「失败后诊断变更会落盘」：
+// failTask 的 saveTask 在 settle 之前，若不再次持久化，重启后 PartialSize 丢失 ⇒ 动作提示误判。
+func TestSettleArtifacts_PersistsDiagnostics(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	sm := capacity.NewStorageManager(filepath.Join(root, "cap"), 16<<20, nil, testLogger())
+	mgr, _ := newCloudTestManager(t, root, sm, actionsTestConfig())
+	task, err := mgr.CreateTask("url", "https://example.com/s/EXAMPLE-PERSIST-1", "p.bin", 4096, "",
+		TaskParams{Save: true})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	dir := mgr.TaskDirFor(task.Owner, task.ID)
+	if dir == "" {
+		t.Skip("租户目录不可用（测试环境）")
+	}
+	if merr := mkdirAllAndWritePartial(dir, task.Filename); merr != nil {
+		t.Fatalf("造断点: %v", merr)
+	}
+	mgr.mu.Lock()
+	task.Downloaded = 2048
+	task.Status = "failed"
+	mgr.mu.Unlock()
+
+	// 瞬态失败 ⇒ 保留断点并记诊断
+	mgr.settleArtifactsOnFail(task, "source unreachable: timeout", nil)
+	// 立即 flush（等价于 flushLoop 的下一跳），断言落盘内容含 PartialSize。
+	mgr.flushDirty()
+
+	persistFile := filepath.Join(mgr.PersistDirFor(task.Owner), task.ID+".json")
+	raw, rerr := os.ReadFile(persistFile)
+	if rerr != nil {
+		t.Fatalf("读持久化文件: %v", rerr)
+	}
+	if !strings.Contains(string(raw), `"partial_size":2048`) {
+		t.Fatalf("持久化内容应含 partial_size=2048，got %s", string(raw))
 	}
 }

@@ -2157,7 +2157,6 @@ func (m *CloudDownloadManager) keepPartialOnFail(task *CloudTask, errMsg string)
 // settleArtifactsOnFail）。诊断字段是任务 JSON 的一部分，写入必须与持久化同锁。
 func (m *CloudDownloadManager) recordKeptPartial(task *CloudTask) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	d := task.diag() // nil 安全：诊断是"失败可查"的必需载体，不能因未初始化而丢失
 	if d.PartialPath == "" {
 		d.PartialPath = m.TaskDirFor(task.Owner, task.ID)
@@ -2165,6 +2164,12 @@ func (m *CloudDownloadManager) recordKeptPartial(task *CloudTask) {
 	if task.Downloaded > d.PartialSize {
 		d.PartialSize = task.Downloaded
 	}
+	id := task.ID
+	m.mu.Unlock()
+	// failTask 的 saveTask 发生在 settle **之前** ⇒ 这里的诊断变更必须再落盘一次，
+	// 否则重启后 PartialSize 丢失（动作提示会误判"无断点"）。走 markDirty 由 flush 统一写，
+	// 避免在失败路径上再阻塞一次磁盘 IO。
+	m.markDirty(id)
 }
 
 // clearPartialDiagnostics 清零「部分产物」诊断（产物被删除后调用；必须持 m.mu）。
@@ -2173,11 +2178,13 @@ func (m *CloudDownloadManager) recordKeptPartial(task *CloudTask) {
 // `PlanTaskActions` 误判"有断点可续"，提示与实际不符。
 func (m *CloudDownloadManager) clearPartialDiagnostics(task *CloudTask) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if d := task.Diagnostics; d != nil {
 		d.PartialSize = 0
 		d.PartialPath = ""
 	}
+	id := task.ID
+	m.mu.Unlock()
+	m.markDirty(id) // 与 recordKeptPartial 同理：诊断变更需再次落盘
 }
 
 // discardPartialOnFail 删除失败任务的断点残留并把账本收敛到磁盘实际（调用方已持锁外上下文）。
@@ -2212,5 +2219,5 @@ func (m *CloudDownloadManager) discardPartialOnFail(task *CloudTask) {
 	if before > after {
 		m.storage.ReleaseCloud(before - after)
 	}
-	m.clearPartialDiagnostics(task)
+	m.clearPartialDiagnostics(task) // 内部 markDirty：诊断与 ReservedSize 变更都会随任务落盘
 }
