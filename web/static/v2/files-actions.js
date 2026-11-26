@@ -306,13 +306,22 @@
   }
 
   function mkdir() {
+    // 建目录与上传同一纪律：必须有**具体卷**。不带 `?volume=` 时服务端按 prefer-default
+    // 选首个视图卷（`TestMkdir_NoVolumeLandsOnFirstViewVolume` 锁定），在聚合视图里
+    // 「建到哪张卷」对用户不可预期 ⇒ 入口已禁用（syncUploadGate），这里再兜底一次。
+    var vol = view() && view().volume ? view().volume() : '';
+    if (!f.canUploadTo(vol)) {
+      toast('warn', '请先选择具体卷再新建目录（「全部卷」是多卷聚合视图，无法确定创建位置）');
+      return;
+    }
     openDialog({
       title: T('dlg.mkdir.title'), message: T('dlg.mkdir.msg'),
       input: true, value: '', okText: T('dlg.create'),
       onOk: function (name) {
-        var sub = view() ? view().subdir() : '';
         var rel = relOf(name);
-        run(api.json('POST', '/mkdir?dirname=' + enc(rel)), '已创建目录 ' + name);
+        // **必须带 volume**：否则目录落到默认卷，用户在选中的卷上「建完看不到」。
+        run(api.json('POST', '/mkdir?dirname=' + enc(rel) + '&volume=' + enc(vol)),
+          '已创建目录 ' + name);
       }
     });
   }
@@ -320,6 +329,7 @@
   function doDelete(name, isDir, checksum) {
     var sub = view() ? view().subdir() : '';
     var rel = relOf(name);
+
     openDialog({
       title: isDir ? T('dlg.delDir.title') : T('dlg.delFile.title'),
       message: (isDir ? T('dlg.delDir.msg') : T('dlg.delFile.msg')) + rel,
@@ -327,6 +337,9 @@
       onOk: function () {
         // 页面按用户配置（设置 → 删除默认方式）**显式**传 soft：
         // 服务端 API 默认语义保持不变（CLI/脚本零回归），配置只决定页面默认行为。
+        // 目录删除**不带 volume**：本地卷的 rmdir 刻意按「逻辑目录」语义处理——
+        // 同一子目录可因换卷在多卷并存，删「目录 X」应删干净所有卷上的副本（否则留孤儿）
+        // （见 pkg/files/write_ops.go RemoveDir 注释与 TestRmdir_LocalVolumeDeletesLogicalDir）。
         var path = isDir ? '/rmdir?dirname=' + enc(rel) + '&force=true'
           : '/delete?filename=' + enc(rel) + '&soft=' + (deleteMode() === 'hard' ? 'false' : 'true');
         run(api.json('POST', path, { headers: ops.checksumHeader(checksum) }), T('toast.deleted') + name);
@@ -502,7 +515,7 @@
             });
             var chain = Promise.resolve();
             if (dirs.length) {
-              // 目录必须逐个 /rmdir（无批量族）；不需要 checksum 头。
+              // 目录必须逐个 /rmdir（无批量族）；不需要 checksum 头。**带 volume** 锁定单卷。
               dirs.forEach(function (rel) {
                 chain = chain.then(function () {
                   return api.json('POST', '/rmdir?dirname=' + enc(rel) + '&force=true', {});

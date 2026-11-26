@@ -224,3 +224,60 @@ for _, v := range vols { allFiles = append(allFiles, s.listVolumeDirEntries(...)
 **「加一个配置项」不总是解法**。排序、上传目标这类「当前上下文已经决定」的行为，
 正确做法是让上下文自洽（上传到当前卷 / 记住上次点击），而不是新增一个用户要去发现、
 维护、且与服务端策略相互覆盖的配置。页面配置只该装**真正的策略偏好**（如"删除是否硬删"）。
+
+## 2026-11-26 第七轮：新建目录的卷归属（与上传同一条纪律）
+
+上一轮修了「上传必须落具体卷」，留下 `POST /mkdir` 同一类问题。
+
+### 缺陷
+
+前端从不传 `volume`：
+
+```js
+run(api.json('POST', '/mkdir?dirname=' + enc(rel)), ...)   // 无 volume
+```
+
+服务端 `MakeDir(volName="")` 的既有语义（`TestMkdir_NoVolumeLandsOnFirstViewVolume` 锁定）：
+
+> 实际落盘目录选 owner 视图内首个卷（默认卷优先）
+
+⇒ 多卷环境里用户在**卷 B** 建目录，目录落到**默认卷 A**，刷新后看不到（切卷才发现建错地方）。
+
+### 修复
+
+1. **前端传 volume**：`/mkdir?dirname=<rel>&volume=<当前卷>`；
+2. **聚合视图禁用建目录**（与上传同一条门禁）：`syncUploadGate()` 同时管
+   `#v2-upload-input`（含 label）与 `#v2-mkdir`——`aria-disabled` + `.is-disabled` + `title` 说明；
+3. `mkdir()` 内再兜底挡一次（脚本/快捷键可能绕过按钮状态）。
+
+### 服务端语义**不变**（只加测试锁定）
+
+| 场景 | 行为 | 锁定用例 |
+| --- | --- | --- |
+| `?volume=disk2` | 只落在 disk2 | `TestMkdir_ExplicitVolumeLandsOnThatVolume` |
+| 未知卷 | fail-closed 报错，**不落默认卷** | `TestMkdir_UnknownVolumeFails` |
+| 不传 volume | 落首个视图卷（默认卷优先） | `TestMkdir_NoVolumeLandsOnFirstViewVolume` |
+| 建完的可见性 | 只在所属卷的列表里出现 | `TestListDir_VolumeFilterSeesMkdir` |
+
+最后一条是**用户视角的因果**：单纯断言"文件在磁盘上"不足，必须断言"当前卷能看到、另一卷看不到"。
+
+### 验证与变异
+
+- Go：上述 4 条（多卷夹具 `twoVolumeHandlers`，main + disk2）；
+- e2e：`/mkdir` 请求 URL 必须含 `volume=`；建目录按钮门禁与选卷状态一致；
+- 变异命中：把 `mkdir` 的 `&volume=` 去掉 ⇒ `建目录请求未带 volume（会落到默认卷…）` 红。
+
+### 关于 `/rmdir`（实测后确认**不改**）
+
+最初以为 `/rmdir` 不带 `?volume=` 会「跨卷多删」是缺陷，实测 + 读码后确认是**刻意的逻辑
+目录语义**（`pkg/files/write_ops.go` `RemoveDir` 注释）：
+
+> 同一子目录可能因换卷在多个卷上都存在（main/disk2 各有其文件），故按 owner 视图逐卷定位、
+> 对**每个存在该目录的卷**删除其子树
+
+删「目录 X」就应把 X 在所有卷的副本删干净，否则留孤儿目录、切换卷后又看到"已删除"的目录。
+而且**显式 `?volume=` 对本地卷不改变该语义**（只有外部/加密卷走 `removeDirExplicitVolume`）。
+
+⇒ UI 删目录**不传 volume**（传了也不会变窄，反而暗示"只删一卷"）。加了
+`TestRmdir_LocalVolumeDeletesLogicalDir` 把这个"看起来像 bug 的设计"钉住，防止被
+"优化"成只删一卷。**本轮一度按错误假设改了 UI，靠该测试的红灯发现并回退。**

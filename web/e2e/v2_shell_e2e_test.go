@@ -218,11 +218,11 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 
 	// P1a：列表来自 /api/files，且可进入子目录。
-	if err := waitLoc(page, "#v2-file-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
-		t.Fatalf("文件列表未渲染: %v", err)
-	}
-	if txt, _ := page.Locator("#v2-file-body").TextContent(); !strings.Contains(txt, "v2demo") {
-		t.Fatalf("列表缺少播种目录 v2demo: %q", txt)
+	// 用**具体行**等待，而不是「任意 tr」：从别的路由切回来时 tbody 里还留着上一次的行，
+	// 「任意 tr 可见」会立刻满足，随后 load() 清空 tbody ⇒ 读到空文本（实测偶发 flake）。
+	if err := waitLoc(page, "#v2-file-body tr[data-name=v2demo]", playwright.WaitForSelectorStateVisible, 8000); err != nil {
+		txt, _ := page.Locator("#v2-file-body").TextContent()
+		t.Fatalf("文件列表未渲染出 v2demo: %v (body=%q)", err, txt)
 	}
 	// P1c：检查器（概览 / Meta / 版本 / 分享）可打开且切换页签。
 	if err := page.Locator("#v2-file-body tr[data-name=v2demo] [data-action=detail]").Click(); err != nil {
@@ -255,6 +255,14 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	}
 
 	// P1b：UI 新建目录 → 选择 → 批量删除（走真实 /mkdir 与 /rmdir）。
+	// 建目录请求**必须带 volume**：不带时服务端按 prefer-default 选首个视图卷 ⇒ 用户在选中
+	// 的卷上「建完看不到」（多卷环境实测）。
+	var mkdirURL atomic.Value
+	page.OnRequest(func(r playwright.Request) {
+		if strings.Contains(r.URL(), "/mkdir?") {
+			mkdirURL.Store(r.URL())
+		}
+	})
 	if err := page.Locator("#v2-mkdir").Click(); err != nil {
 		t.Fatalf("打开新建目录: %v", err)
 	}
@@ -268,6 +276,9 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		"() => document.querySelector('#v2-file-body').textContent.indexOf('uifolder') !== -1",
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
 		t.Fatalf("新建目录未出现在列表: %v", err)
+	}
+	if u, _ := mkdirURL.Load().(string); !strings.Contains(u, "volume=") {
+		t.Fatalf("建目录请求未带 volume（会落到默认卷，用户在所选卷上看不到）: %v", u)
 	}
 	if err := page.Locator("#v2-file-body tr[data-name=uifolder] .cb").Check(); err != nil {
 		t.Fatalf("勾选新目录: %v", err)
@@ -482,6 +493,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 			}
 			if m["vol"] != "" && m["disabled"] == true {
 				t.Fatalf("已选具体卷时上传不应被禁用: %v", m)
+			}
+			// 新建目录与上传同一纪律（不传 volume 会落默认卷，聚合视图下不可预期）。
+			if mk, _ := page.Evaluate(`() => {
+				const b = document.querySelector('#v2-mkdir');
+				return {aria: b ? b.getAttribute('aria-disabled') : null, disabled: b ? b.classList.contains('is-disabled') : null};
+			}`, nil); mk != nil {
+				if mm, ok := mk.(map[string]any); ok {
+					wantDisabled := m["vol"] == ""
+					if got := mm["aria"] == "true"; got != wantDisabled {
+						t.Fatalf("新建目录门禁与选卷状态不一致（vol=%v, aria-disabled=%v）: %v", m["vol"], mm["aria"], mm)
+					}
+				}
 			}
 		}
 	} else {
