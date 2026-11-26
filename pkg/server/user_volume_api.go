@@ -496,6 +496,9 @@ func (h *Handlers) deleteUserVolumeHandler(w http.ResponseWriter, r *http.Reques
 	if tv, nested := serverenclosure.TranslateNestedVolume(volumeFromUserVolume(*v)); nested {
 		serverenclosure.DetachEnclosureVolume(h.volSet, h.logger, tv)
 	}
+	// 卷设置（分块规则）随卷一起回收：持久化键只按卷名，残留会让**同名重建**的卷静默
+	// 继承旧规则（安全审查 MEDIUM）。放在摘除之后、审计之前。
+	h.forgetVolumeSettings(r.Context(), name)
 	// 审计：用户卷删除成功（破坏性操作必须可追溯）。
 	h.RecordAudit(r.Context(), AuditEvent{
 		Action: "user_volume_delete", ObjectType: "volume", Object: name, Result: AuditResultSuccess,

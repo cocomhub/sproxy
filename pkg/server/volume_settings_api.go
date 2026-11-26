@@ -26,16 +26,28 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/cocomhub/sproxy/internal/httpjson"
 	"github.com/cocomhub/sproxy/pkg/accesskey"
+	"github.com/cocomhub/sproxy/pkg/state"
+	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
 )
 
 // auditActionVolumeSettingsUpdate 是「写卷设置」的业务审计动作（R35-b 登记项）。
 const auditActionVolumeSettingsUpdate = "volume_settings_update"
+
+// 业务审计结果取值（**必须**用既有契约 success/denied/error）：审计控制台、/api/audit?result=
+// 筛选与通知规则都按这套值判定；自造 ok/failed 会让成功事件显示成红「失败」且筛不到。
+const (
+	auditResultSuccess = "success"
+	auditResultDenied  = "denied"
+	auditResultError   = "error"
+)
 
 // volumeSettingsMaxBody 是设置写入请求体上限（规则集是文本，1 MiB 远超实际需要）。
 const volumeSettingsMaxBody = 1 << 20
@@ -70,10 +82,9 @@ func (h *Handlers) resolveVolumeSettingsAccess(r *http.Request, name string, wri
 	if !found {
 		return volumeSettingsAccess{}, http.StatusNotFound, "卷不存在"
 	}
+	// **be 可以为 nil**：本地卷（默认卷）没有外部后端，但它是可见卷、卷表里有「详情」按钮
+	// ⇒ 必须 200 + 空 settings（「此卷暂无可调配置」），不能报「卷不存在」。
 	be := h.volSet.External(name)
-	if be == nil {
-		return volumeSettingsAccess{}, http.StatusNotFound, "卷不存在"
-	}
 	if !write {
 		return volumeSettingsAccess{vol: vol, be: be}, http.StatusOK, ""
 	}
@@ -147,8 +158,17 @@ func (h *Handlers) volumeDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usage, state := h.volumeStatusMeta(acc.vol, normalizeOwner(ownerFromRequest(r)))
+	h.ensureSettingsStoreInjected(name, acc.be) // 运行期新建卷的惰性补注入
 	caps := []string{}
-	settings, ok := h.collectVolumeSettings(r.Context(), acc.be)
+	settings, ok, serr := h.collectVolumeSettings(r.Context(), acc.be)
+	if serr != nil {
+		// 读取失败与「没有可调配置」必须可区分：把服务端故障显示成「暂无可调配置」会让
+		// 运维以为卷型不支持，从而彻底放弃排查。
+		slog.Warn("volume settings: 读取设置分区失败", "volume", name, "error", serr)
+		httpjson.Send(w, http.StatusInternalServerError,
+			map[string]any{"success": false, "message": "读取卷设置失败（服务端内部错误，详见服务端日志）"})
+		return
+	}
 	if ok {
 		caps = append(caps, "settings")
 	}
@@ -170,25 +190,37 @@ func (h *Handlers) volumeSettingsGetHandler(w http.ResponseWriter, r *http.Reque
 		httpjson.Send(w, status, map[string]any{"success": false, "message": msg})
 		return
 	}
-	settings, _ := h.collectVolumeSettings(r.Context(), acc.be)
+	h.ensureSettingsStoreInjected(name, acc.be)
+	settings, _, serr := h.collectVolumeSettings(r.Context(), acc.be)
+	if serr != nil {
+		slog.Warn("volume settings: 读取设置分区失败", "volume", name, "error", serr)
+		httpjson.Send(w, http.StatusInternalServerError,
+			map[string]any{"success": false, "message": "读取卷设置失败（服务端内部错误，详见服务端日志）"})
+		return
+	}
 	httpjson.Send(w, http.StatusOK, map[string]any{"settings": settings})
 }
 
-// collectVolumeSettings 取后端设置分区（未实现能力 ⇒ (空列表, false)）。
-func (h *Handlers) collectVolumeSettings(ctx context.Context, be registry.ExternalBackend) ([]registry.VolumeSettings, bool) {
+// collectVolumeSettings 取后端设置分区。
+//
+// 三态：`ErrUnsupported`（包装器表达「inner 没这个能力」）⇒ (空列表, false, nil)；
+// 其它错误 ⇒ (空列表, true, err) 让调用方回 5xx——**不能**把服务端故障伪装成「没有配置」。
+func (h *Handlers) collectVolumeSettings(ctx context.Context, be registry.ExternalBackend) ([]registry.VolumeSettings, bool, error) {
 	sp, ok := be.(registry.SettingsProvider)
 	if !ok {
-		return []registry.VolumeSettings{}, false
+		return []registry.VolumeSettings{}, false, nil
 	}
 	sections, err := sp.Settings(ctx)
 	if err != nil {
-		slog.Warn("volume settings: 读取设置分区失败", "error", err)
-		return []registry.VolumeSettings{}, true
+		if errors.Is(err, syncpkg.ErrUnsupported) {
+			return []registry.VolumeSettings{}, false, nil
+		}
+		return []registry.VolumeSettings{}, true, err
 	}
 	if sections == nil {
 		sections = []registry.VolumeSettings{}
 	}
-	return sections, true
+	return sections, true, nil
 }
 
 // volumeSettingsPutHandler 处理 PUT /api/volumes/{name}/settings/{section}。
@@ -200,9 +232,10 @@ func (h *Handlers) volumeSettingsPutHandler(w http.ResponseWriter, r *http.Reque
 		httpjson.Send(w, status, map[string]any{"success": false, "message": msg})
 		return
 	}
+	h.ensureSettingsStoreInjected(name, acc.be) // 运行期新建卷：首次保存前补注入
 	sw, ok := acc.be.(registry.SettingsWriter)
 	if !ok {
-		h.auditSettings(r.Context(), name, section, "denied", "卷不支持设置写入")
+		h.auditSettings(r.Context(), name, section, auditResultDenied, "卷不支持设置写入")
 		httpjson.Send(w, http.StatusMethodNotAllowed,
 			map[string]any{"success": false, "message": "该卷不支持设置写入"})
 		return
@@ -210,19 +243,27 @@ func (h *Handlers) volumeSettingsPutHandler(w http.ResponseWriter, r *http.Reque
 	r.Body = http.MaxBytesReader(w, r.Body, volumeSettingsMaxBody)
 	payload, rerr := io.ReadAll(r.Body)
 	if rerr != nil {
-		h.auditSettings(r.Context(), name, section, "failed", "请求体读取失败")
-		httpjson.Send(w, http.StatusBadRequest, map[string]any{"success": false, "message": "请求体读取失败: " + rerr.Error()})
+		// 超限（MaxBytesReader）也走 400：属于客户端输入问题，且不回内部细节。
+		h.auditSettings(r.Context(), name, section, auditResultError, "请求体读取失败")
+		httpjson.Send(w, http.StatusBadRequest, map[string]any{"success": false, "message": "请求体读取失败（超限或非法）"})
 		return
 	}
 	if uerr := sw.UpdateSettings(r.Context(), section, payload); uerr != nil {
 		code := settingsErrorStatus(uerr)
-		h.auditSettings(r.Context(), name, section, "failed", uerr.Error())
-		httpjson.Send(w, code, map[string]any{"success": false, "message": uerr.Error()})
+		h.auditSettings(r.Context(), name, section, auditResultError, safeSettingsError(uerr))
+		// 客户端错误回原文（含规则下标，便于精确定位）；服务端内部错误只回通用文案
+		// （CLAUDE.md：不把原始 error 抛给客户端，可能含路径/驱动细节）。
+		msg := uerr.Error()
+		if code >= http.StatusInternalServerError {
+			msg = "保存失败（服务端内部错误，详见服务端日志）"
+			slog.Warn("volume settings: 写入失败", "volume", name, "section", section, "error", uerr)
+		}
+		httpjson.Send(w, code, map[string]any{"success": false, "message": msg})
 		return
 	}
-	h.auditSettings(r.Context(), name, section, "ok", settingsSummary(payload))
+	h.auditSettings(r.Context(), name, section, auditResultSuccess, settingsSummary(payload))
 	// 回显新版本（从后端重新读，保证与持久化一致）。
-	sections, _ := h.collectVolumeSettings(r.Context(), acc.be)
+	sections, _, _ := h.collectVolumeSettings(r.Context(), acc.be)
 	version := int64(0)
 	for _, s := range sections {
 		if s.Key != section {
@@ -248,10 +289,24 @@ func settingsErrorStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, registry.ErrSettingsSectionUnsupported):
 		return http.StatusMethodNotAllowed
-	case strings.HasPrefix(err.Error(), "policy:"):
+	case errors.Is(err, registry.ErrSettingsPayloadInvalid):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
+	}
+}
+
+// safeSettingsError 生成**可入审计**的错误摘要：客户端输入类错误保留原因（便于追责），
+// 服务端内部错误只留类别。
+//
+// 为什么不能直接落 err.Error()：正则编译错误的文本**内嵌原始表达式**（Go 的 regexp.Error
+// 含 Expr）⇒ 会把用户配置的路径模式写进审计，违背「审计不含规则全文」的约束。
+func safeSettingsError(err error) string {
+	switch settingsErrorStatus(err) {
+	case http.StatusBadRequest, http.StatusConflict, http.StatusMethodNotAllowed:
+		return truncateRunes(err.Error(), 200)
+	default:
+		return "内部错误"
 	}
 }
 
@@ -263,20 +318,105 @@ func AttachVolumeSettingsStores(h *Handlers) {
 	if h == nil || h.volSet == nil {
 		return
 	}
-	st := h.stateStore
-	store := registry.NewStateSettingsStore(st)
+	if h.stateStore == nil {
+		// 默认单机部署（state_store.type 缺省/local 且非集群）不会装配 StateStore，但
+		// LocalStateStore 本就实现了 Get/Put/CAS ⇒ 用**轻量本地实例**兜底，让「卷设置
+		// 持久化」在默认部署下也成立。**不调 SetStateStore**：那会把分享/索引也切到
+		// StateStore 后端（更大的行为变更，不属于本功能）。
+		h.volumeSettingsLocalStore = state.NewLocalStateStore(h.volumeSettingsStateDir(), nil)
+	}
 	for _, v := range h.volSet.All() {
 		be := h.volSet.External(v.Name)
 		if be == nil {
 			continue
 		}
-		setter, ok := be.(registry.SettingsStoreSetter)
-		if !ok {
-			continue
-		}
-		if err := setter.SetSettingsStore(store); err != nil {
-			slog.Warn("volume settings: 注入持久化后端失败（该卷设置将只读）",
-				"volume", v.Name, "error", err)
+		h.ensureSettingsStoreInjected(v.Name, be)
+	}
+}
+
+// volumeSettingsStateDir 返回卷设置本地兜底存储目录（`<存储根>/state/volume-settings`）。
+// 与 StateStore 的 `<存储根>/state` 同根不同子目录：即便将来启用 StateStore 也不会互相干扰。
+func (h *Handlers) volumeSettingsStateDir() string {
+	root := ""
+	if h.cfgPtr != nil {
+		if cfg := h.cfgPtr.Load(); cfg != nil {
+			root = cfg.StorageRoot
 		}
 	}
+	if root == "" {
+		root = "."
+	}
+	return filepath.Join(root, "state", "volume-settings")
+}
+
+// settingsStoreInjected 记录「已注入过持久化后端的后端」。
+//
+// 键 = `<卷名> + 后端实例指针`：只按卷名会让「卷被删除后重建」（新后端实例）复用旧的
+// 「已注入」标记而**跳过注入**（该卷设置永久只读）。包级 map 在测试间也会串味。
+var settingsStoreInjected sync.Map
+
+// forgetVolumeSettings 在**卷被删除**时清掉它的持久化设置与注入缓存。
+//
+// 为什么必须清（安全审查）：设置键只按卷名（`volume_policy/<卷名>`），若删除后残留，**同名
+// 重建**的卷会静默继承旧规则——规则含路径语义，属跨身份残留状态（旧卷主可能仍能用规则影响
+// 新卷主的文件布局）。与「容量计数文件保留」不同：本功能是**配置**而非占用事实，重建应从
+// 默认/基线开始。
+func (h *Handlers) forgetVolumeSettings(ctx context.Context, name string) {
+	if store := registry.NewStateSettingsStore(h.settingsStateStore()); store != nil {
+		if err := store.Delete(ctx, name); err != nil {
+			slog.Warn("volume settings: 删除卷设置失败（同名重建可能继承旧规则）", "volume", name, "error", err)
+		}
+	}
+	// 注入缓存按「卷名+后端实例」为键：逐条清掉该卷名下的全部条目。
+	prefix := name + "|"
+	settingsStoreInjected.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
+			settingsStoreInjected.Delete(k)
+		}
+		return true
+	})
+}
+
+// settingsStateStore 返回卷设置用的持久化后端：优先装配好的 StateStore，其次本地兜底。
+//
+// **必须显式判 nil 再赋值**（不能 `st := h.stateStore; if st == nil { st = h.volumeSettingsLocalStore }`）：
+// 把 nil 的 `*state.LocalStateStore` 赋给 `state.StateStore` 接口会得到**非 nil 接口**
+// （typed-nil），`NewStateSettingsStore` 的 `st == nil` 判空失效 ⇒ 包出一个调用即 panic 的实现。
+func (h *Handlers) settingsStateStore() state.StateStore {
+	if h.stateStore != nil {
+		return h.stateStore
+	}
+	if h.volumeSettingsLocalStore != nil {
+		return h.volumeSettingsLocalStore
+	}
+	return nil
+}
+
+// settingsInjectKey 生成注入缓存的键（卷名 + 后端实例地址）。
+func settingsInjectKey(name string, be registry.ExternalBackend) string {
+	return fmt.Sprintf("%s|%p", name, be)
+}
+
+// ensureSettingsStoreInjected 幂等地给支持注入的后端装上持久化后端。
+//
+// 为什么需要惰性路径：`AttachVolumeSettingsStores` 在启动时跑一次，而运行期经
+// `POST /api/volumes/user` 新建的卷在那之后才存在 ⇒ 若不补注入，用户新建卷打开详情
+// 永远是只读，直到重启进程。
+func (h *Handlers) ensureSettingsStoreInjected(name string, be registry.ExternalBackend) {
+	if be == nil {
+		return
+	}
+	setter, ok := be.(registry.SettingsStoreSetter)
+	if !ok {
+		return
+	}
+	key := settingsInjectKey(name, be)
+	if _, done := settingsStoreInjected.Load(key); done {
+		return
+	}
+	if err := setter.SetSettingsStore(registry.NewStateSettingsStore(h.settingsStateStore())); err != nil {
+		slog.Warn("volume settings: 注入持久化后端失败（该卷设置将只读）", "volume", name, "error", err)
+		return
+	}
+	settingsStoreInjected.Store(key, struct{}{})
 }

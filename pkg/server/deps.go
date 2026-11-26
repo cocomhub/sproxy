@@ -266,6 +266,10 @@ type volumeDeps struct {
 	// 测试手工构造的 Handlers）。默认卷语义：globalRoot 字段 = 默认卷根、tenantFor 走默认卷。
 	// 写路径本任务仍只走默认卷（T4 起卷感知），volSet 供多卷 reconcile 与后续卷路由消费。
 	volSet *registry.Set
+	// volumeSettingsLocalStore 是**卷设置持久化**的本地兜底（默认单机部署未装配
+	// StateStore 时使用；见 volume_settings_api.go 的 AttachVolumeSettingsStores）。
+	// 与 StateStore 同根不同子目录：将来启用 StateStore 也不互相干扰。
+	volumeSettingsLocalStore *state.LocalStateStore
 	// userVolumes 是用户自有卷 store（U3：per-owner volume meta 持久化；nil = 未装配，
 	// 相关 /api/volumes/user 路由返回 400）。**它是运行时用户卷的唯一事实源**（重启由
 	// ScanRestore 恢复；历史 `configWriter` YAML 写回机制已随阶段 2 迁移移除）。

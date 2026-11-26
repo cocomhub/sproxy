@@ -80,18 +80,33 @@ test('addRule / removeRule：默认 priority 高于现存，删除越界忽略',
   assert.strictEqual(vs.removeRule(next, 99).length, 2);
 });
 
-test('toPayload：输出人类可读 max_size 且省略零值', () => {
-  const p = vs.toPayload([{ path_regex: '^a/', mode: 'single', max_size: 20 * 1024 * 1024, min_size: 0, priority: 5 }]);
+test('toPayload：体积字段输出精确字节并省略零值', () => {
+  const max = 20 * 1024 * 1024;
+  const p = vs.toPayload([{ path_regex: '^a/', mode: 'single', max_size: max, min_size: 0, priority: 5 }]);
   assert.deepStrictEqual(p, {
-    rules: [{ path_regex: '^a/', mode: 'single', priority: 5, max_size: '20MiB' }]
+    rules: [{ path_regex: '^a/', mode: 'single', priority: 5, max_size: max }]
   });
+});
+
+test('toPayload：未编辑的体积字段不被 formatSize 往返改写（精度回归）', () => {
+  // 1234567 经 formatSize → "1.18 MiB" 会变成 1237319（曾静默改写，可能撞卷块上限）
+  const rows = vs.fromValue({ rules: [{ path_regex: '^a/', mode: 'single', max_size: 1234567 }] });
+  const p = vs.toPayload(rows);
+  assert.strictEqual(p.rules[0].max_size, 1234567);
+});
+
+test('toPayload：编辑后的体积字段按输入解析（支持 "20MiB"）', () => {
+  const rows = vs.fromValue({ rules: [{ path_regex: '^a/', mode: 'single', max_size: 1234567 }] });
+  rows[0].max_size = '20MiB';
+  assert.strictEqual(vs.toPayload(rows).rules[0].max_size, 20 * 1024 * 1024);
 });
 
 test('fromValue：后端 value → 行数组（缺字段归一）', () => {
   const rows = vs.fromValue({ version: 3, rules: [{ path_regex: '^a/', mode: 'single', max_size: 1024 }] });
   assert.strictEqual(rows.length, 1);
   assert.deepStrictEqual(rows[0], {
-    path_regex: '^a/', min_size: 0, max_size: 1024, mode: 'single', priority: 0, note: ''
+    path_regex: '^a/', min_size: 0, max_size: 1024, mode: 'single', priority: 0, note: '',
+    orig_min_size: 0, orig_max_size: 1024
   });
   assert.deepStrictEqual(vs.fromValue(null), []);
 });

@@ -120,7 +120,12 @@
     return { ok: errors.length === 0, errors: errors };
   }
 
-  /** 前端行数组 → PUT body（max_size 输出人类可读串，与后端 ByteSize 解析对齐）。 */
+  /**
+   * 前端行数组 → PUT body。
+   *
+   * 体积字段的取舍：用户**没动过**就原样提交原始字节值（精确）；动过则按输入解析并回写
+   * 纯数字字节（不经过 formatSize 往返，避免 1234567 → "1.18MiB" = 1237319 的静默漂移）。
+   */
   function toPayload(rules) {
     return {
       rules: (rules || []).map(function (r) {
@@ -129,14 +134,22 @@
           mode: String(r.mode || 'single'),
           priority: Number(r.priority) || 0
         };
-        var min = parseSize(r.min_size);
-        if (min) { out.min_size = formatSize(min).replace(/\s+/g, ''); }
-        var max = parseSize(r.max_size);
-        if (max) { out.max_size = formatSize(max).replace(/\s+/g, ''); }
+        var min = sizeField(r, 'min_size');
+        if (min) { out.min_size = min; }
+        var max = sizeField(r, 'max_size');
+        if (max) { out.max_size = max; }
         if (r.note) { out.note = String(r.note); }
         return out;
       })
     };
+  }
+
+  /** sizeField 返回该行某体积字段应提交的值（未编辑 ⇒ 原始字节；已编辑 ⇒ 解析结果）。 */
+  function sizeField(r, key) {
+    var parsed = parseSize(r[key]);
+    var orig = Number(r['orig_' + key]) || 0;
+    if (orig > 0 && (parsed === null || parsed === orig)) { return orig; }
+    return parsed || 0;
   }
 
   /** 后端 value（{rules,version}）→ 前端行数组。 */
@@ -150,7 +163,11 @@
         max_size: Number(r.max_size) || 0,
         mode: String(r.mode || 'random'),
         priority: Number(r.priority) || 0,
-        note: r.note || ''
+        note: r.note || '',
+        // 原始字节值：用户**未编辑**该字段时原样提交，避免经过 formatSize（≤2 位小数）
+        // 往返把 1234567 改写成 1.18MiB=1237319 这类静默精度损失（可能直接撞卷块上限）。
+        orig_min_size: Number(r.min_size) || 0,
+        orig_max_size: Number(r.max_size) || 0
       };
     });
   }

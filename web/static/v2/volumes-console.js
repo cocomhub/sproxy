@@ -312,6 +312,9 @@
     var sr = el('v2-sec-refresh'); if (sr) { sr.addEventListener('click', loadSecrets); }
     var sc = el('v2-sec-create'); if (sc) { sc.addEventListener('click', createSecret); }
     var vc = el('v2-vl-create'); if (vc) { vc.addEventListener('click', createUserVolume); }
+    // 卷详情抽屉的关闭按钮/遮罩/Esc 绑定在 volume-drawer.js 的 init 里。**必须真的调用**——
+    // 此前只声明未接线，抽屉打开后 ✕/遮罩/Esc 全无反应（审查 Important），只能刷新页面。
+    if (window.v2volumeDrawer && window.v2volumeDrawer.init) { window.v2volumeDrawer.init(); }
     if (el('v2-vl-body')) { load(); loadUser(); loadSecrets(); }
   }
 

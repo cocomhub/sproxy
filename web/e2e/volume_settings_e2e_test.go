@@ -154,4 +154,12 @@ func TestVolumeSettings_DetailDrawerEditsRules(t *testing.T) {
 	if len(payload.Rules) != 2 {
 		t.Fatalf("应提交 2 条规则，得到 %d", len(payload.Rules))
 	}
+
+	// ⑤ 抽屉可关闭（审查 Important：init 未接线 ⇒ ✕/遮罩/Esc 全无反应）
+	if err := page.Locator("#v2-vd-close").Click(playwright.LocatorClickOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("点击关闭: %v", err)
+	}
+	if err := waitLoc(page, "#v2-vdrawer.show", playwright.WaitForSelectorStateHidden, 5000); err != nil {
+		t.Fatalf("点 ✕ 后抽屉应关闭: %v", err)
+	}
 }

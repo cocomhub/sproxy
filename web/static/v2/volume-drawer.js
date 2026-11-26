@@ -288,9 +288,23 @@
       })
       .catch(function (e) {
         var msg = (e && e.message) || String(e);
-        if (/409/.test(msg)) { msg = '规则已被他人修改，请刷新后重试（并发写冲突）'; }
+        // v2api 抛出的 Error 只带服务端 message（不带 HTTP 状态码）⇒ 按哨兵文案识别冲突，
+        // 不靠 /409/ 正则（那永远不成立）。冲突后立即重读，让用户看到最新版本再改。
+        if (/版本冲突/.test(msg)) {
+          banner('规则已被他人修改，已重新加载最新版本，请确认后再次保存', 'warn');
+          return openDetail(state.name);
+        }
         banner('保存失败：' + msg, 'warn');
       });
+  }
+
+  /** Esc 关闭抽屉（仅当抽屉打开时接管，避免影响命令面板/预览等其它 Esc 语义）。 */
+  function onKeydown(e) {
+    if (e.key !== 'Escape') { return; }
+    var d = el('v2-vdrawer');
+    if (!d || !d.classList.contains('show')) { return; }
+    e.preventDefault();
+    closeDrawer();
   }
 
   function init() {
@@ -298,6 +312,7 @@
     if (c) { c.addEventListener('click', closeDrawer); }
     var b = el('v2-vd-backdrop');
     if (b) { b.addEventListener('click', closeDrawer); }
+    if (typeof document !== 'undefined') { document.addEventListener('keydown', onKeydown); }
   }
 
   var mod = {

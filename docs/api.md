@@ -1530,7 +1530,9 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 返回卷基础信息 + 能力列表 + 设置分区（含 schema 与当前值）。
 
 - 可见性：卷必须在请求者可见卷视图内，否则 `404`（不泄露他人私有卷存在性）
+- 本地卷（无外部后端）同样返回 200：`settings` 为 `[]`（「此卷暂无可调配置」），不是 404
 - `capabilities` 含 `settings` 表示该卷支持设置分区；不支持时 `settings` 为 `[]`
+- 后端读取设置失败 ⇒ `500`（不把服务端故障伪装成「没有配置」）
 - 路径为三段（`/{name}/detail`）而非 `/{name}`：卷名可合法取 `export`/`user` 等值，两段通配会与
   既有字面路由撞名
 
@@ -1568,8 +1570,8 @@ POST /api/volumes/refresh?volume=<卷名>   # 只清该卷状态缓存（本地�
 - 请求体上限 1 MiB；成功返回 `{"success":true,"version":N}`
 - 状态码：校验失败 `400`（错误信息含规则下标）；版本冲突 `409`（并发写，重读后重试）；
   分区不支持 `405`；卷不存在/不可见 `404`
-- 审计：`action=volume_settings_update`（`result` = `ok`/`denied`/`failed`；`detail` 只含条数与
-  载荷摘要，**不含规则全文**）
+- 审计：`action=volume_settings_update`（`result` = `success`/`denied`/`error`，与全仓审计结果
+  取值一致；`detail` 只含条数与载荷摘要，**不含规则全文**）
 
 ```bash
 curl -X PUT "https://host/api/volumes/vault/settings/block_policy"   -H 'Content-Type: application/json'   -d '{"rules":[{"path_regex":"^archive/.*\.zip$","max_size":"20MiB","mode":"single","priority":100}]}'

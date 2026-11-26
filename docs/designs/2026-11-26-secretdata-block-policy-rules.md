@@ -49,8 +49,12 @@ secretdata 卷当前**只有一种块级规划**：`RandomPlanner`（`block_poli
 ```go
 // Rule 是一条分块规则：路径正则 + 体积区间 → 块级模式。
 type Rule struct {
-    // PathRegex 是对**用户可见相对路径**的 RE2 正则（整串匹配，服务端编译时加 ^(?:...)$）。
-    // 例：`^archive/.*\.zip$`、`\.jpg$`、`^photos/`。
+    // PathRegex 是对**用户可见相对路径**的 RE2 正则，**子串匹配**（服务端直接 Compile，不加
+    // ^/$ 包装）：`\.jpg$` 命中 `photos/a.jpg`、`^archive/` 命中 `archive/x.zip`。需要整串
+    // 语义的调用方自行写 `^...$`。
+    //
+    // 订正（2026-11-26 实施期）：原设计写「整串匹配（自动加 ^(?:...)$）」，实测会让
+    // `\.jpg$` 退化为「文件名叫 .jpg」，规则形同废纸 ⇒ 改为子串匹配（用户直觉）。
     PathRegex string `json:"path_regex"`
     // MaxSize/MinSize 是可选的体积区间（字节）。MaxSize>0 表示仅 size ≤ MaxSize 命中；
     // MinSize>0 表示仅 size ≥ MinSize 命中；两者同时给 = 闭区间。0 = 该侧不限。

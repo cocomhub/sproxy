@@ -8,14 +8,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cocomhub/sproxy/pkg/accesskey"
 	"github.com/cocomhub/sproxy/pkg/audit"
+	"github.com/cocomhub/sproxy/pkg/state"
+	"github.com/cocomhub/sproxy/pkg/storage"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 	"github.com/cocomhub/sproxy/pkg/volume"
 	"github.com/cocomhub/sproxy/pkg/volume/registry"
@@ -26,9 +31,13 @@ import (
 //  ② 错误 → 状态码映射（400/405/409/500）；
 //  ③ 业务审计在成功与拒绝两条路径都发出，且不含规则全文。
 
-// settingsCtx 构造带 Principal 的请求 ctx（认证面的输出形态）。
+// settingsCtx 构造带 Principal **与 actor** 的请求 ctx（认证面的输出形态）。
+// 两者都要：owner 经 `ownerFromRequest`（= ActorFrom）取值，角色经 PrincipalFrom 取值；
+// 生产侧 authMiddleware 同时写入二者，测试必须镜像——只写 Principal 会让 owner 恒为空
+// （退化成 anonymous），使「自己的用户卷」判据假通过。
 func settingsCtx(owner, role string) context.Context {
-	return withPrincipal(context.Background(), &Principal{Owner: owner, Role: role})
+	ctx := withPrincipal(context.Background(), &Principal{Owner: owner, Role: role})
+	return withActor(ctx, owner)
 }
 
 // doSettingsReq 用给定 ctx/body 调 handler。
@@ -158,7 +167,7 @@ func TestVolumeSettings_StatusMapping(t *testing.T) {
 	}{
 		{"version conflict → 409", registry.ErrSettingsVersionConflict, http.StatusConflict},
 		{"unsupported section → 405", registry.ErrSettingsSectionUnsupported, http.StatusMethodNotAllowed},
-		{"validation → 400", errors.New("policy: 规则 0 的 max_size 超过硬上限"), http.StatusBadRequest},
+		{"payload invalid → 400", fmt.Errorf("%w: 缺 max_size", registry.ErrSettingsPayloadInvalid), http.StatusBadRequest},
 		{"other → 500", errors.New("boom"), http.StatusInternalServerError},
 	}
 	for _, tc := range tests {
@@ -323,5 +332,243 @@ func TestVolumeSettingsRoutes_Registered(t *testing.T) {
 		if !got[k] {
 			t.Errorf("既有路由丢失: %s", k)
 		}
+	}
+}
+
+// ---- 审查修复回归 ----
+
+// TestVolumeSettings_PrivateUserVolumeOfOthersIs404 锁定防枚举：他人 owner-only 用户卷
+// 必须 404（不是 403/200），与 deleteUserVolumeHandler 同源判据。
+func TestVolumeSettings_PrivateUserVolumeOfOthersIs404(t *testing.T) {
+	t.Parallel()
+	h := newSettingsTestHandlers(t, "alice-vault", &fakeSettingsBackend{sections: []registry.VolumeSettings{{
+		Key: "block_policy", Value: json.RawMessage(`{"rules":[]}`),
+	}}})
+	// 把该卷登记成 alice 的用户卷（owner-only ACL：Mode=allow + 单 owner 白名单）
+	uv := &UserVolumeStore{root: t.TempDir(), ownerLocks: map[string]*sync.Mutex{}}
+	if err := uv.Create("alice", UserVolume{
+		Name: "alice-vault", Type: "secretdata",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}},
+	}); err != nil {
+		t.Fatalf("Create user volume: %v", err)
+	}
+	h.userVolumes = uv
+	// 重新登记带 owner-only ACL 的卷描述
+	_ = h.volSet.RemoveExternalVolume("alice-vault")
+	if err := h.volSet.AddExternalVolume(volume.Volume{
+		Name: "alice-vault", Type: "secretdata",
+		ACL: volume.ACL{Mode: volume.ModeAllow, Owners: map[string]struct{}{"alice": {}}},
+	}, &fakeSettingsBackend{}); err != nil {
+		t.Fatalf("AddExternalVolume: %v", err)
+	}
+
+	// bob 看不到 ⇒ 读与写都 404
+	for _, tc := range []struct {
+		method, target string
+		body           []byte
+	}{
+		{http.MethodGet, "/api/volumes/alice-vault/detail", nil},
+		{http.MethodGet, "/api/volumes/alice-vault/settings", nil},
+		{http.MethodPut, "/api/volumes/alice-vault/settings/block_policy", []byte(`{"rules":[]}`)},
+	} {
+		rr := doSettingsReq(t, settingsRoutes(h), settingsCtx("bob", string(accesskey.RoleUser)), tc.method, tc.target, tc.body)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s %s: code=%d want 404（防枚举）body=%s", tc.method, tc.target, rr.Code, rr.Body.String())
+		}
+	}
+	// alice 自己能写
+	rr := doSettingsReq(t, settingsRoutes(h), settingsCtx("alice", string(accesskey.RoleUser)),
+		http.MethodPut, "/api/volumes/alice-vault/settings/block_policy", []byte(`{"rules":[]}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("owner 写自己的用户卷应 200，得到 %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestVolumeSettings_LocalVolumeReturnsEmptySettings 锁定本地卷（无外部后端）也返回 200 +
+// 空 settings（不是 404）：卷表里每个可见卷都有「详情」按钮，点开应是「暂无可调配置」。
+func TestVolumeSettings_LocalVolumeReturnsEmptySettings(t *testing.T) {
+	t.Parallel()
+	// 本地卷登记为**存储卷**（无 External 后端）——卷表会列出它，点详情应是「暂无可调配置」。
+	root := t.TempDir()
+	r, rerr := storage.OpenRoot(root)
+	if rerr != nil {
+		t.Fatalf("OpenRoot: %v", rerr)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	h := &Handlers{}
+	h.volSet = registry.NewSet([]volume.Volume{{Name: "main", Type: "local"}}, nil, nil, nil, "main")
+	if err := h.volSet.RegisterStorageVolume(localVolStub{name: "main", root: r}); err != nil {
+		t.Fatalf("RegisterStorageVolume: %v", err)
+	}
+	rr := doSettingsReq(t, settingsRoutes(h), settingsCtx("alice", string(accesskey.RoleUser)),
+		http.MethodGet, "/api/volumes/main/detail", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("本地卷详情应 200，得到 %d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Settings []registry.VolumeSettings `json:"settings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if len(got.Settings) != 0 {
+		t.Fatalf("本地卷应无设置分区，得到 %+v", got.Settings)
+	}
+}
+
+// TestVolumeSettings_AuditResultContract 锁定审计 result 取值走契约（success/denied/error），
+// 不是自造的 ok/failed —— 否则审计控制台把成功显示成红「失败」、result=success 筛不到。
+func TestVolumeSettings_AuditResultContract(t *testing.T) {
+	t.Parallel()
+	h := newSettingsTestHandlers(t, "av2", &fakeSettingsBackend{})
+	attachTestAudit(t, h)
+	doSettingsReq(t, settingsRoutes(h), settingsCtx("boss", string(accesskey.RoleAdmin)),
+		http.MethodPut, "/api/volumes/av2/settings/block_policy", []byte(`{"rules":[]}`))
+	doSettingsReq(t, settingsRoutes(h), settingsCtx("alice", string(accesskey.RoleUser)),
+		http.MethodPut, "/api/volumes/av2/settings/block_policy", []byte(`{"rules":[]}`))
+
+	seen, err := h.auditSvc.Query(context.Background(), audit.EntryFilter{Action: auditActionVolumeSettingsUpdate})
+	if err != nil {
+		t.Fatalf("查审计: %v", err)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("应有成功 + 拒绝两条，得到 %d", len(seen))
+	}
+	for _, e := range seen {
+		switch string(e.Result) {
+		case "success", "denied", "error":
+		default:
+			t.Fatalf("审计 result=%q 不在契约内（success/denied/error）", e.Result)
+		}
+	}
+}
+
+// TestVolumeSettings_InvalidPayloadIs400 锁定客户端载荷非法 → 400（不是 500），
+// 且 500 不回内部错误原文。
+func TestVolumeSettings_InvalidPayloadIs400(t *testing.T) {
+	t.Parallel()
+	be := &fakeSettingsBackend{updateErr: registry.ErrSettingsPayloadInvalid}
+	h := newSettingsTestHandlers(t, "p1", be)
+	rr := doSettingsReq(t, settingsRoutes(h), settingsCtx("boss", string(accesskey.RoleAdmin)),
+		http.MethodPut, "/api/volumes/p1/settings/block_policy", []byte(`{`))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("载荷非法应 400，得到 %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// localVolStub 是本地卷（存储卷）的最小白名单实现：只用 Root 的 FS 视图与卷名。
+type localVolStub struct {
+	name string
+	root *storage.Root
+}
+
+func (l localVolStub) Name() string      { return l.name }
+func (l localVolStub) Kind() volume.Kind { return volume.KindStorage }
+func (l localVolStub) FS() syncpkg.FS    { return nil }
+func (l localVolStub) Close() error      { return nil }
+
+// TestEnsureSettingsStoreInjected_LazyForRuntimeVolumes 锁定运行期新建的用户卷也能拿到
+// 持久化后端（启动时的 AttachVolumeSettingsStores 早于该卷存在 ⇒ 必须惰性补注入，
+// 否则用户新建卷后打开详情永远 read_only，直到重启）。
+func TestEnsureSettingsStoreInjected_LazyForRuntimeVolumes(t *testing.T) {
+	t.Parallel()
+	b := &fakeStoreSetterBackend{}
+	h := newSettingsTestHandlers(t, "late", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+
+	if b.setCalls != 0 {
+		t.Fatalf("初始不应注入，得到 %d", b.setCalls)
+	}
+	h.ensureSettingsStoreInjected("late", b)
+	if b.setCalls != 1 || b.store == nil {
+		t.Fatalf("应按需注入一次，得到 calls=%d store=%v", b.setCalls, b.store)
+	}
+	// 幂等：已注入后不重复
+	h.ensureSettingsStoreInjected("late", b)
+	if b.setCalls != 1 {
+		t.Fatalf("已注入后不应重复注入，得到 %d", b.setCalls)
+	}
+}
+
+// fakeStoreSetterBackend 记录注入调用（并可选成功/失败）。
+type fakeStoreSetterBackend struct {
+	fakeSettingsBackend
+	setCalls int
+	store    registry.SettingsStore
+}
+
+func (f *fakeStoreSetterBackend) SetSettingsStore(s registry.SettingsStore) error {
+	f.setCalls++
+	f.store = s
+	return nil
+}
+
+// TestAttachVolumeSettingsStores_LocalFallback 锁定默认单机部署（未配 state_store）时，
+// 卷设置仍能持久化：装配层用本地 StateStore 兜底。否则「Web UI 动态调整并持久化」这条
+// 交付能力只在 mongo/集群下可用，与文档/验收不符。
+func TestAttachVolumeSettingsStores_LocalFallback(t *testing.T) {
+	t.Parallel()
+	b := &fakeStoreSetterBackend{}
+	h := newSettingsTestHandlers(t, "localpersist", b)
+	// h.stateStore 为 nil（默认 local 单机未装配 StateStore）
+	cfg := Default()
+	cfg.StorageRoot = t.TempDir()
+	var cfgPtr atomic.Pointer[Config]
+	cfgPtr.Store(cfg)
+	h.cfgPtr = &cfgPtr
+	AttachVolumeSettingsStores(h)
+	if b.store == nil {
+		t.Fatal("未装配 StateStore 时应回落本地 StateStore（否则设置分区恒只读）")
+	}
+	if _, err := b.store.Save(context.Background(), "localpersist", json.RawMessage(`{"rules":[]}`), 0); err != nil {
+		t.Fatalf("本地 StateStore 应可写: %v", err)
+	}
+}
+
+// TestSettingsStoreInjectedCache_KeyedByBackend 防止包级注入缓存在测试间串味：
+// 缓存按「卷名 + 后端实例」区分（同名不同实例必须重新注入）。
+func TestSettingsStoreInjectedCache_KeyedByBackend(t *testing.T) {
+	t.Parallel()
+	b1 := &fakeStoreSetterBackend{}
+	b2 := &fakeStoreSetterBackend{}
+	h := newSettingsTestHandlers(t, "dup-name", b1)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+	h.ensureSettingsStoreInjected("dup-name", b1)
+	h.ensureSettingsStoreInjected("dup-name", b2)
+	if b2.setCalls != 1 {
+		t.Fatalf("同名不同后端实例必须各自注入，得到 %d", b2.setCalls)
+	}
+}
+
+// TestForgetVolumeSettings_ClearsStateAndCache 锁定卷删除时清理持久化设置与注入缓存
+// （安全审查 MEDIUM）：设置只按卷名持久化，若删除后残留，同名重建的卷会静默继承旧规则
+// ——规则含路径语义，属于跨身份的残留状态。
+func TestForgetVolumeSettings_ClearsStateAndCache(t *testing.T) {
+	t.Parallel()
+	b := &fakeStoreSetterBackend{}
+	h := newSettingsTestHandlers(t, "recycled", b)
+	st := state.NewLocalStateStore(t.TempDir(), nil)
+	h.SetStateStore(st)
+
+	h.ensureSettingsStoreInjected("recycled", b) // 建立注入缓存 + 注入 store
+	if b.store == nil {
+		t.Fatal("应先注入 store")
+	}
+	if _, err := b.store.Save(context.Background(), "recycled", json.RawMessage(`{"rules":[]}`), 0); err != nil {
+		t.Fatalf("预置持久化规则: %v", err)
+	}
+
+	h.forgetVolumeSettings(context.Background(), "recycled")
+
+	raw, ver, err := b.store.Load(context.Background(), "recycled")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if raw != nil || ver != 0 {
+		t.Fatalf("卷删除后不应残留设置，得到 (%s,%d)", raw, ver)
+	}
+	// 注入缓存也要清：同名重建会用**新后端实例**，不该复用旧的「已注入」标记
+	if _, done := settingsStoreInjected.Load(settingsInjectKey("recycled", b)); done {
+		t.Fatal("删除后应清除该卷的注入缓存")
 	}
 }
