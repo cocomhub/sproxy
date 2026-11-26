@@ -982,6 +982,9 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-share-password").Fill("e2epw"); err != nil {
 		t.Fatalf("填写口令: %v", err)
 	}
+	if err := page.Locator("#v2-share-watermark").Fill("e2ewm"); err != nil {
+		t.Fatalf("填写水印: %v", err)
+	}
 	if err := page.Locator("#v2-share-create").Click(); err != nil {
 		t.Fatalf("创建口令分享: %v", err)
 	}
@@ -1007,6 +1010,9 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	withPw, pwErr := http.Get(shareLink + "?password=e2epw")
 	if pwErr != nil {
 		t.Fatalf("带口令访问: %v", pwErr)
+	}
+	if wm := withPw.Header.Get("X-Share-Watermark"); wm != "e2ewm" {
+		t.Fatalf("分享水印头 = %q，期望 e2ewm", wm)
 	}
 	gotBody, _ := io.ReadAll(withPw.Body)
 	withPw.Body.Close()

@@ -239,6 +239,20 @@ func (h *Handlers) accessShareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 派生内容（?transform=thumb&watermark=<seed>）：与 /download 共用同一实现。
+	// 旧实现直接 io.Copy 原文件 ⇒ 文档声称的缩略图/水印在分享面从未生效（实测缺陷 2026-11-25）。
+	if r.URL.Query().Get("transform") != "" {
+		// 分享级响应头（只读/水印/来源策略）在派生响应上同样必须可见，否则客户端无法
+		// 得知该分享带水印（旧实现只在原始流式分支设置）。
+		h.setShareHeaders(w, link)
+		if dp, dpOK := h.shareDownloadPath(src, link, r); dpOK && h.fileService().ServeTransform(w, r, dp) {
+			return
+		}
+		// 外部卷/无租户根：派生只支持本地卷 → 明确 501（不得静默回原文件）。
+		sendJSONResponse(w, UploadResponse{Success: false, Message: "分享派生内容仅支持本地卷文件"}, http.StatusNotImplemented)
+		return
+	}
+
 	// 直接流式传输文件，不暴露文件路径。
 	// 加密卷走**用户可见**入口（透明解密）并报**明文**长度——raw Open 会把密文原样下发
 	// （评审 P0：分享面静默损坏），密文长度当 Content-Length 还会导致客户端 unexpected EOF。
@@ -312,6 +326,37 @@ func sharePasswordFromRequest(r *http.Request) string {
 	return strings.TrimSpace(r.URL.Query().Get("password"))
 }
 
+// setShareHeaders 设置分享语义响应头（只读/水印/缓存与来源策略），**两个响应分支共用**
+// （原始流式 + 派生内容），否则派生响应会丢掉 X-Share-Watermark 等信息。
+func (h *Handlers) setShareHeaders(w http.ResponseWriter, link *share.Link) {
+	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
+	if link.ReadOnly {
+		w.Header().Set("X-Share-ReadOnly", "true")
+	}
+	// 分享绑定水印（roadmap P2 残余）：创建时指定 watermark → 响应头可见 +
+	// 客户端可经 ?transform=thumb&watermark=<seed> 叠加（防截图外流可追溯）。
+	if link.WatermarkSeed != "" {
+		w.Header().Set("X-Share-Watermark", link.WatermarkSeed)
+	}
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+// shareDownloadPath 把分享源转换成派生管线需要的下载目标（仅本地卷可用：派生缓存写在租户
+// meta 桶，外部卷没有租户根）。不可用时 ok=false。
+func (h *Handlers) shareDownloadPath(src *ownerSource, link *share.Link, r *http.Request) (files.DownloadPath, bool) {
+	if src == nil || src.Local == nil || link == nil {
+		return files.DownloadPath{}, false
+	}
+	// 用量/限速所需的 actor 由请求上下文提供；这里显式带 owner，保证派生缓存与配额记账归属正确。
+	return files.DownloadPath{
+		Filename:   filepath.Base(link.Rel),
+		VolumeName: link.Volume,
+		Tenant:     h.tenantFor(link.TenantID),
+		Rel:        link.Rel,
+	}, true
+}
+
 // resolveShareAccessSource 解析分享源的**卷感知**定位：
 //   - `link.Volume` 非空（新记录）⇒ **只在该卷**重新定位（ACL 复核 + 文件存在性）；
 //   - 否则（旧记录/无卷语义）⇒ 旧行为：默认/本地卷优先（locateOwnerFile），未命中再按视图扫描。
@@ -338,15 +383,7 @@ func (h *Handlers) resolveShareAccessSource(r *http.Request, link *share.Link) (
 // streamShareFile 设置分享响应头并以流式方式传输文件内容（不暴露文件路径）。
 func (h *Handlers) streamShareFile(w http.ResponseWriter, r *http.Request, token string, link *share.Link, f io.Reader, size int64) {
 	w.Header().Set(headerContentType, contentTypeOctetStream)
-	// 分享只读语义可见（roadmap P2）：仅下载的分享响应带 X-Share-ReadOnly 头。
-	if link.ReadOnly {
-		w.Header().Set("X-Share-ReadOnly", "true")
-	}
-	// 分享绑定水印（roadmap P2 残余）：创建时指定 watermark → 响应头可见 +
-	// 客户端可经 ?transform=thumb&watermark=<seed> 叠加（防截图外流可追溯）。
-	if link.WatermarkSeed != "" {
-		w.Header().Set("X-Share-Watermark", link.WatermarkSeed)
-	}
+	h.setShareHeaders(w, link)
 	w.Header().Set("Content-Disposition", formatContentDisposition(filepath.Base(link.Rel)))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")

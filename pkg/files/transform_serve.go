@@ -14,6 +14,25 @@ import (
 	"strconv"
 )
 
+// ServeTransform 按 `?transform=` 以**派生内容**响应某个已解析的下载目标（分享面复用同一实现）。
+//
+// 返回 false 表示未处理（未指定 transform / 打开失败）——调用方应回退原始流式响应。
+// 为什么需要它：分享链接此前直接 `io.Copy` 原文件 ⇒ 文档声称的 `?transform=thumb&watermark=`
+// 在分享面**从未生效**（同一能力在 /download 上却是真的）。派生逻辑只此一份，分享面复用。
+func (s *Service) ServeTransform(w http.ResponseWriter, r *http.Request, dp DownloadPath) bool {
+	name := r.URL.Query().Get("transform")
+	if name == "" {
+		return false
+	}
+	of, err := s.OpenPath(r.Context(), dp)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = of.File.Close() }()
+	s.serveTransform(w, r, dp, of, name)
+	return true
+}
+
 // serveTransform 处理 ?transform=<name>&width=N 下载：读原文件 → 按扩展名查注册表
 // 变换 → 写派生内容（原文件不动）。无匹配变换 / 变换失败 → 回退原文件（零回归）。
 func (s *Service) serveTransform(w http.ResponseWriter, r *http.Request, dp DownloadPath, of OpenedFile, name string) {
