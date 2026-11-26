@@ -55,6 +55,22 @@ func NewTenant(owner string, root *Root) (*Tenant, error) {
 // Root 返回租户持有的存储根。
 func (t *Tenant) Root() *Root { return t.root }
 
+// Close 释放该租户自己的根句柄（`OpenTenant`/`TenantCache` 每次都会新开一个 `os.Root`）。
+//
+// 为什么必须能显式关（2026-11-27 CI `Test(windows)` 实测）：`os.Root` 持目录 fd 且**没有
+// finalizer**；不关会让 `t.TempDir()` 的 `RemoveAll` 报
+// `The process cannot access the file because it is being used by another process`。
+// 实测命中 `pkg/server/s3` 的 `TestListObjectsV2_NamedBucket`（桶根本身关了，但
+// `OpenTenant` 产生的**租户根**没关）。
+//
+// 幂等 + nil 安全（重复 Close 返回 nil）。
+func (t *Tenant) Close() error {
+	if t == nil || t.root == nil {
+		return nil
+	}
+	return t.root.Close()
+}
+
 // UserRoot 返回用户文件桶名（"user"）。用户文件根 = Tenant.Root() 下的该目录。
 func (t *Tenant) UserRoot() string { return bucketUser }
 

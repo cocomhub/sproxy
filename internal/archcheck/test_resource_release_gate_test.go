@@ -3,7 +3,7 @@
 
 package archcheck
 
-// test_resource_release_gate_test.go 是门禁 **R59**：测试夹具创建的**系统资源**
+// test_resource_release_gate_test.go 是门禁 **R60**：测试夹具创建的**系统资源**
 // （目录句柄 / debounce 落盘协程）必须显式释放。
 //
 // 背景（2026-11-27 两轮 CI 实测，均 `Test(windows)` 偶发）：
@@ -34,7 +34,7 @@ const (
 	testResourceWindow = 10
 	// 下限护栏：低于此值说明扫描面/正则失效（会假绿）。
 	testResourceMinFiles = 900
-	testResourceMinSites = 130
+	testResourceMinSites = 145
 )
 
 // testResourcePattern 是「需要显式释放的资源构造函数」清单。
@@ -42,7 +42,7 @@ const (
 // 新增条目时同时确认：该构造函数确实持有进程级资源（fd / goroutine / listener），
 // 且**没有** finalizer 兜底。
 var testResourcePattern = regexp.MustCompile(
-	`(?:storage\.)?OpenRoot\(|checksum\.NewChecksumStore\(|(?:^|[^.\w])NewChecksumStore\(`)
+	`(?:storage\.)?OpenRoot\(|(?:storage\.)?OpenTenant\(|checksum\.NewChecksumStore\(|(?:^|[^.\w])NewChecksumStore\(`)
 
 // openTestRootHelper 是本仓统一的「打开即登记关闭」助手名（命中即视为已登记）。
 var openTestRootHelper = regexp.MustCompile(`openTestRoot\(|openRootForTest\(|testRootAt\(`)
@@ -53,7 +53,7 @@ var closeOwnership = regexp.MustCompile(`\.Close\(\)|t\.Cleanup\(`)
 // skipPathPrefixes 是扫描时跳过的目录（相对 module root）。
 var skipPathPrefixes = []string{"build/", "node_modules/", ".git/", ".worktrees/", "vendor/"}
 
-func TestR59_TestFixturesReleaseSystemResources(t *testing.T) {
+func TestR60_TestFixturesReleaseSystemResources(t *testing.T) {
 	t.Parallel()
 	root := moduleRoot(t)
 	exceptions := readTestResourceExceptions(t)
@@ -125,15 +125,15 @@ func TestR59_TestFixturesReleaseSystemResources(t *testing.T) {
 
 	// 双侧下限护栏：扫描面被改窄 / 正则失效 ⇒ 立刻红（否则门禁假绿）。
 	if files < testResourceMinFiles {
-		t.Fatalf("R59 扫描到的测试文件数 %d < 下限 %d（扫描面被改窄？门禁会假绿）", files, testResourceMinFiles)
+		t.Fatalf("R60 扫描到的测试文件数 %d < 下限 %d（扫描面被改窄？门禁会假绿）", files, testResourceMinFiles)
 	}
 	if sites < testResourceMinSites {
-		t.Fatalf("R59 匹配到的资源构造调用点 %d < 下限 %d（正则失效？门禁会假绿）", sites, testResourceMinSites)
+		t.Fatalf("R60 匹配到的资源构造调用点 %d < 下限 %d（正则失效？门禁会假绿）", sites, testResourceMinSites)
 	}
 
 	sort.Strings(violations)
 	if len(violations) > 0 {
-		t.Errorf("R59：测试夹具创建了系统资源但未登记关闭（Windows 上会让 t.TempDir() 清理失败；\n"+
+		t.Errorf("R60：测试夹具创建了系统资源但未登记关闭（Windows 上会让 t.TempDir() 清理失败；\n"+
 			"   os.Root 无 finalizer、ChecksumStore 带 debounce 落盘协程）。\n"+
 			"   修法：改用 openTestRoot(t, dir) 或紧跟 t.Cleanup(func(){ _ = X.Close() })；\n"+
 			"   确有正当例外登记到 internal/archcheck/%s 并写理由：\n  %s",
