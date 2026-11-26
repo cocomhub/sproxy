@@ -124,8 +124,8 @@ func TestBackend_SettingsReloaderPassthrough(t *testing.T) {
 	if !ok2 {
 		t.Fatal("包装器应恒实现能力接口（用 ErrUnsupported 表达未实现）")
 	}
-	if err := rl2.ReloadSettings(context.Background()); !errors.Is(err, syncpkg.ErrUnsupported) {
-		t.Fatalf("inner 未实现时应返回 ErrUnsupported，得到 %v", err)
+	if err := rl2.ReloadSettings(context.Background()); !errors.Is(err, registry.ErrSettingsReloadNotImplemented) {
+		t.Fatalf("inner 未实现时应返回专用哨兵 ErrSettingsReloadNotImplemented，得到 %v", err)
 	}
 }
 

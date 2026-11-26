@@ -921,13 +921,23 @@ function statsRefresh() {
 // overviewCardsInFlight 防重入：两个入口（switchStatsTab / 控制台刷新）几乎同时调用时，
 // 两次都看不到 #overview-cards ⇒ 各插入一份 ⇒ 卡片数翻倍（e2e 实测 10 ≠ 5）。
 let overviewCardsInFlight = false;
+let overviewCardsPending = false;
 async function renderOverviewCards() {
   const panel = document.getElementById('stats-panel');
   if (!panel) return;
-  if (overviewCardsInFlight) return;
+  // 并发触发**必须重放**而不是丢弃：被丢弃的那次若恰好是「打开统计面板」的触发
+  // （首屏渲染仍在飞），卡片区将永远不渲染（用户看到概率性空白，e2e 实测 20s 不出现）。
+  const plan = overviewRenderPlan(overviewCardsInFlight, overviewCardsPending);
+  if (!plan.run) {
+    overviewCardsPending = plan.pending;
+    return;
+  }
   overviewCardsInFlight = true;
   try {
-    await renderOverviewCardsOnce(panel);
+    do {
+      overviewCardsPending = false;
+      await renderOverviewCardsOnce(panel);
+    } while (overviewCardsPending);
   } finally {
     overviewCardsInFlight = false;
   }

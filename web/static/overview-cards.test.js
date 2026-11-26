@@ -72,3 +72,19 @@ test('overviewStorage 聚合容量水位（无容量 ⇒ percent=null）', () =>
   const cards = m.overviewCards({}, {}, 0, { capacity: 100, usage: 95, percent: 95 });
   assert.strictEqual(cards.find((c) => c.key === 'storage-used').tone, 'bad');
 });
+
+test('overviewRenderPlan：并发渲染必须重放，不得丢弃（面板概率空白缺陷）', () => {
+  // 首次调用：开始渲染
+  assert.strictEqual(m.overviewRenderPlan(false, false).run, true);
+  // 渲染进行中再次触发：不并发跑，但**必须记住要重放**
+  const busy = m.overviewRenderPlan(true, false);
+  assert.strictEqual(busy.run, false);
+  assert.strictEqual(busy.pending, true);
+  // 渲染结束后发现有挂起请求：再跑一轮，并清掉挂起标记
+  const replay = m.overviewRenderPlan(false, true);
+  assert.strictEqual(replay.run, true);
+  assert.strictEqual(replay.pending, false);
+  // 无挂起：正常收敛
+  const idle = m.overviewRenderPlan(false, false);
+  assert.strictEqual(idle.run, true);
+});

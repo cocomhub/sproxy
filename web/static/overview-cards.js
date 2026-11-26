@@ -108,6 +108,23 @@ function overviewCardsHtml(cloud, issues, failedLastHour, storage) {
   return html + '</div>';
 }
 
+/**
+ * overviewRenderPlan 是概览卡片的**并发渲染门控**（纯函数，便于单测）。
+ *
+ * 语义（2026-11-27 修复）：渲染进行中再次触发时**不得丢弃**，必须置 pending 让调用方在
+ * 本轮结束后重放一次。旧实现 `if (inFlight) return;` 直接丢弃 —— 若被丢弃的那次恰好是
+ * 「打开统计面板」的触发（首屏渲染还在飞），卡片区就永远不渲染，用户看到概率性空白
+ * （CI e2e 实测：服务端任务已 failed，20s 后卡片仍不可见）。
+ *
+ * 返回 { run, pending }：run=true 表示调用方应立即开始渲染；pending 为更新后的挂起标记。
+ */
+function overviewRenderPlan(inFlight, pending) {
+  if (inFlight) {
+    return { run: false, pending: true };
+  }
+  return { run: true, pending: false };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     overviewCards: overviewCards,
@@ -116,5 +133,6 @@ if (typeof module !== 'undefined' && module.exports) {
     overviewStorage: overviewStorage,
     overviewCardAction: overviewCardAction,
     overviewAuditHtml: overviewAuditHtml,
+    overviewRenderPlan: overviewRenderPlan,
   };
 }

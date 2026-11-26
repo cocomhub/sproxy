@@ -86,6 +86,11 @@ var (
 	ErrSettingsVersionConflict = errors.New("registry: 卷设置版本冲突")
 	// ErrSettingsSectionUnsupported 是该卷不支持请求的分区（映射 405）。
 	ErrSettingsSectionUnsupported = errors.New("registry: 卷设置分区不支持")
+	// ErrSettingsReloadNotImplemented 是「该后端没有严格重载语义」的**专用**哨兵。
+	//
+	// 为什么不用通用 syncpkg.ErrUnsupported：inner 的真实失败若恰好 wrap 了 ErrUnsupported，
+	// 会被误判成「不支持」而落回吞错路径 ⇒ 真实失败被掩盖（安全审查 2026-11-27）。
+	ErrSettingsReloadNotImplemented = errors.New("registry: 后端未实现设置重载")
 	// ErrSettingsPayloadInvalid 是请求载荷非法（JSON 损坏/字段越界等**客户端输入**问题，映射 400）。
 	// 后端必须用它包住可识别的输入错误——否则装配层只能按字符串前缀猜，猜不中就变成 500。
 	ErrSettingsPayloadInvalid = errors.New("registry: 卷设置载荷非法")

@@ -31,6 +31,10 @@ func TestConsoleLayout_FullscreenNavAndDeepLink(t *testing.T) {
 	defer stop()
 	page.Goto(baseURL + "/ui/")
 	openStatsModal(t, page)
+	// 并发触发重放（2026-11-27）：连点两次统计按钮会让首次渲染在飞时再次触发；旧的
+	// 「inFlight 直接丢弃」实现会让卡片区永不渲染（CI 实测 20s 空白）。这里主动制造该
+	// 并发窗口，卡片必须仍然出现。
+	openStatsModal(t, page)
 
 	// ① 尺寸：读取 shell 的 boundingBox，必须远大于旧 500×80vh。
 	box, err := page.Locator("#console-shell").BoundingBox()

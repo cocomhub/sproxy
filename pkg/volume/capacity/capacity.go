@@ -910,7 +910,7 @@ func (b *Backend) ReloadSettings(ctx context.Context) error {
 	if rl, ok := b.ExternalBackend.(registry.SettingsReloader); ok {
 		return rl.ReloadSettings(ctx)
 	}
-	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", syncpkg.ErrUnsupported)
+	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", registry.ErrSettingsReloadNotImplemented)
 }
 
 // SetSettingsStore 委托 inner（registry.SettingsStoreSetter，装配层注入持久化后端）。

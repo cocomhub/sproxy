@@ -585,19 +585,19 @@ func TestRefreshVolume_ReloadsBlockPolicy(t *testing.T) {
 	if err := h.volumeSettingsRefresh(context.Background(), "reload-me"); err != nil {
 		t.Fatalf("volumeSettingsRefresh: %v", err)
 	}
-	if b.setCalls != 1 {
-		t.Fatalf("refresh 应重新注入持久化后端（触发重载），得到 %d", b.setCalls)
+	if b.reloadCalls != 1 {
+		t.Fatalf("refresh 应调用严格重载一次，得到 %d", b.reloadCalls)
 	}
 }
 
-// reloadableBackend 记录 SetSettingsStore 调用次数（模拟「载入最新规则」）。
+// reloadableBackend 实现**严格重载**（SettingsReloader），并记录调用次数。
 type reloadableBackend struct {
 	fakeSettingsBackend
-	setCalls int
+	reloadCalls int
 }
 
-func (b *reloadableBackend) SetSettingsStore(registry.SettingsStore) error {
-	b.setCalls++
+func (b *reloadableBackend) ReloadSettings(context.Context) error {
+	b.reloadCalls++
 	return nil
 }
 
@@ -633,12 +633,14 @@ func TestVolumeSettingsRefresh_UnsupportedMeansNoReload(t *testing.T) {
 	b := &setterOnlyBackend{}
 	h := newSettingsTestHandlers(t, "no-reload", b)
 	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
-	// inner 无严格重载语义 ⇒ 回退装配式注入（保持既有行为），不报错
-	if err := h.volumeSettingsRefresh(context.Background(), "no-reload"); err != nil {
-		t.Fatalf("无重载语义不应报错（回退兼容注入）: %v", err)
+	// inner 无严格重载语义（专用哨兵）⇒ 结论 not_supported，**不回退** Setter 吞错路径
+	// （安全审查：不支持就不能伪装成「已重载」，也不该走失败不可见的注入）。
+	outcome, err := h.volumeSettingsRefreshOutcome(context.Background(), "no-reload", b)
+	if err != nil || outcome != settingsReloadNotSupported {
+		t.Fatalf("应为 not_supported 且无错误，得到 %v err=%v", outcome, err)
 	}
-	if b.setCalls != 1 {
-		t.Fatalf("应回退一次 Setter 兼容注入，得到 %d", b.setCalls)
+	if b.setCalls != 0 {
+		t.Fatalf("不应回退 Setter 吞错路径，得到 %d 次", b.setCalls)
 	}
 
 	// **真实失败绝不回退**（核心：否则重载失败被当成成功）
@@ -663,7 +665,88 @@ func (b *setterOnlyBackend) SetSettingsStore(registry.SettingsStore) error {
 }
 
 func (b *setterOnlyBackend) ReloadSettings(context.Context) error {
-	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", syncpkg.ErrUnsupported)
+	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", registry.ErrSettingsReloadNotImplemented)
 }
 
 // failingReloadBackend 模拟 inner 的真实重载失败（不得回退兼容路径）。
+
+// ---- 安全审查（2026-11-27）：重载三态、专用哨兵、审计结果 ----
+
+// TestVolumeSettingsRefresh_ThreeState 锁定 refresh 重载的**三态**结论：
+// reloaded / not_supported / failed。文案与审计必须基于结果，而不是「包装器是否实现接口」
+// （包装器恒实现 ⇒ 断言恒真 ⇒ 不支持的后端也会被说成「已重载」）。
+func TestVolumeSettingsRefresh_ThreeState(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		be   registry.ExternalBackend
+		want settingsReloadOutcome
+	}{
+		{"reloader ok", &reloadableBackend{}, settingsReloaded},
+		{"reloader NotSupported", &notSupportedReloadBackend{}, settingsReloadNotSupported},
+		{"reloader real failure", &failingReloadBackend{}, settingsReloadFailed},
+		// inner 恰好返回通用 ErrUnsupported（语义不同）也必须是 failed，不得被当成「不支持」
+		{"reloader generic ErrUnsupported", &genericUnsupportedReloadBackend{}, settingsReloadFailed},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSettingsTestHandlers(t, "v", &plainSettingsBackend{})
+			got, err := h.volumeSettingsRefreshOutcome(context.Background(), "v", c.be)
+			if got != c.want {
+				t.Fatalf("outcome=%v want %v (err=%v)", got, c.want, err)
+			}
+			if c.want == settingsReloadFailed && err == nil {
+				t.Fatal("failed 必须带错误")
+			}
+			if c.want != settingsReloadFailed && err != nil {
+				t.Fatalf("非 failed 不应带错误: %v", err)
+			}
+		})
+	}
+}
+
+// TestVolumeSettingsReload_ErrorNotLeakedToAudit 锁定失败原因**分类化**：message 与审计 detail
+// 只出现类别，不出现内部 error 文本（可能是路径/驱动细节）。
+func TestVolumeSettingsReload_ErrorNotLeakedToAudit(t *testing.T) {
+	t.Parallel()
+	b := &failingReloadBackend{} // 错误文本含 "state store unavailable"
+	h := newSettingsTestHandlers(t, "leak", b)
+	h.SetStateStore(state.NewLocalStateStore(t.TempDir(), nil))
+	attachTestAudit(t, h)
+
+	r := httptest.NewRequest(http.MethodPost, "/api/volumes/refresh?volume=leak", nil)
+	note, detail, auditResult := h.reloadVolumeSettingsNote(r.WithContext(settingsCtx("boss", string(accesskey.RoleAdmin))), "leak")
+	if auditResult != AuditResultError {
+		t.Fatalf("重载失败时审计 result 应为 error，得到 %q", auditResult)
+	}
+	for _, s := range []string{note, detail} {
+		if strings.Contains(s, "state store unavailable") {
+			t.Fatalf("不得把内部错误文本写入回显/审计: %q", s)
+		}
+		if !strings.Contains(s, "重载失败") {
+			t.Fatalf("应给出分类化失败说明: %q", s)
+		}
+	}
+}
+
+// 以下是本组用例的后端替身。
+type plainSettingsBackend struct{}
+
+func (plainSettingsBackend) FS() syncpkg.FS { return fakeSyncFS{} }
+func (plainSettingsBackend) Close() error   { return nil }
+func (plainSettingsBackend) Settings(context.Context) ([]registry.VolumeSettings, error) {
+	return nil, nil
+}
+
+type notSupportedReloadBackend struct{ plainSettingsBackend }
+
+func (notSupportedReloadBackend) ReloadSettings(context.Context) error {
+	return fmt.Errorf("capacity: backend 未实现 ReloadSettings: %w", registry.ErrSettingsReloadNotImplemented)
+}
+
+type genericUnsupportedReloadBackend struct{ plainSettingsBackend }
+
+func (genericUnsupportedReloadBackend) ReloadSettings(context.Context) error {
+	return fmt.Errorf("inner: %w", syncpkg.ErrUnsupported)
+}
