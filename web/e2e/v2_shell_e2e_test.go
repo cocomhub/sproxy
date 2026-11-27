@@ -286,7 +286,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-batch-delete").Click(); err != nil {
 		t.Fatalf("点批量删除: %v", err)
 	}
-	if err := page.Locator("[data-dlg=ok]").Click(); err != nil {
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
 		t.Fatalf("确认删除: %v", err)
 	}
 	if _, err := page.WaitForFunction(
@@ -779,15 +779,16 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-file-body tr[data-name=\"yeskipdlg.txt\"] [data-action=delete]").Click(); err != nil {
 		t.Fatalf("点删除（应弹确认）: %v", err)
 	}
+	// 纯确认走统一的 window.v2confirm（与云端任务的破坏性动作同一实现）。
 	if _, err := page.WaitForFunction(`() => {
-		const t = document.querySelector('#v2-dlg-title');
+		const t = document.querySelector('#v2-confirm-title');
 		if (!t) { return false; }
 		const back = t.closest('.modal-backdrop');
 		return !!back && back.hidden === false;
 	}`, nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(4000)}); err != nil {
 		t.Fatalf("skip_confirm=false 时必须弹确认框: %v", err)
 	}
-	if err := page.Locator("[data-dlg=cancel]").Click(); err != nil {
+	if err := page.Locator("#v2-confirm [data-act=cancel]").Click(); err != nil {
 		t.Fatalf("取消删除对话框: %v", err)
 	}
 	if _, err := page.WaitForFunction(
@@ -1317,10 +1318,10 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Keyboard().Press("Delete"); err != nil {
 		t.Fatalf("按 Delete: %v", err)
 	}
-	if err := waitLoc(page, ".modal-backdrop [data-dlg=cancel]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+	if err := waitLoc(page, "#v2-confirm [data-act=cancel]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("Delete 未打开确认框: %v", err)
 	}
-	if err := page.Locator(".modal-backdrop [data-dlg=cancel]").Click(); err != nil {
+	if err := page.Locator("#v2-confirm [data-act=cancel]").Click(); err != nil {
 		t.Fatalf("取消批量删除: %v", err)
 	}
 
@@ -1574,7 +1575,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]").Click(); err != nil {
 		t.Fatalf("点击删除: %v", err)
 	}
-	if err := page.Locator(".modal-backdrop [data-dlg=ok]").Click(); err != nil {
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
 		t.Fatalf("确认删除: %v", err)
 	}
 	if _, err := page.WaitForFunction(
@@ -1627,7 +1628,7 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-file-body tr[data-name=\"e2e.txt\"] [data-action=delete]").Click(); err != nil {
 		t.Fatalf("再次点击删除: %v", err)
 	}
-	if err := page.Locator(".modal-backdrop [data-dlg=ok]").Click(); err != nil {
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
 		t.Fatalf("再次确认删除: %v", err)
 	}
 	if _, err := page.WaitForFunction(

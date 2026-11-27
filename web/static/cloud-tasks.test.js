@@ -403,10 +403,12 @@ test('ctActionsFor 含覆盖转存与换链接（needs_url），并随前置条�
   assert.strictEqual(by2.retry_transfer_overwrite.disabled, true);
 });
 
-test('ctBatchActionOptionsHtml 列出可批量动作（不含换链接）', () => {
+test('ctBatchActionOptionsHtml 列出可批量动作（不含换链接、不含破坏性覆盖转存）', () => {
   const html = m.ctBatchActionOptionsHtml();
   assert.ok(html.includes('retry_download'));
-  assert.ok(html.includes('retry_transfer_overwrite'));
+  assert.ok(html.includes('retry_transfer'));
+  // 破坏性动作（覆盖目标已有文件、无备份）**不进批量**：误点会一次毁掉多个文件。
+  assert.ok(!html.includes('retry_transfer_overwrite'));
   assert.ok(!html.includes('retry_from_url'));
 });
 

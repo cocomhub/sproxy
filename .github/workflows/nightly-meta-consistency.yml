@@ -15,6 +15,8 @@ concurrency:
 
 permissions:
   contents: read
+  # nightly 失败要自动开 issue（否则 nightly = 无人看的死流程：调度失败默认只给最后改 cron 的人发邮件）
+  issues: write
 
 jobs:
   meta-consistency:
@@ -29,20 +31,27 @@ jobs:
           go-version: "1.27"
           check-latest: true
 
+      # 镜像**按 digest 固定**：本仓已因镜像来源问题连改两轮（#1338 quay → #1339 elestio），
+      # 根因是跟随 `latest` —— 上游一推新 digest 就可能让 nightly 神秘失效，且无法复现当时
+      # 通过的组合。升级镜像时改这里（`docker buildx imagetools inspect <image>` 取 digest）。
+      # 镜像**按 digest 固定**：本仓已因镜像来源问题连改两轮（#1338 quay → #1339 elestio），
+      # 根因是跟随 `latest` —— 上游一推新 digest 就可能让 nightly 神秘失效，且无法复现当时
+      # 通过的组合。升级镜像时改这里（`docker buildx imagetools inspect <image>` 取 digest）。
       - name: start MinIO
+        env:
+          MINIO_IMAGE: elestio/minio@sha256:25348a257f1ece1b192f25f6cd9854618fa86422ac87b494b5d4e629c556d4bd
         run: |
           docker run -d --name sproxy-nightly-minio \
             -p 19000:9000 \
             -e MINIO_ROOT_USER=minioadmin \
             -e MINIO_ROOT_PASSWORD=minioadmin \
-            elestio/minio:latest server /data
+            "$MINIO_IMAGE" server /data
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:19000/minio/health/ready >/dev/null; then break; fi
             sleep 1
           done
-          docker run --rm --network host --entrypoint sh elestio/minio:latest -c \
+          docker run --rm --network host --entrypoint sh "$MINIO_IMAGE" -c \
             "mc alias set local http://127.0.0.1:19000 minioadmin minioadmin && mc mb --ignore-existing local/sproxy"
-
       - name: build sproxy
         run: |
           make prepare
@@ -96,6 +105,30 @@ jobs:
         run: |
           go test -tags=e2e -run TestMetaConsistencyRealVolumes -v ./test/e2e
 
+      # nightly 失败必须**有人看得见**：扫描式流程失败时没人盯着 Actions 页面，「每天绿/红」
+      # 变成背景噪声。此处开（或复用一个仍 OPEN 的）issue，并带上失败 job 链接。
+      - name: report failure
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const title = 'nightly: 跨存储 meta 一致性失败';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const NL = String.fromCharCode(10);
+            const body = ['运行链接：' + run, '', '失败详情见 run 的日志与 nightly-meta-logs artifact。'].join(NL);
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', labels: 'nightly', per_page: 5,
+            });
+            const exist = open.data.find((x) => x.title === title);
+            if (exist) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: exist.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo, title, body, labels: ['nightly'],
+              });
+            }
       - name: cleanup
         if: always()
         run: |

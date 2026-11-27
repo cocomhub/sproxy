@@ -467,9 +467,14 @@ function ctActionDisabled(plan, action) {
   return true;
 }
 
+// 破坏性动作（覆盖写入目标已有文件，无备份、不可撤销）：**不进批量**，单条执行前必须确认。
+// 与 v2 的 cloud-table.js 同一策略（页面双轨，但安全语义必须一致）。
+const CT_DESTRUCTIVE_ACTIONS = ['retry_transfer_overwrite'];
+
 // ctBatchActionOptionsHtml 渲染批量动作下拉（只列可批量化的动作；换链接需逐个输入，故不含）。
 function ctBatchActionOptionsHtml() {
-  const order = ['retry_download', 'retry_transfer', 'retry_transfer_overwrite', 'rotate_source', 'discard_partial'];
+  // 破坏性动作排除在批量之外：批量误点会一次毁掉多个目标文件。
+  const order = ['retry_download', 'retry_transfer', 'rotate_source', 'discard_partial'];
   return order.map(function (a) {
     const info = CT_ACTIONS[a] || { label: a };
     return '<option value="' + ctEsc(a) + '">' + ctEsc(info.label) + '</option>';
@@ -1039,6 +1044,12 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined') {
           setCtMsg('该动作当前不可用（' + (sel && sel.selectedOptions && sel.selectedOptions[0]
             ? sel.selectedOptions[0].textContent : action) + '）');
           return;
+        }
+        if (CT_DESTRUCTIVE_ACTIONS.indexOf(action) >= 0) {
+          const NL = String.fromCharCode(10);
+          const msg = '「覆盖转存」会覆盖目标位置已存在的文件（无备份、不可撤销）。' + NL + NL +
+            '任务：' + ((t && (t.filename || t.id)) || id) + NL + NL + '确定继续？';
+          if (!window.confirm(msg)) { setCtMsg('已取消（覆盖写入需显式确认）'); return; }
         }
         const payload = { action: action };
         if (ctActionNeedsURL(ctActionsFor(t), action)) {

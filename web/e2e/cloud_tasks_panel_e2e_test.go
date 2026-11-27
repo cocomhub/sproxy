@@ -11,6 +11,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -408,5 +409,76 @@ func waitFailedTask(t *testing.T, baseURL string) {
 		case <-deadline:
 			t.Fatal("20s 内没有任务进入 failed")
 		}
+	}
+}
+
+// TestV2CloudTable_DestructiveActionNeedsConfirm 锁定「破坏性任务动作必须用户显式确认」。
+//
+// `retry_transfer_overwrite` 是服务端 plan 里唯一的破坏性动作（目标已存在时覆盖写入、
+// 无备份、不可撤销）。此前点一下即执行；批量里已排除，**单条**这条路必须确认。
+// 判据（不依赖真实 conflict 任务）：直接驱动共享层 `v2cloudTable.perform`
+// （传输页与控制台都经它），用桩 api 记录请求 —— 确认前**零请求**，确认后一次请求。
+func TestV2CloudTable_DestructiveActionNeedsConfirm(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+	})
+	defer cleanup()
+
+	page, stop := pageFixture(t)
+	defer stop()
+	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
+		t.Fatalf("打开 /ui/v2/: %v", err)
+	}
+	if err := waitLoc(page, ".nav[data-route=files]", playwright.WaitForSelectorStateVisible, 15000); err != nil {
+		t.Fatalf("v2 壳层未就绪: %v", err)
+	}
+
+	// 桩 api：记录所有请求路径（不真的打服务端，避免造 conflict 任务的复杂度）。
+	if _, err := page.Evaluate(`() => {
+		window.__calls = [];
+		window.__stubApi = { json: function (m, p) { window.__calls.push(m + ' ' + p); return Promise.resolve({}); } };
+		window.v2cloudTable.perform('retry_transfer_overwrite',
+			{ id: 'TASK-1', filename: 'demo.bin' }, window.__stubApi, function () {});
+	}`, nil); err != nil {
+		t.Fatalf("驱动 perform: %v", err)
+	}
+	// ① 确认框必须出现（且带「覆盖」说明）。
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("覆盖转存未弹出确认框: %v", err)
+	}
+	if msg, _ := page.Evaluate(`() => (document.querySelector('#v2-confirm-msg') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(msg), "覆盖") {
+		t.Fatalf("确认框未说明覆盖风险: %q", msg)
+	}
+	// ② 确认前**零请求**（这是本用例的核心：以前点一下就发）。
+	if calls, _ := page.Evaluate(`() => window.__calls.length`, nil); fmt.Sprint(calls) != "0" {
+		t.Fatalf("确认前已发出请求（破坏性动作未经确认即执行）: %v", calls)
+	}
+	// ③ 取消 ⇒ 仍零请求。
+	if err := page.Locator("#v2-confirm [data-act=cancel]").Click(); err != nil {
+		t.Fatalf("取消确认框: %v", err)
+	}
+	if calls, _ := page.Evaluate(`() => window.__calls.length`, nil); fmt.Sprint(calls) != "0" {
+		t.Fatalf("取消后仍发出请求: %v", calls)
+	}
+	// ④ 再次操作并确认 ⇒ 恰好一次 POST /actions。
+	if _, err := page.Evaluate(`() => {
+		window.v2cloudTable.perform('retry_transfer_overwrite',
+			{ id: 'TASK-1', filename: 'demo.bin' }, window.__stubApi, function () {});
+	}`, nil); err != nil {
+		t.Fatalf("再次驱动 perform: %v", err)
+	}
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("第二次未弹确认框: %v", err)
+	}
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("确认覆盖写入: %v", err)
+	}
+	if _, err := page.WaitForFunction(`() => window.__calls.length === 1`, nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		t.Fatalf("确认后未发出且仅发出一次请求: %v", err)
+	}
+	if calls, _ := page.Evaluate(`() => window.__calls[0]`, nil); !strings.Contains(fmt.Sprint(calls), "/api/cloud/tasks/TASK-1/actions") {
+		t.Fatalf("确认后请求路径不对: %v", calls)
 	}
 }

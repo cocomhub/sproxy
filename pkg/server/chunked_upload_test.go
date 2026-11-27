@@ -67,6 +67,8 @@ func newTestServerWithChunked(t *testing.T, modifyCfg func(*Config)) (string, *a
 	h.globalRoot = globalRoot
 	h.globalPool = quota.NewPool(cfg.MaxStorageBytes)
 	h.tenants = storage.NewTenantCache(h.globalRoot, storage.WithMetaBucket(), storage.WithLogger(h.logger))
+	// TenantCache 缓存按 owner 懒建的租户子根（各自独立 os.Root）⇒ 必须显式关（R60）。
+	t.Cleanup(func() { _ = h.tenants.Close() })
 	h.checksumStores = make(map[string]checksum.ChecksumStoreIface)
 	h.uploadStores = make(map[string]*files.UploadStore)
 	h.quotaScopes = make(map[string]*quota.Scope)
