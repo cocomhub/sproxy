@@ -434,13 +434,18 @@
         if (item) { markFailed(item, file, err, function () { attempt(pair); }); }
       });
     };
-    var chain = Promise.resolve();
-    items.forEach(function (pair) {
-      chain = chain.then(function () { return attempt(pair); })
-        .then(function () { return null; }, function () { return null; }); // 单文件失败不阻断队列
+    // **有限并发**（默认 3）：此前严格串行 —— N 个文件 = N 段带宽空转（每段都要
+    // 请求/校验往返，尤其分块上传的 init/complete）。服务端分块会话本就按会话隔离
+    // （每会话独立 upload_id），串行只浪费往返延迟。
+    // 上限固定 3 而非可配置：再高会抢带宽（「避免并发抢带宽」正是当初串行的理由），
+    // 3 是「填满往返空隙」与「不抢带宽」之间的取舍（单文件仍可占满链路）。
+    return window.v2uploadPool.runPool(items, attempt, UPLOAD_CONCURRENCY).then(function () {
+      if (view()) { view().load(); }
     });
-    chain.then(function () { if (view()) { view().load(); } });
   }
+
+  /** 上传并发上限（固定值，见 uploadFiles 里的权衡说明）。 */
+  var UPLOAD_CONCURRENCY = 3;
 
   function mkdir() {
     // 建目录与上传同一纪律：必须有**具体卷**。不带 `?volume=` 时服务端按 prefer-default

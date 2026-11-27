@@ -307,6 +307,43 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("上传后列表未出现 e2e.txt: %v", err)
 	}
 
+	// P1d-2：多文件上传走**有限并发**（上限 3）——不是逐个串行。
+	// 判据：3 个文件在"同时进行中"的窗口内被并发提交（观察 setInputFiles 后立刻
+	// 出现的 running 行数 ≥2，且上传请求有重叠）。
+	var inflight, peakInflight atomic.Int64
+	page.OnRequest(func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.HasSuffix(strings.Split(r.URL(), "?")[0], "/upload") {
+			n := inflight.Add(1)
+			for {
+				old := peakInflight.Load()
+				if n <= old || peakInflight.CompareAndSwap(old, n) {
+					break
+				}
+			}
+		}
+	})
+	page.OnResponse(func(r playwright.Response) {
+		if r.Request().Method() == http.MethodPost && strings.HasSuffix(strings.Split(r.URL(), "?")[0], "/upload") {
+			inflight.Add(-1)
+		}
+	})
+	big := make([]byte, 4096)
+	var multi []playwright.InputFile
+	for _, n := range []string{"par1.bin", "par2.bin", "par3.bin"} {
+		multi = append(multi, playwright.InputFile{Name: n, MimeType: "application/octet-stream", Buffer: big})
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles(multi); err != nil {
+		t.Fatalf("选择多文件上传: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('par3.bin') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("并发上传后列表未出现 par3.bin: %v", err)
+	}
+	if peak := peakInflight.Load(); peak < 2 {
+		t.Fatalf("多文件上传未并发（峰值 in-flight=%d，仍为串行）", peak)
+	}
+
 	// P1e：文本文件点击预览（真实 /download 读取）。
 	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
 		t.Fatalf("打开预览: %v", err)
@@ -545,7 +582,20 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("拖拽上传后未出现 dropped.txt: %v", err)
 	}
 
-	// ① 上传队列：多文件串行时，未轮到的行显示「排队中」，且顶部有汇总。
+	// ① 上传队列：投放多文件时顶部有**分项汇总**（排队 / 上传中 / 暂停 / 失败）。
+	// 注意：上传已是**有限并发**（上限 3），小文件可能在一次断言间隙内全部完成 ⇒
+	// 「此刻读到非空汇总」是时序赌博。改用 MutationObserver 记录汇总的**每一次**变化，
+	// 跑完后在日志里断言出现过分项文案（不依赖任何停留窗口）。
+	if _, err := page.Evaluate(`() => {
+		window.__sumLog = [];
+		const n = document.querySelector('#v2-uploads-sum');
+		if (!n) { return; }
+		const rec = () => window.__sumLog.push(n.textContent || '');
+		rec();
+		new MutationObserver(rec).observe(n, {childList: true, characterData: true, subtree: true});
+	}`, nil); err != nil {
+		t.Fatalf("安装汇总观察器: %v", err)
+	}
 	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{
 		{Name: "q1.txt", MimeType: "text/plain", Buffer: []byte("q1")},
 		{Name: "q2.txt", MimeType: "text/plain", Buffer: []byte("q2")},
@@ -557,15 +607,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
 		t.Fatalf("上传队列行未出现: %v", err)
 	}
-	// 汇总文案按状态分项（排队 / 上传中 / 暂停 / 失败）：多文件刚投放时至少会有「排队 N」。
-	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "排队") && !strings.Contains(fmt.Sprint(sum), "上传中") {
-		t.Fatalf("上传汇总缺失: %q", sum)
-	}
 	// 队列跑完后容器应隐藏、文件出现。
 	if _, err := page.WaitForFunction(
 		"() => { const b = document.querySelector('#v2-uploads'); return !b || b.hidden; }", nil,
 		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
 		t.Fatalf("上传队列未清空: %v", err)
+	}
+	// 汇总分项文案必须真实出现过（排队 / 上传中 / 暂停 / 失败 之一）。
+	if got, err := page.Evaluate(`() => (window.__sumLog || []).join('|')`, nil); err != nil {
+		t.Fatalf("读取汇总日志: %v", err)
+	} else if log := fmt.Sprint(got); !strings.Contains(log, "排队") && !strings.Contains(log, "上传中") &&
+		!strings.Contains(log, "暂停") && !strings.Contains(log, "失败") {
+		t.Fatalf("上传汇总从未出现分项文案（日志: %q）", log)
 	}
 
 	// ①b 审查回归：小文件（走 uploadSimpleFile，非分块）失败也必须落到 failed 态 ——

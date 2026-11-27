@@ -280,6 +280,8 @@ web-test:
 	@node --check web/static/v2/files-view.js
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
+	@node --check web/static/v2/upload-pool.js
+	@node --check web/static/v2/upload-pool.test.js
 	@node --check web/static/v2/files-actions.js
 	@node --check web/static/v2/preview.js
 	@node --check web/static/v2/transfer.js
@@ -371,6 +373,7 @@ web-test:
 	node --test web/static/v2/files.test.js
 	node --test web/static/v2/files-ops.test.js
 	node --test web/static/v2/upload-chunked.test.js
+	node --test web/static/v2/upload-pool.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/events.test.js
 	node --test web/static/notify-format.test.js
