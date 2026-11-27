@@ -335,6 +335,7 @@ type downloadCtx struct {
 	subDirty       int             // 自上次写盘以来新完成的子块数（节流用）
 	lastPersistAt  time.Time       // 上次写盘时间（节流用）
 	manifestWrites int             // manifest 写盘次数（测试观测用）
+	journalWrites  int             // WAL 子块记录次数（测试观测用）
 	journal        ProgressJournal // 进度日志（audit WAL；nil = 仅 manifest）
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
@@ -1033,9 +1034,19 @@ func (d *HybridDownloader) persistSubMask(dc *downloadCtx, c chunk, mask uint64,
 	if dc.subDirty < subMaskPersistEvery && time.Since(dc.lastPersistAt) < subMaskPersistInterval {
 		return
 	}
-	writeManifest(dc.destPath, m)
 	dc.subDirty = 0
 	dc.lastPersistAt = time.Now()
+	// 收敛（2026-11-27）：有 WAL 时**增量写 WAL**（append-only，只记这一块掩码），
+	// manifest 退化为「整块完成时」的粗检查点——不再为每个子块重写整个 manifest。
+	// 无 WAL（CLI 极简装配）时仍按节流写 manifest，保证单机续传可用。
+	if dc.journal != nil {
+		if jerr := dc.journal.SubBlockDone(context.Background(), c.offset, mask); jerr != nil {
+			d.log.Warn("hybrid journal sub-block save failed", "offset", c.offset, "err", jerr)
+		}
+		dc.journalWrites++
+		return
+	}
+	writeManifest(dc.destPath, m)
 	dc.manifestWrites++
 }
 
@@ -1911,11 +1922,56 @@ func (d *HybridDownloader) recoverFromJournal(ctx context.Context, dc *downloadC
 			d.resetJournal(ctx, j, "working file missing")
 		}
 	default:
-		if recovered := mergeJournalChunks(manifest, st.Done); recovered > 0 {
+		recovered := mergeJournalChunks(manifest, st.Done)
+		// 子块位图（1MiB 子块续传的细粒度进度）：并入 manifest 与内存镜像。
+		merged := d.mergeJournalMasks(dc, manifest, st.Masks)
+		if recovered > 0 || merged > 0 {
 			writeManifest(dc.destPath, manifest)
-			d.log.Info("hybrid journal recovered chunks", "count", recovered, "dest", dc.destPath)
+			d.log.Info("hybrid journal recovered progress", "chunks", recovered, "sub_blocks", merged,
+				"dest", dc.destPath)
 		}
 	}
+}
+
+// mergeJournalMasks 把 WAL 的子块位图并入 manifest.Blocks 与 dc.masks（按位 OR，取更完整的一侧）。
+// 返回合并（新增或扩大）的 chunk 数。调用方随后统一 writeManifest。
+func (d *HybridDownloader) mergeJournalMasks(dc *downloadCtx, manifest *hybridManifest, masks map[int64]uint64) int {
+	if len(masks) == 0 {
+		return 0
+	}
+	dc.manifestMu.Lock()
+	defer dc.manifestMu.Unlock()
+	if manifest.Blocks == nil {
+		manifest.Blocks = map[int64]uint64{}
+	}
+	if dc.masks == nil {
+		dc.masks = map[int64]uint64{}
+	}
+	merged := 0
+	var addedBytes int64
+	for off, mask := range masks {
+		if manifest.Chunks[off] > 0 {
+			continue // 整块已完成，位图无意义
+		}
+		prev := manifest.Blocks[off]
+		next := prev | mask
+		if next != prev {
+			merged++
+			addedBytes += int64(bits.OnesCount64(next&^prev)) * hybridSubBlockSize
+		}
+		manifest.Blocks[off] = next
+		dc.masks[off] |= mask
+	}
+	if addedBytes > 0 {
+		// 进度基准同步（prepareManifest 在 WAL 合并**之前**计算过 done）：把 WAL 恢复的
+		// 子块字节补进进度，避免续传时进度条倒退（钳制到总大小）。
+		if cur := dc.prog.Load() + addedBytes; cur < dc.currentTotal {
+			dc.prog.Store(cur)
+		} else {
+			dc.prog.Store(dc.currentTotal)
+		}
+	}
+	return merged
 }
 
 // resetJournal 作废 WAL 历史进度（失败仅告警：最坏情况是下次仍不复用——不会静默损坏）。
