@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -480,5 +482,105 @@ func TestV2CloudTable_DestructiveActionNeedsConfirm(t *testing.T) {
 	}
 	if calls, _ := page.Evaluate(`() => window.__calls[0]`, nil); !strings.Contains(fmt.Sprint(calls), "/api/cloud/tasks/TASK-1/actions") {
 		t.Fatalf("确认后请求路径不对: %v", calls)
+	}
+}
+
+// TestV2CloudTasks_RetryFromURLUsesDialog 锁定「换链接重试」用 v2 对话框而非原生 prompt。
+//
+// 背景：`window.prompt` 阻塞渲染进程、无样式，且**无法做输入校验** —— 用户输入非法链接只能
+// 等服务端 400，看不出哪里错。改为 v2confirm.input：本地即时校验 + 失败可改 + 提交带 url。
+// 判据（真实失败任务）：点「换链接重试」→ 出现 `#v2-confirm-input`（不是原生存取框）
+// → 填非法值提交仍停留并给出原因 → 填合法值提交 ⇒ 恰好一次 POST，body 含该 url。
+func TestV2CloudTasks_RetryFromURLUsesDialog(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, func(c *server.Config) {
+		c.CloudDownloadAllowPrivate = true
+		c.CloudMaxRetries = 1
+		c.CloudRetryDelay = time.Millisecond
+	})
+	defer cleanup()
+
+	body := []byte(`{"url":"http://127.0.0.1:1/fromurl.bin","filename":"fromurl.bin","download_local":true,"save":true}`)
+	if code, resp := postJSON(t, baseURL+"/api/cloud/download", body); code != http.StatusOK {
+		t.Fatalf("创建失败任务: %d %s", code, resp)
+	}
+	waitFailedTask(t, baseURL)
+
+	page, stop := pageFixture(t)
+	defer stop()
+	// 只要一个对话框：原生 prompt 若出现，Playwright 会自动 dismiss；这里显式记录以备诊断。
+	var promptSeen atomic.Int64
+	page.On("dialog", func(d playwright.Dialog) {
+		promptSeen.Add(1)
+		_ = d.Dismiss()
+	})
+	// 记录动作请求（含 body）。
+	type actReq struct {
+		url  string
+		body string
+	}
+	var mu sync.Mutex
+	var acts []actReq
+	page.On("request", func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.Contains(r.URL(), "/actions") {
+			b, _ := r.PostDataBuffer()
+			mu.Lock()
+			acts = append(acts, actReq{url: r.URL(), body: string(b)})
+			mu.Unlock()
+		}
+	})
+
+	if _, err := page.Goto(baseURL + "/ui/v2/#/transfer"); err != nil {
+		t.Fatalf("打开传输页: %v", err)
+	}
+	if err := waitLoc(page, "#v2-tf-body tr [data-plan-action=retry_from_url]",
+		playwright.WaitForSelectorStateVisible, 20000); err != nil {
+		t.Fatalf("失败任务未渲染「换链接重试」按钮: %v", err)
+	}
+	if err := page.Locator("#v2-tf-body tr [data-plan-action=retry_from_url]").First().Click(); err != nil {
+		t.Fatalf("点换链接重试: %v", err)
+	}
+	// ① 必须是 v2 对话框（输入框在其中），而不是原生 prompt。
+	if err := waitLoc(page, "#v2-confirm-input", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("换链接重试未使用 v2 对话框: %v", err)
+	}
+	if n := promptSeen.Load(); n != 0 {
+		t.Fatalf("仍在用原生 prompt（出现 %d 次）", n)
+	}
+	// ② 非法链接：本地校验拦住，不提交、对话框不关。
+	if err := page.Locator("#v2-confirm-input").Fill("ftp://example.invalid/x.bin"); err != nil {
+		t.Fatalf("填非法链接: %v", err)
+	}
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("提交非法链接: %v", err)
+	}
+	if err := waitLoc(page, "#v2-confirm-err", playwright.WaitForSelectorStateVisible, 3000); err != nil {
+		t.Fatalf("非法链接未给出本地校验提示: %v", err)
+	}
+	mu.Lock()
+	n := len(acts)
+	mu.Unlock()
+	if n != 0 {
+		t.Fatalf("非法链接已发出请求（应在本地被拦）: %d", n)
+	}
+	// ③ 合法链接：提交 ⇒ 恰好一次 POST，body 带该 url。
+	const newURL = "https://example.com/s/EXAMPLE-RETRY-FROM-URL-1"
+	if err := page.Locator("#v2-confirm-input").Fill(newURL); err != nil {
+		t.Fatalf("填合法链接: %v", err)
+	}
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("提交合法链接: %v", err)
+	}
+	if _, err := page.WaitForFunction(`() => true`, nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(1500)}); err != nil {
+		t.Fatalf("等待提交: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(acts) != 1 {
+		t.Fatalf("应恰好一次动作请求，实际 %d", len(acts))
+	}
+	if !strings.Contains(acts[0].body, newURL) || !strings.Contains(acts[0].body, "retry_from_url") {
+		t.Fatalf("动作请求体不对: %s", acts[0].body)
 	}
 }

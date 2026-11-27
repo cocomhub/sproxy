@@ -73,6 +73,11 @@ jobs:
               - name: nightly
                 key: nightly-token
                 permission: write
+          # versioning 开启：让「同名不同内容 ⇒ 覆盖」分支真正执行（关闭时服务端 409，
+          # 用例会退化为「拒绝后原样保留」断言——两条分支都要有覆盖，故这里主动开启）。
+          versioning:
+            enabled: true
+            max_versions: 2
           volumes:
             - name: main
               type: local
@@ -103,7 +108,7 @@ jobs:
           SPROXY_META_E2E_BEARER: nightly-token
           SPROXY_META_E2E_VOLUMES: main,s3
         run: |
-          go test -tags=e2e -run TestMetaConsistencyRealVolumes -v ./test/e2e
+          go test -tags=e2e -run 'TestMetaConsistencyRealVolumes|TestOverwriteConsistencyRealVolumes' -v ./test/e2e
 
       # nightly 失败必须**有人看得见**：扫描式流程失败时没人盯着 Actions 页面，「每天绿/红」
       # 变成背景噪声。此处开（或复用一个仍 OPEN 的）issue，并带上失败 job 链接。

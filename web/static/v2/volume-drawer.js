@@ -294,6 +294,11 @@
     var box0 = el('v2-vd-rule-errors');
     if (warn) {
       if (box0) { box0.hidden = false; box0.textContent = warn; }
+      // **刻意保留原生 confirm**（v2 里唯一的例外）：这条警告是**提示性**的（规则可从配置文件恢复，
+      // 且内联面板 #v2-vd-rule-errors 已完整显示同一段文案），不是「不可逆数据的最后一道闸」。
+      // 换成页面内模态会把「保存」从**同步阻断**变成异步：max_size 等字段的取值挂在 input 事件、
+      // 校验读 state.rows，二者在异步等待期间会被重渲染/重读打乱（实测把规则编辑 e2e 打红）。
+      // 破坏性动作（删除/覆盖写/清盘）已全部走 v2confirm —— 这里不做无收益的改造。
       if (!window.confirm(warn + ' 继续保存？')) { return Promise.resolve(); }
     }
     var check = S.validateRules(state.rows, { hardMax: S.HARD_MAX_SINGLE_BYTES });

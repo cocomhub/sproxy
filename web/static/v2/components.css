@@ -198,7 +198,11 @@ body {
 .btn[disabled] { opacity: .45; cursor: not-allowed; }
 .table .actions { white-space: nowrap; }
 
-.modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+/* 模态层必须在**一切**非模态浮层之上：设置抽屉 71 / 命令面板 71 / 拖拽提示 78 / 上传队列 55。
+   此前是 50 ⇒ 从设置抽屉里打开的确认框被抽屉压住，鼠标点不到（e2e 实测「确认改为直接删除」
+   一直超时：elementFromPoint 命中的是抽屉里的 toolbar）。模态是"用户必须先回应"的语义，
+   压在任何面板之上才自洽。 */
+.modal-backdrop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center;
   background: rgba(0, 0, 0, 0.45); padding: 16px; }
 .modal-backdrop[hidden] { display: none; }
 .modal { width: 420px; max-width: 92vw; padding: 18px; background: var(--surface);

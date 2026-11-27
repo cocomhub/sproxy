@@ -124,11 +124,32 @@
 
   function taskAction(kind, t) {
     // `retry_from_url`（换链接重试）需要用户补 URL —— 这是服务端 plan 里 needs_url 的唯一动作。
-    var extraURL = '';
+    // 用 v2 对话框而不是 window.prompt：原生弹窗阻塞渲染进程、无样式，且**无法做输入校验**
+    // （非 http(s) 的输入只能等服务端 400，用户看不出哪里错）。
     if (kind === 'retry_from_url') {
-      extraURL = window.prompt('换链接重试：请输入新的下载链接（同名文件，断点可能不适用）') || '';
-      if (!extraURL) { return; }
+      if (!window.v2confirm) { return; }
+      window.v2confirm.input({
+        title: '换链接重试',
+        message: '输入新的下载链接（同名文件；断点可能不适用）',
+        label: '下载链接',
+        okText: '重试',
+        // 本地即时校验：只放行 http(s)（与服务端 SSRF 白名单同一门槛的**子集**，
+        // 内网地址是否允许由服务端按 allow_private 判定，前端不猜）。
+        validate: function (v) {
+          if (!/^https?:\/\//i.test(v)) { return '链接必须以 http:// 或 https:// 开头'; }
+          return '';
+        }
+      }).then(function (url) {
+        if (!url) { return; }
+        runAction(kind, t, url);
+      });
+      return;
     }
+    runAction(kind, t, '');
+  }
+
+  /** 提交任务动作并给出反馈（提示走 toast，失败带服务端原因）。 */
+  function runAction(kind, t, extraURL) {
     window.v2cloudTable.perform(kind, t, api, function (ok, e) {
       if (ok) {
         if (window.v2toast) { window.v2toast('ok', '已执行：' + actionName(kind, t)); }
