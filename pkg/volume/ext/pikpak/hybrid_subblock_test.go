@@ -6,7 +6,10 @@ package pikpak
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -411,5 +414,60 @@ func TestWriteManifest_ConcurrentReaderNeverSeesCorrupt(t *testing.T) {
 	wg.Wait()
 	if n := corrupt.Load(); n > 0 {
 		t.Fatalf("读者读到 %d 次非法（半截）manifest ⇒ 写入不是原子的", n)
+	}
+}
+
+func TestMarkChunkDone_JournalOnlyNoManifestRewrite(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out8.bin")
+	hd := &HybridDownloader{}
+	fj := &fakeJournal{}
+	const total = 8 << 20
+	dc := &downloadCtx{
+		currentTotal: total, chunkSize: 4 << 20, destPath: dest,
+		shareID: "EXAMPLE-JW", target: &ShareFile{ID: "f8", Size: total, Hash: "H8"}, journal: fj,
+	}
+	src := manifestSource{ShareID: "EXAMPLE-JW", FileID: "f8", Size: total, Hash: "H8"}
+	for _, off := range []int64{0, 4 << 20} {
+		hd.markChunkDone(context.Background(), dc, chunk{offset: off, length: 4 << 20}, src)
+	}
+	if dc.manifestWrites != 0 {
+		t.Fatalf("有 WAL 时不应重写 manifest，got %d 次", dc.manifestWrites)
+	}
+	if _, err := os.Stat(ManifestPath(dest)); !os.IsNotExist(err) {
+		t.Fatalf("不应因为分片完成而创建 manifest: err=%v", err)
+	}
+	got, lerr := fj.Load(context.Background())
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if len(got.Done) != 2 {
+		t.Fatalf("WAL 应记录 2 个分片，got %v", got.Done)
+	}
+	if dc.manifest == nil || len(dc.manifest.Chunks) != 2 {
+		t.Fatalf("内存镜像应持有 2 个分片，got %+v", dc.manifest)
+	}
+}
+
+// TestMarkChunkDone_JournalFailureFallsBackToManifest 锁定「WAL 写失败回落 manifest」：
+// 持久化是崩溃恢复的唯一依据，不能因日志故障丢进度。
+func TestMarkChunkDone_JournalFailureFallsBackToManifest(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out9.bin")
+	hd := &HybridDownloader{}
+	fj := &fakeJournal{chunkErr: errors.New("wal down")}
+	hd.log = slog.New(slog.NewTextHandler(io.Discard, nil)) // 回退路径会 Warn
+	const total = 4 << 20
+	dc := &downloadCtx{
+		currentTotal: total, chunkSize: total, destPath: dest,
+		shareID: "EXAMPLE-FB", target: &ShareFile{ID: "f9", Size: total, Hash: "H9"}, journal: fj,
+	}
+	src := manifestSource{ShareID: "EXAMPLE-FB", FileID: "f9", Size: total, Hash: "H9"}
+	hd.markChunkDone(context.Background(), dc, chunk{offset: 0, length: total}, src)
+	if m := loadManifest(dest); m == nil || m.Chunks[0] != total {
+		t.Fatalf("WAL 失败时必须回落写 manifest，got %+v", m)
+	}
+	if !dc.journalDegraded {
+		t.Fatal("应标记 journalDegraded")
 	}
 }
