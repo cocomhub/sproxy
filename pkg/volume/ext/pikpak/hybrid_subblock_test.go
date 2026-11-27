@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -326,4 +327,89 @@ func TestProgressJournal_SubBlockRoundTrip(t *testing.T) {
 		t.Fatalf("Reset 后旧代际掩码应被忽略，got %v", st2.Masks)
 	}
 	_ = j.Close()
+}
+
+// TestWriteManifest_AtomicNoTmpLeft 锁定 manifest **原子写**：写完不留 .tmp，
+// 且内容可解析（此前是截断式 os.WriteFile，崩溃会留下非法 JSON ⇒ 进度全丢）。
+func TestWriteManifest_AtomicNoTmpLeft(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out5.bin")
+	writeManifest(dest, &hybridManifest{Chunks: map[int64]int64{0: 4 << 20}, Total: 8 << 20})
+	writeManifest(dest, &hybridManifest{Chunks: map[int64]int64{0: 4 << 20, 4 << 20: 4 << 20}, Total: 8 << 20})
+	if _, err := os.Stat(ManifestPath(dest) + manifestTmpSuffix); !os.IsNotExist(err) {
+		t.Fatalf(".tmp 不应残留: err=%v", err)
+	}
+	m := loadManifest(dest)
+	if m == nil || len(m.Chunks) != 2 {
+		t.Fatalf("应读到最新内容，got %+v", m)
+	}
+}
+
+// TestLoadManifest_CorruptArchivedAsStale 锁定「损坏 manifest 归档留证 + 清理 tmp 残留」。
+func TestLoadManifest_CorruptArchivedAsStale(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out6.bin")
+	if err := os.WriteFile(ManifestPath(dest), []byte(`{"chunks":{"0":1048576`), 0o644); err != nil { // 截断 JSON
+		t.Fatalf("写坏 manifest: %v", err)
+	}
+	if err := os.WriteFile(ManifestPath(dest)+manifestTmpSuffix, []byte("x"), 0o644); err != nil {
+		t.Fatalf("写 tmp: %v", err)
+	}
+	if m := loadManifest(dest); m != nil {
+		t.Fatalf("损坏应视为无进度，got %+v", m)
+	}
+	if _, err := os.Stat(StaleManifestPath(dest)); err != nil {
+		t.Fatalf("损坏 manifest 应归档为 .stale: %v", err)
+	}
+	if _, err := os.Stat(ManifestPath(dest) + manifestTmpSuffix); !os.IsNotExist(err) {
+		t.Fatalf("tmp 残留应被清理: err=%v", err)
+	}
+	// 归档后可正常重建
+	writeManifest(dest, &hybridManifest{Chunks: map[int64]int64{0: 1 << 20}, Total: 1 << 20})
+	if m := loadManifest(dest); m == nil || len(m.Chunks) != 1 {
+		t.Fatalf("重建后应可读，got %+v", m)
+	}
+}
+
+// TestWriteManifest_ConcurrentReaderNeverSeesCorrupt 锁定原子性**本质**：
+// 边写边读时读者不得看到「截断的半截 JSON」（非原子 os.WriteFile 会命中）。
+func TestWriteManifest_ConcurrentReaderNeverSeesCorrupt(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out7.bin")
+	big := func(n int64) *hybridManifest {
+		m := &hybridManifest{Chunks: make(map[int64]int64, 2000), Total: 2000 << 20}
+		for i := range int64(2000) {
+			m.Chunks[i<<20] = 1 << 20
+		}
+		return m
+	}
+	writeManifest(dest, big(0)) // 先有一份有效版本
+	var corrupt atomic.Int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := os.ReadFile(ManifestPath(dest))
+			if err != nil {
+				continue // 重命名瞬间不可读：跳过（合法）
+			}
+			var m hybridManifest
+			if json.Unmarshal(data, &m) != nil || m.Chunks == nil {
+				corrupt.Add(1)
+			}
+		}
+	})
+	for i := range 200 {
+		writeManifest(dest, big(int64(i)))
+	}
+	close(stop)
+	wg.Wait()
+	if n := corrupt.Load(); n > 0 {
+		t.Fatalf("读者读到 %d 次非法（半截）manifest ⇒ 写入不是原子的", n)
+	}
 }
