@@ -331,12 +331,13 @@ type downloadCtx struct {
 	// manifest 是**内存镜像**（2026-11-27 性能修复）：此前每次 markChunkDone/persistSubMask
 	// 都 `loadManifest` 全量读盘 + JSON 解析——64GiB 文件（1MiB 子块 ⇒ 65536 次）累计读放大
 	// 达数十 GB（O(n²)）。改为下载期只读写一次：内存对象随位图一起增量更新。
-	manifest       *hybridManifest
-	subDirty       int             // 自上次写盘以来新完成的子块数（节流用）
-	lastPersistAt  time.Time       // 上次写盘时间（节流用）
-	manifestWrites int             // manifest 写盘次数（测试观测用）
-	journalWrites  int             // WAL 子块记录次数（测试观测用）
-	journal        ProgressJournal // 进度日志（audit WAL；nil = 仅 manifest）
+	manifest        *hybridManifest
+	subDirty        int             // 自上次写盘以来新完成的子块数（节流用）
+	lastPersistAt   time.Time       // 上次写盘时间（节流用）
+	manifestWrites  int             // manifest 写盘次数（测试观测用）
+	journalWrites   int             // WAL 子块记录次数（测试观测用）
+	journalDegraded bool            // WAL 写失败已回落到 manifest（观测/诊断用）
+	journal         ProgressJournal // 进度日志（audit WAL；nil = 仅 manifest）
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
 	shareID    string
@@ -1022,7 +1023,6 @@ const subMaskPersistInterval = 5 * time.Second
 // 此前 1MiB 子块 × 64GiB ⇒ 65536 次「读全量 manifest + 写全量 manifest」（写放大数十 GB）。
 func (d *HybridDownloader) persistSubMask(dc *downloadCtx, c chunk, mask uint64, src manifestSource) {
 	dc.manifestMu.Lock()
-	defer dc.manifestMu.Unlock()
 	m := d.manifestLocked(dc, src)
 	if m.Blocks == nil {
 		m.Blocks = map[int64]uint64{}
@@ -1032,22 +1032,28 @@ func (d *HybridDownloader) persistSubMask(dc *downloadCtx, c chunk, mask uint64,
 	m.Source = src
 	dc.subDirty++
 	if dc.subDirty < subMaskPersistEvery && time.Since(dc.lastPersistAt) < subMaskPersistInterval {
+		dc.manifestMu.Unlock()
 		return
 	}
 	dc.subDirty = 0
 	dc.lastPersistAt = time.Now()
-	// 收敛（2026-11-27）：有 WAL 时**增量写 WAL**（append-only，只记这一块掩码），
-	// manifest 退化为「整块完成时」的粗检查点——不再为每个子块重写整个 manifest。
-	// 无 WAL（CLI 极简装配）时仍按节流写 manifest，保证单机续传可用。
-	if dc.journal != nil {
-		if jerr := dc.journal.SubBlockDone(context.Background(), c.offset, mask); jerr != nil {
-			d.log.Warn("hybrid journal sub-block save failed", "offset", c.offset, "err", jerr)
-		}
-		dc.journalWrites++
+	if dc.journal == nil {
+		// 无 WAL：按节流写 manifest（唯一恢复依据）。
+		writeManifest(dc.destPath, m)
+		dc.manifestWrites++
+		dc.manifestMu.Unlock()
 		return
 	}
-	writeManifest(dc.destPath, m)
-	dc.manifestWrites++
+	dc.manifestMu.Unlock()
+	// 有 WAL：只追加一条位图记录（锁外，避免 fsync 阻塞其它分片）。
+	if jerr := dc.journal.SubBlockDone(context.Background(), c.offset, mask); jerr != nil {
+		d.log.Warn("hybrid journal sub-block save failed, fallback to manifest", "offset", c.offset, "err", jerr)
+		d.manifestFallback(dc)
+		return
+	}
+	dc.manifestMu.Lock()
+	dc.journalWrites++
+	dc.manifestMu.Unlock()
 }
 
 // manifestLocked 返回 manifest 内存镜像（懒加载；调用方必须持 dc.manifestMu）。
@@ -1933,6 +1939,16 @@ func (d *HybridDownloader) recoverFromJournal(ctx context.Context, dc *downloadC
 		recovered := mergeJournalChunks(manifest, st.Done)
 		// 子块位图（1MiB 子块续传的细粒度进度）：并入 manifest 与内存镜像。
 		merged := d.mergeJournalMasks(dc, manifest, st.Masks)
+		// WAL 只保证**记录**落盘，数据未必已 flush ⇒ 与 manifest 路径同样做零尾扫描，
+		// 否则重启后可能跳过"记录完成但内容是零"的分片（GCID 必失败、且每次重试重复）。
+		if dropped := d.dropZeroTailChunksReturning(dc.destPath, manifest); len(dropped) > 0 {
+			dc.manifestMu.Lock()
+			for _, off := range dropped {
+				delete(dc.masks, off)
+				delete(manifest.Blocks, off)
+			}
+			dc.manifestMu.Unlock()
+		}
 		if recovered > 0 || merged > 0 {
 			writeManifest(dc.destPath, manifest)
 			d.log.Info("hybrid journal recovered progress", "chunks", recovered, "sub_blocks", merged,
@@ -2035,16 +2051,35 @@ func (d *HybridDownloader) markChunkDone(ctx context.Context, dc *downloadCtx, c
 	m.Chunks[c.offset] = c.length
 	delete(m.Blocks, c.offset) // 整块完成 ⇒ 子块位图不再需要
 	m.Source = src
-	writeManifest(dc.destPath, m)
 	dc.subDirty = 0
 	dc.lastPersistAt = time.Now()
-	dc.manifestWrites++
+	useJournal := dc.journal != nil
+	if !useJournal {
+		// 无 WAL（CLI 极简装配）：manifest 是唯一恢复依据 ⇒ 必须落盘。
+		writeManifest(dc.destPath, m)
+		dc.manifestWrites++
+	}
 	dc.manifestMu.Unlock()
-	// WAL 记录（锁外：audit 写入可能 fsync，不阻塞其它分片的 manifest 写入）。
-	if dc.journal != nil {
-		if jerr := dc.journal.ChunkDone(ctx, c.offset, c.length); jerr != nil {
-			d.log.Warn("hybrid journal chunk save failed", "offset", c.offset, "err", jerr)
-		}
+	if !useJournal {
+		return
+	}
+	// 有 WAL：**只追加一条记录**，不重写 manifest（2026-11-27 用户裁定：下载是连续操作，
+	// 进程内只用内存；文件只在崩溃恢复时被读，绝大多数任务整个生命周期都读不到）。
+	// 锁外执行：audit 写入可能 fsync，不应阻塞其它分片的 manifest 更新。
+	if jerr := dc.journal.ChunkDone(ctx, c.offset, c.length); jerr != nil {
+		d.log.Warn("hybrid journal chunk save failed, fallback to manifest", "offset", c.offset, "err", jerr)
+		d.manifestFallback(dc)
+	}
+}
+
+// manifestFallback 在 WAL 写失败时把内存进度补写到 manifest（防止"只追加"路径丢恢复依据）。
+func (d *HybridDownloader) manifestFallback(dc *downloadCtx) {
+	dc.manifestMu.Lock()
+	defer dc.manifestMu.Unlock()
+	dc.journalDegraded = true
+	if dc.manifest != nil {
+		writeManifest(dc.destPath, dc.manifest)
+		dc.manifestWrites++
 	}
 }
 
@@ -2129,8 +2164,14 @@ func (d *HybridDownloader) loadValidManifest(destPath, shareID string, target *S
 // 直接信任 manifest 会跳过这些块 → 大小正确但内容残缺（静默损坏）＋校验反复失败。
 // 剔除后 markChunkDone 会重新记录，本次下载补下这些块。
 func (d *HybridDownloader) dropZeroTailChunks(destPath string, m *hybridManifest) {
+	d.dropZeroTailChunksReturning(destPath, m)
+}
+
+// dropZeroTailChunksReturning 同 dropZeroTailChunks，但返回被剔除的 chunk offset
+// （WAL 合并路径要据此清掉对应的子块掩码，否则会被当作"部分完成"跳过重新下载）。
+func (d *HybridDownloader) dropZeroTailChunksReturning(destPath string, m *hybridManifest) []int64 {
 	if m == nil || len(m.Chunks) == 0 {
-		return
+		return nil
 	}
 	// 用 manifest 自己记录的块长度（不是下载器当前 chunkSize——旧 manifest 可能是别的大小）。
 	spans := make([]ChunkSpan, 0, len(m.Chunks))
@@ -2143,16 +2184,19 @@ func (d *HybridDownloader) dropZeroTailChunks(destPath string, m *hybridManifest
 	suspect, err := ScanZeroTail(WorkingPath(destPath), spans, ZeroScanOptions{})
 	if err != nil {
 		d.log.Warn("hybrid manifest zero-tail scan failed, trust manifest", "err", err)
-		return
+		return nil
 	}
 	if len(suspect) == 0 {
-		return
+		return nil
 	}
+	dropped := make([]int64, 0, len(suspect))
 	for _, s := range suspect {
 		delete(m.Chunks, s.Offset)
+		dropped = append(dropped, s.Offset)
 	}
 	d.log.Warn("hybrid manifest chunks dropped (zero tail, will re-download)", "count", len(suspect))
 	writeManifest(destPath, m)
+	return dropped
 }
 
 // writeManifest 落盘 manifest（错误忽略：进度文件问题只影响续传效率，不影响正确性）。
