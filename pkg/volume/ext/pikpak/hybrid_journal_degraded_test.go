@@ -44,7 +44,7 @@ func TestMarkChunkDone_PersistentJournalFailureKeepsProgressBoundedWrites(t *tes
 		journal: fj,
 	}
 	src := manifestSource{ShareID: "EXAMPLE-DEGRADED", FileID: "f10", Size: total, Hash: "H10"}
-	for i := 0; i < chunks; i++ {
+	for i := range chunks {
 		hd.markChunkDone(context.Background(), dc, chunk{offset: int64(i) * chunkSize, length: chunkSize}, src)
 	}
 
