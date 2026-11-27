@@ -307,6 +307,43 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("上传后列表未出现 e2e.txt: %v", err)
 	}
 
+	// P1d-2：多文件上传走**有限并发**（上限 3）——不是逐个串行。
+	// 判据：3 个文件在"同时进行中"的窗口内被并发提交（观察 setInputFiles 后立刻
+	// 出现的 running 行数 ≥2，且上传请求有重叠）。
+	var inflight, peakInflight atomic.Int64
+	page.OnRequest(func(r playwright.Request) {
+		if r.Method() == http.MethodPost && strings.HasSuffix(strings.Split(r.URL(), "?")[0], "/upload") {
+			n := inflight.Add(1)
+			for {
+				old := peakInflight.Load()
+				if n <= old || peakInflight.CompareAndSwap(old, n) {
+					break
+				}
+			}
+		}
+	})
+	page.OnResponse(func(r playwright.Response) {
+		if r.Request().Method() == http.MethodPost && strings.HasSuffix(strings.Split(r.URL(), "?")[0], "/upload") {
+			inflight.Add(-1)
+		}
+	})
+	big := make([]byte, 4096)
+	var multi []playwright.InputFile
+	for _, n := range []string{"par1.bin", "par2.bin", "par3.bin"} {
+		multi = append(multi, playwright.InputFile{Name: n, MimeType: "application/octet-stream", Buffer: big})
+	}
+	if err := page.Locator("#v2-upload-input").SetInputFiles(multi); err != nil {
+		t.Fatalf("选择多文件上传: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => document.querySelector('#v2-file-body').textContent.indexOf('par3.bin') !== -1",
+		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
+		t.Fatalf("并发上传后列表未出现 par3.bin: %v", err)
+	}
+	if peak := peakInflight.Load(); peak < 2 {
+		t.Fatalf("多文件上传未并发（峰值 in-flight=%d，仍为串行）", peak)
+	}
+
 	// P1e：文本文件点击预览（真实 /download 读取）。
 	if err := page.Locator("#v2-file-body tr[data-name='e2e.txt'] a[data-preview]").Click(); err != nil {
 		t.Fatalf("打开预览: %v", err)
