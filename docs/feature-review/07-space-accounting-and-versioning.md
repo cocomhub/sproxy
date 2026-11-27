@@ -18,6 +18,10 @@
 旧版本的字节**仍然被引用**（在 version 桶里，可 `sclient versions restore` 恢复）⇒ 按定义
 就不是孤儿，不该被回收。回收它要靠 `versioning.retention` 的策略 GC（与「覆盖写」正交）。
 
+**因此「retention GC 真的会删除过期版本」成为本结论的承重墙** —— 若 GC 不生效，卷同样会无限
+增长，只是增长得更慢（被 max_versions 截断兜住一部分）。该链路此前**没有任何用例**，
+本轮补了 `pkg/server/version_gc_retention_test.go`（见第七节）。
+
 **结论**：我最初设计的断言（覆盖后 usage 不增长）会**强制产品放弃版本备份**，方向错误 ——
 按「先确认是不是缺陷」的纪律，改成验收**真正的三个不变量**。
 
@@ -52,6 +56,24 @@
 初始化上传失败 (HTTP 409): {"success":false,"message":"目标卷 \"main\" 已存在同名文件"}
 （目标路径已有不同内容的文件；请先删除/改名后重传，或由服务端开启 versioning 以允许覆盖）
 ```
+
+## 六之二、retention GC 验收：`TestVersionGC_RetentionReclaimsOverwrittenContent`
+
+覆盖写 → 旧版本存在 → **保留期内不删** → 保留期到期后删除 → 当前文件仍在。
+
+三段断言各有独立含义：
+
+| 断言 | 若失败意味着 |
+|---|---|
+| 覆盖后版本数 == 1 | `SaveVersion` 没发生 ⇒ 第五节的前提不成立（那就不是"设计"，是丢了备份） |
+| 保留期内版本数仍为 1 | GC **误删**（把"超过才删"实现成"总是删"）⇒ 用户无法恢复 |
+| 到期后版本数 == 0 | GC 不生效 ⇒ 卷无限增长（本节的承重墙） |
+
+变异命中：把 `cleanupVersionsByRetention` 调用换成 `entries = entries`（不做保留期清理）
+⇒ 「保留期到期后版本应被 GC 删除，仍有 1 个」红。
+
+> 配额归还（version 桶 Scope）另有既有单测 `TestService_ReleaseVersionUsage_ReleasesScope`
+> 覆盖，本用例不重复断言。
 
 ## 六、P3：`markChunkDone` 不清 `dc.masks` 的脆弱耦合（已加断言）
 
