@@ -740,6 +740,19 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	return fileChecksum, false, nil
 }
 
+// conflictHint 为「目标路径已有**不同内容**」的冲突补一句**可操作**的指引。
+//
+// 背景（2026-11-27）：服务端对同名不同内容按策略拒绝（显式指名卷的 AD-4 卷唯一性查重恒拒；
+// 自动路由下 versioning 关闭也拒）。客户端**刻意不自动删除**旧文件后重传——删除不可逆，
+// 而"覆盖"与"改名"是两种意图，SDK 不该替调用方猜。这里只把下一步写清楚：
+// 由调用方显式删除或改名，或让服务端开启 versioning（versioning 下覆盖会先备份旧版本）。
+func conflictHint(status int, body string) string {
+	if status != http.StatusConflict || !strings.Contains(body, "已存在") {
+		return ""
+	}
+	return "（目标路径已有不同内容的文件；请先删除/改名后重传，或由服务端开启 versioning 以允许覆盖）"
+}
+
 // sameContentChecksum 判断「服务端已有文件的 checksum」与「本次待传内容」是否同一份内容。
 // 状态未给 checksum（老服务端/无台账）⇒ 视为一致（保持既有幂等语义，不因缺字段退化）。
 func sameContentChecksum(existing, want string) bool {
@@ -836,7 +849,8 @@ func (c *FileClient) initNewUploadSession(ctx context.Context, p resumeSessionPa
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return "", 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s", resp.StatusCode, string(body))
+		return "", 0, 0, fmt.Errorf("初始化上传失败 (HTTP %d): %s%s", resp.StatusCode,
+			string(body), conflictHint(resp.StatusCode, string(body)))
 	}
 
 	var initResult struct {

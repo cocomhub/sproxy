@@ -132,3 +132,42 @@ func TestChunkedUpload_ExistingSameChecksumStillShortCircuits(t *testing.T) {
 		t.Fatalf("同内容不应重传分块（chunk=%d）", chunkN.Load())
 	}
 }
+
+// TestChunkedUpload_ConflictErrorIsActionable 锁「同名不同内容被拒时错误必须可操作」。
+//
+// 我们**刻意不**自动删除旧文件后重传（删除不可逆，SDK 不替调用方猜意图），因此错误文案
+// 必须直接给出下一步：先删除/改名，或由服务端开启 versioning。否则用户只看到
+// 「已存在同名文件」，不知道该怎么继续。
+func TestChunkedUpload_ConflictErrorIsActionable(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /upload/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"success":false}`))
+	})
+	mux.HandleFunc("POST /upload/init", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"success":false,"message":"目标卷 \"main\" 已存在同名文件"}`))
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	dir := t.TempDir()
+	local := filepath.Join(dir, "c.bin")
+	if err := os.WriteFile(local, []byte("conflict"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewFileClient(ts.URL, WithAccessKey("ak", "sk"), WithAccessKeyID("skey-test01"))
+	_, err := c.ChunkedUpload(t.Context(), local, "c.bin")
+	if err == nil {
+		t.Fatal("同名不同内容应报错（服务端 409）")
+	}
+	msg := err.Error()
+	for _, want := range []string{"409", "已存在", "删除/改名", "versioning"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误文案缺少可操作指引 %q: %s", want, msg)
+		}
+	}
+}

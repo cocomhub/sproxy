@@ -208,8 +208,8 @@ func TestOverwriteConsistencyRealVolumes(t *testing.T) {
 			}
 			// ③ 读侧全量必须是 B。
 			gotPath := dir + "/got-" + vol + ".bin"
-			if err := fc.Download(ctx, remote, gotPath); err != nil {
-				t.Fatalf("下载: %v", err)
+			if derr := fc.Download(ctx, remote, gotPath); derr != nil {
+				t.Fatalf("下载: %v", derr)
 			}
 			got, err := os.ReadFile(gotPath)
 			if err != nil {
@@ -244,6 +244,115 @@ func TestOverwriteConsistencyRealVolumes(t *testing.T) {
 				t.Fatalf("覆盖后 meta_extra x_ow=%v want %s（与磁盘内容不符）", mi.Extra["x_ow"], wantExtra)
 			}
 			assertMetaMTime(t, "overwrite", mi.MTime, wantMTime)
+		})
+	}
+}
+
+// TestIdempotentReuploadRealVolumes 幂等重传验收（nightly/手工）：同内容再传一次必须
+// **真的不重传**，且服务端状态不变。
+//
+// 为什么要这条：`ChunkedUpload` 的「已存在」短路依赖服务端 `GET /upload/status` 回
+// `Completed` + **该文件的 checksum**；客户端据此判断「内容已在云端」。这条契约一旦漂移，
+// 要么退化成每次都重传（浪费带宽），要么反过来把「内容不同」也当命中（静默不更新 —— 已修的 P1）。
+// 单测用 mock 钉了两侧，本用例在**真实服务端**上再钉一次（含 checksum 字段是否真的带回来）。
+func TestIdempotentReuploadRealVolumes(t *testing.T) {
+	t.Parallel()
+	base := strings.TrimRight(os.Getenv("SPROXY_META_E2E_URL"), "/")
+	ak, sk, skid := os.Getenv("SPROXY_META_E2E_AK"), os.Getenv("SPROXY_META_E2E_SK"), os.Getenv("SPROXY_META_E2E_SKID")
+	bearer := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_BEARER"))
+	volsRaw := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_VOLUMES"))
+	if base == "" || volsRaw == "" || (bearer == "" && (ak == "" || sk == "" || skid == "")) {
+		t.Skip("需要 SPROXY_META_E2E_URL/VOLUMES 以及 AK/SK/SKID 或 BEARER")
+	}
+	payload := []byte("idempotent-reupload-0123456789")
+	dir := t.TempDir()
+	local := dir + "/idem.bin"
+	if err := os.WriteFile(local, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Now().Add(-45 * time.Minute).Truncate(time.Second)
+	if err := os.Chtimes(local, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256Hex(payload)
+
+	for _, vol := range strings.Split(volsRaw, ",") {
+		vol = strings.TrimSpace(vol)
+		if vol == "" {
+			continue
+		}
+		t.Run(vol, func(t *testing.T) {
+			opts := []client.Option{client.WithVolume(vol), client.WithTimeout(60 * time.Second)}
+			if bearer != "" {
+				opts = append(opts, client.WithBearerToken(bearer))
+			} else {
+				opts = append(opts, client.WithAccessKey(ak, sk), client.WithAccessKeyID(skid))
+			}
+			fc := client.NewFileClient(base, opts...)
+			ctx := context.Background()
+			remote := fmt.Sprintf("idem-e2e-%d.bin", time.Now().UnixNano())
+			t.Cleanup(func() { _ = fc.Delete(context.Background(), remote, "") })
+
+			// ① 首次：分块上传（与服务端「已存在」判据同一路径）。
+			if _, err := fc.ChunkedUpload(ctx, local, remote); err != nil {
+				t.Fatalf("首次上传: %v", err)
+			}
+			before, err := fc.Stat(ctx, remote)
+			if err != nil || before == nil {
+				t.Fatalf("首次 stat: %v", err)
+			}
+			if !strings.EqualFold(before.Checksum, sum) {
+				t.Fatalf("首次上传后 checksum=%s want %s", before.Checksum, sum)
+			}
+
+			// ② 再传同一内容：必须短路为「已存在」，且不得改动服务端状态。
+			res, err := fc.ChunkedUpload(ctx, local, remote)
+			if err != nil {
+				t.Fatalf("二次上传: %v", err)
+			}
+			if res == nil || !res.Success {
+				t.Fatalf("二次上传应幂等成功，实际 %+v", res)
+			}
+			if res.UploadID != client.UploadIDAlreadyExists && res.Message == "" {
+				t.Logf("二次上传未被识别为「已存在」（结果 %+v）——服务端 Completed 契约可能漂移", res)
+			} else {
+				t.Logf("二次上传短路：upload_id=%q message=%q", res.UploadID, res.Message)
+			}
+			after, err := fc.Stat(ctx, remote)
+			if err != nil || after == nil {
+				t.Fatalf("二次 stat: %v", err)
+			}
+			if after.Size != before.Size || !strings.EqualFold(after.Checksum, before.Checksum) {
+				t.Fatalf("幂等重传改动了文件：before=%+v after=%+v", before, after)
+			}
+			mi, err := fc.GetFileMetaInfo(ctx, remote)
+			if err != nil {
+				t.Fatalf("二次后 meta: %v", err)
+			}
+			assertMetaMTime(t, "idempotent", mi.MTime, mtime)
+
+			// ③ **零重写**的硬证据：versioning 开启时，真正的覆盖写会留下一个旧版本；
+			//    幂等短路不该产生任何新版本。版本接口不可用时跳过该断言（不改结论）。
+			if vers, verr := fc.ListVersions(ctx, remote); verr == nil {
+				if len(vers) > 0 {
+					t.Fatalf("幂等重传产生了 %d 个新版本 ⇒ 服务端被重写（不是真短路）: %+v", len(vers), vers)
+				}
+			} else {
+				t.Logf("版本接口不可用，跳过「零重写」硬断言: %v", verr)
+			}
+
+			// ④ 内容仍可完整读回（幂等短路没有把文件搞坏）。
+			gotPath := dir + "/got-" + vol + ".bin"
+			if derr := fc.Download(ctx, remote, gotPath); derr != nil {
+				t.Fatalf("下载: %v", derr)
+			}
+			got, err := os.ReadFile(gotPath)
+			if err != nil {
+				t.Fatalf("读回: %v", err)
+			}
+			if string(got) != string(payload) {
+				t.Fatalf("幂等重传后内容不符（len=%d want %d）", len(got), len(payload))
+			}
 		})
 	}
 }
