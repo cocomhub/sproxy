@@ -534,7 +534,12 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 		if t.Direction == req.Direction && t.Remote == req.Remote && t.Src == req.Src && t.Dst == req.Dst &&
 			ownerVisible(t.Owner, req.Owner) &&
 			(t.Status == StatusPending || t.Status == StatusSyncing || t.Status == StatusRetrying) {
-			c := *t
+			// **必须深拷贝**（2026-11-27，与 pkg/cloud 的 R62 同族）：该快照被**直接返回给
+			// 调用方**（HTTP 层随后解锁序列化）。`SyncTask` 含被**原地改写**的引用字段——
+			// `Results`（`backfillRetryResults` 在写锁内改写 `stored.Results[i].Action/...`）、
+			// `Carriers`（执行结束回填）、`Include`/`Exclude`——浅拷贝会让调用方与写者共享
+			// 底层数组（读到半更新条目 / DATA RACE）。
+			c := deepCopySyncTask(t)
 			m.mu.Unlock()
 			m.logger.Info("duplicate sync task request, reusing existing",
 				"task_id", c.ID,
@@ -542,7 +547,7 @@ func (m *Manager) CreateTask(req CreateRequest) (*SyncTask, bool, error) {
 				"remote", c.Remote,
 				"status", c.Status,
 			)
-			return &c, false, nil
+			return c, false, nil
 		}
 	}
 
@@ -660,6 +665,26 @@ func (m *Manager) SubmitAndStart(req CreateRequest) (*SyncTask, bool, error) {
 	return task, isNew, nil
 }
 
+// deepCopySyncTask 返回任务的深拷贝快照（调用方持 m.mu 读锁）。
+//
+// **唯一实现**：所有「把任务交出去」的出口都经它（CreateTask 去重复用 / Get）。
+// `SyncTask` 的引用字段全部显式复制——`Results`（元素也会被原地改写，必须复制切片）、
+// `Carriers`（map，执行结束回填）、`Include`/`Exclude`（切片）。
+// 背景：去重复用此前是浅拷贝 `c := *t` 后把 `&c` **直接返回给调用方**，与写锁内的
+// `backfillRetryResults`（原地改写 `Results[i]`）共享底层数组 ⇒ 读到半更新条目 / DATA RACE
+// （与 pkg/cloud 的 R62 同族，2026-11-27）。
+func deepCopySyncTask(t *SyncTask) *SyncTask {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	c.Include = append([]string(nil), t.Include...)
+	c.Exclude = append([]string(nil), t.Exclude...)
+	c.Results = append([]SyncFileResult(nil), t.Results...)
+	c.Carriers = copyCarriers(t.Carriers)
+	return &c
+}
+
 // Get 返回任务深拷贝（切片字段隔离，防止调用方误改污染活任务，审查 M-7），
 // 不存在或对请求者 owner 不可见（跨 owner，IDOR 防护）时返回 nil。
 func (m *Manager) Get(id, owner string) *SyncTask {
@@ -669,12 +694,7 @@ func (m *Manager) Get(id, owner string) *SyncTask {
 	if !ok || !ownerVisible(t.Owner, owner) {
 		return nil
 	}
-	c := *t
-	c.Include = append([]string(nil), t.Include...)
-	c.Exclude = append([]string(nil), t.Exclude...)
-	c.Results = append([]SyncFileResult(nil), t.Results...)
-	c.Carriers = copyCarriers(t.Carriers) // map 必须深拷（否则与后台回填并发读写）
-	return &c
+	return deepCopySyncTask(t)
 }
 
 // List 返回任务元信息列表（CreatedAt 降序），按请求者 owner 过滤：
