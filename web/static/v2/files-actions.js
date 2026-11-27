@@ -72,6 +72,8 @@
     if (!dlg) { return; }
     dlg.wrap.hidden = true;
     dlg.wrap.setAttribute('aria-hidden', 'true');
+    // 释放焦点陷阱并恢复打开前的焦点（否则关闭后落回 <body>）。
+    if (typeof dlg.release === 'function') { dlg.release(); dlg.release = null; }
   }
 
   function submitDialog() {
@@ -123,6 +125,8 @@
     dlg.onOk = cfg.onOk;
     dlg.wrap.hidden = false;
     dlg.wrap.setAttribute('aria-hidden', 'false');
+    // 焦点陷阱（WCAG 2.4.3）：aria-modal 只是声明，Tab 必须留在模态内。
+    if (window.v2focusTrap) { dlg.release = window.v2focusTrap.trap(dlg.wrap); }
     if (cfg.input) { dlg.input.focus(); dlg.input.select(); } else { dlg.ok.focus(); }
   }
 

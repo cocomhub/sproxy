@@ -280,6 +280,8 @@ web-test:
 	@node --check web/static/v2/files-view.js
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
+	@node --check web/static/v2/focus-trap.js
+	@node --check web/static/v2/focus-trap.test.js
 	@node --check web/static/v2/confirm.js
 	@node --check web/static/v2/upload-pool.js
 	@node --check web/static/v2/upload-pool.test.js
@@ -374,6 +376,7 @@ web-test:
 	node --test web/static/v2/files.test.js
 	node --test web/static/v2/files-ops.test.js
 	node --test web/static/v2/upload-chunked.test.js
+	node --test web/static/v2/focus-trap.test.js
 	node --test web/static/v2/upload-pool.test.js
 	node --test web/static/app-render.test.js
 	node --test web/static/events.test.js

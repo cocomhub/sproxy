@@ -2301,3 +2301,87 @@ func mustText(page playwright.Page, sel string) string {
 	}
 	return el
 }
+
+// TestV2Modal_FocusTrappedAndRestored 锁「模态焦点陷阱 + 关闭后焦点恢复」（WCAG 2.4.3）。
+//
+// 背景：v2 的模态都带 role="dialog" aria-modal="true"，但那是**声明**不是强制 ——
+// 此前按 Tab 会把焦点移到模态背后的页面，关闭后焦点落回 <body>（键盘/读屏用户失去上下文）。
+// 判据（真实浏览器）：
+//  1. 打开确认框后连按 Tab，document.activeElement 必须始终在 #v2-confirm 内；
+//  2. Shift+Tab 同理（反向循环）；
+//  3. 关闭后焦点必须回到触发按钮（不是 body）。
+func TestV2Modal_FocusTrappedAndRestored(t *testing.T) {
+	// sproxy:serial: Playwright 单浏览器上下文 + 真实服务端
+	baseURL, _, cleanup := testServerCfg(t, nil)
+	defer cleanup()
+	page, stop := pageFixture(t)
+	defer stop()
+	if _, err := page.Goto(baseURL + "/ui/v2/"); err != nil {
+		t.Fatalf("打开 /ui/v2/: %v", err)
+	}
+	if err := waitLoc(page, ".nav[data-route=files]", playwright.WaitForSelectorStateVisible, 15000); err != nil {
+		t.Fatalf("v2 壳层未就绪: %v", err)
+	}
+
+	// 用「删除默认方式 → 改为直接删除」触发确认框：传真实交互路径，且触发按钮有稳定 id。
+	// 设置是**抽屉**（不是 hash 路由分区）：与既有用例同一打开路径。
+	if err := page.Locator("#v2-settings-open").Click(); err != nil {
+		t.Fatalf("打开设置抽屉: %v", err)
+	}
+	if err := waitLoc(page, "#v2-set-delete-mode", playwright.WaitForSelectorStateVisible, 15000); err != nil {
+		t.Fatalf("设置抽屉未就绪: %v", err)
+	}
+	if _, err := page.Locator("#v2-set-delete-mode").SelectOption(playwright.SelectOptionValues{
+		Values: &[]string{"hard"},
+	}); err != nil {
+		t.Fatalf("选择 hard: %v", err)
+	}
+	if err := page.Locator("#v2-set-delete-save").Focus(); err != nil {
+		t.Fatalf("聚焦保存按钮: %v", err)
+	}
+	if err := page.Locator("#v2-set-delete-save").Click(); err != nil {
+		t.Fatalf("点击保存（应弹确认框）: %v", err)
+	}
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("确认框未出现: %v", err)
+	}
+
+	inside := func() bool {
+		v, _ := page.Evaluate(`() => {
+			const a = document.activeElement;
+			const box = document.querySelector('#v2-confirm');
+			return !!(a && box && box.contains(a));
+		}`, nil)
+		b, _ := v.(bool)
+		return b
+	}
+	// ① 正向 Tab 6 次：焦点必须始终在模态内（若逃逸，会落到背景按钮/地址栏）。
+	for i := 0; i < 6; i++ {
+		if err := page.Keyboard().Press("Tab"); err != nil {
+			t.Fatalf("Tab #%d: %v", i+1, err)
+		}
+		if !inside() {
+			cur, _ := page.Evaluate("() => { const a = document.activeElement; return a ? (a.id || a.tagName) : 'null'; }", nil)
+			t.Fatalf("Tab #%d 后焦点逃出模态（%v）⇒ 焦点陷阱没生效", i+1, cur)
+		}
+	}
+	// ② 反向 Shift+Tab 4 次：同理。
+	for i := 0; i < 4; i++ {
+		if err := page.Keyboard().Press("Shift+Tab"); err != nil {
+			t.Fatalf("Shift+Tab #%d: %v", i+1, err)
+		}
+		if !inside() {
+			t.Fatalf("Shift+Tab #%d 后焦点逃出模态 ⇒ 反向循环没生效", i+1)
+		}
+	}
+	// ③ 关闭后焦点必须回到触发按钮。
+	if err := page.Locator("#v2-confirm [data-act=cancel]").Click(); err != nil {
+		t.Fatalf("取消确认框: %v", err)
+	}
+	if _, err := page.WaitForFunction(
+		"() => { const a = document.activeElement; return !!a && a.id === 'v2-set-delete-save'; }", nil,
+		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(5000)}); err != nil {
+		cur, _ := page.Evaluate("() => { const a = document.activeElement; return a ? (a.id || a.tagName) : 'null'; }", nil)
+		t.Fatalf("关闭后焦点未回到触发按钮（当前 %v）⇒ 读屏用户会失去上下文", cur)
+	}
+}

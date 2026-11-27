@@ -21,7 +21,7 @@
   if (typeof window === 'undefined') { return; }
 
   var box = null;
-  var state = { mode: 'confirm', onOk: null, resolve: null, validate: null };
+  var state = { mode: 'confirm', onOk: null, resolve: null, validate: null, release: null };
 
   function build() {
     if (box) { return; }
@@ -87,7 +87,10 @@
     showErr('');
     var res = state.resolve;
     var cb = state.onOk;
-    state = { mode: 'confirm', onOk: null, resolve: null, validate: null };
+    var release = state.release;
+    state = { mode: 'confirm', onOk: null, resolve: null, validate: null, release: null };
+    // 焦点陷阱释放（恢复打开前的焦点）：否则键盘用户关闭后落回 <body>，读屏失去上下文。
+    if (typeof release === 'function') { release(); }
     if (value === true && typeof cb === 'function') { cb(); }
     if (typeof res === 'function') { res(value === true ? true : value); }
   }
@@ -123,6 +126,8 @@
     box.querySelector('[data-act=cancel]').hidden = state.mode === 'show';
     box.hidden = false;
     box.setAttribute('aria-hidden', 'false');
+    // 焦点陷阱：aria-modal="true" 只是声明，不强制 —— Tab 必须留在模态内（WCAG 2.4.3）。
+    if (window.v2focusTrap) { state.release = window.v2focusTrap.trap(box); }
     if (state.mode === 'confirm') { ok.focus(); } else { input.focus(); if (o.value) { input.select(); } }
 
     return new Promise(function (resolve) { state.resolve = resolve; });
