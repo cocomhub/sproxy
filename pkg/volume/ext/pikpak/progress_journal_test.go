@@ -184,6 +184,7 @@ type fakeJournal struct {
 
 	st        ProgressState
 	chunks    []int64
+	blocks    []int64
 	resets    int
 	done      bool
 	closed    bool
@@ -201,6 +202,9 @@ func (f *fakeJournal) Load(context.Context) (ProgressState, error) {
 	out := f.st
 	if out.Done == nil {
 		out.Done = map[int64]int64{}
+	}
+	if out.Masks == nil {
+		out.Masks = map[int64]uint64{}
 	}
 	return out, nil
 }
@@ -221,11 +225,26 @@ func (f *fakeJournal) ChunkDone(_ context.Context, off, _ int64) error {
 	f.st.Done[off] = 1
 	return nil
 }
+func (f *fakeJournal) SubBlockDone(_ context.Context, off int64, mask uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chunkErr != nil {
+		return f.chunkErr
+	}
+	if f.st.Masks == nil {
+		f.st.Masks = map[int64]uint64{}
+	}
+	f.st.Masks[off] |= mask
+	f.blocks = append(f.blocks, off)
+	return nil
+}
+
 func (f *fakeJournal) Reset(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resets++
 	f.st.Done = map[int64]int64{}
+	f.st.Masks = map[int64]uint64{}
 	return nil
 }
 

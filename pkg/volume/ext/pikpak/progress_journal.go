@@ -50,8 +50,11 @@ type ProgressState struct {
 	Total     int64
 	ChunkSize int64
 	Done      map[int64]int64 // offset → length（**当前代际**）
-	Epoch     int64           // 进度代际（Reset 递增；旧代际记录忽略）
-	Finished  bool            // 已写提交记录（无需再恢复）
+	// Masks 是 chunk offset → 已完成子块位图（**当前代际**；1MiB 子块续传的细粒度进度）。
+	// 与 Done 同一 WAL：append-only 记录，避免每次都全量重写 manifest（2026-11-27 收敛）。
+	Masks    map[int64]uint64
+	Epoch    int64 // 进度代际（Reset 递增；旧代际记录忽略）
+	Finished bool  // 已写提交记录（无需再恢复）
 }
 
 // ProgressJournal 是分片进度日志（唯一实现：audit WAL；测试可注入 fake）。
@@ -64,6 +67,8 @@ type ProgressJournal interface {
 	Load(ctx context.Context) (ProgressState, error)
 	RecordSource(ctx context.Context, st ProgressState) error
 	ChunkDone(ctx context.Context, offset, length int64) error
+	// SubBlockDone 记录 chunk 内已完成子块位图（**累计掩码**，幂等；重放按 offset 覆盖）。
+	SubBlockDone(ctx context.Context, offset int64, mask uint64) error
 	MarkDone(ctx context.Context) error
 	// Reset 作废历史进度（代际 +1）：数据文件不可信 / 上一轮已完成 / 源已更换时调用，
 	// 避免旧分片在后续尝试中被误合并（否则会跳过分片 → 完整性校验必失败）。
@@ -121,6 +126,7 @@ func (j *auditProgressJournal) Load(ctx context.Context) (ProgressState, error) 
 		out.ChunkSize = *cs
 	}
 	collectJournalChunks(st.KV, out.Epoch, out.Done)
+	out.Masks = collectJournalMasks(st.KV, out.Epoch)
 	j.setEpoch(out.Epoch)
 	return out, nil
 }
@@ -192,6 +198,50 @@ func collectJournalChunks(kv map[string]any, epoch int64, done map[int64]int64) 
 			done[off] = *ln
 		}
 	}
+}
+
+// journalBlockPrefix 是子块位图记录的键前缀（`block:<epoch>:<offset>`）。
+const journalBlockPrefix = "block:"
+
+// collectJournalMasks 把**当前代际**的子块位图并入 masks（offset → 累计掩码）。
+// 键格式：`block:<epoch>:<offset>`；同一 offset 多次写按**后写覆盖**（值即累计掩码）。
+func collectJournalMasks(kv map[string]any, epoch int64) map[int64]uint64 {
+	out := map[int64]uint64{}
+	for k, v := range kv {
+		rest, ok := strings.CutPrefix(k, journalBlockPrefix)
+		if !ok {
+			continue
+		}
+		a, b, found := strings.Cut(rest, ":")
+		if !found {
+			continue
+		}
+		ep, perr := parseInt64(a)
+		if perr != nil || ep != epoch {
+			continue
+		}
+		off, perr := parseInt64(b)
+		if perr != nil {
+			continue
+		}
+		if mask := decodeJournalValue[uint64](v); mask != nil {
+			out[off] = *mask
+		}
+	}
+	return out
+}
+
+// SubBlockDone 记录 chunk 内已完成子块位图（累计掩码，幂等）。
+func (j *auditProgressJournal) SubBlockDone(ctx context.Context, offset int64, mask uint64) error {
+	ep, err := j.currentEpoch(ctx)
+	if err != nil {
+		return fmt.Errorf("pikpak journal: read epoch: %w", err)
+	}
+	key := journalBlockPrefix + formatInt64(ep) + ":" + formatInt64(offset)
+	if err := j.scope.Save(ctx, key, mask); err != nil {
+		return fmt.Errorf("pikpak journal: save sub-blocks %d: %w", offset, err)
+	}
+	return nil
 }
 
 // RecordSource 记录源身份（含 total/chunk_size），供恢复时校验源一致。

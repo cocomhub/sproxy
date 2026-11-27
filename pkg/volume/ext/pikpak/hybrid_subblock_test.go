@@ -231,3 +231,99 @@ func TestMarkChunkDone_WritesImmediately(t *testing.T) {
 		t.Fatalf("整块完成必须立即落盘，got %+v", m)
 	}
 }
+
+// TestPersistSubMask_JournalsInsteadOfManifest 锁定「有 WAL 时子块进度走增量 WAL」：
+// manifest 退化为整块检查点，不再为每个子块重写整个文件（2026-11-27 收敛）。
+func TestPersistSubMask_JournalsInsteadOfManifest(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out3.bin")
+	hd := &HybridDownloader{}
+	fj := &fakeJournal{}
+	const chunkSize = 64 << 20
+	dc := &downloadCtx{
+		currentTotal: chunkSize, chunkSize: chunkSize, destPath: dest,
+		shareID: "EXAMPLE-WAL", target: &ShareFile{ID: "f3", Size: chunkSize, Hash: "H3"},
+		journal: fj,
+	}
+	src := manifestSource{ShareID: "EXAMPLE-WAL", FileID: "f3", Size: chunkSize, Hash: "H3"}
+	for i := range 64 {
+		mask := (uint64(1) << uint(i+1)) - 1
+		hd.persistSubMask(dc, chunk{offset: 0, length: chunkSize}, mask, src)
+	}
+	if dc.manifestWrites != 0 {
+		t.Fatalf("有 WAL 时不应写 manifest（每个子块一次），got %d", dc.manifestWrites)
+	}
+	if dc.journalWrites == 0 || dc.journalWrites > 10 {
+		t.Fatalf("WAL 写应被节流，got %d 次（64 个子块）", dc.journalWrites)
+	}
+	if _, err := os.Stat(ManifestPath(dest)); !os.IsNotExist(err) {
+		t.Fatalf("不应产生 manifest 文件（整块未完成）: err=%v", err)
+	}
+	// WAL 里的位图应是最新累计值（节流窗口内最后一次写入）
+	got, lerr := fj.Load(context.Background())
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if got.Masks[0] == 0 {
+		t.Fatalf("WAL 应记录子块位图，got %+v", got.Masks)
+	}
+}
+
+// TestMergeJournalMasks_RestoresSubBlockProgress 锁定「WAL 子块位图在续传时并入内存镜像」。
+func TestMergeJournalMasks_RestoresSubBlockProgress(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out4.bin")
+	hd := &HybridDownloader{}
+	dc := &downloadCtx{destPath: dest, chunkSize: 4 << 20, currentTotal: 8 << 20}
+	dc.prog.Store(4 << 20) // prepareManifest 已按 manifest 记录过整块进度
+	manifest := &hybridManifest{Chunks: map[int64]int64{0: 4 << 20}}
+	merged := hd.mergeJournalMasks(dc, manifest, map[int64]uint64{
+		0:       0b1111, // 整块已完成 ⇒ 忽略
+		4 << 20: 0b0011, // 部分完成 ⇒ 并入
+	})
+	if merged != 1 {
+		t.Fatalf("应合并 1 个 chunk，got %d", merged)
+	}
+	if manifest.Blocks[4<<20] != 0b0011 || dc.masks[4<<20] != 0b0011 {
+		t.Fatalf("位图未并入: manifest=%v masks=%v", manifest.Blocks, dc.masks)
+	}
+	if _, ok := manifest.Blocks[0]; ok {
+		t.Fatalf("整块已完成的 chunk 不应保留位图: %v", manifest.Blocks)
+	}
+	// 进度基准应补上 WAL 恢复的 2 个子块（2MiB），钳制到 total
+	if got := dc.prog.Load(); got != 6<<20 {
+		t.Fatalf("进度应补入 WAL 子块字节，got %d want %d", got, int64(6<<20))
+	}
+}
+
+// TestProgressJournal_SubBlockRoundTrip 验证 WAL 子块位图可重放（文件型，含 Reset 代际隔离）。
+func TestProgressJournal_SubBlockRoundTrip(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	j, err := NewFileProgressJournal(dir, "share-EXAMPLE-SB:dest.bin")
+	if err != nil {
+		t.Fatalf("NewFileProgressJournal: %v", err)
+	}
+	ctx := context.Background()
+	if serr := j.SubBlockDone(ctx, 4<<20, 0b0101); serr != nil {
+		t.Fatalf("SubBlockDone: %v", serr)
+	}
+	if serr := j.SubBlockDone(ctx, 4<<20, 0b0111); serr != nil { // 累计掩码覆盖
+		t.Fatalf("SubBlockDone: %v", serr)
+	}
+	st, lerr := j.Load(ctx)
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if st.Masks[4<<20] != 0b0111 {
+		t.Fatalf("掩码应为最新累计值，got %v", st.Masks)
+	}
+	if rerr := j.Reset(ctx); rerr != nil {
+		t.Fatalf("Reset: %v", rerr)
+	}
+	st2, _ := j.Load(ctx)
+	if len(st2.Masks) != 0 {
+		t.Fatalf("Reset 后旧代际掩码应被忽略，got %v", st2.Masks)
+	}
+	_ = j.Close()
+}
