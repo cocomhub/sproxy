@@ -33,8 +33,8 @@ const (
 	// testResourceWindow 是「关闭归属」的查找窗口（行）。
 	testResourceWindow = 10
 	// 下限护栏：低于此值说明扫描面/正则失效（会假绿）。
-	testResourceMinFiles = 900
-	testResourceMinSites = 190
+	testResourceMinFiles = 1650
+	testResourceMinSites = 255
 )
 
 // testResourcePattern 是「需要显式释放的资源构造函数」清单（含 registry.NewSet：它内部
@@ -44,7 +44,11 @@ const (
 // 且**没有** finalizer 兜底。
 var testResourcePattern = regexp.MustCompile(
 	`(?:storage\.)?OpenRoot\(|(?:storage\.)?OpenTenant\(|checksum\.NewChecksumStore\(|` +
-		`(?:^|[^.\w])NewChecksumStore\(|(?:registry\.)?NewSet\(`)
+		`(?:^|[^.\w])NewChecksumStore\(|(?:registry\.)?NewSet\(|` +
+		// TenantCache 也缓存着按 owner 懒建的**租户子根**（每个 = 独立 os.Root / 目录 fd，
+		// 且无 finalizer）⇒ 与 OpenTenant 同属一类资源，之前是「间接经由 NewSet 覆盖」的
+		// 唯一漏网入口（直接构造的测试夹具不关 ⇒ Windows `RemoveAll: being used`）。
+		`(?:storage\.)?NewTenantCache\(`)
 
 // openTestRootHelper 是本仓统一的「打开即登记关闭」助手名（命中即视为已登记）。
 var openTestRootHelper = regexp.MustCompile(`openTestRoot\(|openRootForTest\(|testRootAt\(`)

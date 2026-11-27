@@ -99,6 +99,15 @@
       cfg.onOk(cfg.value || '');
       return;
     }
+    // **无输入框的确认统一走 window.v2confirm**（与云端任务的破坏性动作同一实现）：
+    // 此前本文件另有一套纯确认渲染，两份实现各自演化（提示文案/danger 样式/Esc 行为
+    // 都要求一致）。带输入框的（新建目录/重命名）仍用本文件的 openDialog——那是另一种能力。
+    if (cfg && !cfg.input && typeof window.v2confirm === 'function') {
+      window.v2confirm({
+        title: cfg.title, message: cfg.message, okText: cfg.okText, danger: !!cfg.danger
+      }, function () { if (typeof cfg.onOk === 'function') { cfg.onOk(cfg.value || ''); } });
+      return;
+    }
     openDialog(cfg);
   }
 

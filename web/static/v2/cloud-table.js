@@ -182,8 +182,45 @@
   var PLAN_ACTIONS = ['retry_download', 'retry_transfer', 'retry_transfer_overwrite',
     'rotate_source', 'discard_partial', 'retry_from_url'];
 
+  /**
+   * 破坏性任务动作：执行前必须**用户显式确认**。
+   *
+   * `retry_transfer_overwrite` 是服务端 plan 里唯一的破坏性动作（目标已存在时覆盖写入，
+   * 无备份）—— 批量动作已把它排除（`console.js: pickRetryAction` 跳过），但**单条**
+   * 此前是点一下就执行：误点即毁掉线上已有文件，且不可撤销。此处统一加确认
+   * （传输页与控制台共用本层 ⇒ 一处生效，不靠各页自己记得）。
+   */
+  var DESTRUCTIVE = ['retry_transfer_overwrite'];
+
+  /** 覆盖确认的可读描述（用于对话框文案，e2e 断言也用它）。 */
+  function destructiveHint(kind) {
+    if (kind === 'retry_transfer_overwrite') {
+      return '将**覆盖**目标位置已存在的文件（无备份、不可撤销）';
+    }
+    return '';
+  }
+
+  /** 可注入的确认实现（默认确认框）；测试/嵌入方可替换为 window.v2confirm。 */
+  function confirmDestructive(kind, task, then) {
+    var msg = [destructiveHint(kind), '', '任务：' + ((task && (task.filename || task.id)) || '')].join(String.fromCharCode(10));
+    if (typeof window.v2confirm === 'function') {
+      window.v2confirm({ title: '确认覆盖写入？', message: msg, okText: '覆盖写入', danger: true }, then);
+      return;
+    }
+    if (typeof window.confirm === 'function' && window.confirm(msg)) { then(); }
+  }
+
   /** 统一执行任务动作（取消 / 服务端 plan 动作 / 重试 / 删除），供传输页与控制台复用。 */
   function perform(kind, task, api, done, extraURL) {
+    if (DESTRUCTIVE.indexOf(kind) >= 0) {
+      // 确认后才真正执行（取消/删除不是本层判据的一部分，保持原语义）。
+      if (!extraURL && !(task && task.__confirmed)) {
+        confirmDestructive(kind, task, function () {
+          perform(kind, Object.assign({}, task, { __confirmed: true }), api, done);
+        });
+        return Promise.resolve();
+      }
+    }
     var path, opts;
     if (PLAN_ACTIONS.indexOf(kind) >= 0) {
       var body = { action: kind };
@@ -222,6 +259,7 @@
 
   window.v2cloudTable = {
     render: render, statusClass: statusClass, perform: perform,
+    DESTRUCTIVE: DESTRUCTIVE, destructiveHint: destructiveHint,
     integrityBadge: integrityBadge, resumeBadge: resumeBadge,
     PLAN_ACTIONS: PLAN_ACTIONS
   };
