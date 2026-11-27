@@ -11,6 +11,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // TestMetaLoadConcurrency_Bounds 锁定上限推导 `min(4, 预算/单条常驻)`，含上下限。
@@ -83,7 +85,7 @@ func TestMetaLoadGate_CtxCancel(t *testing.T) {
 		if err == nil {
 			t.Fatal("已取消的 ctx 应在额满时返回错误")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(2 * time.Second)):
 		t.Fatal("ctx 已取消却仍在等待（应立即可返回）")
 	}
 }

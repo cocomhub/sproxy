@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cocomhub/sproxy/pkg/testutil"
 )
 
 // 本文件锁定设计 docs/designs/2026-11-16-deterministic-blob-convergent-encryption.md
@@ -181,7 +183,7 @@ func TestNewChunkTempDir_SerializesSameKey(t *testing.T) {
 	close(hold)
 	select {
 	case <-got:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(2 * time.Second)):
 		t.Fatal("第一写者释放后第二写者应能取得目录")
 	}
 }

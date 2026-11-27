@@ -35,7 +35,7 @@ import (
 // 且受 R14 睡眠棘轮约束（手写 Sleep 顶高全仓计数会被 archcheck 拦）。
 func waitWindows(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
-	testutil.WaitFor(t, 10*time.Second, cond, msg)
+	testutil.WaitFor(t, testutil.ScaleTimeout(10*time.Second), cond, msg)
 }
 
 // TestStageDL_WindowCachedThenAllLocal：窗口下载后二轮零远端。
