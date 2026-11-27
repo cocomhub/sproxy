@@ -279,7 +279,7 @@ func startWriteFailureResumeSource(t *testing.T, full []byte) (*httptest.Server,
 		// 客户端断开即返回，不占用服务端 2s，也不受负载影响（带 5s 兜底防意外长期占用）。
 		select {
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(testutil.ScaleTimeout(5 * time.Second)):
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -304,7 +304,7 @@ func startStallingThenFullSource(t *testing.T, full []byte, prefix int) *httptes
 			}
 			select {
 			case <-r.Context().Done():
-			case <-time.After(5 * time.Second):
+			case <-time.After(testutil.ScaleTimeout(5 * time.Second)):
 			}
 			return
 		}
@@ -457,7 +457,7 @@ func startStallingThenRangeSource(t *testing.T, full []byte, prefix int) (*httpt
 			}
 			select {
 			case <-r.Context().Done():
-			case <-time.After(5 * time.Second):
+			case <-time.After(testutil.ScaleTimeout(5 * time.Second)):
 			}
 			return
 		}
@@ -695,7 +695,7 @@ func TestCloudDownloadManager_CancelDuringWrite_Race(t *testing.T) {
 
 	// 等待 .partial 出现（下载已开始写盘）
 	taskDir := mgr.TaskDirFor("alice", task.ID)
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		_, statErr := os.Stat(filepath.Join(taskDir, "cancel-race.bin.partial"))
 		return statErr == nil
 	}, "下载未开始写盘（.partial 未出现）")
@@ -831,7 +831,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	// 超时等待而非裸 channel 接收：下载 goroutine 若因任何原因走不到第一次写盘（例如 manager
 	// 改掉 DownloadWithWriter 路径而回退到 Download），裸接收会挂到包级 timeout 且 t.Cleanup
 	// 解不开；WaitFor 给出带原因的确定性失败。
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		select {
 		case <-dl.firstWritten:
 			return true
@@ -882,7 +882,7 @@ func TestCloudDownloadManager_CancelDuringWrite_QuotaZeroAfterGoroutineExit(t *t
 	}
 
 	// 保留 testutil.WaitFor 版本：观察者（轮询 API）所见最终收敛到全零。
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		return cloudB.Usage() == 0 && cloudB.Reserved() == 0 && sm.Usage() == 0
 	}, "cancel 后账本未收敛到 0")
 }
@@ -944,7 +944,7 @@ func TestCloudDownloadManager_ConcurrentResumeAndCancel(t *testing.T) {
 	wg.Wait()
 
 	// 等待所有下载 goroutine 退出（running 护栏的终点）
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		mgr.mu.RLock()
 		running := mgr.running[task.ID]
 		mgr.mu.RUnlock()

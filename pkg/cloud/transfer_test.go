@@ -444,7 +444,7 @@ func TestFailTaskWithTransfer_NoDeadlock(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(5 * time.Second)):
 		t.Fatal("failTaskWithTransfer 死锁（5s 未返回）")
 	}
 	mgr.mu.RLock()
@@ -879,14 +879,14 @@ func TestTransferDone_AbortedOnCancel(t *testing.T) {
 		_, _, _ = mgr.transferDone(context.Background(), task, dest, &downloader.Result{}, nil)
 	}()
 	// 等待第一次写失败发生（进入重试退避）
-	testutil.WaitFor(t, 30*time.Second, func() bool { return calls.Load() >= 1 }, "第一次卷写应已发生")
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool { return calls.Load() >= 1 }, "第一次卷写应已发生")
 	// 退避期间取消任务（从 storage 重读 → transferLoop 下一轮 gate 中止）
 	mgr.mu.Lock()
 	mgr.tasks[task.ID].Status = "cancelled"
 	mgr.mu.Unlock()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(10 * time.Second)):
 		t.Fatal("transferDone 未在取消后退出")
 	}
 	if mgr.metrics.TransfersFailed.Load() != 0 {

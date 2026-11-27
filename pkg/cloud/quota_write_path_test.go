@@ -74,7 +74,7 @@ func TestQuota_CloudResumeGrowthRejected(t *testing.T) {
 		t.Fatalf("ResumeTask: %v", err)
 	}
 	var last string
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		snap, ok := mgr.SnapshotTask(task.ID, "alice")
 		if !ok {
 			t.Fatal("task disappeared")
