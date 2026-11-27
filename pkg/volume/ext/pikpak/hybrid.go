@@ -1766,12 +1766,20 @@ type manifestSource struct {
 
 // loadManifest 读取 manifest（不存在返回 nil）。
 func loadManifest(destPath string) *hybridManifest {
-	data, err := os.ReadFile(ManifestPath(destPath))
+	path := ManifestPath(destPath)
+	// 原子写的 tmp 残留（写途中崩溃）先清掉，避免误导人/占用空间。
+	_ = os.Remove(path + manifestTmpSuffix)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 	var m hybridManifest
 	if json.Unmarshal(data, &m) != nil || m.Chunks == nil {
+		// 损坏（含旧版本截断残留）：归档为 .stale 留证据，再按"无进度"处理（全量重下）。
+		// 不归档会反复解析同一个坏文件，且掩盖"曾经写过半截"的事实（2026-11-27 审查）。
+		if len(data) > 0 {
+			_ = os.Rename(path, StaleManifestPath(destPath))
+		}
 		return nil
 	}
 	return &m
@@ -2148,14 +2156,32 @@ func (d *HybridDownloader) dropZeroTailChunks(destPath string, m *hybridManifest
 }
 
 // writeManifest 落盘 manifest（错误忽略：进度文件问题只影响续传效率，不影响正确性）。
+// writeManifest 原子写进度文件（tmp + rename）。
+//
+// 为什么必须原子（2026-11-27 审查）：此前是 `os.WriteFile`（截断 + 写入），崩溃/断电/被强杀
+// 落在写入中途 ⇒ manifest 变成**截断的非法 JSON** ⇒ 下次 `loadManifest` 解析失败返回 nil ⇒
+// 已完成的分片全部丢失（数小时的下载白跑）。tmp + rename 保证「要么旧版本、要么新版本」。
 func writeManifest(destPath string, m *hybridManifest) {
 	if m == nil {
 		return
 	}
-	if data, err := json.Marshal(m); err == nil {
-		_ = os.WriteFile(ManifestPath(destPath), data, 0o644)
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	path := ManifestPath(destPath)
+	tmp := path + manifestTmpSuffix
+	if werr := os.WriteFile(tmp, data, 0o644); werr != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	if rerr := os.Rename(tmp, path); rerr != nil {
+		_ = os.Remove(tmp) // rename 失败清理 tmp；正式文件保持旧版本（不损坏）
 	}
 }
+
+// manifestTmpSuffix 是 manifest 原子写的临时后缀（崩溃残留由 loadManifest 顺手清理）。
+const manifestTmpSuffix = ".tmp"
 
 // workingFileMatches 判断工作文件（临时文件）存在且大小与 manifest.Total 一致。
 func workingFileMatches(destPath string, total int64) bool {
