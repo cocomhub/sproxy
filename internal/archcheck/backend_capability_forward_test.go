@@ -138,12 +138,12 @@ func singleMethodInterfaces(src string) map[string]string {
 	for _, loc := range ifaceRE.FindAllStringSubmatchIndex(src, -1) {
 		name := src[loc[2]:loc[3]]
 		rest := src[loc[1]:]
-		end := strings.Index(rest, "\n}")
-		if end < 0 {
+		before, _, ok := strings.Cut(rest, "\n}")
+		if !ok {
 			continue
 		}
 		var lines []string
-		for _, line := range strings.Split(rest[:end], "\n") {
+		for line := range strings.SplitSeq(before, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "//") {
 				continue
