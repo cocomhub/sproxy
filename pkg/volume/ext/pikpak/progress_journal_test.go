@@ -4,6 +4,7 @@
 package pikpak
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -539,5 +540,122 @@ func TestHybridDownload_JournalFactoryErrorTolerated(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "out.mp4")
 	if _, derr := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil); derr != nil {
 		t.Fatalf("WAL 工厂失败不应阻断下载: %v", derr)
+	}
+}
+
+// rangeRecorder 记录发出的 Range 请求（验证"已完成分片不再被请求"）。
+type rangeRecorder struct {
+	base http.RoundTripper
+	mu   sync.Mutex
+	rgs  []string
+}
+
+func (r *rangeRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rg := req.Header.Get("Range"); rg != "" {
+		r.mu.Lock()
+		r.rgs = append(r.rgs, rg)
+		r.mu.Unlock()
+	}
+	return r.base.RoundTrip(req)
+}
+
+// TestHybridDownload_RealFileJournalResume 端到端锁定**真实文件型 WAL** 的续传：
+// 崩溃前已完成的分片经 WAL 重放被跳过（不再发 Range 请求），其余分片正常下载且内容正确。
+// （既有用例用 fakeJournal 只验接线；本用例覆盖 WAL 键格式/代际/合并的真实路径。）
+func TestHybridDownload_RealFileJournalResume(t *testing.T) {
+	t.Parallel()
+	payload, srvURL, _, _ := newHybridFixture(t, 8<<20)
+	rec := &rangeRecorder{base: http.DefaultTransport}
+	client := &http.Client{Transport: rec}
+	resolver := NewShareResolver(ShareResolverConfig{APIHost: srvURL, UserHost: srvURL, HTTPClient: client})
+	api := NewAPI(APIConfig{Host: srvURL, AccessToken: fakeServerToken, HTTPClient: client}, nil)
+
+	jdir := t.TempDir()
+	const jkey = "EXAMPLE-RESUME-WAL"
+	seed, err := NewFileProgressJournal(jdir, jkey)
+	if err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	// 崩溃前：分片 0（4MiB）已完成并写入 WAL。
+	if cerr := seed.ChunkDone(context.Background(), 0, 4<<20); cerr != nil {
+		t.Fatalf("seed ChunkDone: %v", cerr)
+	}
+	_ = seed.Close()
+
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api,
+		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
+		HTTPClient: client, // 直链下载走同一个记录器，否则断言的 Range 列表为空（无意义）
+		JournalFactory: func(_, _ string) (ProgressJournal, error) {
+			return NewFileProgressJournal(jdir, jkey)
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	// 模拟崩溃残留：工作文件已含**完整数据**（仅分片 0 由 WAL 记录为完成）。
+	if werr := os.WriteFile(WorkingPath(dest), payload, 0o600); werr != nil {
+		t.Fatalf("write working: %v", werr)
+	}
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if res.Size != int64(len(payload)) {
+		t.Fatalf("size = %d want %d", res.Size, len(payload))
+	}
+	got, rerr := os.ReadFile(dest)
+	if rerr != nil {
+		t.Fatalf("read dest: %v", rerr)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("续传后内容应与源一致")
+	}
+	// WAL 记录的分片 0 不应再被请求（Range 起点 0）。
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.rgs) == 0 {
+		t.Fatal("应至少记录到一次 Range 请求（否则断言无意义）")
+	}
+	for _, rg := range rec.rgs {
+		if strings.HasPrefix(rg, "bytes=0-") {
+			t.Fatalf("已完成分片不应被重新请求，got Range %q（全部 %v）", rg, rec.rgs)
+		}
+	}
+}
+
+// TestHybridDownload_JournalChunkGeometryMismatchIgnored 锁定「WAL 分块几何与本次规划不一致
+// ⇒ 不合并（作废 WAL）」：否则小几何的完成记录会让大几何的未完成分片被整块跳过（零洞 ⇒ GCID 必失败）。
+func TestHybridDownload_JournalChunkGeometryMismatchIgnored(t *testing.T) {
+	t.Parallel()
+	payload, _, resolver, api := newHybridFixture(t, 8<<20)
+	// WAL 用 2MiB 几何记录分片 0 完成；本次按 4MiB 规划（manifest 缺失时的自适应/显式几何）。
+	j := &fakeJournal{st: ProgressState{Total: 8 << 20, ChunkSize: 2 << 20, Done: map[int64]int64{0: 2 << 20}}}
+	hd, err := NewHybridDownloader(HybridConfig{
+		Resolver: resolver, API: api,
+		ChunkSize: 4 << 20, ShareRatio: 0.5, Concurrency: 1, AutoDelete: true,
+		JournalFactory: func(_, _ string) (ProgressJournal, error) { return j, nil },
+	})
+	if err != nil {
+		t.Fatalf("NewHybridDownloader: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "out.mp4")
+	if werr := os.WriteFile(WorkingPath(dest), make([]byte, 8<<20), 0o600); werr != nil {
+		t.Fatalf("write working: %v", werr)
+	}
+	res, err := hd.Download(context.Background(), "https://mypikpak.com/s/EXAMPLE-001", dest, nil)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if res.Size != int64(len(payload)) {
+		t.Fatalf("size = %d", res.Size)
+	}
+	if j.resets == 0 {
+		t.Fatal("几何不一致应作废 WAL（resets > 0）")
+	}
+	// 两个 4MiB 分片都必须真正下载（作废后从零）。
+	if len(j.chunks) != 2 || j.chunks[0] != 0 || j.chunks[1] != 4<<20 {
+		t.Fatalf("应按新几何下载全部分片, got %v", j.chunks)
 	}
 }
