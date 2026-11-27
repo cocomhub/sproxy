@@ -582,7 +582,20 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		t.Fatalf("拖拽上传后未出现 dropped.txt: %v", err)
 	}
 
-	// ① 上传队列：多文件串行时，未轮到的行显示「排队中」，且顶部有汇总。
+	// ① 上传队列：投放多文件时顶部有**分项汇总**（排队 / 上传中 / 暂停 / 失败）。
+	// 注意：上传已是**有限并发**（上限 3），小文件可能在一次断言间隙内全部完成 ⇒
+	// 「此刻读到非空汇总」是时序赌博。改用 MutationObserver 记录汇总的**每一次**变化，
+	// 跑完后在日志里断言出现过分项文案（不依赖任何停留窗口）。
+	if _, err := page.Evaluate(`() => {
+		window.__sumLog = [];
+		const n = document.querySelector('#v2-uploads-sum');
+		if (!n) { return; }
+		const rec = () => window.__sumLog.push(n.textContent || '');
+		rec();
+		new MutationObserver(rec).observe(n, {childList: true, characterData: true, subtree: true});
+	}`, nil); err != nil {
+		t.Fatalf("安装汇总观察器: %v", err)
+	}
 	if err := page.Locator("#v2-upload-input").SetInputFiles([]playwright.InputFile{
 		{Name: "q1.txt", MimeType: "text/plain", Buffer: []byte("q1")},
 		{Name: "q2.txt", MimeType: "text/plain", Buffer: []byte("q2")},
@@ -594,15 +607,18 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		nil, playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(6000)}); err != nil {
 		t.Fatalf("上传队列行未出现: %v", err)
 	}
-	// 汇总文案按状态分项（排队 / 上传中 / 暂停 / 失败）：多文件刚投放时至少会有「排队 N」。
-	if sum, _ := page.Evaluate(`() => (document.querySelector('#v2-uploads-sum') || {}).textContent || ''`, nil); !strings.Contains(fmt.Sprint(sum), "排队") && !strings.Contains(fmt.Sprint(sum), "上传中") {
-		t.Fatalf("上传汇总缺失: %q", sum)
-	}
 	// 队列跑完后容器应隐藏、文件出现。
 	if _, err := page.WaitForFunction(
 		"() => { const b = document.querySelector('#v2-uploads'); return !b || b.hidden; }", nil,
 		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(15000)}); err != nil {
 		t.Fatalf("上传队列未清空: %v", err)
+	}
+	// 汇总分项文案必须真实出现过（排队 / 上传中 / 暂停 / 失败 之一）。
+	if got, err := page.Evaluate(`() => (window.__sumLog || []).join('|')`, nil); err != nil {
+		t.Fatalf("读取汇总日志: %v", err)
+	} else if log := fmt.Sprint(got); !strings.Contains(log, "排队") && !strings.Contains(log, "上传中") &&
+		!strings.Contains(log, "暂停") && !strings.Contains(log, "失败") {
+		t.Fatalf("上传汇总从未出现分项文案（日志: %q）", log)
 	}
 
 	// ①b 审查回归：小文件（走 uploadSimpleFile，非分块）失败也必须落到 failed 态 ——
