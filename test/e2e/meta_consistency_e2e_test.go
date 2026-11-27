@@ -16,10 +16,14 @@ package e2e_test
 // 分块上传（meta_extra）→ GetMetaInfo → 清理。未配置 env 自动 skip。
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -246,6 +250,125 @@ func TestOverwriteConsistencyRealVolumes(t *testing.T) {
 			assertMetaMTime(t, "overwrite", mi.MTime, wantMTime)
 		})
 	}
+}
+
+// TestSpaceAccountingRealVolumes 验收「空间账与实际字节一致」的三个不变量：
+//
+//  1. 上传 ⇒ usage 增长 ≈ 文件大小（账本真的记了）；
+//  2. **幂等重传同内容 ⇒ usage 完全不变**（真短路，没有写 —— 与
+//     `TestIdempotentReuploadRealVolumes` 的"零版本"断言互补：那条看逻辑，这条看账）；
+//  3. **删除 ⇒ usage 回到基线附近**（空间真的被归还。这一条最值钱：账本只增不减
+//     在生产上表现为"配额莫名其妙耗尽"，而没有任何内容断言能发现它）。
+//
+// **刻意不**断言「覆盖写回收旧内容」：versioning 开启时服务端会**保留旧版本**（先备份再覆盖），
+// usage 因此按设计增长一个文件大小；versioning 关闭时覆盖被拒（409）。两种情况都不该被
+// 当成"泄漏"——实测确认了这一点（见 docs/feature-review/07）。
+//
+// 观测量用 `GET /api/volumes` 的 `usage`（容量池/卷级计数，跨存储形态都取得到）；
+// 不走 `/orphans`（需卷实现 OrphanAuditor，本地/可信卷未实现 ⇒ 503）。
+func TestSpaceAccountingRealVolumes(t *testing.T) {
+	t.Parallel()
+	base := strings.TrimRight(os.Getenv("SPROXY_META_E2E_URL"), "/")
+	bearer := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_BEARER"))
+	ak, sk, skid := os.Getenv("SPROXY_META_E2E_AK"), os.Getenv("SPROXY_META_E2E_SK"), os.Getenv("SPROXY_META_E2E_SKID")
+	volsRaw := strings.TrimSpace(os.Getenv("SPROXY_META_E2E_VOLUMES"))
+	if base == "" || volsRaw == "" || (bearer == "" && (ak == "" || sk == "" || skid == "")) {
+		t.Skip("需要 SPROXY_META_E2E_URL/VOLUMES 以及 AK/SK/SKID 或 BEARER")
+	}
+	if bearer == "" {
+		t.Skip("usage 观测走 api_keys Bearer")
+	}
+	const size = 3 << 20 // 3 MiB
+	payload := bytes.Repeat([]byte("S"), size)
+	dir := t.TempDir()
+	local := dir + "/space.bin"
+	if err := os.WriteFile(local, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	usage := func() (int64, error) {
+		req, rerr := http.NewRequest(http.MethodGet, base+"/api/volumes", nil)
+		if rerr != nil {
+			return 0, rerr
+		}
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, derr := http.DefaultClient.Do(req)
+		if derr != nil {
+			return 0, derr
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return 0, fmt.Errorf("volumes HTTP %d", resp.StatusCode)
+		}
+		var body struct {
+			Volumes []struct {
+				Name  string `json:"name"`
+				Usage int64  `json:"usage"`
+			} `json:"volumes"`
+		}
+		if jerr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body); jerr != nil {
+			return 0, jerr
+		}
+		var total int64
+		for _, v := range body.Volumes {
+			total += v.Usage
+		}
+		return total, nil
+	}
+
+	t.Run("space", func(t *testing.T) {
+		// 不指名卷：走默认路由（显式指名卷会被 AD-4 卷唯一性查重影响）。
+		fc := client.NewFileClient(base, client.WithTimeout(60*time.Second), client.WithBearerToken(bearer))
+		ctx := context.Background()
+		remote := fmt.Sprintf("space-e2e-%d.bin", time.Now().UnixNano())
+		cleanupDone := false
+		t.Cleanup(func() {
+			if !cleanupDone {
+				_ = fc.Delete(context.Background(), remote, "")
+			}
+		})
+
+		before, err := usage()
+		if err != nil {
+			t.Skipf("usage 不可读（%v）", err)
+		}
+		// ① 上传 ⇒ 账本增长约一个文件大小。
+		if _, uerr := fc.ChunkedUpload(ctx, local, remote); uerr != nil {
+			t.Fatalf("上传: %v", uerr)
+		}
+		afterUp, err := usage()
+		if err != nil {
+			t.Fatalf("上传后 usage 不可读: %v", err)
+		}
+		if grown := afterUp - before; grown < size/2 {
+			t.Fatalf("上传后 usage 未增长（before=%d after=%d，期望 ≥ +%d）⇒ 账本没记或观测不可用",
+				before, afterUp, size/2)
+		}
+		// ② 幂等重传同内容 ⇒ usage **完全不变**（真短路）。
+		if _, ierr := fc.ChunkedUpload(ctx, local, remote); ierr != nil {
+			t.Fatalf("幂等重传: %v", ierr)
+		}
+		afterIdem, err := usage()
+		if err != nil {
+			t.Fatalf("幂等后 usage 不可读: %v", err)
+		}
+		if afterIdem != afterUp {
+			t.Fatalf("幂等重传改动了 usage（before=%d after=%d）⇒ 不是真短路", afterUp, afterIdem)
+		}
+		// ③ 删除 ⇒ usage 回到基线附近（空间真的归还；容差 1/4 文件大小吸收元数据/块粒度）。
+		if derr := fc.Delete(ctx, remote, ""); derr != nil {
+			t.Fatalf("删除: %v", derr)
+		}
+		cleanupDone = true
+		afterDel, err := usage()
+		if err != nil {
+			t.Fatalf("删除后 usage 不可读: %v", err)
+		}
+		if leaked := afterDel - before; leaked > size/4 {
+			t.Fatalf("删除后仍有 %d 字节未归还（before=%d after=%d）⇒ 账本只增不减，配额会被慢慢吃光",
+				leaked, before, afterDel)
+		}
+	})
 }
 
 // TestIdempotentReuploadRealVolumes 幂等重传验收（nightly/手工）：同内容再传一次必须

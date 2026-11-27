@@ -108,7 +108,7 @@ jobs:
           SPROXY_META_E2E_BEARER: nightly-token
           SPROXY_META_E2E_VOLUMES: main,s3
         run: |
-          go test -tags=e2e -run 'TestMetaConsistencyRealVolumes|TestOverwriteConsistencyRealVolumes|TestIdempotentReuploadRealVolumes|TestOverwriteDefaultRouteRealVolumes' -v ./test/e2e
+          go test -tags=e2e -run 'TestMetaConsistencyRealVolumes|TestOverwriteConsistencyRealVolumes|TestIdempotentReuploadRealVolumes|TestNoOrphanChunksRealVolumes|TestOverwriteDefaultRouteRealVolumes' -v ./test/e2e
 
       # nightly 失败必须**有人看得见**：扫描式流程失败时没人盯着 Actions 页面，「每天绿/红」
       # 变成背景噪声。此处开（或复用一个仍 OPEN 的）issue，并带上失败 job 链接。
