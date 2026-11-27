@@ -197,8 +197,23 @@ func (c *ConflictIndex) Get(id string) (*ConflictItem, bool) {
 	if !ok {
 		return nil, false
 	}
+	return deepCopyConflictItem(it), true
+}
+
+// deepCopyConflictItem 返回冲突条目快照（深拷贝 `Ours`/`Theirs` 切片）。
+//
+// 为什么（2026-11-27，R62 同族）：`Get` 把快照交给 HTTP 层，后者在解锁后序列化。
+// `ConflictItem` 含两个 `[]string`（`Ours`/`Theirs`）⇒ 值拷贝会共享底层数组；
+// 一旦将来有人在这些切片上原地改写（追加/替换元素），就会重现 cloud/syncmgr 的
+// 「读到半更新条目 / DATA RACE」缺陷。当前只在构造期写，但代价极低、收益是消除隐患。
+func deepCopyConflictItem(it *ConflictItem) *ConflictItem {
+	if it == nil {
+		return nil
+	}
 	cp := *it
-	return &cp, true
+	cp.Ours = append([]string(nil), it.Ours...)
+	cp.Theirs = append([]string(nil), it.Theirs...)
+	return &cp
 }
 
 // ResolveManual 手动解决：写 content 后标 resolved（调用方负责把 content 写回文件）。

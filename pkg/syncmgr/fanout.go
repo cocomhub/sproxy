@@ -91,7 +91,8 @@ func (m *Manager) FanoutChildren(parentID string) []*SyncTask {
 	var out []*SyncTask
 	for _, t := range m.tasks {
 		if t.FanoutParentID == parentID {
-			out = append(out, t)
+			// 深拷贝（R62 同族）：返回活动对象会让调用方在锁外读到并发改写的 Results/Carriers。
+			out = append(out, deepCopySyncTask(t))
 		}
 	}
 	return out
@@ -103,7 +104,8 @@ func (m *Manager) GetFanoutChild(parentID, remote string) *SyncTask {
 	defer m.mu.RUnlock()
 	for _, t := range m.tasks {
 		if t.FanoutParentID == parentID && t.Remote == remote {
-			return t
+			// 深拷贝（R62 同族）：见 FanoutChildren 的同条理由。
+			return deepCopySyncTask(t)
 		}
 	}
 	return nil
