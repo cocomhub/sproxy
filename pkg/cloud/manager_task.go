@@ -1690,9 +1690,10 @@ func (m *CloudDownloadManager) findByURL(url, owner string, params TaskParams) *
 	for _, t := range m.tasks {
 		if t.URL == url && (t.Status == "pending" || t.Status == "downloading") && ownerVisible(t.Owner, owner) &&
 			sameTaskParams(t, params) {
-			c := *t
-			c.account = nil // 快照不暴露运行时配额句柄
-			return &c
+			// **必须深拷贝**（2026-11-27 同族补漏，与 ListTasks 一致）：该快照会被
+			// CreateTask **直接返回给调用方**（HTTP 层随后在解锁后 json.Marshal）⇒ 逃逸到
+			// 后续步骤后与锁内的原地写（recordChunkState 改 Chunks[i]、诊断写）无同步 ⇒ RACE。
+			return deepCopyTask(t)
 		}
 	}
 	return nil
