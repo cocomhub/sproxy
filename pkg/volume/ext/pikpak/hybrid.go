@@ -2003,6 +2003,13 @@ func (d *HybridDownloader) journalStateMatches(dc *downloadCtx, st *ProgressStat
 	if st.Hash != "" && dc.target.Hash != "" && st.Hash != dc.target.Hash {
 		return false
 	}
+	// 分块几何不一致（2026-11-27 审查）：manifest 缺失时本次按自适应几何规划，而 WAL 的分片
+	// 记录属于旧几何——offset 语义不再是同一区间。**小几何 WAL + 大几何规划**会让一个未完成
+	// 的大分片被整块跳过（该段是零洞）⇒ GCID 必失败、每次重试重复，只能靠 ResetOnGCIDMismatch
+	// 兜底重下。此处直接判"不可信"⇒ 作废 WAL，按新几何从零下（可预测、无静默损坏）。
+	if st.ChunkSize > 0 && dc.chunkSize > 0 && st.ChunkSize != dc.chunkSize {
+		return false
+	}
 	return true
 }
 
