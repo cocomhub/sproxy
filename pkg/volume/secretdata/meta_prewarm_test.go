@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
+
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
 
@@ -74,7 +76,7 @@ func TestPrewarmLoop_StopsOnCtxCancel(t *testing.T) {
 	go func() { fs.prewarmLoop(ctx, []prewarmJob{}); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(2 * time.Second)):
 		t.Fatal("已取消的 ctx 应立即返回")
 	}
 }

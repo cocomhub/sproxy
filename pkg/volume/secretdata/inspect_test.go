@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -212,7 +214,7 @@ func (g *gateStatFS) Stat(ctx context.Context, p string) (*syncpkg.Entry, error)
 	}
 	select {
 	case <-g.gate:
-	case <-time.After(2 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(2 * time.Second)):
 	}
 	return g.LocalFS.Stat(ctx, p)
 }

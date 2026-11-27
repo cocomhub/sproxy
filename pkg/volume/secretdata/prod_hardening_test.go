@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cocomhub/sproxy/pkg/testutil"
+
 	"github.com/cocomhub/sproxy/pkg/cryptox/shardseal"
 	syncpkg "github.com/cocomhub/sproxy/pkg/sync"
 )
@@ -96,7 +98,7 @@ func TestRenameMetaWriteFailure_DoesNotDeadlockVolume(t *testing.T) {
 		if err == nil {
 			t.Fatal("meta 写失败时改名胜出（应返回错误）")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(10 * time.Second)):
 		inner.mu.Lock()
 		n := inner.failed
 		inner.mu.Unlock()
@@ -177,7 +179,7 @@ func TestDeleteLastFile_KeepsInFlightWrite(t *testing.T) {
 
 	select {
 	case <-inner.entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(10 * time.Second)):
 		t.Fatal("在途写未进入上传阶段（用例前提不成立）")
 	}
 
@@ -192,7 +194,7 @@ func TestDeleteLastFile_KeepsInFlightWrite(t *testing.T) {
 		if err != nil {
 			t.Fatalf("在途写应成功: %v", err)
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(testutil.ScaleTimeout(30 * time.Second)):
 		t.Fatal("在途写未完成")
 	}
 
