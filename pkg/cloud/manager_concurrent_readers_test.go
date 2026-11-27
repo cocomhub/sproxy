@@ -101,7 +101,7 @@ func TestDownloadLifecycle_ConcurrentReadersNoRace(t *testing.T) {
 	}()
 
 	// 等任务到达终态（完成或失败都算生命周期走完），再停读面。
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		snap, ok := mgr.SnapshotTask(task.ID, "")
 		if !ok {
 			return false

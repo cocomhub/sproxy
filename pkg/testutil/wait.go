@@ -122,3 +122,21 @@ func MakeReadOnlyDir(t *testing.T) (string, func()) {
 	}
 	return d, func() {}
 }
+
+// raceScale 是 `-race` 构建下的等待窗口放大倍数。
+//
+// 取值依据（2026-11-27 实测，20 核）：`-race` 让单用例慢 5–10 倍；全包 `t.Parallel` 再叠加
+// 抢占 ⇒ 实测同一用例从 4.1s 变成 28s+（7 倍）。取 4 覆盖绝大多数场景，同时保留"真泄漏/
+// 真超时"仍会在放大后的窗口内失败（不是无限等待）。
+const raceScale = 4
+
+// ScaleTimeout 按「当前是否 -race 构建」放大等待窗口。
+//
+// 用法：把测试里的固定常量包起来——`testutil.ScaleTimeout(5 * time.Second)`。
+// **不改变断言语义**，只改变"多慢仍算通过"；非 race 构建下原样返回。
+func ScaleTimeout(d time.Duration) time.Duration {
+	if RaceEnabled && d > 0 {
+		return d * raceScale
+	}
+	return d
+}

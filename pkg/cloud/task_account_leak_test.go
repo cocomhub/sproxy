@@ -68,7 +68,7 @@ func TestCloudTask_ConcurrentResumeCancel_NoLeak(t *testing.T) {
 	_ = mgr.ResumeTask(task.ID, false, owner)
 	// 等 goroutine 完全退出（running 清除）再断言：ResumeTask 异步启动 goroutine，
 	// cancelled 早退 + cleanupRunning 释放需要时间；未等即断言会误判泄漏（假红）。
-	testutil.WaitFor(t, 30*time.Second, func() bool {
+	testutil.WaitFor(t, testutil.ScaleTimeout(30*time.Second), func() bool {
 		return !re.isRunning(task.ID)
 	}, "resume 启动的 goroutine 未退出")
 	// 终态断言：断点仍在盘上 ⇒ Scope 必须等于磁盘字节（90），既不得归零（fail-open）

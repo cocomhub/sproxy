@@ -29,7 +29,7 @@
 | C | `pkg/tunnel` 3 例同时失败（#1115 的 `Test (windows)`；#1138 的 `Test (ubuntu, +Vault)` **复现**） | **A 真实数据竞争** | ✅ **已修** | 根因：`TestGetBuf_PutBuf` 在 `putBuf` **归还池之后**仍读 `buf[0]`（断言"清零"）⇒ 池可**立即**把该 buffer 交给并行使用者（CI 实测 `mockStream.Read`）⇒ race。修法：**不再读归还后的内存**，改为锁定 `getBuf` 的契约（长度/可再次取用）。**对照**：master 整包 `-race` 复现 1/3 次、修复后 `-count=20` 通过 |
 | D | `pkg/server/s3` `TestListObjectsV2_NamedBucket` / `TestBucketRouting` | B? | 🔍 **待复现** | 曾本地复现一次、其后多次不复现 |
 | E | `TestStageDL_TamperedFallsBackToRemote` | B? | 🔍 **待复现** | 在一次全量 `./pkg/...` 中失败、重跑即过 |
-| F | `pkg/cloud` `TestCloudDownloadManager_SubmitAndStart_Async` | B? | 🔍 **待复现** | 文案 `timeout waiting for async download to complete`；疑**等待语义**（非纯超时） |
+| F | `pkg/cloud` 全包等待类用例（`SubmitAndStart_Async` / `QueuedTaskCancellable` / `StorageAccountingNoLeak` / `StorageFullAfterDownload_*` / `RecoverRestartsDownloading` …） | **B 负载型（已定位并修）** | ✅ **已修 2026-11-27** | 原文案 `timeout waiting for async download to complete` / `Close() hung: download goroutine leaked`。**根因（本地确定性复现）**：`-race` + 全包 `t.Parallel` 的 CPU 抢占 —— 单跑 4.1s 的用例在全包 `-race` 下 28–39s 才完成，而窗口是固定 5s/10s/30s ⇒ 把"慢"误报成"泄漏/超时"。**取证**：单独跑失败用例全绿（4.1s）、`-parallel 4` 全包全绿（94s）、`git diff --name-only origin/master \| grep cloud` 为空（该分支未改 pkg/cloud）。**修法（不是加大常量）**：新增 `testutil.ScaleTimeout`，按 `-race` 构建放大 4×（`RaceEnabled` 由 `//go:build race` 决定）⇒ **非 race 构建保持原严格窗口**，不放宽真实缺陷检出；cloud 包 7 个测试文件的等待窗口统一接入。**验证**：全包 `-race -count=1` 连续 3 次全绿（38s/36s/35s，此前 67–94s 且多次失败）。 |
 | G | `pkg/volume/secretdata` `TestWriteFileStream_MemoryDeliveryUploadFail_NoChunkOrphan` | B? | 🔍 **待复现** | 失败文案「夹具未命中内存交付分块上传失败分支」⇒ 疑**块级并发下错误汇总文案**不确定；本地 `-count=30` 与全包 ×3 均不复现 |
 
 ### 待复现条目的取证要求（下次出现时补齐）
