@@ -2067,20 +2067,56 @@ func (d *HybridDownloader) markChunkDone(ctx context.Context, dc *downloadCtx, c
 	// 进程内只用内存；文件只在崩溃恢复时被读，绝大多数任务整个生命周期都读不到）。
 	// 锁外执行：audit 写入可能 fsync，不应阻塞其它分片的 manifest 更新。
 	if jerr := dc.journal.ChunkDone(ctx, c.offset, c.length); jerr != nil {
-		d.log.Warn("hybrid journal chunk save failed, fallback to manifest", "offset", c.offset, "err", jerr)
+		// **只 Warn 一次**（持续故障时每块都 Warn 会刷屏，淹没真正的诊断信息）。
+		dc.manifestMu.Lock()
+		alreadyDegraded := dc.journalDegraded
+		dc.manifestMu.Unlock()
+		if !alreadyDegraded {
+			d.log.Warn("hybrid journal chunk save failed, degrade to manifest writes", "offset", c.offset, "err", jerr)
+		}
 		d.manifestFallback(dc)
 	}
+}
+
+// persistDegraded 在「WAL 不可用（持续失败）」时按**节流**写 manifest。
+//
+// 为什么需要（2026-11-27 审查）：`manifestFallback` 是**一次性**兜底——回落写完一次完整
+// manifest 后，后续分片仍继续尝试 WAL；若 WAL **持续**失败，则**每个**分片都整文件重写
+// manifest ⇒ 回到 #1342 要消除的 O(n²) 写放大（64 GiB / 1 MiB 子块 ⇒ 65536 次全量重写）。
+//
+// 降级后按与「无 WAL」路径**同一节流**（8 块 / 5s）写：进度仍然不丢（崩溃最多丢节流窗口内
+// 的几块），写放大回到 O(n)。调用方必须持 dc.manifestMu。
+func (d *HybridDownloader) persistDegraded(dc *downloadCtx) {
+	if dc.manifest == nil {
+		return
+	}
+	dc.subDirty++
+	if dc.subDirty < subMaskPersistEvery && time.Since(dc.lastPersistAt) < subMaskPersistInterval {
+		return
+	}
+	dc.subDirty = 0
+	dc.lastPersistAt = time.Now()
+	writeManifest(dc.destPath, dc.manifest)
+	dc.manifestWrites++
 }
 
 // manifestFallback 在 WAL 写失败时把内存进度补写到 manifest（防止"只追加"路径丢恢复依据）。
 func (d *HybridDownloader) manifestFallback(dc *downloadCtx) {
 	dc.manifestMu.Lock()
 	defer dc.manifestMu.Unlock()
+	wasDegraded := dc.journalDegraded
 	dc.journalDegraded = true
-	if dc.manifest != nil {
+	if dc.manifest == nil {
+		return
+	}
+	if !wasDegraded {
+		// 首次降级：立刻写一次完整 manifest（把此前只存在于内存/WAL 的进度落盘，不留窗口）。
 		writeManifest(dc.destPath, dc.manifest)
 		dc.manifestWrites++
+		return
 	}
+	// 持续降级：按节流写（否则每块全量重写 ⇒ O(n²) 回归）。
+	d.persistDegraded(dc)
 }
 
 // removeManifest 完成时删除 manifest。
