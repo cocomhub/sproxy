@@ -328,7 +328,14 @@ type downloadCtx struct {
 	reusedMu   sync.Mutex       // 保护 reusedID（round-11 Critical：并发账号 chunk 无锁读写竞态）
 	manifestMu sync.Mutex       // manifest 写串行化（markChunkDone/markSub）
 	masks      map[int64]uint64 // chunk offset → 已完成子块位图（内存镜像，与 manifest.Blocks 同步）
-	journal    ProgressJournal  // 进度日志（audit WAL；nil = 仅 manifest）
+	// manifest 是**内存镜像**（2026-11-27 性能修复）：此前每次 markChunkDone/persistSubMask
+	// 都 `loadManifest` 全量读盘 + JSON 解析——64GiB 文件（1MiB 子块 ⇒ 65536 次）累计读放大
+	// 达数十 GB（O(n²)）。改为下载期只读写一次：内存对象随位图一起增量更新。
+	manifest       *hybridManifest
+	subDirty       int             // 自上次写盘以来新完成的子块数（节流用）
+	lastPersistAt  time.Time       // 上次写盘时间（节流用）
+	manifestWrites int             // manifest 写盘次数（测试观测用）
+	journal        ProgressJournal // 进度日志（audit WAL；nil = 仅 manifest）
 	// 单次下载不变上下文（Sonar S107 收敛，2026-10-05）：shareID/target/destPath/prog/
 	// onProgress 本是下载期常量，从函数签名收进 dc——函数签名降回 ≤7 参数。
 	shareID    string
@@ -625,6 +632,7 @@ func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64, chun
 	dc.manifestMu.Lock()
 	dc.masks = make(map[int64]uint64, len(manifest.Blocks))
 	maps.Copy(dc.masks, manifest.Blocks)
+	dc.manifest = manifest // 内存镜像复用（后续写盘不再全量读盘）
 	dc.manifestMu.Unlock()
 	// 续传进度基准：整块完成 + 部分完成的子块字节都计入（进度不从 0 重来）。
 	var done int64
@@ -632,8 +640,16 @@ func (d *HybridDownloader) prepareManifest(dc *downloadCtx, shareEnd int64, chun
 		done += ln
 	}
 	for off, mask := range manifest.Blocks {
-		done += int64(bits.OnesCount64(mask)) * hybridSubBlockSize
-		_ = off
+		// 子块完成字节按 **chunk 实际长度**钳制（尾块不足 1MiB 时不再虚增进度）。
+		chunkLen := *chunkSize
+		if remain := dc.currentTotal - off; remain < chunkLen {
+			chunkLen = remain
+		}
+		if chunkLen <= 0 {
+			continue
+		}
+		got := int64(bits.OnesCount64(mask)) * hybridSubBlockSize
+		done += min(got, chunkLen)
 	}
 	if done > dc.currentTotal {
 		done = dc.currentTotal
@@ -992,23 +1008,55 @@ func (d *HybridDownloader) markSub(ctx context.Context, dc *downloadCtx, c chunk
 }
 
 // persistSubMask 把子块位图写入 manifest（部分完成时；整块完成走 markChunkDone）。
+// subMaskPersistEvery 是子块位图**最小写盘间隔**（子块数）：攒够才写盘。
+// 崩溃最多丢失这么多子块（≤8MiB）的进度——远优于整 chunk（≤64MiB）重下。
+const subMaskPersistEvery = 8
+
+// subMaskPersistInterval 是子块位图的**时间**写盘间隔（二者满足其一即写）。
+const subMaskPersistInterval = 5 * time.Second
+
+// persistSubMask 把子块位图写入 manifest（部分完成时；整块完成走 markChunkDone）。
+//
+// 2026-11-27 性能修复：不再每次全量读盘（见 downloadCtx.manifest 注释），并且**节流写盘**——
+// 此前 1MiB 子块 × 64GiB ⇒ 65536 次「读全量 manifest + 写全量 manifest」（写放大数十 GB）。
 func (d *HybridDownloader) persistSubMask(dc *downloadCtx, c chunk, mask uint64, src manifestSource) {
 	dc.manifestMu.Lock()
 	defer dc.manifestMu.Unlock()
-	m := loadManifest(dc.destPath)
-	if m != nil && !m.SourceMatches(src.ShareID, &ShareFile{ID: src.FileID, Size: src.Size, Hash: src.Hash}) {
-		m = nil // 源身份不一致（异常残留）⇒ 重建，避免污染
-	}
-	if m == nil {
-		m = &hybridManifest{Chunks: map[int64]int64{}, ChunkSize: dc.chunkSize}
-	}
+	m := d.manifestLocked(dc, src)
 	if m.Blocks == nil {
 		m.Blocks = map[int64]uint64{}
 	}
 	m.Blocks[c.offset] = mask
 	m.ChunkSize = manifestChunkSize(m, dc)
 	m.Source = src
+	dc.subDirty++
+	if dc.subDirty < subMaskPersistEvery && time.Since(dc.lastPersistAt) < subMaskPersistInterval {
+		return
+	}
 	writeManifest(dc.destPath, m)
+	dc.subDirty = 0
+	dc.lastPersistAt = time.Now()
+	dc.manifestWrites++
+}
+
+// manifestLocked 返回 manifest 内存镜像（懒加载；调用方必须持 dc.manifestMu）。
+// 磁盘 manifest 与本次源身份不一致（异常路径残留旧源）⇒ 重建空 manifest，不合并旧 chunk。
+func (d *HybridDownloader) manifestLocked(dc *downloadCtx, src manifestSource) *hybridManifest {
+	if dc.manifest != nil {
+		return dc.manifest
+	}
+	m := loadManifest(dc.destPath)
+	if m != nil && !m.SourceMatches(src.ShareID, &ShareFile{ID: src.FileID, Size: src.Size, Hash: src.Hash}) {
+		m = nil
+	}
+	if m == nil {
+		m = &hybridManifest{Chunks: map[int64]int64{}, ChunkSize: dc.chunkSize}
+	}
+	if m.Chunks == nil {
+		m.Chunks = map[int64]int64{}
+	}
+	dc.manifest = m
+	return m
 }
 
 // manifestChunkSize 返回应记录的 chunk 几何（已有值优先；缺失时用本次几何）。
@@ -1916,18 +1964,17 @@ func mergeJournalChunks(manifest *hybridManifest, done map[int64]int64) int {
 // markChunkDone 原子记录 chunk 完成（追加到 manifest；首次记录源身份），并写进度 WAL。
 func (d *HybridDownloader) markChunkDone(ctx context.Context, dc *downloadCtx, c chunk, src manifestSource) {
 	dc.manifestMu.Lock()
-	m := loadManifest(dc.destPath)
-	// 🟠4 加固：磁盘 manifest 源与本次不一致（异常路径残留旧源）→ 重建空 manifest（不合并旧 chunk）。
-	if m != nil && !m.SourceMatches(src.ShareID, &ShareFile{ID: src.FileID, Size: src.Size, Hash: src.Hash}) {
-		m = &hybridManifest{Chunks: map[int64]int64{}}
-	}
-	if m == nil {
-		m = &hybridManifest{Chunks: map[int64]int64{}}
+	m := d.manifestLocked(dc, src)
+	if m.Chunks == nil {
+		m.Chunks = map[int64]int64{}
 	}
 	m.Chunks[c.offset] = c.length
 	delete(m.Blocks, c.offset) // 整块完成 ⇒ 子块位图不再需要
 	m.Source = src
 	writeManifest(dc.destPath, m)
+	dc.subDirty = 0
+	dc.lastPersistAt = time.Now()
+	dc.manifestWrites++
 	dc.manifestMu.Unlock()
 	// WAL 记录（锁外：audit 写入可能 fsync，不阻塞其它分片的 manifest 写入）。
 	if dc.journal != nil {

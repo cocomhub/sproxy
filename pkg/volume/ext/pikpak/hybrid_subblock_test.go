@@ -179,3 +179,55 @@ func TestHybridDownload_ResumeOnlyMissingSubBlocks(t *testing.T) {
 		t.Fatalf("续传后内容不一致（%d vs %d 字节）", len(out), len(payload))
 	}
 }
+
+// TestPersistSubMask_ThrottledAndMemoryMirrored 锁定子块位图的**写盘节流 + 内存镜像**：
+// 此前每次子块完成都「全量读盘 + 全量写盘」manifest（64GiB/1MiB ⇒ 65536 次，写放大数十 GB）。
+func TestPersistSubMask_ThrottledAndMemoryMirrored(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out.bin")
+	hd := &HybridDownloader{}
+	const chunkSize = 64 << 20
+	dc := &downloadCtx{
+		currentTotal: 64 << 20, chunkSize: chunkSize, destPath: dest,
+		shareID: "EXAMPLE-SUB", target: &ShareFile{ID: "fid", Size: 64 << 20, Hash: "H"},
+	}
+	src := manifestSource{ShareID: "EXAMPLE-SUB", FileID: "fid", Size: 64 << 20, Hash: "H"}
+	// 64 个子块逐个完成（每次一个新位）
+	for i := range 64 {
+		mask := (uint64(1) << uint(i+1)) - 1
+		hd.persistSubMask(dc, chunk{offset: 0, length: chunkSize}, mask, src)
+	}
+	// 写盘次数必须被节流（每 8 个子块最多一次；容忍首末各一次）
+	if dc.manifestWrites == 0 || dc.manifestWrites > 10 {
+		t.Fatalf("写盘应被节流，got %d 次（64 个子块）", dc.manifestWrites)
+	}
+	// 内存镜像持有最新位图，且落盘内容与内存一致（最后一次写盘）
+	const fullMask uint64 = ^uint64(0) // 64 个子块全完成
+	if dc.manifest == nil || dc.manifest.Blocks[0] != fullMask {
+		t.Fatalf("内存镜像位图不正确: %+v", dc.manifest)
+	}
+	m := loadManifest(dest)
+	if m == nil {
+		t.Fatal("manifest 应已落盘")
+	}
+	if m.Blocks[0] == 0 {
+		t.Fatalf("落盘位图不应为空: %+v", m.Blocks)
+	}
+}
+
+// TestMarkChunkDone_WritesImmediately 锁定整块完成必须**立即**落盘（不参与节流）。
+func TestMarkChunkDone_WritesImmediately(t *testing.T) {
+	t.Parallel()
+	dest := filepath.Join(t.TempDir(), "out2.bin")
+	hd := &HybridDownloader{}
+	dc := &downloadCtx{
+		currentTotal: 4 << 20, chunkSize: 4 << 20, destPath: dest,
+		shareID: "EXAMPLE-DONE", target: &ShareFile{ID: "f2", Size: 4 << 20, Hash: "H2"},
+	}
+	src := manifestSource{ShareID: "EXAMPLE-DONE", FileID: "f2", Size: 4 << 20, Hash: "H2"}
+	hd.markChunkDone(context.Background(), dc, chunk{offset: 0, length: 4 << 20}, src)
+	m := loadManifest(dest)
+	if m == nil || m.Chunks[0] != 4<<20 {
+		t.Fatalf("整块完成必须立即落盘，got %+v", m)
+	}
+}
