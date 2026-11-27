@@ -105,15 +105,22 @@
   }
 
   function kickNode(id) {
-    if (!window.confirm('踢出节点 ' + id + '？该节点将从中继路由与 DHT 中移除，需重新注册才能加入。')) { return; }
-    api.json('DELETE', '/api/hub/nodes/' + encodeURIComponent(id))
-      .then(function () {
-        if (window.v2toast) { window.v2toast('ok', '已踢出节点 ' + id); }
-        loadHub();
-      })
-      .catch(function (e) {
-        banner('v2-hub-state', '踢出失败：' + (e.message || e), 'warn');
-      });
+    // 破坏性操作走 v2 对话框（与其它破坏性动作同一实现：原生 confirm 阻塞渲染且无样式）。
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '踢出节点？',
+      message: '节点 ' + id + ' 将从中继路由与 DHT 中移除，需重新注册才能加入。',
+      okText: '踢出', danger: true
+    }, function () {
+      api.json('DELETE', '/api/hub/nodes/' + encodeURIComponent(id))
+        .then(function () {
+          if (window.v2toast) { window.v2toast('ok', '已踢出节点 ' + id); }
+          loadHub();
+        })
+        .catch(function (e) {
+          banner('v2-hub-state', '踢出失败：' + (e.message || e), 'warn');
+        });
+    });
   }
 
   /** 探测当前凭据角色（admin 才显示踢出按钮）；无权限/接口不可用时保持只读。 */

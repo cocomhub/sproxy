@@ -294,8 +294,22 @@
     var box0 = el('v2-vd-rule-errors');
     if (warn) {
       if (box0) { box0.hidden = false; box0.textContent = warn; }
-      if (!window.confirm(warn + ' 继续保存？')) { return Promise.resolve(); }
+      // 覆盖基线是破坏性语义（基线里未列出的规则会失效）⇒ 用 v2 对话框确认，
+      // 并把警告原文放进对话框（用户不必先读面板再回忆）。
+      if (!window.v2confirm) { return Promise.resolve(); }
+      return window.v2confirm({
+        title: '用运行期规则覆盖基线？',
+        message: warn,
+        okText: '覆盖并保存', danger: true
+      }).then(function (ok) { return ok ? saveRulesNow() : undefined; });
     }
+    return saveRulesNow();
+  }
+
+  /** 校验 + 提交规则（被 saveBlockPolicy 在确认之后调用；也用于无警告路径）。 */
+  function saveRulesNow() {
+    var S = settings();
+    if (!S || !api) { return Promise.resolve(); }
     var check = S.validateRules(state.rows, { hardMax: S.HARD_MAX_SINGLE_BYTES });
     var box = el('v2-vd-rule-errors');
     if (!check.ok) {

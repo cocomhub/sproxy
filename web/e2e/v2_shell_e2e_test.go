@@ -1235,19 +1235,22 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := waitLoc(page, "#v2-set-delete-mode", playwright.WaitForSelectorStateVisible, 5000); err != nil {
 		t.Fatalf("删除默认方式选择器缺失: %v", err)
 	}
-	// 页面级 dialog 处理器只装一次，按消息分派（重复 OnDialog 会让后面的 prompt 拿到空值）。
-	respondDialogs(page, func(d playwright.Dialog) {
-		if strings.Contains(d.Message(), "Secret 名称") {
-			_ = d.Accept("e2esecret")
-			return
-		}
-		_ = d.Accept()
-	})
+	// 页面级 dialog 处理器只装一次（重复 OnDialog 会让后面的对话框拿到空值）。
+	// 注：v2 已无原生 prompt/confirm（全部走 #v2-confirm 对话框）⇒ 此处只兜底接受。
+	respondDialogs(page, func(d playwright.Dialog) { _ = d.Accept() })
 	if _, err := page.Locator("#v2-set-delete-mode").SelectOption(playwright.SelectOptionValues{Values: &[]string{"hard"}}); err != nil {
 		t.Fatalf("选择 hard: %v", err)
 	}
 	if err := page.Locator("#v2-set-delete-save").Click(); err != nil {
 		t.Fatalf("保存删除默认方式: %v", err)
+	}
+	// 「直接删除」= 关闭安全能力 ⇒ 走 v2 确认对话框（不再是原生 confirm）。
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("改为直接删除未弹确认框: %v", err)
+	}
+
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("确认改为直接删除: %v", err)
 	}
 	if _, err := page.WaitForFunction(
 		"() => { const t = document.querySelector('#v2-toasts'); return t && t.textContent.includes('删除默认方式已保存'); }",
@@ -1353,6 +1356,20 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		if err := page.Locator("#v2-sec-create").Click(); err != nil {
 			t.Fatalf("创建 secret: %v", err)
 		}
+		// 名称输入走 v2 对话框（原生 prompt 已移除）。
+		if err := waitLoc(page, "#v2-confirm-input", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+			t.Fatalf("新建 secret 未弹名称对话框: %v", err)
+		}
+		if err := page.Locator("#v2-confirm-input").Fill("e2esecret"); err != nil {
+			t.Fatalf("填写 secret 名称: %v", err)
+		}
+		if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+			t.Fatalf("提交 secret 名称: %v", err)
+		}
+		// 创建成功后弹「密钥只显示一次」只读框 ⇒ 关掉它再继续断言列表。
+		if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 8000); err == nil {
+			_ = page.Locator("#v2-confirm [data-act=ok]").Click()
+		}
 		if err := waitLoc(page, "#v2-sec-body tr", playwright.WaitForSelectorStateVisible, 8000); err != nil {
 			st, _ := page.Locator("#v2-sec-state").TextContent()
 			t.Fatalf("secret 创建后未列出（state=%q）: %v", st, err)
@@ -1364,6 +1381,12 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 		}
 		if err := page.Locator("#v2-sec-body tr button").First().Click(); err != nil {
 			t.Fatalf("删除 secret: %v", err)
+		}
+		if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+			t.Fatalf("删除 secret 未弹确认框: %v", err)
+		}
+		if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+			t.Fatalf("确认删除 secret: %v", err)
 		}
 		if _, err := page.WaitForFunction(
 			"() => !document.querySelector('#v2-sec-body').textContent.includes('e2esecret')",
@@ -1692,6 +1715,13 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 	if err := page.Locator("#v2-trash-body tr:has-text('purge-target.txt') [data-trash-purge]").Click(); err != nil {
 		t.Fatalf("点彻底删除: %v", err)
 	}
+	// 彻底删除是不可恢复操作 ⇒ 必须确认（v2 对话框，不再是原生 confirm）。
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("彻底删除未弹确认框: %v", err)
+	}
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("确认彻底删除: %v", err)
+	}
 	if _, err := page.WaitForFunction(
 		"() => document.querySelector('#v2-trash-body').textContent.indexOf('purge-target.txt') === -1", nil,
 		playwright.PageWaitForFunctionOptions{Timeout: playwright.Float(8000)}); err != nil {
@@ -1703,6 +1733,12 @@ func TestV2Shell_RouteThemeAndEntry(t *testing.T) {
 
 	if err := page.Locator("#v2-trash-empty").Click(); err != nil {
 		t.Fatalf("点击清空: %v", err)
+	}
+	if err := waitLoc(page, "#v2-confirm [data-act=ok]", playwright.WaitForSelectorStateVisible, 5000); err != nil {
+		t.Fatalf("清空回收站未弹确认框: %v", err)
+	}
+	if err := page.Locator("#v2-confirm [data-act=ok]").Click(); err != nil {
+		t.Fatalf("确认清空回收站: %v", err)
 	}
 	if _, err := page.WaitForFunction(
 		"() => !document.querySelector('#v2-trash-empty-hint').hidden",

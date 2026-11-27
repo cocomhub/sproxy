@@ -131,13 +131,19 @@
   }
 
   function revoke(s) {
-    if (!window.confirm('撤销分享 ' + (s.filename || s.token) + '？撤销后链接立即失效。')) { return; }
-    api.json('DELETE', '/api/shares/' + encodeURIComponent(s.token))
-      .then(function () {
-        if (window.v2toast) { window.v2toast('ok', '已撤销'); }
-        load();
-      })
-      .catch(function (e) { banner('撤销失败：' + (e.message || e), 'warn'); });
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '撤销分享？',
+      message: '分享 ' + (s.filename || s.token) + ' 撤销后链接立即失效。',
+      okText: '撤销', danger: true
+    }, function () {
+      api.json('DELETE', '/api/shares/' + encodeURIComponent(s.token))
+        .then(function () {
+          if (window.v2toast) { window.v2toast('ok', '已撤销'); }
+          load();
+        })
+        .catch(function (e) { banner('撤销失败：' + (e.message || e), 'warn'); });
+    });
   }
 
   var all = [];

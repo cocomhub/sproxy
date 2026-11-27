@@ -211,39 +211,72 @@
       });
   }
 
+  // Secret 名称规则与服务端一致（字母/数字/-/_，见 /api/secrets 校验）；
+  // 前端先挡一次是为了**即时反馈**（原生 prompt 做不到，只能等服务端 400）。
+  var SECRET_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
   function createSecret() {
-    var name = window.prompt('Secret 名称（字母/数字/-/_）');
-    if (!name) { return; }
-    api.json('POST', '/api/secrets', {
-      body: new TextEncoder().encode(JSON.stringify({ name: name.trim(), mode: 'random', origin: 'webui' })),
-      contentType: 'application/json'
-    }).then(function (res) {
-      if (res && res.value) {
-        window.prompt('密钥只显示一次，请立即备份（Ctrl+C 复制）', res.value);
+    if (!window.v2confirm) { return; }
+    window.v2confirm.input({
+      title: '新建 Secret',
+      message: '名称用于卷配置引用；密钥由服务端随机生成',
+      label: 'Secret 名称（字母/数字/-/_）',
+      okText: '创建',
+      validate: function (v) {
+        if (!SECRET_NAME_RE.test(v)) { return '只能包含字母、数字、- 和 _，长度 1–64'; }
+        return '';
       }
-      if (window.v2toast) { window.v2toast('ok', '已创建 secret ' + (res.name || name)); }
-      loadSecrets();
-    }).catch(function (e) { secBanner('创建失败：' + (e.message || e), 'warn'); });
+    }).then(function (name) {
+      if (!name) { return; }
+      return api.json('POST', '/api/secrets', {
+        body: new TextEncoder().encode(JSON.stringify({ name: name, mode: 'random', origin: 'webui' })),
+        contentType: 'application/json'
+      }).then(function (res) {
+        if (res && res.value) {
+          // **一次性展示**：密钥只在这里出现一次，用只读对话框（可全选复制），
+          // 不用 window.prompt —— 后者在部分浏览器里不能选中文本，用户无法复制。
+          window.v2confirm.show({
+            title: '密钥只显示一次',
+            message: '请立即备份（关闭后无法再次查看）',
+            label: '密钥',
+            value: res.value,
+            okText: '我已备份'
+          });
+        }
+        if (window.v2toast) { window.v2toast('ok', '已创建 secret ' + (res.name || name)); }
+        loadSecrets();
+      }).catch(function (e) { secBanner('创建失败：' + (e.message || e), 'warn'); });
+    });
   }
 
   function deleteSecret(name) {
-    if (!window.confirm('删除 secret ' + name + '？删除后不可恢复。')) { return; }
-    api.json('DELETE', '/api/secrets/' + encodeURIComponent(name))
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '删除 Secret？', message: '删除 secret ' + name + ' 后不可恢复；引用它的卷将无法解锁。',
+      okText: '删除', danger: true
+    }, function () {
+      api.json('DELETE', '/api/secrets/' + encodeURIComponent(name))
       .then(function () {
         if (window.v2toast) { window.v2toast('ok', '已删除 ' + name); }
         loadSecrets();
       })
       .catch(function (e) { secBanner('删除失败：' + (e.message || e), 'warn'); });
+    });
   }
 
   function deleteUserVolume(name) {
-    if (!window.confirm('删除用户卷 ' + name + '？（卷内文件将一并移除）')) { return; }
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '删除用户卷？', message: '删除用户卷 ' + name + ' 会一并移除卷内文件，不可恢复。',
+      okText: '删除', danger: true
+    }, function () {
     api.json('DELETE', '/api/volumes/user?name=' + encodeURIComponent(name))
       .then(function () {
         if (window.v2toast) { window.v2toast('ok', '已删除卷 ' + name); }
         load(); loadUser();
       })
       .catch(function (e) { banner('删除卷失败：' + (e.message || e), 'warn'); });
+    });
   }
 
   function buildVolumeDialog(types) {

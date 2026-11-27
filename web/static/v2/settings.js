@@ -216,13 +216,9 @@
     var sel = el('v2-set-delete-mode');
     if (!sel) { return; }
     var mode = sel.value === 'hard' ? 'hard' : 'soft';
-    if (mode === 'hard' && !window.confirm('把默认删除改成「直接删除」？页面上的删除将不再进回收站，无法恢复。')) {
-      sel.value = 'soft';
-      return;
-    }
     var skipEl = el('v2-set-skip-confirm');
     var skipConfirm = !!(skipEl && skipEl.checked);
-    api.json('PUT', '/api/ui/prefs', {
+    var commit = function () { api.json('PUT', '/api/ui/prefs', {
       body: new TextEncoder().encode(JSON.stringify({
         'delete': { default_mode: mode, skip_confirm: skipConfirm }
       })),
@@ -235,7 +231,15 @@
         window.v2toast('ok', '删除默认方式已保存：' + (mode === 'hard' ? '直接删除' : '软删进回收站') +
           (skipConfirm ? '（已跳过二次确认）' : ''));
       }
-    }).catch(function (e) { banner('保存失败：' + (e.message || e), 'warn'); });
+    }).catch(function (e) { banner('保存失败：' + (e.message || e), 'warn'); }); };
+    // 「直接删除」= 关闭安全能力（页面删除不再进回收站）⇒ 必须先确认；软删直接保存。
+    if (mode !== 'hard') { commit(); return; }
+    if (!window.v2confirm) { sel.value = 'soft'; return; }
+    window.v2confirm({
+      title: '改为直接删除？',
+      message: '页面上的删除将不再进回收站，无法恢复。',
+      okText: '改为直接删除', danger: true
+    }, commit);
   }
 
   function loadTunnel() {

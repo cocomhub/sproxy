@@ -176,15 +176,22 @@
   function purge(entry) {
     // 与文件页删除共用「跳过二次确认」开关（它就是删除确认的一部分）。
     var skip = window.v2deleteMode && window.v2deleteMode.skipConfirm && window.v2deleteMode.skipConfirm();
-    if (!skip && !window.confirm('彻底删除 ' + entry.name + '？此操作不可恢复。')) { return; }
-    var q = '?file=' + encodeURIComponent(entry.rel);
-    if (entry.volume) { q += '&volume=' + encodeURIComponent(entry.volume); }
-    api.json('DELETE', '/api/trash' + q)
-      .then(function () {
-        if (window.v2toast) { window.v2toast('ok', '已彻底删除 ' + entry.name); }
-        load();
-      })
-      .catch(function (e) { banner('彻底删除失败：' + (e.message || e), 'warn'); });
+    var go = function () {
+      var q = '?file=' + encodeURIComponent(entry.rel);
+      if (entry.volume) { q += '&volume=' + encodeURIComponent(entry.volume); }
+      api.json('DELETE', '/api/trash' + q)
+        .then(function () {
+          if (window.v2toast) { window.v2toast('ok', '已彻底删除 ' + entry.name); }
+          load();
+        })
+        .catch(function (e) { banner('彻底删除失败：' + (e.message || e), 'warn'); });
+    };
+    if (skip) { go(); return; }
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '彻底删除？', message: '删除 ' + entry.name + ' 及其元数据，不可恢复。',
+      okText: '彻底删除', danger: true
+    }, go);
   }
 
   /**
@@ -206,13 +213,19 @@
   }
 
   function emptyAll() {
-    if (!window.confirm('清空全部卷的回收站？此操作不可撤销。')) { return; }
+    if (!window.v2confirm) { return; }
+    window.v2confirm({
+      title: '清空回收站？',
+      message: '将清空**全部卷**的回收站条目，此操作不可撤销。',
+      okText: '清空', danger: true
+    }, function () {
     api.json('POST', '/api/trash/empty?all=1', {})
       .then(function () {
         if (window.v2toast) { window.v2toast('ok', '回收站已清空'); }
         load();
       })
       .catch(function (e) { banner('清空失败：' + (e.message || e), 'warn'); });
+    });
   }
 
   var inited = false;

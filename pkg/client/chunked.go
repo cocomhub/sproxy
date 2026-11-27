@@ -740,6 +740,15 @@ func (c *FileClient) calcFileChecksum(localPath string, file *os.File, fileSize 
 	return fileChecksum, false, nil
 }
 
+// sameContentChecksum 判断「服务端已有文件的 checksum」与「本次待传内容」是否同一份内容。
+// 状态未给 checksum（老服务端/无台账）⇒ 视为一致（保持既有幂等语义，不因缺字段退化）。
+func sameContentChecksum(existing, want string) bool {
+	if existing == "" || want == "" {
+		return true
+	}
+	return strings.EqualFold(existing, want)
+}
+
 // tryResumeSession 尝试续传已有的上传会话。
 // 返回专用结果类型 tryResumeResult。
 //
@@ -753,14 +762,28 @@ func (c *FileClient) tryResumeSession(ctx context.Context, p resumeSessionParams
 	}
 
 	if statusData.Completed {
-		c.logger.InfoContext(ctx, "文件已存在，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
-		return tryResumeResult{result: &ChunkedUploadResult{
-			Success:      true,
-			UploadID:     p.UploadID,
-			Filename:     p.Filename,
-			FileChecksum: p.FileChecksum,
-			Message:      "文件已存在",
-		}, shouldContinue: false}
+		// **必须核对内容**（2026-11-27 审查，P1）：服务端的 Completed 只表示
+		// 「这个路径已有完整文件」（`checkFileExistsStatus` 按路径存在性回答，并带上**该文件**的
+		// checksum），不表示「你要传的这份内容已经在上面」。此前无条件短路成功 ⇒
+		// 「把 B 覆盖写到一个已有 A 的路径」被静默当成成功，实际内容仍是 A（返回 nil error、
+		// 日志写「文件已存在」，上层以为已更新——sdserver 重传/纠错、sync 工具都受影响）。
+		//
+		// 判据：状态回报的 checksum 与本次待传一致（或状态没给 checksum）⇒ 幂等命中；
+		// 不一致 ⇒ **不短路**，继续走新建会话，让服务端按自身策略覆盖（versioning 开）或
+		// 明确 409（versioning 关）——绝不静默成功。
+		if sameContentChecksum(statusData.FileChecksum, p.FileChecksum) {
+			c.logger.InfoContext(ctx, "文件已存在且内容一致，直接返回成功", "file_name", p.Filename, "checksum", shortid.ShortHash(p.FileChecksum))
+			return tryResumeResult{result: &ChunkedUploadResult{
+				Success:      true,
+				UploadID:     p.UploadID,
+				Filename:     p.Filename,
+				FileChecksum: p.FileChecksum,
+				Message:      "文件已存在",
+			}, shouldContinue: false}
+		}
+		c.logger.InfoContext(ctx, "目标路径已有不同内容的文件，继续上传（不短路）",
+			"file_name", p.Filename, "existing", shortid.ShortHash(statusData.FileChecksum),
+			"want", shortid.ShortHash(p.FileChecksum))
 	}
 
 	if statusData.UploadID != "" {
