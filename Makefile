@@ -280,6 +280,7 @@ web-test:
 	@node --check web/static/v2/files-view.js
 	@node --check web/static/v2/files-ops.js
 	@node --check web/static/v2/files-ops.test.js
+	@node --check web/static/v2/confirm.js
 	@node --check web/static/v2/upload-pool.js
 	@node --check web/static/v2/upload-pool.test.js
 	@node --check web/static/v2/files-actions.js

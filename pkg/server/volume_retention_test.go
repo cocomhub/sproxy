@@ -53,13 +53,14 @@ func retentionTestHandlers(t *testing.T, cfg *Config, shareDir string, auditJ *a
 		globalRoot:     vs.DefaultRoot(),
 		globalPool:     nil,
 		volSet:         vs,
-		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())),
+		tenants:        storage.NewTenantCache(vs.DefaultRoot(), storage.WithMetaBucket(), storage.WithLogger(testLogger())), //nolint:lll // 夹具字段初始化
 		checksumStores: make(map[string]checksum.ChecksumStoreIface),
 		uploadStores:   make(map[string]*files.UploadStore),
 		quotaScopes:    make(map[string]*quota.Scope),
 		quotaBuckets:   make(map[string]map[string]*quota.Scope),
 		shareStore:     share.NewStore(testLogger()),
 	}
+	t.Cleanup(func() { _ = h.tenants.Close() }) // 租户子根是独立 os.Root（R60）
 	if shareDir != "" {
 		h.shareStore.EnablePersist(testRootAt(t, shareDir), "")
 	}
